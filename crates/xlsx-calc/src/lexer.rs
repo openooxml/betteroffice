@@ -369,7 +369,7 @@ impl Lexer<'_> {
             return Ok(kind);
         }
 
-        match CellRef::parse_a1(&word) {
+        match CellRef::parse_a1(&word.to_ascii_uppercase()) {
             Ok(cell) => Ok(TokKind::Ref { sheet: None, cell }),
             Err(_) => Ok(TokKind::Ident(word)),
         }
@@ -380,12 +380,15 @@ impl Lexer<'_> {
     fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
         self.bump();
         let mut spec = TableSpec::default();
-        self.skip_ws();
         if self.peek() == Some(']') {
             self.bump();
             return Ok(TokKind::TableRef { table, spec });
         }
-        if self.peek() != Some('[') {
+        let rest = &self.input[self.pos..];
+        if !rest
+            .trim_start_matches([' ', '\t', '\n', '\r'])
+            .starts_with('[')
+        {
             let item = self.read_table_item(start)?;
             add_table_item(&mut spec, &item, start)?;
             return Ok(TokKind::TableRef { table, spec });
@@ -444,6 +447,9 @@ impl Lexer<'_> {
         sheet: Option<String>,
         start: usize,
     ) -> Result<TokKind, ParseError> {
+        if self.input[self.pos..].starts_with("#REF!") {
+            return self.lex_error_literal();
+        }
         let word = self.read_word();
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
@@ -451,7 +457,7 @@ impl Lexer<'_> {
         if let Some(kind) = self.try_range_token(&sheet, &word) {
             return Ok(kind);
         }
-        match CellRef::parse_a1(&word) {
+        match CellRef::parse_a1(&word.to_ascii_uppercase()) {
             Ok(cell) => Ok(TokKind::Ref { sheet, cell }),
             Err(_) => Ok(TokKind::Name {
                 scope: sheet,
@@ -499,13 +505,13 @@ impl Lexer<'_> {
                 Err(_) => self.pos = save,
             }
         }
-        let start = CellRef::parse_a1(word).ok()?;
+        let start = CellRef::parse_a1(&word.to_ascii_uppercase()).ok()?;
         if self.peek() != Some(':') {
             return None;
         }
         self.bump();
         let end = self.read_word();
-        match CellRef::parse_a1(&end) {
+        match CellRef::parse_a1(&end.to_ascii_uppercase()) {
             Ok(end) => Some(TokKind::Range {
                 sheet: sheet.clone(),
                 range: CellRange::new(start, end),
@@ -532,15 +538,15 @@ impl Lexer<'_> {
 }
 
 /// classify one bracket item as a band keyword, an `@` shorthand, or a column
-/// name, and fold it into `spec`.
-fn add_table_item(spec: &mut TableSpec, item: &str, start: usize) -> Result<(), ParseError> {
-    let mut item = item.trim();
+/// name, and fold it into `spec`. spaces inside the brackets belong to the
+/// column name, as excel keeps them in the table's header.
+fn add_table_item(spec: &mut TableSpec, mut item: &str, start: usize) -> Result<(), ParseError> {
     if item.is_empty() {
         return Ok(());
     }
     if let Some(rest) = item.strip_prefix('@') {
         spec.bands.push(TableBand::ThisRow);
-        item = rest.trim();
+        item = rest;
         if item.is_empty() {
             return Ok(());
         }

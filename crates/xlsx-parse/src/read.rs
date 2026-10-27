@@ -19,7 +19,7 @@ use crate::xml::{
     resolve_part_path, xml_err,
 };
 use crate::{
-    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_ROW_STYLES,
+    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
     MAX_SHARED_STRINGS, MAX_TABLE_COLUMNS, MAX_TABLES, ParseError,
 };
 
@@ -275,6 +275,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut sheets_depth = None;
     let mut sheets = Vec::new();
     let mut defined_names = Vec::new();
+    let mut defined_name_bytes = 0usize;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -303,21 +304,24 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     sheets.push(SheetEntry { name, rid });
                 }
                 b"definedName" => {
-                    if defined_names.len() >= MAX_DEFINED_NAMES {
-                        return Err(ParseError::TooManyDefinedNames);
-                    }
                     let name = attr(&e, b"name")?.unwrap_or_default();
                     let local_sheet = attr(&e, b"localSheetId")?
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
                     let hidden = attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value));
                     let formula = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    defined_names.push(DefinedName {
+                    let defined = DefinedName {
                         name,
                         formula,
                         local_sheet,
                         hidden,
-                    });
+                    };
+                    defined_name_bytes =
+                        defined_name_bytes.saturating_add(defined.retained_bytes());
+                    if defined_name_bytes > MAX_DEFINED_NAME_BYTES {
+                        return Err(ParseError::TooManyDefinedNames);
+                    }
+                    defined_names.push(defined);
                 }
                 _ => {}
             },

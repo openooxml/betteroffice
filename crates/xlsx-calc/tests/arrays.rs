@@ -1037,6 +1037,77 @@ fn xlookup_picks_a_row_of_a_block() {
     );
 }
 
+/// a lookup vector the formula computes over whole columns stays an array when
+/// a scalar builtin wraps the lookup or a scalar cell holds it.
+#[test]
+fn xlookup_over_a_computed_vector_answers_inside_a_scalar_function() {
+    let workbook = fixture();
+    let formula = r#"TRIM(_xlfn.XLOOKUP(1,(B:B=4)*(A:A<>""),A:A,"",0,1))"#;
+    assert_eq!(values(formula, &workbook), vec![t("pear")]);
+    let missing = r#"TRIM(_xlfn.XLOOKUP(1,(B:B=9)*(A:A<>""),A:A,"",0,1))"#;
+    assert_eq!(values(missing, &workbook), vec![t("")]);
+    let expression = parse_formula(formula).unwrap();
+    let context = EvalContext::new(&workbook, SheetId(0));
+    assert_eq!(xlsx_calc::evaluate(&expression, &context), t("pear"));
+    let bare = parse_formula(r#"_xlfn.XLOOKUP(1,(A1:A4="apple")*(B1:B4>1),B1:B4)"#).unwrap();
+    assert_eq!(xlsx_calc::evaluate(&bare, &context), n(2.0));
+}
+
+fn scalar(formula: &str, workbook: &Workbook) -> CellValue {
+    let context = EvalContext::new(workbook, SheetId(0));
+    xlsx_calc::evaluate(&parse_formula(formula).unwrap(), &context)
+}
+
+/// a lookup column addresses the result's rows and a lookup row its columns;
+/// any other pairing, or a two-dimensional lookup, is #VALUE!.
+#[test]
+fn xlookup_over_arrays_checks_orientation() {
+    let workbook = fixture();
+    let invalid = CellValue::Error {
+        value: ErrorValue::Value,
+    };
+    for formula in [
+        "_xlfn.XLOOKUP(2,{1;2},{10,20})",
+        "_xlfn.XLOOKUP(2,{1,2},{10,20,30;40,50,60})",
+        "_xlfn.XLOOKUP(2,{1,2;3,4},{10,20;30,40})",
+    ] {
+        assert_eq!(scalar(formula, &workbook), invalid, "{formula}");
+        assert_eq!(
+            values(formula, &workbook),
+            vec![invalid.clone()],
+            "{formula}"
+        );
+    }
+    let rows = "_xlfn.XLOOKUP(2,{1;2},{10,11;20,21})";
+    assert_eq!(arrayed(rows, &workbook), (1, 2, vec![n(20.0), n(21.0)]));
+    assert_eq!(scalar(rows, &workbook), n(20.0));
+    let cols = "_xlfn.XLOOKUP(2,{1,2},{10,20;11,21})";
+    assert_eq!(arrayed(cols, &workbook), (2, 1, vec![n(20.0), n(21.0)]));
+}
+
+/// a scalar cell answering through the array form keeps `if_not_found`,
+/// `match_mode` and `search_mode`.
+#[test]
+fn xlookup_over_arrays_keeps_its_modes() {
+    let workbook = fixture();
+    let cases = [
+        (r#"_xlfn.XLOOKUP(5,{1;2;3},{10;20;30},"none")"#, t("none")),
+        (
+            r#"_xlfn.XLOOKUP(2.5,{1;2;3},{10;20;30},"none",-1)"#,
+            n(20.0),
+        ),
+        (r#"_xlfn.XLOOKUP(2.5,{1;2;3},{10;20;30},"none",1)"#, n(30.0)),
+        (
+            r#"_xlfn.XLOOKUP(1,{1;2;1},{10;20;30},"none",0,-1)"#,
+            n(30.0),
+        ),
+        (r#"_xlfn.XLOOKUP("p*",A1:A4&"",B1:B4,"none",2)"#, n(4.0)),
+    ];
+    for (formula, want) in cases {
+        assert_eq!(scalar(formula, &workbook), want, "{formula}");
+    }
+}
+
 /// match mode picks the nearest value either side of the key; search mode -1
 /// reads the vector from the end.
 #[test]

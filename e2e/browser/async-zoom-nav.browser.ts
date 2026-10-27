@@ -66,7 +66,7 @@ async function open(page: Page, format: Format, file?: string, slides = 3) {
   await expect(page.locator('.editor-stage canvas').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
   if (format === 'docx') {
-    await expect(page.locator('[data-peerless-docx]')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
     await expect(page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ })).toHaveText(`1 of ${pageCount}`);
   } else if (format === 'xlsx') {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
@@ -150,10 +150,14 @@ async function settled(locator: Locator) {
 
 async function fitted(canvas: Locator) {
   await expect.poll(() => canvas.evaluate((element) => {
-    const stage = element.parentElement!;
+    const stage = element.closest('[role="application"]')!;
     const expected = 1280 * Math.min(1, (stage.clientWidth - 40) / 1280, (stage.clientHeight - 40) / 720);
     return Math.abs(element.getBoundingClientRect().width - expected);
   })).toBeLessThan(1);
+}
+
+function stageOf(canvas: Locator): Locator {
+  return canvas.locator('xpath=ancestor::*[@role="application"][1]');
 }
 
 async function inside(inner: Locator, outer: Locator) {
@@ -166,7 +170,7 @@ async function inside(inner: Locator, outer: Locator) {
   }).toBe(true);
 }
 
-const docxInput = (page: Page) => page.locator('.paged-editor__peerless-input');
+const docxInput = (page: Page) => page.locator('.paged-editor__input');
 const docxStatus = (page: Page) => page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ });
 const docxScroller = (page: Page) => page.locator('.docx-editor__scroll-container');
 
@@ -240,12 +244,12 @@ test('docx: zoom step buttons walk presets and stop at both limits', async ({ pa
   const decrease = page.getByRole('button', { name: 'Zoom out', exact: true });
   await preset(page, 'docx', '50%');
   await expect(decrease).toBeDisabled();
-  for (const value of ['75%', '100%', '125%', '150%', '200%']) {
+  for (const value of ['75%', '90%', '100%', '125%', '150%', '200%']) {
     await increase.click();
     await expect(control).toContainText(value);
   }
   await expect(increase).toBeDisabled();
-  for (const value of ['150%', '125%', '100%', '75%', '50%']) {
+  for (const value of ['150%', '125%', '100%', '90%', '75%', '50%']) {
     await decrease.click();
     await expect(control).toContainText(value);
   }
@@ -441,7 +445,7 @@ test('pptx: typed zoom preserves the selected shape and hit testing follows its 
   const initial = (await settled(selection)).width;
   await typedZoom(page, 'pptx', '83%');
   await expect.poll(() => width(selection)).toBeCloseTo(initial * 0.83 / 0.5, 0);
-  const stage = canvas.locator('..');
+  const stage = stageOf(canvas);
   await inside(selection, stage);
   await stage.press('PageDown');
   await expect(page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button').nth(1)).toHaveAttribute('aria-current', 'page');
@@ -478,13 +482,25 @@ test('pptx: scrolling a forty-slide strip selects the last slide and retains zoo
   await expect(buttons.last()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
   await expect.poll(async () => (await canvas.screenshot()).equals(first)).toBe(false);
-  await canvas.locator('..').press('Home');
+  await stageOf(canvas).press('Home');
   await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
-  await canvas.locator('..').press('End');
+  await stageOf(canvas).press('End');
   await expect(buttons.last()).toHaveAttribute('aria-current', 'page');
   await expect(zoomControl(page, 'pptx')).toHaveValue('75%');
   await unchanged(page, 'pptx', info, original);
+});
+
+test('pptx: clicking the slide then PageDown and PageUp move the active slide', async ({ page }) => {
+  await open(page, 'pptx');
+  const canvas = page.getByTestId('pptx-slide-canvas');
+  const buttons = page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button');
+  const box = await settled(canvas);
+  await page.mouse.click(box.x + box.width * 0.9, box.y + box.height * 0.9);
+  await page.keyboard.press('PageDown');
+  await expect(buttons.nth(1)).toHaveAttribute('aria-current', 'page');
+  await page.keyboard.press('PageUp');
+  await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
 });
 
 test('pptx: Fit responds to window resize and slide navigation without changing saved OOXML', async ({ page }, info) => {
@@ -499,14 +515,14 @@ test('pptx: Fit responds to window resize and slide navigation without changing 
   await expect.poll(() => width(canvas)).toBeLessThan(initial);
   await fitted(canvas);
   await expect(zoomControl(page, 'pptx')).toHaveValue('Fit');
-  await inside(canvas, canvas.locator('..'));
-  await canvas.locator('..').press('PageDown');
+  await inside(canvas, stageOf(canvas));
+  await stageOf(canvas).press('PageDown');
   const buttons = page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button');
   await expect(buttons.nth(1)).toHaveAttribute('aria-current', 'page');
   await fitted(canvas);
   await expect(zoomControl(page, 'pptx')).toHaveValue('Fit');
-  await inside(canvas, canvas.locator('..'));
-  await canvas.locator('..').press('PageUp');
+  await inside(canvas, stageOf(canvas));
+  await stageOf(canvas).press('PageUp');
   await expect(buttons.first()).toHaveAttribute('aria-current', 'page');
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect.poll(() => width(canvas)).toBeCloseTo(initial, 0);

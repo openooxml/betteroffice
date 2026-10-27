@@ -640,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "正在加载文档...",
+    "stillOpening": null,
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
     "unableToParse": "无法解析文档",

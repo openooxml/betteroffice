@@ -1,9 +1,9 @@
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
 import type { InputCoordinatorHooks, InputDraft, InputSeal } from './inputCoordinator';
+import type { WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
-  CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest,
-  WorkbookCommandSelection, WorkbookSession, XlsxRangeTarget,
-} from '@betteroffice/xlsx';
+  CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrameRequest, WorkbookCommandSelection,
+} from '@betteroffice/xlsx/worker';
 
 import { WorkerInputRefusal } from './workerInputErrors';
 
@@ -878,6 +878,6 @@ export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
     readonly draft: InputDraft | null
   ) {
     super(status.reason ?? 'Worker command refused');
-    this.name = 'PeerlessWorkerCommandRefusal';
+    this.name = 'XlsxWorkerCommandRefusal';
   }
 }

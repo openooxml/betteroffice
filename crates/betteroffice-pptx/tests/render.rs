@@ -90,12 +90,82 @@ fn a_slide_past_the_deck_is_refused() {
 }
 
 #[test]
-fn text_without_a_registered_font_is_refused_by_layout() {
+fn text_without_a_registered_font_needs_one_for_layout_and_png() {
     let presentation = Presentation::open(FIXTURE).unwrap();
+    let Err(error) = presentation.render_slide(0) else {
+        panic!("slide text laid out without a registered font");
+    };
+    assert!(error.to_string().contains("no font"), "{error}");
     let error = presentation
         .render_png(0, &RenderOptions::default())
         .unwrap_err();
     assert!(error.to_string().contains("no font"), "{error}");
+}
+
+fn text_container_deck(content: &str) -> Vec<u8> {
+    let parts = [
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#.to_owned()),
+        ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#.to_owned()),
+        ("ppt/presentation.xml", r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="slide"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500"/></p:presentation>"#.to_owned()),
+        ("ppt/_rels/presentation.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#.to_owned()),
+        ("ppt/slides/slide1.xml", format!(r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{content}</p:spTree></p:cSld></p:sld>"#)),
+    ];
+    let parts: Vec<_> = parts
+        .into_iter()
+        .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn nested_text_without_fonts_is_refused() {
+    let table = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="100000" y="100000"/><a:ext cx="3000000" cy="1000000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="3000000"/></a:tblGrid><a:tr h="1000000"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"/><a:t>Cell text</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let group = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/><a:chOff x="0" y="0"/><a:chExt cx="3000000" cy="1000000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="3" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"/><a:t>Grouped text</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>"#;
+    for content in [table, group] {
+        let bytes = text_container_deck(content);
+        let mut presentation = Presentation::open(&bytes).unwrap();
+        let Err(error) = presentation.render_slide(0) else {
+            panic!("nested text rendered without a registered font");
+        };
+        assert!(error.to_string().contains("no font"), "{error}");
+        let error = presentation
+            .render_png(0, &RenderOptions::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("no font"), "{error}");
+        presentation
+            .register_font("Arial", false, false, FONT)
+            .unwrap();
+        let rendered = presentation.render_slide(0).unwrap();
+        assert!(rendered.display_list.has_glyphs());
+        if content == table {
+            assert!(rendered.display_list.primitives.iter().any(|primitive| {
+                matches!(primitive, betteroffice_pptx::Primitive::Table { .. })
+            }));
+            assert!(!rendered.display_list.primitives.iter().any(|primitive| {
+                matches!(primitive, betteroffice_pptx::Primitive::TextBox { .. })
+            }));
+        } else {
+            assert!(rendered.display_list.primitives.iter().any(|primitive| {
+                matches!(primitive, betteroffice_pptx::Primitive::TextBox { .. })
+            }));
+        }
+    }
+}
+
+#[test]
+fn a_text_free_slide_renders_png_without_fonts() {
+    let source = include_bytes!("../../pptx-render/tests/fixtures/blip-lum.pptx");
+    let presentation = Presentation::open(source).unwrap();
+    let rendered = presentation.render_slide(0).unwrap();
+    let has_text = rendered.display_list.primitives.iter().any(|primitive| {
+        matches!(primitive, betteroffice_pptx::Primitive::TextBox { lines, .. }
+            if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty()))
+    });
+    assert!(!has_text);
+    let png = presentation
+        .render_png(0, &RenderOptions::default())
+        .unwrap();
+    assert_eq!(png.bytes[..8], PNG_MAGIC);
 }
 
 #[test]

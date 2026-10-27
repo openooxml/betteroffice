@@ -1190,6 +1190,7 @@ fn parse_run_with_context(
                         xml: child.to_raw_inline_xml(),
                         preview,
                         previews: Vec::new(),
+                        text_box: None,
                     }]);
                 } else {
                     replacements.push(parsed);
@@ -1232,6 +1233,7 @@ fn parse_drawing_owned(
                 preview: vml_image_content(element, relationships, media, Some(budget))
                     .map(Box::new),
                 previews: Vec::new(),
+                text_box: None,
             }]);
         }
         let images = vml_image_contents(element, relationships, media, Some(budget));
@@ -1249,6 +1251,7 @@ fn parse_drawing_owned(
                 xml: element.to_raw_inline_xml(),
                 preview: None,
                 previews: images,
+                text_box: None,
             }]);
         }
         if !has_vml_image_data(element, 0) || !in_header_footer {
@@ -1257,6 +1260,7 @@ fn parse_drawing_owned(
                 xml: element.to_raw_inline_xml(),
                 preview: None,
                 previews: Vec::new(),
+                text_box: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1273,6 +1277,7 @@ fn parse_drawing_owned(
                 xml: element.to_raw_inline_xml(),
                 preview: None,
                 previews: Vec::new(),
+                text_box: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1448,6 +1453,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                                 xml: element.to_raw_inline_xml(),
                                 preview,
                                 previews,
+                                text_box: None,
                             }],
                         )));
                     }
@@ -2369,6 +2375,7 @@ mod tests {
                     xml,
                     preview,
                     previews,
+                    ..
                 },
             ] = alternate_run(content)
             else {

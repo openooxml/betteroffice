@@ -2,7 +2,9 @@ use ooxml_drawingml::{
     ColorMap, Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, ThemeFormatScheme,
 };
 
-use crate::drawing::{parse_fill_element, parse_outline_element, picture_fill_element};
+use crate::drawing::{
+    parse_effects, parse_fill_element, parse_outline_element, picture_fill_element,
+};
 use crate::model::PictureFill;
 use crate::relationships::Relationship;
 use crate::xml::XmlElement;
@@ -28,6 +30,7 @@ pub(crate) fn parse_format_scheme(root: &XmlElement) -> ThemeFormatScheme {
         background_fills: style_list(element.child("bgFillStyleLst"), parse_fill_element),
         fills: style_list(element.child("fillStyleLst"), parse_fill_element),
         lines: style_list(element.child("lnStyleLst"), parse_outline_element),
+        effects: style_list(element.child("effectStyleLst"), parse_effects),
     }
 }
 
@@ -171,6 +174,61 @@ fn typeface(element: Option<&XmlElement>) -> String {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn theme_effect_styles_preserve_indices_and_shadow_colors() {
+        let limits = ParseLimits::default();
+        let root = parse_xml(
+            br#"<a:theme><a:themeElements><a:fmtScheme><a:effectStyleLst>
+<a:effectStyle><a:effectLst/></a:effectStyle>
+<a:effectStyle><a:effectLst><a:outerShdw blurRad="76200" dist="38100" dir="5400000"><a:srgbClr val="000000"><a:alpha val="38000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>
+<a:effectStyle><a:effectLst><a:outerShdw blurRad="38100" dist="76200" dir="0"><a:schemeClr val="phClr"><a:alpha val="50000"/></a:schemeClr></a:outerShdw></a:effectLst></a:effectStyle>
+</a:effectStyleLst></a:fmtScheme></a:themeElements></a:theme>"#,
+            "ppt/theme/theme1.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let scheme = parse_format_scheme(&root);
+        assert!(!scheme.is_empty());
+        assert_eq!(scheme.effects.len(), 3);
+        assert_eq!(
+            scheme.effects[0],
+            Some(ooxml_drawingml::ShapeEffects::default())
+        );
+        for (index, blur, distance, direction, rgb, theme_color, alpha) in [
+            (1, 76200, 38100, 5400000, Some("000000"), None, 0.38),
+            (2, 38100, 76200, 0, None, Some("phClr"), 0.5),
+        ] {
+            let shadow = scheme.effects[index]
+                .as_ref()
+                .unwrap()
+                .outer_shadow
+                .as_ref()
+                .unwrap();
+            assert_eq!(shadow.blur_radius, blur);
+            assert_eq!(shadow.distance, distance);
+            assert_eq!(shadow.direction, direction);
+            let color = shadow.color.as_ref().unwrap();
+            assert_eq!(color.rgb.as_deref(), rgb);
+            assert_eq!(color.theme_color.as_deref(), theme_color);
+            assert_eq!(ooxml_drawingml::resolve_color_value_alpha(color), alpha);
+        }
+    }
+
+    #[test]
+    fn theme_effect_styles_preserve_unsupported_slots() {
+        let limits = ParseLimits::default();
+        let root = parse_xml(
+            br#"<a:theme><a:themeElements><a:fmtScheme><a:effectStyleLst><a:effectStyle><a:effectDag/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst></a:fmtScheme></a:themeElements></a:theme>"#,
+            "ppt/theme/theme1.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_format_scheme(&root).effects,
+            vec![None, Some(ooxml_drawingml::ShapeEffects::default())]
+        );
+    }
 
     #[test]
     fn theme_color_definitions_apply_ordered_transforms() {

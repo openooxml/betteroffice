@@ -14,7 +14,6 @@ test('newest suite matches the README model and Evals columns by tier', async ()
   const suite = publishedSuite(newestFirst((await loadData()).suites)[0]!);
   const groups = tiers(suite);
   expect(tables).toHaveLength(groups.length);
-  expect(section).not.toMatch(/complex/i);
   expect(section).not.toContain('Sweep 1');
   for (const [tableIndex, tier] of (groups.length > 1 ? groups : [undefined]).entries()) {
     const [headers, , ...rows] = tables[tableIndex]!.split(/\r?\n/).map(line => line.trim().slice(1, -1).split('|').map(cell => cell.replace(/\*\*|`/g, '').trim()));

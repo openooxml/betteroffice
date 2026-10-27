@@ -5,7 +5,7 @@ const namespace = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const prefix = 'We collect feedback for ';
 const followup = 'Measure it in week one.';
-const input = (page: Page) => page.locator('.paged-editor__peerless-input');
+const input = (page: Page) => page.locator('.paged-editor__input');
 const mirror = (page: Page) => page.locator('.canvas-page-mirror').first();
 const canvas = (page: Page) => page.locator('.paged-editor__page canvas').first();
 const cards = (page: Page) => page.locator('.docx-tracked-change-card.docx-review-card');

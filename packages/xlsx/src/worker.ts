@@ -1,11 +1,4 @@
-/** @experimental */
-export { openWorkbookSession } from './session/client';
-/** @experimental */
-export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
-/** @experimental */
-export { workbookSessionRecovery, WorkbookRecoveryReplayError } from './session/clientRecovery';
-/** @experimental */
-export type { WorkbookSessionRecovery } from './session/clientRecovery';
+export * from './workerSession';
 /** @internal */
 export type {
   CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandContext,
@@ -15,22 +8,23 @@ export type {
   WorkbookSharedAck, WorkbookSharedWireAck, WorkbookSharedOutcome,
   WorkbookCommandTicket, WorkbookEchoHooks, WorkbookSubmitOptions, WorkbookTicketOutcome,
 } from './session/commandProtocol';
-export { createWorkbookEditSession } from './session/editSession';
-export { WorkbookPngUnavailableError } from './session/methods';
-export type { WorkbookEditSession } from './session/editSession';
+/** @internal */
+export { hydratePeer } from './session/client';
 /** @experimental */
-export type {
-  WorkbookCellGeometry,
-  WorkbookCellInputs,
-  WorkbookFrame,
-  WorkbookFrameOptions,
-  WorkbookInitialPaint,
-  WorkbookInitialPaintRequest,
-  WorkbookSessionOpenReply,
-  WorkbookSessionEvents,
-  WorkbookSessionMethods,
-  WorkbookSessionOpenOptions,
-  WorkbookSessionState,
-  WorkbookSheetSummary,
-  WorkbookSheetView,
-} from './session/methods';
+export { WorkbookPeerHydrationError } from './session/peerHydrationError';
+/** @internal */
+export { createWorkbookEditPeer } from './session/editPeer';
+/** @internal */
+export { localNowSerial } from './session/calculationClock';
+/** @internal */
+export type { WorkbookEditPeer, WorkbookEditPeerOptions } from './session/editPeer';
+/** @experimental */
+export { WorkbookEditPeerFailedError } from './session/editPeer';
+/** @internal */
+export {
+  createWorkbookRecoveryMutators, failWorkbookEditPeer, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from './session/editPeerInternals';
+/** @internal */
+export { workbookSessionInternals } from './session/replay';
+/** @internal */
+export type { WorkbookReplayOp } from './session/replay';

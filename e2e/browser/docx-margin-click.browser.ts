@@ -43,7 +43,7 @@ async function saved(page: Page, info: TestInfo) {
   return { paragraphs, header: await text('word/header1.xml'), footer: await text('word/footer1.xml'), notes: await text('word/footnotes.xml') };
 }
 
-const focusedInput = (page: Page) => page.evaluate(() => document.activeElement?.classList.contains('paged-editor__peerless-input') ?? false);
+const focusedInput = (page: Page) => page.evaluate(() => document.activeElement?.classList.contains('paged-editor__input') ?? false);
 
 test('single click in the header band focuses the input and types at the start of the first body paragraph', async ({ page }, info) => {
   const box = await open(page);

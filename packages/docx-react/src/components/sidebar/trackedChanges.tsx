@@ -57,6 +57,7 @@ export const TrackedChangesContext = createContext<{
   user?: CollaborationUser;
   clientId?: number;
   items?: ReviewSidebarItem[];
+  itemIndices?: ReadonlyMap<string, number>;
   navigate?: (id: string, direction: number) => void;
   measureCard?: (id: string, element: HTMLDivElement | null) => void;
   ambiguous?: ReadonlySet<string>;

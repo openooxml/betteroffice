@@ -282,3 +282,48 @@ fn changing_cells_under_an_unmodelled_chart_cache_refuses_naming_chart_and_serie
         );
     }
 }
+
+#[test]
+fn edited_chart_previews_read_cleared_cells_the_way_saves_write_them() {
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$B$5:$B$7</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let mut workbook = charted_workbook_with_chart(chart);
+    workbook
+        .edit_charts(
+            vec![crate::ChartMutation {
+                sheet: SheetId(0),
+                chart: 0,
+                edit: crate::ChartEdit::SetSeries {
+                    series: 0,
+                    name: None,
+                    categories: None,
+                    values: Some("Data!$C$2:$C$3".into()),
+                },
+            }],
+            options(),
+        )
+        .unwrap();
+    let points = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.is_finite().then_some(*value))
+            .collect::<Vec<_>>()
+    };
+    let agree = |workbook: &Workbook, expected: &[Option<f64>]| {
+        let chart = workbook.model.sheets[0].charts[0].clone();
+        let preview = workbook.resolve_chart_space("Sheet1", &chart).unwrap();
+        let saved = saved_chart(workbook);
+        let reopened =
+            xlsx_parse::chart_space(saved.as_bytes(), &workbook.model.styles.theme).unwrap();
+        assert_eq!(points(&preview.series[0].values), expected, "{saved}");
+        assert_eq!(points(&reopened.series[0].values), expected, "{saved}");
+    };
+    agree(&workbook, &[Some(5.0), Some(6.0)]);
+    workbook
+        .edit_cell(SheetId(1), r("C2"), "", options())
+        .unwrap();
+    agree(&workbook, &[None, Some(6.0)]);
+    workbook
+        .edit_cell(SheetId(1), r("C3"), "", options())
+        .unwrap();
+    agree(&workbook, &[]);
+}

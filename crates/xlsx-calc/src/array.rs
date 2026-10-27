@@ -10,10 +10,10 @@ use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS};
 
 use crate::eval::{
     Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, coerced, err,
-    evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
+    evaluate, normalize_provider_value, num, text, to_bool, to_text,
 };
 use crate::functions::Func;
-use crate::functions::lookups::comparable;
+use crate::functions::lookups::{comparable, exact_hit};
 use crate::parser::Expr;
 
 #[cfg(test)]
@@ -252,8 +252,13 @@ const FREE_NODES: u64 = 8;
 /// for in the builtins whose work outgrows the cells they read and write.
 const STEPS_PER_UNIT: u64 = 16;
 
+/// the budget units `steps` inner-loop steps cost.
+pub(crate) fn step_units(steps: u64) -> u64 {
+    steps / STEPS_PER_UNIT
+}
+
 fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
-    if !ctx.consume_cells(steps / STEPS_PER_UNIT) {
+    if !ctx.consume_cells(step_units(steps)) {
         return Err(ErrorValue::Num);
     }
     Ok(())
@@ -358,12 +363,9 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 None => Value::error(ErrorValue::Ref),
             }
         }
-        // a join's ends may fail for their own reason, which scalar
-        // evaluation reports and `as_area` would flatten to "not a reference"
-        Expr::RangeJoin { .. } => match as_array_area(expr, ctx) {
-            Some(area) => area_values(&area, ctx),
-            None => Value::Scalar(evaluate(expr, ctx)),
-        },
+        // a join's ends may fail for their own reason, which its resolve
+        // reports and `as_area` would flatten to "not a reference"
+        Expr::RangeJoin { .. } => resolved_values(expr, ctx),
         Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
             Ok(area) => area_values(&area, ctx),
             Err(error) => Value::error(error),
@@ -380,10 +382,7 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 }
                 _ => binding.value(),
             },
-            None => match as_array_area(expr, ctx) {
-                Some(area) => area_values(&area, ctx),
-                None => Value::Scalar(evaluate(expr, ctx)),
-            },
+            None => resolved_values(expr, ctx),
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| {
@@ -401,13 +400,21 @@ fn array_value(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
         Expr::FuncCall { name, .. }
             if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
         {
-            match as_array_area(expr, ctx) {
-                Some(area) => area_values(&area, ctx),
-                None => Value::Scalar(evaluate(expr, ctx)),
-            }
+            resolved_values(expr, ctx)
         }
         Expr::FuncCall { name, func, args } => call(name, *func, args, ctx),
         _ => Value::Scalar(evaluate(expr, ctx)),
+    }
+}
+
+/// a reference expression read as a block, resolved once: a failed `OFFSET`,
+/// `INDIRECT`, join or defined name answers with the error that resolve
+/// reported, and a value that is no reference is computed instead.
+fn resolved_values(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
+    match crate::eval::resolve_area(expr, ctx) {
+        Some(Ok(area)) => area_values(&used_extent(area, ctx), ctx),
+        Some(Err(error)) => Value::error(error),
+        None => Value::Scalar(evaluate(expr, ctx)),
     }
 }
 
@@ -467,7 +474,10 @@ fn map2(
 /// extent the sheet actually uses so `A:A` costs the authored data, not a
 /// million blanks.
 fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
-    let mut area = as_area(expr, ctx)?;
+    as_area(expr, ctx).map(|area| used_extent(area, ctx))
+}
+
+fn used_extent(mut area: Area, ctx: &EvalContext<'_>) -> Area {
     if area.rows >= xlsx_model::MAX_ROWS as usize {
         let used = ctx.provider.used_rows(area.sheet) as usize;
         area.rows = used.saturating_sub(area.start.row as usize).max(1);
@@ -476,7 +486,7 @@ fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         let used = ctx.provider.used_cols(area.sheet) as usize;
         area.cols = used.saturating_sub(area.start.col as usize).max(1);
     }
-    Some(area)
+    area
 }
 
 fn area_values(area: &Area, ctx: &EvalContext<'_>) -> Value {
@@ -506,6 +516,53 @@ fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array,
         .get(index)
         .map(|arg| evaluate_array(arg, ctx))
         .ok_or(ErrorValue::Value)?;
+    block_of(value)
+}
+
+/// a reference argument already resolved, read as `argument` reads it.
+fn area_argument(area: Area, ctx: &EvalContext<'_>) -> Result<Array, ErrorValue> {
+    block_of(area_values(&used_extent(area, ctx), ctx))
+}
+
+/// `argument` for an exact lookup, with whether its value was read from a
+/// reference, whose blank cells the lookup passes by. the answer comes from
+/// that one evaluation, so a reference an argument computes resolves once.
+fn lookup_argument(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<(Array, bool), ErrorValue> {
+    let arg = args.get(index).ok_or(ErrorValue::Value)?;
+    match arg {
+        // a defined name reads a reference only when it resolves to one
+        Expr::Name { scope, name } if crate::eval::bound(scope, name, ctx).is_none() => {
+            let _scope = ctx.array_scope();
+            match as_array_area(arg, ctx) {
+                Some(area) => Ok((block_of(area_values(&area, ctx))?, true)),
+                None => Ok((block_of(Value::Scalar(evaluate(arg, ctx)))?, false)),
+            }
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            let _scope = ctx.array_scope();
+            let (value, reference) = index_form(args, ctx);
+            Ok((block_of(value)?, reference))
+        }
+        // these read a reference whenever they evaluate without an error
+        Expr::RangeJoin { .. } => Ok((argument(args, ctx, index)?, true)),
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
+            Ok((argument(args, ctx, index)?, true))
+        }
+        // a plain or LET-held reference resolves without evaluating anything
+        _ => {
+            let block = argument(args, ctx, index)?;
+            Ok((block, as_area(arg, ctx).is_some()))
+        }
+    }
+}
+
+fn block_of(value: Value) -> Result<Array, ErrorValue> {
     match value {
         Value::Scalar(CellValue::Error { value }) => Err(value),
         Value::Scalar(value) => Array::new(1, 1, vec![value]),
@@ -537,7 +594,7 @@ fn optional_number(
     default: f64,
 ) -> Result<f64, ErrorValue> {
     match optional(args, ctx, index)? {
-        Some(value) => to_number(&value),
+        Some(value) => ctx.number(&value),
         None => Ok(default),
     }
 }
@@ -733,6 +790,7 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
         "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
         "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" | "XMATCH" => &[0],
+        "FORECAST" | "FORECAST.LINEAR" => &[0],
         "LARGE" | "SMALL" => &[1],
         "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
         _ => return None,
@@ -753,6 +811,7 @@ fn lifts(name: &str) -> bool {
             | "CHAR"
             | "CLEAN"
             | "CODE"
+            | "COMBIN"
             | "COS"
             | "COSH"
             | "DATE"
@@ -761,9 +820,12 @@ fn lifts(name: &str) -> bool {
             | "DEGREES"
             | "EDATE"
             | "EOMONTH"
+            | "EVEN"
             | "EXACT"
             | "EXP"
+            | "FACT"
             | "FIND"
+            | "FIXED"
             | "FLOOR"
             | "HOUR"
             | "INT"
@@ -792,6 +854,7 @@ fn lifts(name: &str) -> bool {
             | "N"
             | "NOT"
             | "NUMBERVALUE"
+            | "ODD"
             | "POWER"
             | "PROPER"
             | "QUOTIENT"
@@ -1176,7 +1239,7 @@ fn choose(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
         let mut picks = Vec::new();
         for position in 1..args.len() {
             for value in argument(args, ctx, position)?.values {
-                let index = to_number(&value)?.trunc();
+                let index = ctx.number(&value)?.trunc();
                 let resolved = if index < 0.0 {
                     limit as f64 + index
                 } else {
@@ -1301,11 +1364,11 @@ fn expand(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         }
         let data = argument(args, ctx, 0)?;
         let rows = match optional(args, ctx, 1)? {
-            Some(value) => index_of(to_number(&value)?)?,
+            Some(value) => index_of(ctx.number(&value)?)?,
             None => data.rows,
         };
         let cols = match optional(args, ctx, 2)? {
-            Some(value) => index_of(to_number(&value)?)?,
+            Some(value) => index_of(ctx.number(&value)?)?,
             None => data.cols,
         };
         if rows < data.rows || cols < data.cols {
@@ -1341,8 +1404,8 @@ fn slice(args: &[Expr], ctx: &EvalContext<'_>, dropping: bool) -> Value {
             return Err(ErrorValue::Value);
         }
         let data = argument(args, ctx, 0)?;
-        let row_span = span(optional(args, ctx, 1)?, data.rows, dropping)?;
-        let col_span = span(optional(args, ctx, 2)?, data.cols, dropping)?;
+        let row_span = span(optional(args, ctx, 1)?, data.rows, dropping, ctx)?;
+        let col_span = span(optional(args, ctx, 2)?, data.cols, dropping, ctx)?;
         if row_span.is_empty() || col_span.is_empty() {
             return Err(ErrorValue::Value);
         }
@@ -1361,11 +1424,12 @@ fn span(
     count: Option<CellValue>,
     length: usize,
     dropping: bool,
+    ctx: &EvalContext<'_>,
 ) -> Result<std::ops::Range<usize>, ErrorValue> {
     let Some(count) = count else {
         return Ok(0..length);
     };
-    let count = to_number(&count)?.trunc();
+    let count = ctx.number(&count)?.trunc();
     if !count.is_finite() || count.abs() > length as f64 {
         return Ok(if dropping { 0..0 } else { 0..length });
     }
@@ -1422,8 +1486,13 @@ fn dimension(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 }
 
 fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    index_form(args, ctx).0
+}
+
+/// `INDEX`, and whether it answered in its reference form.
+fn index_form(args: &[Expr], ctx: &EvalContext<'_>) -> (Value, bool) {
     if args.len() < 2 || args.len() > 3 {
-        return Value::error(ErrorValue::Value);
+        return (Value::error(ErrorValue::Value), false);
     }
     let rows = evaluate_array(&args[1], ctx);
     let cols = match args.get(2).map(|arg| evaluate_array(arg, ctx)) {
@@ -1437,14 +1506,14 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         .first()
         .is_some_and(|arg| indexes_a_reference(arg, ctx));
     if !reference && (matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_)))) {
-        return index_each(args, ctx, &rows, cols.as_ref());
+        return (index_each(args, ctx, &rows, cols.as_ref()), false);
     }
     let mut spliced = args.to_vec();
     spliced[1] = Expr::Literal(rows.into_scalar());
     if let Some(value) = cols {
         spliced[2] = Expr::Literal(value.into_scalar());
     }
-    index_one(&spliced, ctx, reference)
+    (index_one(&spliced, ctx, reference), reference)
 }
 
 /// whether `INDEX`'s first argument is a reference, picking its reference
@@ -1507,6 +1576,7 @@ fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&
                     &data,
                     rows.broadcast(row, col),
                     cols.map(|c| c.broadcast(row, col)),
+                    ctx,
                 ))?;
             }
         }
@@ -1514,8 +1584,8 @@ fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&
     })())
 }
 
-fn pick(data: &Array, row: CellValue, col: Option<CellValue>) -> CellValue {
-    let index = |value: CellValue| to_number(&value).map(f64::trunc);
+fn pick(data: &Array, row: CellValue, col: Option<CellValue>, ctx: &EvalContext<'_>) -> CellValue {
+    let index = |value: CellValue| ctx.number(&value).map(f64::trunc);
     let first = match index(row) {
         Ok(value) => value,
         Err(error) => return err(error),
@@ -1702,7 +1772,7 @@ fn aggregate(
                 CellValue::Error { value } if !skip_errors => return Value::error(value),
                 _ => {}
             },
-            Value::Scalar(value) => match to_number(&value) {
+            Value::Scalar(value) => match ctx.number(&value) {
                 Ok(number) => numbers.push(number),
                 Err(_) if matches!(value, CellValue::Empty) => {}
                 Err(error) => return Value::error(error),
@@ -1871,6 +1941,7 @@ fn lookup_position(
     key: &CellValue,
     mode: f64,
     search: f64,
+    reference: bool,
 ) -> (Option<usize>, usize) {
     use std::cmp::Ordering;
     let count = lookup.values.len();
@@ -1900,7 +1971,7 @@ fn lookup_position(
             continue;
         }
         let ordering = cmp_values(value, key);
-        if ordering == Ordering::Equal {
+        if exact_hit(value, key, reference) {
             return (Some(position), visited + 1);
         }
         // -1 keeps the largest value below the key, 1 the smallest above it
@@ -1923,40 +1994,132 @@ fn lookup_position(
     (approximate.map(|(position, _)| position), count)
 }
 
-/// how a lookup vector addresses a result block: down its rows, or across its
-/// columns. `None` is a mismatch between the two.
+/// how a lookup vector addresses a result block: a column down its rows, a
+/// row across its columns. `None` is a mismatch between the two.
 fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
-    if lookup.rows > 1 && lookup.cols > 1 {
-        return None;
-    }
-    let count = lookup.values.len();
-    if lookup.cols == 1 && data.rows == count {
-        return Some(true);
-    }
-    if lookup.rows == 1 && data.cols == count {
-        return Some(false);
-    }
-    match (data.rows == count, data.cols == count) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
+    axis((lookup.rows, lookup.cols), (data.rows, data.cols))
+}
+
+fn axis(lookup: (usize, usize), data: (usize, usize)) -> Option<bool> {
+    match lookup {
+        (1, 1) if data.0 == 1 => Some(true),
+        (1, 1) if data.1 == 1 => Some(false),
+        (rows, 1) if rows > 1 && data.0 == rows => Some(true),
+        (1, cols) if cols > 1 && data.1 == cols => Some(false),
         _ => None,
     }
+}
+
+/// whether a reference beside a computed block can line up with it, judged
+/// before a cell is read: as written, or, for a whole column or row, by the
+/// used extent a block computed over such ranges has. one computed cell never
+/// lines up with a reference of several.
+fn lines_up(area: Area, block: &Array, ctx: &EvalContext<'_>, lookup: bool) -> bool {
+    if block.values.len() == 1 && area.cell_count() != Some(1) {
+        return false;
+    }
+    let fits = |area: Area| {
+        let (area, block) = ((area.rows, area.cols), (block.rows, block.cols));
+        let fit = if lookup {
+            axis(area, block)
+        } else {
+            axis(block, area)
+        };
+        fit.is_some()
+    };
+    // a whole axis stands for the used extent only where that is as long as
+    // the block's own axis
+    let used = used_extent(area, ctx);
+    let mut stood = area;
+    if area.rows >= xlsx_model::MAX_ROWS as usize && used.rows == block.rows && block.rows > 1 {
+        stood.rows = block.rows;
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize && used.cols == block.cols && block.cols > 1 {
+        stood.cols = block.cols;
+    }
+    fits(area) || fits(stood)
 }
 
 /// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
 /// the lookup vector picks a whole row or column of the result block, so a
 /// two-dimensional result answers with a block rather than one cell.
 fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    xlookup_over(args, ctx, None, None, |_| argument(args, ctx, 2))
+}
+
+/// a scalar `XLOOKUP` the array form answers for, with its lookup value
+/// `target`, its lookup argument where it resolved to a reference, and its
+/// result argument where the formula already evaluated it.
+pub(crate) fn xlookup_beside(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    target: CellValue,
+    lookup: Option<Area>,
+    data: Option<Value>,
+) -> Value {
+    let keys = Some(Value::Scalar(target));
+    xlookup_over(args, ctx, keys, lookup, |block| {
+        xlookup_result(args, ctx, data, block)
+    })
+}
+
+/// the result argument of a scalar `XLOOKUP`: `value` where the formula
+/// already evaluated it, else resolved as a reference once, or computed when
+/// it is no reference.
+fn xlookup_result(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    value: Option<Value>,
+    lookup: Option<&Array>,
+) -> Result<Array, ErrorValue> {
+    match value {
+        Some(value) => block_of(value),
+        None => match crate::eval::resolve_area(&args[2], ctx) {
+            Some(Ok(area)) => match lookup {
+                Some(lookup) if !lines_up(area, lookup, ctx, false) => Err(ErrorValue::Value),
+                _ => area_argument(area, ctx),
+            },
+            Some(Err(error)) => Err(error),
+            None => argument(args, ctx, 2),
+        },
+    }
+}
+
+/// `XLOOKUP` with its lookup value, where `keys` holds it, and its lookup
+/// argument, where `lookup` holds it, already evaluated or resolved to a
+/// reference, so they are not evaluated again. `data` reads the result
+/// argument once the lookup argument has read without an error, given the
+/// lookup block the formula computed; beside a lookup reference the result is
+/// read first, so a mismatched shape answers before the reference is read.
+fn xlookup_over(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    keys: Option<Value>,
+    lookup: Option<Area>,
+    data: impl FnOnce(Option<&Array>) -> Result<Array, ErrorValue>,
+) -> Value {
     result((|| {
         if args.len() < 3 || args.len() > 6 {
             return Err(ErrorValue::Value);
         }
-        let keys = evaluate_array(&args[0], ctx);
+        let keys = keys.unwrap_or_else(|| evaluate_array(&args[0], ctx));
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
-        let data = argument(args, ctx, 2)?;
+        let (lookup, reference, data) = match lookup {
+            Some(area) => {
+                let data = data(None)?;
+                if !lines_up(area, &data, ctx, true) {
+                    return Err(ErrorValue::Value);
+                }
+                (area_argument(area, ctx)?, true, data)
+            }
+            None => {
+                let (lookup, reference) = lookup_argument(args, ctx, 1)?;
+                let data = data(Some(&lookup))?;
+                (lookup, reference, data)
+            }
+        };
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
         lookup_modes(mode, search)?;
@@ -1973,7 +2136,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 .clone()
         };
         let slice = |key: &CellValue| {
-            let (position, visits) = lookup_position(&lookup, key, mode, search);
+            let (position, visits) = lookup_position(&lookup, key, mode, search, reference);
             let picked = match position {
                 Some(position) if down => rows_of(&data, position),
                 Some(position) => column_of(&data, position),
@@ -2020,7 +2183,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         if let Some(error) = keys.as_error() {
             return Err(error);
         }
-        let lookup = argument(args, ctx, 1)?;
+        let (lookup, reference) = lookup_argument(args, ctx, 1)?;
         let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
         let search = optional_number(args, ctx, 3, 1.0)?.trunc();
         lookup_modes(mode, search)?;
@@ -2031,7 +2194,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         for row in 0..rows {
             for col in 0..cols {
                 let (position, visits) =
-                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search);
+                    lookup_position(&lookup, &keys.broadcast(row, col), mode, search, reference);
                 charge_search(ctx, &mut first, visits)?;
                 cells.push(match position {
                     Some(position) => num(position as f64 + 1.0),
@@ -2093,7 +2256,7 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut ys = Vec::with_capacity(n);
         for row in 0..ys_block.rows {
             for col in 0..ys_block.cols {
-                ys.push(to_number(&ys_block.at(row, col))?);
+                ys.push(ctx.number(&ys_block.at(row, col))?);
             }
         }
         // predictors as columns; a y vector laid out in rows means x is too
@@ -2114,7 +2277,7 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                     let mut column = Vec::with_capacity(obs);
                     for o in 0..obs {
                         let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-                        column.push(to_number(&cell)?);
+                        column.push(ctx.number(&cell)?);
                     }
                     columns.push(column);
                 }
@@ -2181,7 +2344,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut ys = Vec::with_capacity(n);
         for row in 0..ys_block.rows {
             for col in 0..ys_block.cols {
-                ys.push(to_number(&ys_block.at(row, col))?);
+                ys.push(ctx.number(&ys_block.at(row, col))?);
             }
         }
         // predictors as columns; a y vector laid out in rows means x is too
@@ -2204,7 +2367,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             let mut cells = Vec::with_capacity(count);
             for row in 0..new_block.rows {
                 for col in 0..new_block.cols {
-                    cells.push(num(predict(&[to_number(&new_block.at(row, col))?])));
+                    cells.push(num(predict(&[ctx.number(&new_block.at(row, col))?])));
                 }
             }
             return Ok(reserved(new_block.rows, new_block.cols, cells));
@@ -2227,7 +2390,7 @@ fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
                 } else {
                     new_block.at(v, point)
                 };
-                coordinates.push(to_number(&cell)?);
+                coordinates.push(ctx.number(&cell)?);
             }
             cells.push(num(predict(&coordinates)));
         }
@@ -2259,7 +2422,7 @@ fn known_x(
         let mut column = Vec::with_capacity(obs);
         for o in 0..obs {
             let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
-            column.push(to_number(&cell)?);
+            column.push(ctx.number(&cell)?);
         }
         columns.push(column);
     }
@@ -2511,7 +2674,8 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             for col in 0..right.cols {
                 let mut total = 0.0;
                 for inner in 0..left.cols {
-                    total += to_number(&left.at(row, inner))? * to_number(&right.at(inner, col))?;
+                    total +=
+                        ctx.number(&left.at(row, inner))? * ctx.number(&right.at(inner, col))?;
                 }
                 cells.push(num(total));
             }
@@ -2523,6 +2687,12 @@ fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// SUMPRODUCT: elementwise product of every argument, summed; non-numeric
 /// cells count as zero.
 fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if let Some(value) = crate::functions::math::sumproduct_indexed(args, ctx, true) {
+        return Value::Scalar(value);
+    }
+    if let Some(value) = crate::functions::math::sumproduct_array(args, ctx) {
+        return Value::Scalar(value);
+    }
     let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
     if !values.iter().any(|value| matches!(value, Value::Array(_)))
         && let Some(scalar) = crate::functions::resolve("SUMPRODUCT")

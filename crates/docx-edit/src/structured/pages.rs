@@ -2356,6 +2356,7 @@ mod tests {
             ("doNotUseHTMLParagraphAutoSpacing", json!(true)),
             ("suppressSpBfAfterPgBrk", json!(true)),
             ("allowSpaceOfSameStyleInTable", json!(true)),
+            ("adjustLineHeightInTable", json!(true)),
         ] {
             let mut full = json!({"compatibilityFlags": docx_parse::CompatibilityFlags::default()});
             full["compatibilityFlags"][flag] = value.clone();

@@ -89,7 +89,7 @@ can touch the live workbook. Sheet and nested shared maps are frozen by logical
 identity, so replacing one is rejected even when its visible contents match.
 
 Only the nonstructural schema this library emits is accepted. Use authenticated,
-authorized transports — the byte and collection limits reduce resource exposure,
+authorized transports: the byte and collection limits reduce resource exposure,
 they do not make hostile Yrs `Any` payloads safe.
 
 Cell formats live in a content-addressed `xlsx:cell-formats` map that per-sheet
@@ -104,8 +104,8 @@ and the `xdr:` anchor that pins it. Structural edits move all three together, or
 are refused.
 
 A chart on a sheet is a frame, addressed by the drawing part and the anchor
-index within it — `ChartRegion::id`, what `move_chart` and `Op::SetChartAnchor`
-take. Two anchors may point at one chart part, so the part names no single
+index within it (`ChartRegion::id`, what `move_chart` and `Op::SetChartAnchor`
+take). Two anchors may point at one chart part, so the part names no single
 frame; each frame hit-tests, moves and saves as itself. An index names a
 position, not an object, so `Op::SetChartAnchor` is a compare-and-set: it
 carries the chart part and the anchor the frame held when the op was recorded,
@@ -117,7 +117,7 @@ A chart part is refused, and with it every rename, sheet removal and row or
 column edit on the workbook, when it is a ChartEx (`cx:chartSpace`) part, when
 no sheet claims it, when it carries a pivot source, an external data cache, a
 reference outside the chart namespace or a `sqref` extension reference, or when
-a cache sits beside a reference this crate cannot resolve — a defined name, a
+a cache sits beside a reference this crate cannot resolve: a defined name, a
 union, an external book, an area spanning two dimensions, or a multi-level
 category cache. Part types are resolved the way OPC resolves them, an
 `Override` first and the `Default` for the extension after, so a chart typed by

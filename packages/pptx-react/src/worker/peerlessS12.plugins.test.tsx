@@ -209,3 +209,20 @@ test('plugin_document_replacement_starts_a_new_generation', async () => {
   await act(async () => { value.view.unmount(); });
   expect(cleanups).toEqual(['document-replaced', 'unmounted']);
 });
+
+test('peerless_plugin_reads_preserve_engine_facts', async () => {
+  const { readFactsDeck } = await import('../plugins/readFacts.testSupport');
+  let context: PptxPluginContext<null> | undefined;
+  const plugin = definePptxPlugin({ id: 'facts', createState: () => null, onEvent(next) { context = next; } });
+  const value = await open({ file: await readFactsDeck(), plugins: [plugin] });
+  await waitFor(() => expect(context).toBeDefined());
+  const result = await context!.read.readContent();
+  expect(result).toEqual(await value.api.readContent());
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error('Read refused');
+  expect(result.slides[0]).toMatchObject({ title: 'Heading\nNext', hidden: true, layout: { name: 'Heading layout', type: 'title' } });
+  expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
+    { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
+    { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },
+  ]);
+});

@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ooxml_drawingml::{
-    ColorMap, ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
-    preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
+    ColorMap, ColorValue, ShapeFill, ShapeOutline, ShapeStyle, Theme,
+    preset_geometry_default_adjustments, preset_geometry_to_path, resolve_color_value_to_hex,
+    resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
@@ -486,17 +487,30 @@ impl DeckSession {
                 let mut new_texts = Vec::new();
                 for text_id in texts {
                     let new_text_id = text_id.replacen(&id, &new_shape_id, 1);
+                    let key = crate::table::storage_key(&txn, &text_id)?;
                     let text = stories
-                        .get(&txn, &text_id)
+                        .get(&txn, &key)
                         .ok_or_else(|| EditError::StoryNotFound(text_id.clone()))?
                         .cast::<TextRef>()
                         .map_err(|_| EditError::StoryNotFound(text_id.clone()))?;
                     copies.push((
-                        Some(text_id),
+                        Some((text_id, key)),
                         new_text_id.clone(),
                         In::Text(text.as_prelim(&txn)),
                     ));
                     new_texts.push(new_text_id);
+                }
+                let mut structure: Option<pptx_parse::TableStructure> =
+                    optional_json(&source_shape, &txn, "tableStructureJson")?;
+                if let Some(structure) = &mut structure {
+                    structure.story_keys.clone_from(&new_texts);
+                    shape.insert("tableStoryKeys".into(), string_array(&new_texts).into());
+                    shape.insert(
+                        "tableStructureJson".into(),
+                        serde_json::to_string(structure)
+                            .map_err(|error| EditError::Json(error.to_string()))?
+                            .into(),
+                    );
                 }
                 shape.insert("textStories".into(), string_array(&new_texts).into());
                 copies.push((None, new_shape_id, shape.into()));
@@ -516,17 +530,24 @@ impl DeckSession {
                 copies,
             )
         };
+        let (comments, comment_copies) = {
+            let txn = self.doc.transact();
+            (
+                required_map(&txn, crate::COMMENTS)?,
+                crate::comments::duplicate_comments(&txn, slide_id, &new_id)?,
+            )
+        };
         slide.insert("id".into(), new_id.clone().into());
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         for (story, id, value) in copies {
-            if let Some(source_id) = story {
+            if let Some((source_id, source_key)) = story {
                 let text = stories
                     .insert(&mut txn, id.as_str(), value)
                     .cast::<TextRef>()
                     .map_err(|_| EditError::StoryNotFound(id.clone()))?;
                 crate::story::materialize_paragraph_joins(&text, &mut txn, &source_id)?;
-                let prefix = format!("para:{source_id}:");
+                let prefix = format!("para:{source_key}:");
                 for diff in text.diff(&txn, YChange::identity) {
                     if let Out::YMap(marker) = diff.insert {
                         let copied_id = map_string(&marker, &txn, crate::PARA_ID)
@@ -542,6 +563,9 @@ impl DeckSession {
             } else {
                 shapes.insert(&mut txn, id, value);
             }
+        }
+        for (id, comment) in comment_copies {
+            comments.insert(&mut txn, id, comment);
         }
         slides.insert(&mut txn, new_id.as_str(), slide);
         order.insert(&mut txn, position, new_id.as_str());
@@ -1295,9 +1319,12 @@ fn validate_doc_impl(
         .collect();
     while let Some(shape) = shapes.pop() {
         shapes.extend(&shape.children);
+        crate::table::validate_structure(shape)?;
+        crate::table::validate_history(&txn, shape)?;
         for story in &shape.text_stories {
+            let key = crate::table::storage_key(&txn, &story.id)?;
             let text = stories
-                .get(&txn, &story.id)
+                .get(&txn, &key)
                 .and_then(|value| value.cast::<TextRef>().ok())
                 .ok_or_else(|| {
                     EditError::InvalidState(format!("story {} is not text", story.id))
@@ -1419,12 +1446,20 @@ pub(crate) fn import_source_render_data(
             .themes
             .iter()
             .find(|source| source.part_path == theme.part_path)
-            && theme.background_pictures != source.background_pictures
         {
-            theme
-                .background_pictures
-                .clone_from(&source.background_pictures);
-            changed = true;
+            if theme.background_pictures != source.background_pictures {
+                theme
+                    .background_pictures
+                    .clone_from(&source.background_pictures);
+                changed = true;
+            }
+            if theme.format_scheme.effects.is_empty() && !source.format_scheme.effects.is_empty() {
+                theme
+                    .format_scheme
+                    .effects
+                    .clone_from(&source.format_scheme.effects);
+                changed = true;
+            }
         }
     }
     for master in &mut package.masters {
@@ -1500,6 +1535,7 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
         };
         match (target, source) {
             (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                changed |= merge_source_effect_reference(&mut target.style, &source.style);
                 changed |= target.picture_fill != source.picture_fill;
                 target.picture_fill.clone_from(&source.picture_fill);
                 if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
@@ -1507,6 +1543,7 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
                 }
             }
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
+                changed |= merge_source_effect_reference(&mut target.style, &source.style);
                 if target.effects.is_empty() && !source.effects.is_empty() {
                     target.effects.clone_from(&source.effects);
                     changed = true;
@@ -1545,6 +1582,20 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
         }
     }
     changed
+}
+
+fn merge_source_effect_reference(
+    target: &mut Option<Box<ShapeStyle>>,
+    source: &Option<Box<ShapeStyle>>,
+) -> bool {
+    let Some(effect) = source.as_ref().and_then(|style| style.effect.as_ref()) else {
+        return false;
+    };
+    if target.as_ref().is_some_and(|style| style.effect.is_some()) {
+        return false;
+    }
+    target.get_or_insert_with(Default::default).effect = Some(effect.clone());
+    true
 }
 
 /// Copies the chart-space fill, axis lines, series lines and text properties a
@@ -1616,7 +1667,9 @@ fn backfill_table(
         && let Some(pptx_parse::GraphicFrameData::Table(mut stored)) =
             optional_json(&shape, txn, "graphicJson")?
     {
-        let changed = if stored.grid.is_empty() {
+        let changed = if map_string(&shape, txn, "tableStructureJson").is_some() {
+            false
+        } else if stored.grid.is_empty() {
             stored = table.clone();
             true
         } else {
@@ -2280,6 +2333,9 @@ pub(crate) fn slide_parts<T: ReadTxn>(
     Ok(SlideParts {
         shape_ids: live_shape_order(&shape_order, txn)?,
         snapshot: SlideSnapshot {
+            title: None,
+            hidden: None,
+            layout: None,
             id: slide_id.to_owned(),
             source_part_path,
             layout_part_path,
@@ -2597,8 +2653,9 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         child_ids,
     } = shape_parts(shapes, txn, shape_id, theme)?;
     for story_id in story_ids {
+        let key = crate::table::storage_key(txn, &story_id)?;
         let story = stories
-            .get(txn, &story_id)
+            .get(txn, &key)
             .and_then(|value| value.cast::<TextRef>().ok())
             .ok_or_else(|| EditError::InvalidState(format!("missing story {story_id}")))?;
         snapshot
@@ -2679,6 +2736,7 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
         pending_media: None,
         blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
+        table_structure: optional_json(&shape, txn, "tableStructureJson")?,
         graphic: None,
         text_stories: Vec::new(),
         children: Vec::new(),
@@ -2763,6 +2821,9 @@ fn baseline_slide(
         ),
     );
     Ok(SlideSnapshot {
+        title: None,
+        hidden: None,
+        layout: None,
         id: slide_id,
         source_part_path: Some(slide.part_path.clone()),
         layout_part_path: slide.layout_part_path.clone(),
@@ -2884,6 +2945,7 @@ fn baseline_shape(
         media_part_path,
         pending_media: None,
         blip_effects,
+        table_structure: None,
         graphic,
         text_stories,
         children,
@@ -3607,7 +3669,7 @@ mod tests {
             "comment text",
             "reply target",
             "reply nested",
-            "reply legacy",
+            "reply empty",
             "paragraph target",
             "paragraph index",
         ] {
@@ -3621,7 +3683,7 @@ mod tests {
             let mut reply = String::new();
             for session in [&refused, &fresh] {
                 session.set_undo_capture_mode(UndoCaptureMode::Manual);
-                if case != "reply legacy" {
+                if case != "reply empty" {
                     session
                         .set_comment_flavor(&ctx, CommentFlavor::Modern)
                         .unwrap();
@@ -3629,7 +3691,7 @@ mod tests {
                 root = add_test_comment(session, &ctx, &slide_id, "Root")
                     .unwrap()
                     .comment_id;
-                if case != "reply legacy" {
+                if case != "reply empty" {
                     reply = add_test_reply(session, &ctx, &root, "Reply")
                         .unwrap()
                         .comment_id;
@@ -3715,7 +3777,7 @@ mod tests {
                     add_test_reply(&refused, &ctx, "missing-comment", "Reply").map(|_| ())
                 }
                 "reply nested" => add_test_reply(&refused, &ctx, &reply, "Reply").map(|_| ()),
-                "reply legacy" => add_test_reply(&refused, &ctx, &root, "Reply").map(|_| ()),
+                "reply empty" => add_test_reply(&refused, &ctx, &root, "").map(|_| ()),
                 "paragraph target" => refused
                     .insert_paragraph_break(&ctx, "missing-story", 0)
                     .map(|_| ()),
@@ -3745,7 +3807,7 @@ mod tests {
                     "reply target" | "reply nested" => {
                         add_test_reply(session, &ctx, &root, "Reply").unwrap();
                     }
-                    "reply legacy" => {
+                    "reply empty" => {
                         session.remove_comment(&ctx, &root).unwrap();
                         session
                             .set_comment_flavor(&ctx, CommentFlavor::Modern)

@@ -7,10 +7,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use xlsx_model::styles::{Font, Stylesheet};
+use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{CellRef, ColId, MAX_COLS, MAX_ROWS, RowId};
+use xlsx_model::{CellRef, ColId, HAlign, MAX_COLS, MAX_ROWS, RowId};
 
-use crate::Viewport;
+use crate::{Viewport, wrap};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -53,6 +54,8 @@ pub fn geometry_row_storage_allocations() -> u64 {
 pub const DEFAULT_COL_WIDTH_CHARS: f64 = 8.43;
 /// default row height in points (excel default for 11pt calibri).
 pub const DEFAULT_ROW_HEIGHT_PT: f64 = 15.0;
+/// excel's tallest row.
+const MAX_ROW_HEIGHT_PT: f64 = 409.5;
 /// `sheetFormatPr/@baseColWidth` when a sheet declares none (ecma-376 §18.3.1.81).
 const DEFAULT_BASE_COL_WIDTH: f64 = 8.0;
 /// point size assumed for a cell whose style names none.
@@ -139,6 +142,14 @@ impl RowFit {
     }
 }
 
+/// the baseline step of wrapped `size_pt` text: one fitted row of it, on
+/// the print grid when `print_dpi` is set.
+pub(crate) fn line_pitch_pt(size_pt: f64, print_dpi: Option<f64>) -> f64 {
+    print_dpi
+        .map_or(RowFit::Screen, |dpi| RowFit::Print { dpi })
+        .natural(size_pt)
+}
+
 /// floors to whole points, absorbing the float error a ratio leaves just under
 /// an exact integer (90.0 x 14/15 evaluates to 62.999...).
 fn floor_pt(pt: f64) -> f64 {
@@ -179,6 +190,49 @@ impl<'a> NormalFace<'a> {
         }
     }
 }
+
+/// one `indent` level in the renderer's 96dpi space: three spaces of the
+/// normal font (ecma-376 §18.8.1, whatever the cell's own font), each snapped
+/// to whole device pixels as excel lays them out. excel for mac's print at
+/// 72dpi indents calibri 11 by 6pt a level and arial 10 by 9pt.
+pub(crate) fn indent_step_px(styles: &Stylesheet, print: Option<&PrintMetrics>) -> f32 {
+    match print {
+        Some(metrics) => indent_step(NormalFace::from_metrics(metrics), metrics.dpi as f64),
+        None => indent_step(NormalFace::from_styles(styles), 96.0),
+    }
+}
+
+/// [`indent_step_px`] of the `normal` face laid out at `dpi`.
+fn indent_step(normal: NormalFace<'_>, dpi: f64) -> f32 {
+    let space = (space_advance_em(normal.family) * normal.size_pt * dpi / 72.0).round();
+    (3.0 * space * 96.0 / dpi) as f32
+}
+
+/// the space advance in em of common office faces and their metric twins.
+fn space_advance_em(family: Option<&str>) -> f64 {
+    let Some(family) = family else {
+        return CALIBRI_SPACE_EM;
+    };
+    match family.trim().to_ascii_lowercase().as_str() {
+        "calibri" | "carlito" => CALIBRI_SPACE_EM,
+        "arial" | "helvetica" | "liberation sans" | "arimo" => 0.2778,
+        "times new roman" | "liberation serif" | "tinos" => 0.25,
+        "courier new" | "liberation mono" | "cousine" => 0.6001,
+        "cambria" | "caladea" => 0.2202,
+        "aptos" => 0.2031,
+        "verdana" => 0.3516,
+        "tahoma" => 0.3125,
+        "georgia" => 0.2412,
+        "trebuchet ms" => 0.3013,
+        "century gothic" => 0.2769,
+        "arial narrow" => 0.2280,
+        "candara" => 0.2168,
+        "consolas" => 0.5498,
+        _ => 0.25,
+    }
+}
+
+const CALIBRI_SPACE_EM: f64 = 0.2261;
 
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
 /// cached hint it recomputes; `None` keeps stored heights. gated on calibri
@@ -256,6 +310,94 @@ pub fn autofit_relevant(
         RowFit::Screen,
     )
     .is_some()
+        || styles
+            .alignment_for(style.unwrap_or(0))
+            .is_some_and(wrap::wraps)
+            && !sheet.merges.iter().any(|range| range.start == at)
+}
+
+/// horizontal inset of a cell's text box in px: both paddings, and one indent level.
+#[derive(Debug, Clone, Copy)]
+struct TextInset {
+    pad: f32,
+    indent: f32,
+}
+
+impl TextInset {
+    /// the inset of `fit`, its indent level the step the painted text indents by.
+    fn of(fit: RowFit, normal: NormalFace<'_>) -> Self {
+        match fit {
+            RowFit::Screen => Self {
+                pad: 2.0 * crate::TEXT_PAD_PX,
+                indent: indent_step(normal, 96.0),
+            },
+            RowFit::Print { dpi } => Self {
+                pad: 5.0 * (96.0 / dpi) as f32,
+                indent: indent_step(normal, dpi),
+            },
+        }
+    }
+}
+
+/// the height a wrapped text cell asks of its row, one fitted line of its font
+/// per estimated line, when it wraps onto a second line. Callers skip merge
+/// anchors; a hidden column fits nothing.
+fn wrapped_height(
+    styles: &Stylesheet,
+    style: Option<u32>,
+    cell: &xlsx_model::workbook::Cell,
+    column_px: f32,
+    inset: TextInset,
+    normal: NormalFace<'_>,
+    fit: RowFit,
+) -> Option<f64> {
+    if !matches!(cell.value, CellValue::Text { .. }) {
+        return None;
+    }
+    let style = style.unwrap_or(0);
+    let alignment = styles
+        .alignment_for(style)
+        .filter(|alignment| wrap::wraps(alignment))?;
+    if column_px <= 0.0 {
+        return None;
+    }
+    let indent = match alignment.h {
+        Some(HAlign::Left | HAlign::Right) => {
+            alignment.indent.unwrap_or(0).min(crate::MAX_INDENT) as f32 * inset.indent
+        }
+        _ => 0.0,
+    };
+    let size = styles
+        .font_for(style)
+        .and_then(|font| font.size_pt)
+        .filter(|pt| pt.is_finite() && *pt > 0.0)
+        .unwrap_or(normal.size_pt);
+    // the painter wraps the formatted text, and never beside a fill
+    let formatted = xlsx_model::numfmt::format_value(
+        &cell.value,
+        &crate::format_code_for_style(styles, style),
+        xlsx_model::DateSystem::default(),
+    );
+    if formatted
+        .layout
+        .iter()
+        .any(|part| part.kind != xlsx_model::numfmt::FormatPartKind::Padding)
+    {
+        return None;
+    }
+    let lines = wrap::estimated_line_count(
+        &formatted.text,
+        (column_px - inset.pad - indent).max(0.0),
+        size,
+    );
+    (lines > 1).then(|| (fit.natural(size) * lines as f64).min(MAX_ROW_HEIGHT_PT))
+}
+
+fn taller(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// rows excel auto-fits, with the height each takes: every row that carries no
@@ -268,6 +410,8 @@ fn autofit_rows(
     styles: &Stylesheet,
     default_pt: f64,
     normal: NormalFace<'_>,
+    column_px: impl Fn(ColId) -> f32,
+    inset: TextInset,
     fit: RowFit,
 ) -> BTreeMap<RowId, f64> {
     let mut fitted = BTreeMap::new();
@@ -284,21 +428,22 @@ fn autofit_rows(
             fitted.insert(row, height);
         }
     }
-    let spanned: HashSet<(RowId, ColId)> = sheet
-        .merges
-        .iter()
-        .filter(|range| range.end.row > range.start.row)
-        .map(|range| (range.start.row, range.start.col))
-        .collect();
-    for (at, _) in sheet.iter_cells() {
+    let spanned = merge_anchors(sheet, true);
+    let anchors = merge_anchors(sheet, false);
+    for (at, cell) in sheet.iter_cells() {
         #[cfg(feature = "test-counters")]
         AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
         let style = sheet.effective_style(at);
-        if let Some(height) = autofit_height(styles, style, default_pt, cached_default, normal, fit)
-        {
+        let wrapped = wrapped_height(styles, style, cell, column_px(at.col), inset, normal, fit)
+            .filter(|height| cached_default || *height > default_pt)
+            .filter(|_| !anchors.contains(&(at.row, at.col)));
+        if let Some(height) = taller(
+            autofit_height(styles, style, default_pt, cached_default, normal, fit),
+            wrapped,
+        ) {
             let entry = fitted.entry(at.row).or_insert(height);
             if height > *entry {
                 *entry = height;
@@ -306,6 +451,16 @@ fn autofit_rows(
         }
     }
     fitted
+}
+
+/// the anchors of the sheet's merges, only those spanning rows when `spanning`.
+fn merge_anchors(sheet: &Sheet, spanning: bool) -> HashSet<(RowId, ColId)> {
+    sheet
+        .merges
+        .iter()
+        .filter(|range| !spanning || range.end.row > range.start.row)
+        .map(|range| (range.start.row, range.start.col))
+        .collect()
 }
 
 fn missing_row_style(sheet: &Sheet, row: RowId) -> Option<u32> {
@@ -595,6 +750,10 @@ impl Sizes {
         Some((index * SIZE_CHUNK_LEN + within) as u32)
     }
 
+    fn width(&self, index: u32) -> f32 {
+        self.value(index).unwrap_or(self.default)
+    }
+
     fn value(&self, index: u32) -> Option<f32> {
         let chunk = self.chunks.get(index as usize / SIZE_CHUNK_LEN)?;
         let value = chunk.values[index as usize % SIZE_CHUNK_LEN];
@@ -686,6 +845,8 @@ pub struct GridGeometry {
     columns: Sizes,
     rows: Sizes,
     spanned: Arc<HashSet<(RowId, ColId)>>,
+    anchors: Arc<HashSet<(RowId, ColId)>>,
+    inset: TextInset,
 }
 
 impl GridGeometry {
@@ -732,6 +893,7 @@ impl GridGeometry {
         column_pixels: impl Fn(f64) -> f32,
         fit: RowFit,
     ) -> Self {
+        let inset = TextInset::of(fit, normal);
         #[cfg(feature = "test-counters")]
         GEOMETRY_CONSTRUCTIONS.set(GEOMETRY_CONSTRUCTIONS.get().wrapping_add(1));
         let default_row_pt = fit.default_row(sheet, declared_row_pt, normal);
@@ -740,7 +902,6 @@ impl GridGeometry {
         } else {
             row_pt_to_px(default_row_pt)
         };
-        let fitted = autofit_rows(sheet, styles, default_row_pt, normal, fit);
         let scale = stored_height_scale(sheet, normal, fit);
         let columns: Vec<_> = sheet
             .col_widths
@@ -756,6 +917,16 @@ impl GridGeometry {
                 )
             })
             .collect();
+        let columns = Sizes::from_values(xlsx_model::MAX_COLS, default_col_px, &columns);
+        let fitted = autofit_rows(
+            sheet,
+            styles,
+            default_row_pt,
+            normal,
+            |col| columns.width(col),
+            inset,
+            fit,
+        );
         let sized: std::collections::BTreeSet<_> = sheet
             .row_heights
             .keys()
@@ -787,33 +958,20 @@ impl GridGeometry {
                 .map(|size| (row, size))
             })
             .collect();
-        let columns = Sizes::from_values(xlsx_model::MAX_COLS, default_col_px, &columns);
         let rows = Sizes::from_values(xlsx_model::MAX_ROWS, default_row_px, &rows);
-        let spanned = Arc::new(
-            sheet
-                .merges
-                .iter()
-                .filter(|range| range.end.row > range.start.row)
-                .map(|range| (range.start.row, range.start.col))
-                .collect(),
-        );
         Self {
             columns,
             rows,
-            spanned,
+            spanned: Arc::new(merge_anchors(sheet, true)),
+            anchors: Arc::new(merge_anchors(sheet, false)),
+            inset,
         }
     }
 
     #[doc(hidden)]
     pub fn update_merges(&mut self, sheet: &Sheet) {
-        self.spanned = Arc::new(
-            sheet
-                .merges
-                .iter()
-                .filter(|range| range.end.row > range.start.row)
-                .map(|range| (range.start.row, range.start.col))
-                .collect(),
-        );
+        self.spanned = Arc::new(merge_anchors(sheet, true));
+        self.anchors = Arc::new(merge_anchors(sheet, false));
     }
 
     #[doc(hidden)]
@@ -842,20 +1000,35 @@ impl GridGeometry {
                         RowFit::Screen,
                     )
                 });
-                for (at, _) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
+                for (at, cell) in sheet.iter_cells_in_rect(row..row + 1, 0..xlsx_model::MAX_COLS) {
                     #[cfg(feature = "test-counters")]
                     AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
                     if self.spanned.contains(&(at.row, at.col)) {
                         continue;
                     }
                     let style = sheet.effective_style(at);
-                    if let Some(height) = autofit_height(
+                    let cached_default = sheet.format.default_row_height_pt.is_some();
+                    let wrapped = wrapped_height(
                         styles,
                         style,
-                        default_pt,
-                        sheet.format.default_row_height_pt.is_some(),
+                        cell,
+                        self.columns.width(at.col),
+                        self.inset,
                         normal,
                         RowFit::Screen,
+                    )
+                    .filter(|height| cached_default || *height > default_pt)
+                    .filter(|_| !self.anchors.contains(&(at.row, at.col)));
+                    if let Some(height) = taller(
+                        autofit_height(
+                            styles,
+                            style,
+                            default_pt,
+                            cached_default,
+                            normal,
+                            RowFit::Screen,
+                        ),
+                        wrapped,
                     ) {
                         fitted = Some(fitted.map_or(height, |old| old.max(height)));
                     }
@@ -868,8 +1041,15 @@ impl GridGeometry {
         }
     }
 
+    /// also refits the rows whose wrapped text the resized columns rewrap.
     #[doc(hidden)]
-    pub fn update_columns(&mut self, sheet: &Sheet, columns: impl IntoIterator<Item = ColId>) {
+    pub fn update_columns(
+        &mut self,
+        sheet: &Sheet,
+        styles: &Stylesheet,
+        columns: impl IntoIterator<Item = ColId>,
+    ) {
+        let mut resized = std::collections::BTreeSet::new();
         for col in columns {
             let size = sheet.col_widths.get(&col).map(|&width| {
                 if sheet.col_hidden(col) {
@@ -880,8 +1060,26 @@ impl GridGeometry {
             });
             if self.columns.value(col) != size {
                 self.columns.set(col, size);
+                resized.insert(col);
             }
         }
+        if resized.is_empty()
+            || sheet.format.custom_height
+            || !styles
+                .cell_xfs
+                .iter()
+                .any(|xf| xf.alignment.as_ref().is_some_and(wrap::wraps))
+        {
+            return;
+        }
+        let rows: std::collections::BTreeSet<RowId> = sheet
+            .iter_cells()
+            .filter(|(at, cell)| {
+                resized.contains(&at.col) && matches!(cell.value, CellValue::Text { .. })
+            })
+            .map(|(at, _)| at.row)
+            .collect();
+        self.update_rows(sheet, styles, rows);
     }
 
     pub fn col_x(&self, col: ColId) -> f32 {
@@ -979,6 +1177,35 @@ mod tests {
 
     fn styles() -> Stylesheet {
         Stylesheet::default()
+    }
+
+    #[test]
+    fn wrap_insets_indent_by_the_painted_indent_step() {
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        }];
+        let screen = TextInset::of(RowFit::Screen, NormalFace::from_styles(&styles));
+        assert_eq!(screen.indent, indent_step_px(&styles, None));
+        assert_eq!(screen.indent, 12.0);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 5.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: 10.0,
+            font_family: "Arial".into(),
+            font_ascent: 9.0,
+            font_descent: 2.0,
+        };
+        let print = TextInset::of(
+            RowFit::Print { dpi: 72.0 },
+            NormalFace::from_metrics(&metrics),
+        );
+        assert_eq!(print.indent, indent_step_px(&styles, Some(&metrics)));
+        assert_eq!(print.indent, 12.0);
     }
 
     #[test]

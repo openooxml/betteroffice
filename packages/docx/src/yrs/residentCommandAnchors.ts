@@ -4,19 +4,19 @@ import type {
   DocxCommandEnvelope,
   DocxCommandPosition,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
   ResolvedDocxCommandSelection,
 } from './residentCommandProtocol';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
-const commandStates = new WeakMap<ResidentDocxCommandEngine, ResidentDocxCommandState>();
+const commandStates = new WeakMap<DocxWorkerCommandEngine, DocxWorkerCommandState>();
 
-export function registerCommandAnchorState(engine: ResidentDocxCommandEngine, state: ResidentDocxCommandState): void {
+export function registerCommandAnchorState(engine: DocxWorkerCommandEngine, state: DocxWorkerCommandState): void {
   commandStates.set(engine, state);
 }
 
-export function readCommandStickyPosition(engine: ResidentDocxCommandEngine, at: YrsLoc): YrsStickyPosition {
+export function readCommandStickyPosition(engine: DocxWorkerCommandEngine, at: YrsLoc): YrsStickyPosition {
   const sticky = engine.encodeStickyPosition(at);
   commandStates.get(engine)?.stickyPositions.set(stickyPositionKey(sticky.story, sticky.encoded), {
     story: sticky.story, encoded: sticky.encoded.slice(),
@@ -40,7 +40,7 @@ function position(value: unknown): value is DocxCommandPosition {
 }
 
 export function commandSelectionRange(
-  engine: Pick<ResidentDocxCommandEngine, 'geometryReader'>,
+  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>,
   selected: DocxCommandSelection
 ): YrsStoryRange | null {
   if (!selected || typeof selected !== 'object' || Array.isArray(selected) ||
@@ -72,8 +72,8 @@ export function commandSelectionRange(
 }
 
 export function readCommandSelection(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   selected = state.selection,
   requireSticky = false
 ): ResolvedDocxCommandSelection {
@@ -97,7 +97,7 @@ export function readCommandSelection(
 }
 
 /** The range a selection covers in the current document; positions carrying an issued sticky follow later edits. */
-export function currentSelectionRange(engine: ResidentDocxCommandEngine, selected: DocxCommandSelection): YrsStoryRange | null {
+export function currentSelectionRange(engine: DocxWorkerCommandEngine, selected: DocxCommandSelection): YrsStoryRange | null {
   const state = commandStates.get(engine);
   if (!state) return commandSelectionRange(engine, selected);
   const read = readCommandSelection(engine, state, selected);
@@ -105,8 +105,8 @@ export function currentSelectionRange(engine: ResidentDocxCommandEngine, selecte
 }
 
 export function mintCommandSelection(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   selected: DocxCommandSelection
 ): DocxCommandSelection {
   const mint = (at: YrsLoc): DocxCommandPosition => {
@@ -120,8 +120,8 @@ export function mintCommandSelection(
 }
 
 export function resolveCommandSelection(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   command: DocxCommandEnvelope,
   context: DocxCommandApplyContext
 ): ResolvedDocxCommandSelection {

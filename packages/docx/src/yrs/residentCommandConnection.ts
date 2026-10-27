@@ -2,21 +2,21 @@ import { isCommandAck, isCommandOutcomeUnknownError } from '../../../../shared/o
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
-  ResidentCommandClient,
+  DocxCommandClient,
   DocxCommandAck,
-  ResidentCommandConnection,
-  ResidentCommandInitReply,
-  ResidentCommandInitRequest,
+  DocxCommandConnection,
+  DocxCommandInitReply,
+  DocxCommandInitRequest,
 } from './residentCommandProtocol';
 
-export async function createResidentCommandConnection(
-  client: ResidentCommandClient,
-  init: ResidentCommandInitRequest | ResidentCommandInitReply
-): Promise<ResidentCommandConnection> {
+export async function createDocxCommandConnection(
+  client: DocxCommandClient,
+  init: DocxCommandInitRequest | DocxCommandInitReply
+): Promise<DocxCommandConnection> {
   const generation = 'outcomes' in init ? client.commandInitialGeneration(init) : client.commandGeneration;
   if (generation === undefined || generation !== client.commandGeneration) {
     if ('outcomes' in init) discardCommandPresentation(init.frame);
-    throw new SessionFailure('disposed', 'Resident command document was replaced');
+    throw new SessionFailure('disposed', 'Worker command document was replaced');
   }
   let failure: SessionFailure | undefined;
   let disposal: Promise<void> | undefined;
@@ -46,7 +46,7 @@ export async function createResidentCommandConnection(
 
   function call<T>(request: () => Promise<T>, discard?: (value: T) => void): Promise<T> {
     if (client.commandGeneration !== generation) {
-      return Promise.reject(fail(new SessionFailure('disposed', 'Resident command document was replaced')));
+      return Promise.reject(fail(new SessionFailure('disposed', 'Worker command document was replaced')));
     }
     if (failure) return Promise.reject(failure);
     if (disposal) return Promise.reject(new SessionFailure('disposed', 'Command connection was disposed'));
@@ -59,7 +59,7 @@ export async function createResidentCommandConnection(
         pending.delete(reject);
         if (failure || disposal || client.commandGeneration !== generation) {
           discard?.(value);
-          reject(failure ?? fail(new SessionFailure('disposed', 'Resident command document was replaced')));
+          reject(failure ?? fail(new SessionFailure('disposed', 'Worker command document was replaced')));
         } else resolve(value);
       }, (error: unknown) => {
         pending.delete(reject);
@@ -92,7 +92,7 @@ export async function createResidentCommandConnection(
       (value) => discardCommandPresentation(value.frame));
     if (client.commandGeneration !== generation || client.commandInitialGeneration(initial) !== generation) {
       discardCommandPresentation(initial.frame);
-      throw new SessionFailure('disposed', 'Resident command document was replaced');
+      throw new SessionFailure('disposed', 'Worker command document was replaced');
     }
     if (!isCommandAck(initial) || initial.session !== init.session || initial.incarnation !== init.incarnation ||
       initial.epoch !== init.epoch || initial.version !== (init.version ?? 0) ||
@@ -100,17 +100,17 @@ export async function createResidentCommandConnection(
       initial.editState === undefined || !initial.frame || initial.frame.baseRevision !== undefined ||
       initial.frame.coversThroughSeq !== initial.throughSeq) {
       discardCommandPresentation(initial.frame);
-      throw new SessionFailure('message', 'Resident command initialization has invalid state');
+      throw new SessionFailure('message', 'Worker command initialization has invalid state');
     }
     function validateAck(ack: DocxCommandAck): DocxCommandAck {
       const frame = ack?.frame;
       if (!isCommandAck(ack)) {
         discardCommandPresentation(frame);
-        throw new SessionFailure('message', 'Malformed resident command acknowledgement');
+        throw new SessionFailure('message', 'Malformed worker command acknowledgement');
       }
       if (ack.session !== initial.session || ack.incarnation !== initial.incarnation || ack.epoch !== initial.epoch) {
         discardCommandPresentation(ack.frame);
-        throw fail(new SessionFailure('disposed', 'Resident command document was replaced'));
+        throw fail(new SessionFailure('disposed', 'Worker command document was replaced'));
       }
       return ack;
     }

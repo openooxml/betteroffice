@@ -1,6 +1,6 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxFindDisplayMatch, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DocxFindDisplayMatch, DocxDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
 import { markPresented, stampWorkerFrameVersion } from './layoutProvenance';
 import { readViewerFindMatches, type ViewerRefReadAccess } from './viewerRefReads';
 
@@ -39,7 +39,7 @@ test('find reads matches at the presented worker version without a selection', a
 });
 
 test('a superseded find retries against the next presented frame', async () => {
-  const read = mock(async (_request: ResidentDocumentRead) => ({ version: 'B', value: matches }));
+  const read = mock(async (_request: DocxDocumentRead) => ({ version: 'B', value: matches }));
   const { access } = accessFor(read);
   expect(await readViewerFindMatches(access, 'word', options)).toEqual({ version: 'B', matches });
   expect(read.mock.calls).toEqual([

@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { detachedBuffers, freezeDeep } from '../../../../shared/office-session/testing/frozen';
-import { createResidentCommandConnection } from './residentCommandConnection';
-import type { DocxCommandEnvelope, DocxCommandPayload, ResidentCommandInitRequest } from './residentCommandProtocol';
+import { createDocxCommandConnection } from './residentCommandConnection';
+import type { DocxCommandEnvelope, DocxCommandPayload, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { ResidentEngineWorkerPort } from './residentEngineWorkerClient';
-import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
-import { ResidentSourceWorkerClient } from './residentSourceWorkerClient';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 
-const INIT: ResidentCommandInitRequest = {
+const INIT: DocxCommandInitRequest = {
   session: 'docx-frozen', incarnation: 1, epoch: 1, readOnly: false,
   fonts: [], layoutInput: '{}', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
 };
@@ -24,7 +24,7 @@ function copyingPort() {
     postMessage(message, transfer = []) {
       const request = structuredClone(message, { transfer });
       if (!('id' in request)) return;
-      let response: ResidentEngineWorkerResponse | undefined;
+      let response: DocxEngineWorkerResponse | undefined;
       if (request.type === 'commandInit') {
         response = { id: request.id, ok: true, commandInitial: { ...identity, version: 0, throughSeq: 0, outcomes: [],
           selection: null,
@@ -38,7 +38,7 @@ function copyingPort() {
         response = { id: request.id, ok: true,
           commandAck: { ...identity, version: seq, throughSeq: seq, outcomes: [{ seq, status: 'applied' }] } };
       }
-      if (response) queueMicrotask(() => port.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>));
+      if (response) queueMicrotask(() => port.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>));
     },
     terminate() {},
   };
@@ -47,7 +47,7 @@ function copyingPort() {
 
 test('resident command edits leave a frozen envelope and its buffers untouched', async () => {
   const worker = copyingPort();
-  const connection = await createResidentCommandConnection(new ResidentSourceWorkerClient(worker.port), INIT);
+  const connection = await createDocxCommandConnection(new DocxSourceWorkerClient(worker.port), INIT);
   try {
     const commands = [
       envelope(1, 'setFontEnvironment', {

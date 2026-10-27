@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx-i18n",
-  "version": "0.3.0",
+  "version": "0.5.1",
   "description": "Shared UI locale strings and types for the @betteroffice/xlsx React editor.",
   "sideEffects": false,
   "main": "./dist/index.mjs",
@@ -79,6 +79,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/xlsx-i18n"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

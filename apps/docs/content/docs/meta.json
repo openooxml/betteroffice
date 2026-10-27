@@ -3,6 +3,7 @@
     "index",
     "packages",
     "javascript",
+    "migrating-to-0-5",
     "rust",
     "python",
     "agents",

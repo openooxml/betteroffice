@@ -14,6 +14,7 @@ import type {
   OperationRefusal,
   ValidationSuccess,
 } from '../../../shared/host-contracts/edits';
+import type { XlsxSheetVisibility } from './exports';
 import type { NumberFormatMutation, RangeStylePatch } from './wasm/loader';
 
 export type {
@@ -193,6 +194,7 @@ export interface XlsxReadRequest {
 }
 
 export interface XlsxSheetEntry {
+  visibility?: XlsxSheetVisibility;
   sheetId: string;
   name: string;
   /**

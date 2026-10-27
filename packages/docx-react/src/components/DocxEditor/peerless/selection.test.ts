@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { createDocxWorkerEditSession } from '@betteroffice/docx/worker';
 import type {
-  DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxSelectionPointIntent, ResidentCommandConnection,
+  DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxSelectionPointIntent, DocxCommandConnection,
 } from '@betteroffice/docx/worker';
 import type { CommandTicket } from '../../../../../../shared/office-session/commands/types';
 import { captureSelectionIntent } from './selection';
@@ -31,7 +31,7 @@ function position(paraId: string, offset: number, byte: number) {
 
 function orderedSelection() {
   const old = position('old', 2, 8);
-  const initial: ResidentCommandConnection['initial'] = {
+  const initial: DocxCommandConnection['initial'] = {
     ...geometry.identity, version: 0, throughSeq: 0, outcomes: [], selection: { anchor: old, focus: old },
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
@@ -43,7 +43,7 @@ function orderedSelection() {
   const replies = new Map<number, { ack: DocxCommandAck; resolve(ack: DocxCommandAck): void }>();
   const received: { command: DocxCommandEnvelope; predecessor: DocxCommandSelection; selection: DocxCommandSelection }[] = [];
   let version = 0;
-  const connection: ResidentCommandConnection = {
+  const connection: DocxCommandConnection = {
     initial, requestFullFrame: async () => initial,
     client: { failure: undefined, onFailure: () => () => {}, dispose: async () => {},
       call: {

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { capturePageExtent, validatePageBounds } from './page-bounds';
+import { capturePageExtent, extentMatches, validatePageBounds } from './page-bounds';
 import { MAX_LOCAL_REFERENCE_PAGES } from './reference.mjs';
 
 const a4 = { width_pt: 595.25, height_pt: 842, width_px: 1241, height_px: 1755 };
@@ -133,4 +133,12 @@ test('keeps a mismatched page at its own size only when asked', () => {
     output: { width_px: 1755, height_px: 1241 },
     adjustment: 'none',
   });
+});
+
+test('matches canvas extents within one pixel of the recorded page', () => {
+  const bounds = validatePageBounds(profile([a4, letter]));
+  expect(extentMatches(bounds, 0, 1240, 1756)).toBe(true);
+  expect(extentMatches(bounds, 1, 1241, 1755)).toBe(false);
+  expect(extentMatches(bounds, 2, 10, 10)).toBe(true);
+  expect(extentMatches(null, 0, 10, 10)).toBe(true);
 });

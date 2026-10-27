@@ -12,7 +12,10 @@ use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, wri
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
-use crate::authority::snapshot::{Codec, ConditionalFormatSnapshot, Released, released};
+use crate::authority::snapshot::{
+    Codec, ConditionalFormatSnapshot, LegacyConditionalFormatSnapshot, Released, released,
+    released_conditional_formats, sets_italic, write_released_conditional_formats,
+};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -46,6 +49,12 @@ const CONDITIONAL_HEADER: u8 = 29;
 const CONDITIONAL_FORMATS: u8 = 30;
 const AUTO_FILTER_HEADER: u8 = 31;
 const AUTO_FILTERS: u8 = 32;
+/// A conditional formats record laid out with italic; one tagged
+/// `CONDITIONAL_FORMATS` predates it.
+const CONDITIONAL_FORMATS_V2: u8 = 33;
+/// A chart record that also carries the edited part XML it saves; a chart
+/// without any keeps the `CHART` layout.
+const CHART_XML: u8 = 34;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -55,7 +64,9 @@ fn run_tag(tag: u8) -> u8 {
     match tag {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
         STYLED_SHEET | HIDDEN_SHEET => SHEET,
+        CHART_XML => CHART,
         XF_V2 => XF,
+        CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
         FILL_V2 => FILL,
         BORDER_V2 => BORDER,
         tag => tag,
@@ -317,7 +328,17 @@ impl MetadataCursor {
             if self.phase == CONDITIONAL_FORMATS {
                 self.phase = NAME;
                 if has_conditional_formats(model) {
-                    w.u8(CONDITIONAL_FORMATS);
+                    let formats = model.sheets.iter().map(|sheet| &sheet.conditional_formats);
+                    if !sets_italic(&model.styles.dxfs, formats.clone().flatten()) {
+                        w.u8(CONDITIONAL_FORMATS);
+                        write_released_conditional_formats(
+                            w,
+                            &model.styles.dxfs,
+                            formats.map(Vec::as_slice),
+                        );
+                        return Ok(true);
+                    }
+                    w.u8(CONDITIONAL_FORMATS_V2);
                     model.styles.dxfs.write(w);
                     w.var_usize(model.sheets.len());
                     for sheet in &model.sheets {
@@ -436,6 +457,8 @@ impl MetadataCursor {
             }
             w.u8(if self.sheet_phase == CHART && self.child != 0 {
                 CHART_REF
+            } else if self.sheet_phase == CHART && sheet.charts[self.index].raw_xml.is_some() {
+                CHART_XML
             } else if self.sheet_phase == SHEET
                 && (!sheet.hidden_col_widths.is_empty() || !sheet.hidden_row_heights.is_empty())
             {
@@ -655,7 +678,10 @@ impl ModelSnapshotBuilder {
                 ));
             }
             if decoding
-                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
                 || extent > budget.max_bytes()
             {
                 self.preflight_large_record(raw, budget)?;
@@ -664,7 +690,10 @@ impl ModelSnapshotBuilder {
                 return Ok(SnapshotProgress::pending());
             }
             if decoding
-                || matches!(raw, CONDITIONAL_FORMATS | AUTO_FILTERS)
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
                 || extent > budget.max_bytes()
             {
                 let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
@@ -729,13 +758,15 @@ impl ModelSnapshotBuilder {
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
-            CONDITIONAL_FORMATS => preflight!(ConditionalFormatSnapshot),
+            CONDITIONAL_FORMATS => preflight!(LegacyConditionalFormatSnapshot),
+            CONDITIONAL_FORMATS_V2 => preflight!(ConditionalFormatSnapshot),
             AUTO_FILTERS => preflight!(Vec<Option<xlsx_model::AutoFilter>>),
             TABLE => preflight!((
                 String,
                 (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
             )),
             CHART => preflight!((String, (String, (usize, (ChartAnchor, usize))))),
+            CHART_XML => preflight!((String, (String, (usize, (ChartAnchor, (usize, String)))))),
             _ => Err(SnapshotError::new(
                 "snapshot model exceeds advance byte budget",
             )),
@@ -769,6 +800,11 @@ impl ModelSnapshotBuilder {
                 end
             }
             CONDITIONAL_FORMATS => {
+                let (value, end) = decoded!(LegacyConditionalFormatSnapshot);
+                self.adopt_conditional_formats(released_conditional_formats(value))?;
+                end
+            }
+            CONDITIONAL_FORMATS_V2 => {
                 let (value, end) = decoded!(ConditionalFormatSnapshot);
                 self.adopt_conditional_formats(value)?;
                 end
@@ -884,15 +920,28 @@ impl ModelSnapshotBuilder {
                 }
                 end
             }
-            CHART => {
-                let ((part, (drawing, (anchor_index, (anchor, refs)))), end) =
-                    decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+            CHART | CHART_XML => {
+                let ((part, (drawing, (anchor_index, (anchor, refs)))), raw_xml, end) = if tag
+                    == CHART_XML
+                {
+                    let ((part, (drawing, (anchor_index, (anchor, (refs, xml))))), end) =
+                        decoded!((String, (String, (usize, (ChartAnchor, (usize, String))))));
+                    (
+                        (part, (drawing, (anchor_index, (anchor, refs)))),
+                        Some(chart_xml(xml)?),
+                        end,
+                    )
+                } else {
+                    let (value, end) = decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+                    (value, None, end)
+                };
                 self.model
                     .sheets
                     .last_mut()
                     .ok_or_else(|| SnapshotError::new("snapshot sheet metadata has no sheet"))?
                     .charts
                     .push(SheetChart {
+                        raw_xml,
                         part,
                         drawing,
                         anchor_index,
@@ -910,8 +959,12 @@ impl ModelSnapshotBuilder {
                 ));
             }
         };
-        let index = if matches!(tag, TABLE | CHART) {
-            usize::from(self.runs.front().is_some_and(|&(next, _)| next != tag))
+        let index = if matches!(tag, TABLE | CHART | CHART_XML) {
+            usize::from(
+                self.runs
+                    .front()
+                    .is_some_and(|&(next, _)| next != run_tag(tag)),
+            )
         } else {
             0
         };
@@ -1149,7 +1202,10 @@ impl ModelSnapshotBuilder {
         self.remaining_records -= 1;
         match raw {
             AUTO_FILTERS => self.adopt_auto_filters(Codec::read(r)?)?,
-            CONDITIONAL_FORMATS => self.adopt_conditional_formats(Codec::read(r)?)?,
+            CONDITIONAL_FORMATS => self.adopt_conditional_formats(released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(r)?,
+            ))?,
+            CONDITIONAL_FORMATS_V2 => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
@@ -1184,6 +1240,7 @@ impl ModelSnapshotBuilder {
                 .columns
                 .push(r.str()?.to_owned()),
             SHEET | STYLED_SHEET | HIDDEN_SHEET => self.read_sheet(r, raw)?,
+            CHART_XML => self.read_sheet_record(raw, r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
         self.validate_counts()?;
@@ -1295,8 +1352,8 @@ impl ModelSnapshotBuilder {
                 }
                 sheet.row_styles.insert(row, xf);
             }
-            CHART => {
-                let (chart, refs) = read_chart(r)?;
+            CHART | CHART_XML => {
+                let (chart, refs) = read_chart(r, tag == CHART_XML)?;
                 sheet.charts.push(chart);
                 if refs != 0 {
                     self.runs.push_front((CHART_REF, refs));
@@ -1965,10 +2022,26 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
     })
 }
 
-/// `record` as releases before format facets wrote it: an `XF` record holding
-/// such a release's reading moves to their layout, any other stays as it is.
+/// `record` as releases before format facets wrote it: an `XF` or conditional
+/// formats record holding such a release's reading moves to their layout, any
+/// other stays as it is.
 #[cfg(test)]
 pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() == Some(&CONDITIONAL_FORMATS_V2) {
+        let (dxfs, formats) =
+            ConditionalFormatSnapshot::read(&mut Reader::new(&record[1..])).unwrap();
+        let mut w = Writer::new();
+        w.u8(CONDITIONAL_FORMATS);
+        write_released_conditional_formats(&mut w, &dxfs, formats.iter().map(Vec::as_slice));
+        let released = w.into_bytes();
+        assert_eq!(
+            released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(&mut Reader::new(&released[1..])).unwrap()
+            ),
+            (dxfs, formats)
+        );
+        return released;
+    }
     if record.first() != Some(&XF_V2) {
         return record.to_vec();
     }
@@ -2066,6 +2139,7 @@ fn read_anchor(r: &mut Reader<'_>) -> SnapshotResult<ChartAnchor> {
 
 fn write_chart(w: &mut Writer, value: &SheetChart) {
     let SheetChart {
+        raw_xml,
         part,
         drawing,
         anchor_index,
@@ -2077,17 +2151,35 @@ fn write_chart(w: &mut Writer, value: &SheetChart) {
     w.var_usize(*anchor_index);
     write_anchor(w, anchor);
     w.var_usize(refs.len());
+    if let Some(xml) = raw_xml {
+        w.str(xml);
+    }
 }
 
-fn read_chart(r: &mut Reader<'_>) -> SnapshotResult<(SheetChart, usize)> {
-    let chart = SheetChart {
+/// `edited` reads the part XML a `CHART_XML` record carries after the chart.
+fn read_chart(r: &mut Reader<'_>, edited: bool) -> SnapshotResult<(SheetChart, usize)> {
+    let mut chart = SheetChart {
+        raw_xml: None,
         part: r.str()?.to_owned(),
         drawing: r.str()?.to_owned(),
         anchor_index: r.var_usize()?,
         anchor: read_anchor(r)?,
         refs: Vec::new(),
     };
-    Ok((chart, r.var_usize()?))
+    let refs = r.var_usize()?;
+    if edited {
+        chart.raw_xml = Some(chart_xml(r.str()?.to_owned())?);
+    }
+    Ok((chart, refs))
+}
+
+fn chart_xml(xml: String) -> SnapshotResult<String> {
+    if xml.len() > xlsx_parse::MAX_TREE_BYTES {
+        return Err(SnapshotError::new(
+            "snapshot chart XML exceeds its size limit",
+        ));
+    }
+    Ok(xml)
 }
 
 fn write_chart_ref(w: &mut Writer, value: &ChartRef) {
@@ -2108,6 +2200,92 @@ mod tests {
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
+
+    #[test]
+    fn binary_model_decodes_conditional_formats_without_italic() {
+        let mut model = Workbook::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            bold: Some(true),
+            ..Default::default()
+        });
+        let mut chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+        let chunk = chunks
+            .iter_mut()
+            .find(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                kind == ChunkKind::Model && matches!(payload[0], 30 | 33)
+            })
+            .unwrap();
+        let (kind, ordinal, _) = unframe(chunk).unwrap();
+        *chunk = frame(kind, ordinal, &[30, 1, 0, 1, 1, 0, 1, 0]);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+    }
+
+    #[test]
+    fn binary_model_writes_italic_conditional_formats_only_when_set() {
+        for italic in [None, Some(false)] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+                bold: Some(true),
+                italic,
+                ..Default::default()
+            });
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            let tags = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .filter(|tag| matches!(*tag, CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2))
+                .collect::<Vec<_>>();
+            let expected = if italic.is_some() {
+                CONDITIONAL_FORMATS_V2
+            } else {
+                CONDITIONAL_FORMATS
+            };
+            assert_eq!(tags, [expected]);
+            assert_eq!(decode(&chunks), model);
+        }
+    }
+
+    #[test]
+    fn binary_model_conditional_formats_preserve_italic() {
+        for italic in [true, false] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(
+                serde_json::from_value(serde_json::json!({
+                    "bold": true, "italic": italic
+                }))
+                .unwrap(),
+            );
+            model.sheets[0].conditional_formats = serde_json::from_value(serde_json::json!([{
+                "sqref": "A1", "rules": [{"id": "cf1", "type": "expression",
+                    "formulas": ["A1>0"], "priority": 1, "format": {"italic": italic}}]
+            }]))
+            .unwrap();
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            for restored in [
+                decode(&chunks),
+                advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            ] {
+                let format = serde_json::to_value(&restored.styles.dxfs[0]).unwrap();
+                assert_eq!(format["italic"], italic);
+                let format = serde_json::to_value(
+                    &restored.sheets[0].conditional_formats[0].rules[0].format,
+                )
+                .unwrap();
+                assert_eq!(format["italic"], italic);
+            }
+        }
+    }
 
     #[test]
     fn binary_model_preserves_conditional_formats_and_dxfs() {
@@ -2326,10 +2504,150 @@ mod tests {
         builder.finish().unwrap()
     }
 
+    /// Italic formats (33) and edited charts (34) ride tags a release before
+    /// them does not read, so it refuses such a model through the same arm
+    /// that refuses any unknown tag here; a model with neither keeps the
+    /// released tags.
+    #[test]
+    fn italic_and_edited_chart_records_coexist_and_unknown_tags_fail_loud() {
+        let mut sheet = Sheet::new("Charts");
+        sheet.charts.push(SheetChart {
+            raw_xml: Some("<c:chartSpace/>".into()),
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        });
+        let mut model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            italic: Some(true),
+            ..Default::default()
+        });
+        let budget = SnapshotBudget::new(1, 16384).unwrap();
+        let tags = |chunks: &[Vec<u8>]| {
+            chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        let chunks = encode(&model, budget);
+        let written = tags(&chunks);
+        assert!(written.contains(&CONDITIONAL_FORMATS_V2), "{written:?}");
+        assert!(written.contains(&CHART_XML), "{written:?}");
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+
+        let mut released = model.clone();
+        released.sheets[0].charts[0].raw_xml = None;
+        released.styles.dxfs[0].italic = None;
+        released.styles.dxfs[0].bold = Some(true);
+        let released_chunks = encode(&released, budget);
+        let written = tags(&released_chunks);
+        assert!(
+            written.iter().all(|tag| *tag < CONDITIONAL_FORMATS_V2),
+            "{written:?}"
+        );
+        assert_eq!(decode(&released_chunks), released);
+
+        for tag in [CONDITIONAL_FORMATS_V2, CHART_XML] {
+            let mut unknown = chunks.clone();
+            let chunk = unknown
+                .iter_mut()
+                .find(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    kind == ChunkKind::Model && payload[0] == tag
+                })
+                .unwrap();
+            let (kind, ordinal, payload) = unframe(chunk).unwrap();
+            let mut payload = payload.to_vec();
+            payload[0] = 35;
+            *chunk = frame(kind, ordinal, &payload);
+            let mut builder = ModelSnapshotBuilder::new();
+            let refused = unknown
+                .iter()
+                .try_for_each(|chunk| builder.push(chunk).map(|_| ()))
+                .is_err();
+            assert!(refused || builder.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn model_snapshots_carry_edited_chart_xml() {
+        let mut sheet = Sheet::new("Charts");
+        for (index, raw_xml) in [
+            None,
+            Some(format!("<c:chartSpace>{}</c:chartSpace>", "y".repeat(3000))),
+            Some("<c:chartSpace/>".to_owned()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.charts.push(SheetChart {
+                raw_xml,
+                part: format!("xl/charts/chart{index}.xml"),
+                drawing: "drawing.xml".into(),
+                anchor_index: index,
+                anchor: ChartAnchor::TwoCell {
+                    from: AnchorCell::default(),
+                    to: AnchorCell::default(),
+                    edit_as: AnchorEditAs::TwoCell,
+                },
+                refs: (0..index)
+                    .map(|row| ChartRef {
+                        kind: ChartRefKind::Values,
+                        formula: format!("Charts!$A${}", row + 1),
+                    })
+                    .collect(),
+            });
+        }
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        let whole_budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let bounded_budget = SnapshotBudget::new(1, 1024).unwrap();
+        let chunks = encode(&model, whole_budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, bounded_budget).unwrap(), model);
+        let unedited = Workbook {
+            sheets: vec![{
+                let mut sheet = model.sheets[0].clone();
+                sheet
+                    .charts
+                    .iter_mut()
+                    .for_each(|chart| chart.raw_xml = None);
+                sheet
+            }],
+            ..Workbook::default()
+        };
+        let released = encode(&unedited, whole_budget);
+        assert!(
+            released
+                .iter()
+                .all(|chunk| !chunk.windows(5).any(|window| window == b"<c:ch"))
+        );
+        assert_eq!(decode(&released), unedited);
+    }
+
     #[test]
     fn model_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
         let mut sheet = Sheet::new("Charts");
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "p".repeat(2048),
             drawing: "drawing.xml".into(),
             anchor_index: 0,
@@ -3009,6 +3327,7 @@ mod tests {
         ];
         for (anchor_index, anchor) in anchors.into_iter().enumerate() {
             sheet.charts.push(SheetChart {
+                raw_xml: None,
                 part: String::new(),
                 drawing: "drawing".into(),
                 anchor_index,

@@ -204,6 +204,7 @@ export interface OpaqueDrawingContent {
   xml: string;
   preview?: Image;
   previews?: Image[];
+  textBox?: Shape;
 }
 
 /**

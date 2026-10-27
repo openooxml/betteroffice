@@ -271,11 +271,8 @@ export function UnifiedSidebar({
 
           return (
             <div key={item.id} style={{ ...style, transition }}>
-              {item.render({
-                isExpanded,
-                onToggleExpand: () => toggleExpand(item.id),
-                measureRef: getMeasureRef(item.id),
-              })}
+              <SidebarItemContent render={item.render} id={item.id} isExpanded={isExpanded}
+                toggleExpand={toggleExpand} measureRef={getMeasureRef(item.id)} />
             </div>
           );
         })}
@@ -283,3 +280,14 @@ export function UnifiedSidebar({
     </aside>
   );
 }
+
+const SidebarItemContent = React.memo(function SidebarItemContent({ render, id, isExpanded, toggleExpand, measureRef }: {
+  render: ReactSidebarItem['render'];
+  id: string;
+  isExpanded: boolean;
+  toggleExpand(id: string): void;
+  measureRef(element: HTMLDivElement | null): void;
+}) {
+  const onToggleExpand = useCallback(() => toggleExpand(id), [toggleExpand, id]);
+  return <>{render({ isExpanded, onToggleExpand, measureRef })}</>;
+});

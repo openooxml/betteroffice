@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import type { DocxCommandAck, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/worker';
+import type { DocxCommandAck, DocxCommandFrame, DocxCommandConnection } from '@betteroffice/docx/worker';
 import { SessionFailure } from '../../../../../../shared/office-session/types';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 
@@ -25,14 +25,14 @@ function stagedFrame(): DocxCommandFrame {
 }
 
 function resident(incarnation = 1) {
-  const initial: ResidentCommandConnection['initial'] = {
+  const initial: DocxCommandConnection['initial'] = {
     session: 'lifecycle', incarnation, epoch: 1, version: 0, throughSeq: 0, outcomes: [], selection: null,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null }, frame: stagedFrame(),
   };
   const dispose = mock(async () => {});
   const failures = new Set<(failure: SessionFailure) => void>();
-  const connection: ResidentCommandConnection = {
+  const connection: DocxCommandConnection = {
     initial, requestFullFrame: async () => initial, requestViewport: mock(async () => {}),
     client: { failure: undefined, dispose,
       onFailure: (listener) => { failures.add(listener); return () => failures.delete(listener); },
@@ -75,7 +75,7 @@ test('opening reads the latest raster scale before command initialization', asyn
 
 test('unmounting during connection open releases the unused initial frame', async () => {
   const { connection, dispose, options } = resident();
-  let resolve!: (value: ResidentCommandConnection) => void;
+  let resolve!: (value: DocxCommandConnection) => void;
   options.openConnection = () => new Promise((yes) => { resolve = yes; });
   const view = renderHook(() => usePeerlessEditSession(options));
   view.unmount();

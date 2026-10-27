@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
@@ -32,6 +33,16 @@ const MAX_ACTIVE_ZONES: usize = 200;
 /// A shape the lowering placed by anchor rather than in the flow.
 fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
+}
+
+/// An image run measurement skips as a float: it takes no room on the line.
+fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
+    image.position.is_some()
+        && (image.display_mode.as_deref() == Some("float")
+            || matches!(
+                image.wrap_type.as_deref(),
+                Some("square" | "tight" | "through")
+            ))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1516,7 +1527,13 @@ fn measure_paragraph_with_context(
                     floating_zones,
                     cumulative_y,
                 )
-                .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+                .unwrap_or_else(|| {
+                    if config.font_chains.values().all(Vec::is_empty) {
+                        wrapped_synthetic_paragraph_extent(paragraph, content_width)
+                    } else {
+                        synthetic_paragraph_extent(paragraph, content_width)
+                    }
+                })
             }
         };
         let mut extent = measure(paragraph);
@@ -1525,13 +1542,16 @@ fn measure_paragraph_with_context(
             && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
             && attrs.horizontal_rules.is_empty()
             && attrs.list_marker.as_deref().is_none_or(str::is_empty)
-            && !paragraph.runs.is_empty()
-            && paragraph.runs.iter().all(|run| {
-                matches!(run, Run::Text(text)
-                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+            && paragraph.runs.iter().any(|run| matches!(run, Run::Text(_)))
+            && paragraph.runs.iter().all(|run| match run {
+                Run::Text(text) => {
+                    text.fmt.font_size.is_some_and(|run_size| run_size > size)
                         && (attrs.doc_grid_pitch_px.is_none()
                             || text.fmt.snap_to_grid != Some(false))
-                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}'))
+                }
+                Run::Image(image) => floats_off_the_line(image),
+                _ => false,
             })
         {
             let mark_extent = measure(&ParagraphBlock {
@@ -1554,6 +1574,7 @@ fn measure_paragraph_with_context(
     });
     let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
+    measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
         let weight = extent_weight(&extent) + dependencies.retained_bytes();
         EXTENT_CACHE.with(|cache| {
@@ -1778,6 +1799,72 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
     fnv1a(hash, config.compat.to_string().as_bytes())
 }
 
+/// Word lays a single-spaced line holding nothing but inline VML `o:hr`
+/// pictures at the tallest picture's height; the paragraph mark's font adds
+/// no room.
+fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    let rule_picture = |run: &crate::types::Run| match run {
+        crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
+            (image.position.is_none()
+                && !crate::cell_layout::is_floating_image(
+                    image.wrap_type.as_deref(),
+                    image.display_mode.as_deref(),
+                )
+                && image.display_mode.as_deref() != Some("block")
+                && image.wrap_type.as_deref() != Some("topAndBottom")
+                && image.rotation_deg.is_none_or(|deg| deg == 0.0))
+            .then_some(image.height)
+        }
+        _ => None,
+    };
+    let single_spaced = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref())
+        .is_none_or(|spacing| {
+            spacing
+                .line_rule
+                .as_deref()
+                .is_none_or(|rule| rule == "auto")
+                && spacing.line.is_none_or(|line| (line - 1.0).abs() < 1e-6)
+        });
+    if !single_spaced || !paragraph.runs.iter().any(|run| rule_picture(run).is_some()) {
+        return;
+    }
+    for line in &mut extent.lines {
+        let mut rule_height = None;
+        let mut standalone = true;
+        for (index, run) in paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .take(line.tail_run + 1)
+            .skip(line.head_run)
+        {
+            if index == line.tail_run && line.tail_char == 0 {
+                continue;
+            }
+            match run {
+                crate::types::Run::Text(text)
+                    if text.text.is_empty() || text.fmt.hidden == Some(true) => {}
+                _ => match rule_picture(run) {
+                    Some(height) => {
+                        rule_height = Some(rule_height.unwrap_or(0.0_f64).max(height));
+                    }
+                    None => standalone = false,
+                },
+            }
+        }
+        let Some(height) = rule_height.filter(|height| *height > 0.0 && standalone) else {
+            continue;
+        };
+        extent.total_height += height - line.line_height;
+        line.line_height = height;
+        line.ascent = height;
+        line.descent = 0.0;
+    }
+}
+
 fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
     let Some(attrs) = paragraph
         .attrs
@@ -1924,6 +2011,7 @@ fn synthetic_line_rule(spacing: Option<&ParagraphSpacing>) -> Option<LineSpacing
 
 fn synthetic_row(
     head_run: usize,
+    head_char: usize,
     tail_run: usize,
     tail_char: usize,
     width: f64,
@@ -1953,7 +2041,7 @@ fn synthetic_row(
     };
     TypesetRow {
         head_run,
-        head_char: 0,
+        head_char,
         tail_run,
         tail_char,
         width,
@@ -1963,6 +2051,64 @@ fn synthetic_row(
         synthetic_fallback: Some(true),
         marker_tab_offset: None,
         ..TypesetRow::default()
+    }
+}
+
+struct SyntheticRows<'a> {
+    lines: Vec<TypesetRow>,
+    head_run: usize,
+    head_char: usize,
+    tail_run: usize,
+    tail_char: usize,
+    width: f64,
+    font_px: f64,
+    default_font_px: f64,
+    content_width: Option<f64>,
+    first_line_indent: f64,
+    body_line_indent: f64,
+    rule: Option<&'a LineSpacingRule>,
+}
+
+impl SyntheticRows<'_> {
+    fn finish(&mut self, tail_run: usize, tail_char: usize) {
+        self.lines.push(synthetic_row(
+            self.head_run,
+            self.head_char,
+            tail_run,
+            tail_char,
+            if self.content_width.is_some() {
+                self.width
+            } else {
+                0.0
+            },
+            self.font_px,
+            self.rule,
+        ));
+        self.head_run = tail_run;
+        self.head_char = tail_char;
+        self.width = 0.0;
+        self.font_px = self.default_font_px;
+    }
+
+    fn push(&mut self, run: usize, start: usize, end: usize, width: f64, font_px: f64) {
+        if self.width > 0.0
+            && self.content_width.is_some_and(|limit| {
+                let indent = if self.lines.is_empty() {
+                    self.first_line_indent
+                } else {
+                    self.body_line_indent
+                };
+                self.width + width > (limit - indent).max(0.0)
+            })
+        {
+            self.finish(self.tail_run, self.tail_char);
+            self.head_run = run;
+            self.head_char = start;
+        }
+        self.tail_run = run;
+        self.tail_char = end;
+        self.width += width;
+        self.font_px = self.font_px.max(font_px);
     }
 }
 
@@ -2010,11 +2156,10 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
                     .unwrap_or("1");
                 line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
             }
-            // an authored break is exact, so it splits the fallback rows even
-            // though their widths are guesses
             Run::LineBreak(_) => {
                 lines.push(synthetic_row(
                     head_run,
+                    0,
                     index,
                     0,
                     slot(line_width),
@@ -2035,12 +2180,153 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
     });
     lines.push(synthetic_row(
         head_run,
+        0,
         tail_run,
         tail_char,
         slot(line_width),
         font_px,
         rule.as_ref(),
     ));
+
+    ParagraphExtent {
+        total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
+            + lines.iter().map(|line| line.line_height).sum::<f64>()
+            + spacing.and_then(|value| value.after).unwrap_or(0.0),
+        lines,
+    }
+}
+
+fn wrapped_synthetic_paragraph_extent(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+) -> ParagraphExtent {
+    let default_font_size = valid_font_size(
+        paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.default_font_size),
+        11.0,
+    );
+    let default_font_px = default_font_size * 96.0 / 72.0;
+    let spacing = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref());
+    let rule = synthetic_line_rule(spacing);
+    let measurable = content_width.is_finite() && content_width > 0.0;
+
+    let indent = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref());
+    let has_list_marker = paragraph.attrs.as_ref().is_some_and(|attrs| {
+        attrs.list_marker_hidden != Some(true)
+            && attrs
+                .list_marker
+                .as_ref()
+                .is_some_and(|marker| !marker.is_empty())
+    });
+    let left = indent.and_then(|indent| indent.left).unwrap_or(0.0);
+    let hanging = indent.and_then(|indent| indent.hanging).unwrap_or(0.0);
+    let first_line = indent.and_then(|indent| indent.first_line).unwrap_or(0.0);
+    let marker_inset = |is_first_line| {
+        let (padding, shift) = crate::display_list::line_text_insets(
+            left.max(0.0),
+            hanging.max(0.0),
+            first_line.max(0.0),
+            is_first_line,
+            true,
+            0.0,
+        );
+        padding + shift - left
+    };
+    let line_width = content_width
+        - indent.and_then(|indent| indent.left).unwrap_or(0.0)
+        - indent.and_then(|indent| indent.right).unwrap_or(0.0);
+    let mut rows = SyntheticRows {
+        lines: Vec::new(),
+        head_run: 0,
+        head_char: 0,
+        tail_run: 0,
+        tail_char: 0,
+        width: 0.0,
+        font_px: default_font_px,
+        default_font_px,
+        content_width: measurable.then_some(line_width.max(0.0)),
+        first_line_indent: if has_list_marker {
+            marker_inset(true)
+        } else {
+            first_line - hanging
+        },
+        body_line_indent: if has_list_marker {
+            marker_inset(false)
+        } else {
+            0.0
+        },
+        rule: rule.as_ref(),
+    };
+    for (index, run) in paragraph.runs.iter().enumerate() {
+        match run {
+            Run::Text(text) => {
+                let font_px = synthetic_font_px(&text.fmt, default_font_size);
+                if text.text.is_empty() || text.text == "\u{200b}" {
+                    rows.font_px = rows.font_px.max(font_px);
+                }
+                if text.text != "\u{200b}" {
+                    let mut offset = 0;
+                    for cluster in text.text.graphemes(true) {
+                        let width = synthetic_text_width(cluster, &text.fmt, default_font_size);
+                        let end = offset + cluster.encode_utf16().count();
+                        rows.push(index, offset, end, width, font_px);
+                        offset = end;
+                    }
+                }
+            }
+            Run::Tab(tab) => rows.push(
+                index,
+                0,
+                1,
+                tab.width.unwrap_or(48.0).max(0.0),
+                synthetic_font_px(&tab.fmt, default_font_size),
+            ),
+            Run::Image(image) => rows.push(
+                index,
+                0,
+                1,
+                synthetic_inline_image_width(image),
+                default_font_px,
+            ),
+            Run::Reserved(reserved) => rows.push(index, 0, 1, reserved.width, default_font_px),
+            Run::Field(field) => {
+                let fallback = field
+                    .fallback
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("1");
+                rows.push(
+                    index,
+                    0,
+                    1,
+                    synthetic_text_width(fallback, &field.fmt, default_font_size),
+                    synthetic_font_px(&field.fmt, default_font_size),
+                );
+            }
+            Run::LineBreak(_) => {
+                rows.finish(index, 0);
+                rows.head_run = index + 1;
+                rows.head_char = 0;
+            }
+            Run::Unsupported => {}
+        }
+    }
+    let tail_run = paragraph.runs.len().saturating_sub(1).max(rows.head_run);
+    let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
+        Run::Text(text) => text.text.encode_utf16().count(),
+        Run::LineBreak(_) => 0,
+        _ => 1,
+    });
+    rows.finish(tail_run, tail_char);
+    let lines = rows.lines;
 
     ParagraphExtent {
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
@@ -3078,7 +3364,7 @@ fn measure_table_cells(
                 matches!(block, LayoutBlock::Table(table)
                     if nested_table_float_offset(table.floating.as_ref()).is_some())
             });
-            let measures = if has_table_floats {
+            let mut measures = if has_table_floats {
                 measure_cell_blocks_with_table_floats(
                     &mut cell.blocks,
                     measure_width.max(1.0),
@@ -3087,6 +3373,19 @@ fn measure_table_cells(
             } else {
                 measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
             };
+            if rotated && config.font_chains.values().all(Vec::is_empty) {
+                for (block, measure) in cell.blocks.iter().zip(&mut measures) {
+                    if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
+                        (block, measure)
+                        && extent
+                            .lines
+                            .iter()
+                            .any(|line| line.synthetic_fallback == Some(true))
+                    {
+                        *extent = synthetic_paragraph_extent(paragraph, measure_width.max(1.0));
+                    }
+                }
+            }
             cells.push(TableCellExtent {
                 blocks: measures,
                 width: cell_width,
@@ -3810,6 +4109,36 @@ mod tests {
             assert_eq!(actual.total_height, original.total_height);
             assert_eq!(actual.lines, original.lines);
         }
+    }
+
+    #[test]
+    fn spacers_carrying_their_own_floats_use_the_mark_line_height() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "float-spacer",
+            "attrs": {"defaultFontSize": 6},
+            "runs": [
+                {"kind": "image", "src": "behind", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "behind", "displayMode": "float"},
+                {"kind": "image", "src": "through", "width": 100, "height": 120,
+                 "position": {}, "wrapType": "through", "displayMode": "block"},
+                {"kind": "text", "text": " ", "fontSize": 10}
+            ]
+        }))
+        .unwrap();
+        let measure = |paragraph: &ParagraphBlock| {
+            crate::typed_measure::measure_paragraph(paragraph, 300.0, &config, None, 0.0).unwrap()
+        };
+        let original = measure(&paragraph);
+        let mut mark = paragraph.clone();
+        mark.runs.clear();
+        let mark = measure(&mark);
+        assert!(mark.total_height < original.total_height);
+        let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(actual.total_height, mark.total_height);
+        assert_eq!(actual.lines[0].line_height, mark.lines[0].line_height);
     }
 
     fn cache_paragraph(fonts: &crate::MeasureFonts) {
@@ -6590,6 +6919,166 @@ mod tests {
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);
+    }
+
+    #[test]
+    fn missing_fonts_wrap_every_scalar_with_utf16_ranges() {
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "p",
+            "runs": [
+                {"kind": "text", "text": "ab😀cd", "fontSize": 12},
+                {"kind": "text", "text": "ef", "fontSize": 12},
+                {"kind": "lineBreak"},
+                {"kind": "text", "text": "gh", "fontSize": 12}
+            ]
+        }))
+        .unwrap();
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        for font_chains in [
+            BTreeMap::new(),
+            BTreeMap::from([("unavailable|0|0".to_owned(), Vec::new())]),
+        ] {
+            let config = MeasurementConfig {
+                font_chains,
+                defaults: json!({"fontFamily": "unavailable", "fontSize": 12}),
+                ..Default::default()
+            };
+            assert!(
+                crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0)
+                    .is_none()
+            );
+            let extent = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            let ranges: Vec<_> = extent
+                .lines
+                .iter()
+                .map(|line| (line.head_run, line.head_char, line.tail_run, line.tail_char))
+                .collect();
+            assert_eq!(
+                ranges,
+                vec![
+                    (0, 0, 0, 2),
+                    (0, 2, 0, 5),
+                    (0, 5, 1, 1),
+                    (1, 1, 2, 0),
+                    (3, 0, 3, 2),
+                ]
+            );
+            assert!(extent.lines.iter().all(|line| line.width <= 32.0));
+            assert!((extent.total_height - 92.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn fontless_wrapped_extents_cache_until_a_chain_is_populated() {
+        for font_chains in [
+            BTreeMap::new(),
+            BTreeMap::from([("requested|0|0".to_owned(), Vec::new())]),
+        ] {
+            let fonts = crate::MeasureFonts::default();
+            let _fonts = fonts.enter();
+            let font = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+            assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+            let mut config = MeasurementConfig {
+                font_chains,
+                defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+                ..Default::default()
+            };
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "cached-fontless", "runs": [
+                    {"kind": "text", "text": "abcd", "fontFamily": "Requested", "fontSize": 12}
+                ]
+            }))
+            .unwrap();
+            let (wrapped, dependencies) = FontChainDependencies::capture(|| {
+                measure_paragraph(&paragraph, 32.0, &config).unwrap()
+            });
+            assert_eq!(wrapped.lines.len(), 2);
+            assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+            assert!(matches!(
+                extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
+                ExtentLookup::Hit(_)
+            ));
+            let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+            let repeat = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before);
+            assert_eq!(
+                serde_json::to_vec(&wrapped).unwrap(),
+                serde_json::to_vec(&repeat).unwrap()
+            );
+            let identity = crate::measure_font_cache_identity(&config.font_chains);
+            config
+                .font_chains
+                .insert("unrelated|0|0".to_owned(), vec![0]);
+            assert!(dependencies.matches(FontChains::BTree(&config.font_chains)));
+            assert_ne!(
+                identity,
+                crate::measure_font_cache_identity(&config.font_chains)
+            );
+            assert!(matches!(
+                extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
+                ExtentLookup::Miss(_)
+            ));
+            let configured = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before + 1);
+            assert_eq!(configured.lines.len(), 1);
+            assert_eq!(configured.lines[0].synthetic_fallback, Some(true));
+            assert!(matches!(
+                extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
+                ExtentLookup::Hit(_)
+            ));
+            config.font_chains.insert("another|0|0".to_owned(), vec![0]);
+            assert!(matches!(
+                extent_cache_lookup(&paragraph, 32.0, &config, None, 0.0),
+                ExtentLookup::Hit(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn configured_fonts_keep_rejected_scale_extent_byte_identical() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "rejected-scale",
+            "runs": [{
+                "kind": "text", "text": "abcd", "fontSize": 12, "horizontalScale": 0
+            }],
+            "attrs": {"spacing": {"before": 2, "after": 3}}
+        }))
+        .unwrap();
+        assert!(
+            crate::typed_measure::measure_paragraph(&paragraph, 32.0, &config, None, 0.0).is_none()
+        );
+        let expected = ParagraphExtent {
+            lines: vec![TypesetRow {
+                head_run: 0,
+                head_char: 0,
+                tail_run: 0,
+                tail_char: 4,
+                width: 64.0,
+                ascent: 12.8,
+                descent: 3.2,
+                line_height: 18.4,
+                synthetic_fallback: Some(true),
+                ..TypesetRow::default()
+            }],
+            total_height: 23.4,
+        };
+        let fontless = MeasurementConfig {
+            font_chains: BTreeMap::new(),
+            ..config.clone()
+        };
+        for _ in 0..2 {
+            let wrapped = measure_paragraph(&paragraph, 32.0, &fontless).unwrap();
+            assert_eq!(wrapped.lines.len(), 2);
+            let extent = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&extent).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
     }
 
     fn wrapped_shape(wrap_text: Option<&str>, x: f64, width: f64) -> ShapeBlock {

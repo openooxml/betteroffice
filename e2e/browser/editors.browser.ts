@@ -28,7 +28,7 @@ async function open(page: Page, format: Format, file?: string, query = '') {
 }
 
 const docxInput = (page: Page) =>
-  page.locator('[data-testid=yrs-input], .paged-editor__peerless-input');
+  page.locator('[data-testid=yrs-input], .paged-editor__input');
 
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
   const downloading = page.waitForEvent('download');

@@ -9,9 +9,9 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { Document } from '@betteroffice/docx/types/document';
 import * as yrs from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import type { DocxEditorBaseProps } from '../DocxEditor';
 import * as displayList from './hooks/useDisplayList';
@@ -41,11 +41,11 @@ const errors: Error[] = [];
 let warn: ReturnType<typeof spyOn<typeof console, 'warn'>>;
 
 class FakeWorker {
-  static requests: ResidentEngineWorkerRequest[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  static requests: DocxEngineWorkerRequest[] = [];
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
+  postMessage(request: DocxEngineWorkerRequest | DocxEngineWorkerHostModule): void {
     if ('id' in request) FakeWorker.requests.push(request);
   }
   terminate(): void {}

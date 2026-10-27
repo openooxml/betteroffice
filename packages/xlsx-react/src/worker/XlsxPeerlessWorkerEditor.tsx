@@ -8,15 +8,15 @@ import {
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookCommandSelection,
-  WorkbookSheetSummary,
+  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary,
 } from '@betteroffice/xlsx';
+import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
 import { flushSync } from 'react-dom';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import { commandForEvent } from '../commands/descriptors';
-import { commandReason } from '../commands/evaluate';
+import { commandReason, initialZoomScale } from '../commands/evaluate';
 import type { XlsxCommandFailureCode } from '../commands/types';
 import type { InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -61,6 +61,7 @@ import {
   PeerlessSelectionEffect, PeerlessWorkerAccessibility, PeerlessWorkerExtent, PeerlessWorkerOverlay,
   PeerlessWorkerPresence,
 } from './PeerlessWorkerSurface';
+import { WorkbookFailure } from '../components/WorkbookFailure';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -142,7 +143,7 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 const PeerlessDefaultToolbar = memo(function PeerlessDefaultToolbar() {
   return <EditorToolbar mode="commands"><EditorToolbar.Toolbar />
     <div style={{ display: 'flex', padding: '4px 8px' }}>
-      <ToolbarCommandButton id="save" /><ToolbarCommandButton id="exportPng" /><EditorToolbar.FormulaBar />
+      <EditorToolbar.FormulaBar />
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;
@@ -164,7 +165,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [presentation] = useState(() => new WorkerPresentationStore());
   const { setSelection, selectionRef, setView, viewRef, setPainted } = presentation;
   const [catalog, setCatalog, catalogRef] = useSyncedState<WorkbookSheetSummary[]>([]);
-  const [zoom, setZoom, zoomRef] = useSyncedState(1);
+  const [zoom, setZoom, zoomRef] = useSyncedState(initialZoomScale(props.initialZoom));
   const [refusal, setRefusal] = useState<{ code: XlsxCommandFailureCode; detail?: string } | null>(null);
   const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
   const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
@@ -205,6 +206,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [bridge] = useState<WorkerEditorApiBridge & XlsxAsyncExportBridge>(() => ({
     coordinator: () => null, readOnly: () => propsRef.current.readOnly ?? false, focus,
     exportSheet: () => activeRef.current, exportCoordinator: () => exportInput.current,
+    editorDocument: () => pluginAccess, saved: (bytes) => propsRef.current.onSave?.(bytes),
     clearSelection: () => {}, refreshProposals: () => {}, recoverInput: async () => {},
     selectCells: () => false, selectCellsAsync: async () => false, apply: () => {},
   }));
@@ -752,6 +754,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (ack.statuses.some((status) => status.committed && status.status === 'applied')) {
       mutation.current += 1;
       refreshSheetGeometry();
+      propsRef.current.onDocumentChange?.({ version: ack.version });
       propsRef.current.onChange?.();
     }
   };
@@ -1233,7 +1236,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     fail: (error) => run?.fail(error), afterPaint: () => coordinator.whenPresented().then(() => true, () => false),
     deliver(bytes) {
       if (propsRef.current.onSave) propsRef.current.onSave(bytes);
-      else {
+      if (propsRef.current.downloadOnSave ?? !propsRef.current.onSave) {
         const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: XLSX_MIME }));
         const anchor = document.createElement('a');
         anchor.href = url; anchor.download = propsRef.current.fileName ?? 'workbook.xlsx';
@@ -1458,7 +1461,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
         }}
         style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
-          minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
+          minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif', ...props.style }}>
+        {props.file && !run?.ready && !error && props.loadingIndicator}
         <PeerlessSelectionEffect store={presentation} onChange={applySelectionFormat} />
         {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}
         <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
@@ -1492,12 +1496,15 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {renderDock('bottom')}
           </div>
           {renderDock('right')}
+          {error && sheets.length === 0 && <WorkbookFailure kind="open" details={error.message} />}
+          {!props.file && !error && <div data-testid="xlsx-empty" role="status" style={{ position: 'absolute', inset: 0,
+            display: 'grid', placeItems: 'center', color: '#5f6368', pointerEvents: 'none' }}>{t('editor.openPrompt')}</div>}
         </div>
         <PeerlessWorkerAccessibility store={presentation} active={active} sheets={sheets} />
         {refusal && <div data-testid="xlsx-input-refusal" role="alert">
           {commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}
         </div>}
-        {error && <div data-testid="xlsx-error" role="alert">{t('editor.openError')}: {error.message}</div>}
+        {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
         {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
           {sheets.map((sheet) => <button key={sheet.id} role="tab" aria-selected={sheet.index === active} disabled={Boolean(error)}

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import type { Document } from '../types/document';
+import type { RunLanguage } from '../types/formatting';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
@@ -13,7 +14,7 @@ import {
   saveEditorDocument,
 } from './editorSave';
 import type { DocxParagraphText } from './edits';
-import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
+import { createYrsSession, decodeDocxHostJson, documentToYrs, saveYrsDocx, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -622,5 +623,196 @@ describe('source run language after a paragraph edit', () => {
         Array.from(text(run), () => run.match(/<w:lang\b[^>]*\/>/)?.[0] ?? ''));
       expect(saved).toEqual(languages.flatMap((language) => Array<string>(4).fill(language)));
     });
+
+    it('keeps a run’s w:lang when a simple field before it shows the same text', async () => {
+      const paragraph = '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr>' +
+        '<w:t>X</w:t></w:r></w:fldSimple><w:r><w:rPr><w:lang w:val="de-DE"/></w:rPr><w:t>X</w:t></w:r></w:p>';
+      const xml = await saveTableEdit(path, runFixture('', paragraph), (engine) => {
+        const { paraId, text: current } = bodyParagraph(engine, '');
+        engine.replaceRange({
+          story: 'body', start: { paraId, offset: current.length - 1 }, end: { paraId, offset: current.length },
+        }, 'Y');
+        return ['body'];
+      });
+      expect(text(xml)).toBe('XY');
+      const runs = xml.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g) ?? [];
+      expect(runs.find((run) => text(run) === 'Y')).toContain('<w:lang w:val="de-DE"/>');
+      expect(xml).toMatch(/<w:fldSimple\b[^>]*>[\s\S]*?<w:lang w:val="fr-FR"\/>[\s\S]*?<\/w:fldSimple>/);
+    });
+  });
+});
+
+const SOURCE_FONTS = '<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:cstheme="minorHAnsi"/>';
+const FONT_DEFAULTS = '<w:docDefaults><w:rPrDefault><w:rPr>' +
+  '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>' +
+  '<w:lang w:val="en-US" w:eastAsia="en-US"/></w:rPr></w:rPrDefault></w:docDefaults>';
+
+function fontFixture(): Uint8Array {
+  return runFixture(FONT_DEFAULTS, '<w:p w14:paraId="00000001"><w:pPr><w:rPr>' + SOURCE_FONTS +
+    '</w:rPr></w:pPr><w:r><w:rPr>' + SOURCE_FONTS + '<w:lang w:eastAsia="en-GB"/>' +
+    '</w:rPr><w:t>Before middle after</w:t></w:r></w:p>');
+}
+
+function expectSourceFonts(xml: string): void {
+  const fonts = xml.match(/<w:rFonts\b[^>]*\/>/g) ?? [];
+  expect(fonts.length).toBeGreaterThan(0);
+  fonts.forEach(font => expect(font).toBe(SOURCE_FONTS));
+}
+
+const RESOLVED_LIST_FONTS = { ascii: 'Calibri', hAnsi: 'Calibri', eastAsia: 'Calibri', cs: 'Calibri' };
+const LIST_MARK_FONTS = '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/>';
+
+function listItem(value: string, fonts: string, wrapper = '', markFonts = LIST_MARK_FONTS, language = ''): string {
+  const run = `<w:r><w:rPr>${fonts}${language}</w:rPr><w:t>${value}</w:t></w:r>`;
+  return '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>' +
+    `<w:rPr>${markFonts}</w:rPr></w:pPr>` +
+    (wrapper ? `<w:${wrapper} w:anchor="target">${run}</w:${wrapper}>` : run) + '</w:p>';
+}
+
+async function saveLegacyListContinuation(body: string, resolveOriginal = false,
+  language: RunLanguage = { latin: 'en-US', eastAsia: 'en-US' }): Promise<string> {
+  const bytes = runFixture(FONT_DEFAULTS, body);
+  const legacy = await createYrsSession();
+  owned.push(legacy);
+  legacy.openDocx(bytes, true);
+  const source = bodyParagraph(legacy, 'Item 2');
+  const properties = legacy.paragraphs('body').find(paragraph => paragraph.paraId === source.paraId)!.properties;
+  const { secondParaId } = legacy.splitParagraph({ story: 'body', paraId: source.paraId, offset: source.text.length });
+  legacy.setParagraphAttr(secondParaId, 'numPr', properties.numPr);
+  legacy.setParagraphAttr(secondParaId, '_originalFormatting', properties._originalFormatting);
+  legacy.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Continued');
+  legacy.formatRange({
+    story: 'body', start: { paraId: secondParaId, offset: 0 }, end: { paraId: secondParaId, offset: 9 },
+  }, { other: { fontFamily: RESOLVED_LIST_FONTS, language } });
+  for (const paragraph of legacy.paragraphs('body')) {
+    legacy.setParagraphAttr(paragraph.paraId, '_originalRunBoundaries', null);
+    if (resolveOriginal) {
+      const original = paragraph.properties._originalFormatting as Record<string, unknown>;
+      legacy.setParagraphAttr(paragraph.paraId, '_originalFormatting', {
+        ...original,
+        runProperties: { ...(original.runProperties as object), fontFamily: RESOLVED_LIST_FONTS },
+      });
+    }
+  }
+  const session = await createYrsSession();
+  owned.push(session);
+  session.openDocx(bytes, false);
+  session.loadState(legacy.encodeState());
+  expect(session.paragraphs('body').every(paragraph => !paragraph.properties._originalRunBoundaries)).toBe(true);
+  return documentXml((await saveYrsDocx(session)).bytes);
+}
+
+describe('0.5.0 copied list paragraph font recovery', () => {
+  it('uses item 2 authored slots when three items share paragraph properties', async () => {
+    const fonts = [
+      '<w:rFonts w:ascii="Calibri"/>',
+      '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>',
+      '<w:rFonts w:hAnsi="Calibri"/>',
+    ];
+    const xml = await saveLegacyListContinuation(fonts.map((font, index) => listItem(`Item ${index + 1}`, font)).join(''));
+    const continued = paragraphs(xml).find(paragraph => text(paragraph) === 'Continued');
+    expect(continued).toBeDefined();
+    const run = continued!.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/)?.[0];
+    expect(run?.match(/<w:rFonts\b[^>]*\/>/)?.[0]).toBe(fonts[1]);
+    expect(paragraphs(xml).map(text)).toEqual(['Item 1', 'Item 2', 'Continued', 'Item 3']);
+  });
+
+  it('recovers the last run inside a hyperlink', async () => {
+    const fonts = '<w:rFonts w:ascii="Calibri"/>';
+    const xml = await saveLegacyListContinuation(listItem('Item 2', fonts, 'hyperlink'));
+    const continued = paragraphs(xml).find(paragraph => text(paragraph) === 'Continued');
+    expect(continued).toBeDefined();
+    const run = continued!.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/)?.[0];
+    expect(run?.match(/<w:rFonts\b[^>]*\/>/)?.[0]).toBe(fonts);
+  });
+
+  it('keeps resolved slots when legacy paragraph properties have no source match', async () => {
+    const xml = await saveLegacyListContinuation(listItem('Item 2', '<w:rFonts w:ascii="Calibri"/>', '',
+      '<w:rFonts w:ascii="Calibri"/>'), true);
+    const continued = paragraphs(xml).find(paragraph => text(paragraph) === 'Continued');
+    expect(continued).toBeDefined();
+    const run = continued!.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/)?.[0];
+    expect(run?.match(/<w:rFonts\b[^>]*\/>/)?.[0]).toBe(LIST_MARK_FONTS);
+  });
+
+  it('includes language when matching a continued run to its source', async () => {
+    const xml = await saveLegacyListContinuation(
+      listItem('Item 1', '<w:rFonts w:ascii="Calibri"/>', '', LIST_MARK_FONTS, '<w:lang w:val="fr-FR"/>') +
+      listItem('Item 2', '<w:rFonts w:hAnsi="Calibri"/>', '', LIST_MARK_FONTS, '<w:lang w:val="de-DE"/>'),
+      false, { latin: 'fr-FR', eastAsia: 'en-US' });
+    const continued = paragraphs(xml).find(paragraph => text(paragraph) === 'Continued');
+    expect(continued).toBeDefined();
+    const run = continued!.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/)?.[0];
+    expect(run?.match(/<w:rFonts\b[^>]*\/>/)?.[0]).toBe('<w:rFonts w:ascii="Calibri"/>');
+    expect(run).toContain('<w:lang w:val="fr-FR"/>');
+  });
+});
+
+describe('authored fonts on rewritten runs', () => {
+  it.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('preserves fonts through %s', async (path) => {
+    const xml = await saveTableEdit(path, fontFixture(), (engine) => {
+      const { paraId } = bodyParagraph(engine, 'Before');
+      engine.replaceRange({ story: 'body', start: { paraId, offset: 7 }, end: { paraId, offset: 13 } }, 'changed');
+      return ['body'];
+    });
+    expectSourceFonts(xml);
+    expect(xml).toContain('<w:lang w:eastAsia="en-GB"/>');
+  });
+
+  it('keeps concrete fonts in seeded marks while materializing authored source fonts', async () => {
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(fontFixture(), true);
+    const run = session.storySegments('body').find(segment => segment.kind === 'text');
+    expect(run?.attributes.fontFamily).toMatchObject({ ascii: 'Calibri', hAnsi: 'Calibri', cs: 'Calibri' });
+    const paragraph = session.materializeDocx()!.package.document.content[0]!;
+    if (paragraph.type !== 'paragraph' || paragraph.content[0]?.type !== 'run') throw new Error('missing run');
+    expect(paragraph.content[0].formatting?.fontFamily).toEqual({
+      asciiTheme: 'minorHAnsi', hAnsiTheme: 'minorHAnsi', csTheme: 'minorHAnsi',
+    });
+  });
+
+  it('recovers authored fonts from source bytes after loading 0.5.0-style encoded state', async () => {
+    const bytes = fontFixture();
+    const legacy = await createYrsSession();
+    owned.push(legacy);
+    legacy.openDocx(bytes, false);
+    const document = legacy.materializeDocx()!;
+    const paragraph = document.package.document.content[0]!;
+    if (paragraph.type !== 'paragraph') throw new Error('missing paragraph');
+    for (const formatting of [paragraph.formatting?.runProperties,
+      ...paragraph.content.flatMap(child => child.type === 'run' ? [child.formatting] : [])]) {
+      if (formatting?.fontFamily) Object.assign(formatting.fontFamily, { ascii: 'Calibri', hAnsi: 'Calibri', cs: 'Calibri' });
+    }
+    documentToYrs(legacy, document);
+    const state = legacy.encodeState();
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(bytes, false);
+    session.loadState(state);
+    const { paraId } = bodyParagraph(session, 'Before');
+    session.addComment([{ story: 'body', start: { paraId, offset: 7 }, end: { paraId, offset: 13 } }],
+      'Reader', '2026-01-01T00:00:00Z', 'Check');
+    const first = documentXml((await saveYrsDocx(session)).bytes);
+    expectSourceFonts(first);
+    expect(first).toContain('<w:lang w:eastAsia="en-GB"/>');
+    expect(documentXml((await saveYrsDocx(session)).bytes)).toBe(first);
+  });
+
+  it('keeps an intentional font change while dropping inherited script slots', async () => {
+    const session = await createYrsSession();
+    owned.push(session);
+    session.openDocx(fontFixture(), true);
+    const { paraId } = bodyParagraph(session, 'Before');
+    session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 6 } }, {
+      other: { fontFamily: { ascii: 'Courier New', hAnsi: 'Courier New' } },
+    });
+    const xml = documentXml((await saveYrsDocx(session)).bytes);
+    const changed = (xml.match(/<w:r\b[\s\S]*?<\/w:r>/g) ?? []).find(run => run.includes('Before'))!;
+    expect(changed).toContain('w:ascii="Courier New"');
+    expect(changed).toContain('w:hAnsi="Courier New"');
+    expect(changed).not.toContain('w:asciiTheme');
+    expect(changed.match(/<w:rFonts\b[^>]*\/>/)?.[0]).not.toContain('w:eastAsia');
+    expect(changed).toContain('<w:lang w:eastAsia="en-GB"/>');
   });
 });

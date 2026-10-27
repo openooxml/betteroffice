@@ -13,8 +13,8 @@ Cargo changes. On merge to `main`, the Release workflow opens a
 `chore: release` PR that applies the bumps and CHANGELOG entries; merging that
 PR publishes to npm and crates.io.
 
-Each format is its own fixed group — `xlsx` and `xlsx-react` version in
-lockstep, independent of `docx`. The published Rust crates use one
+The DOCX, XLSX and PPTX packages share one fixed version; fonts and VSDX
+each have their own. The published Rust crates use one
 lockstep version independent from npm. Apps and other private packages are
 never published.
 

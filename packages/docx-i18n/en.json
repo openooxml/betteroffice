@@ -45,7 +45,10 @@
     "symbol": "Symbol",
     "watermark": "Watermark",
     "help": "Help",
-    "reportIssue": "Report issue"
+    "reportIssue": "Report issue",
+    "imageWrap": {
+      "current": "Current"
+    }
   },
   "formattingBar": {
     "groups": {
@@ -567,6 +570,12 @@
       "noResults": "No shortcuts found matching \"{query}\"",
       "pressEscToClose": "Press {key} to close",
       "or": "or"
+    },
+    "objectGeometry": {
+      "left": "Left (px)",
+      "top": "Top (px)",
+      "width": "Width (px)",
+      "height": "Height (px)"
     }
   },
   "comments": {
@@ -636,7 +645,11 @@
       "makeFormal": "Make Formal",
       "makeCasual": "Make Casual",
       "custom": "Custom"
-    }
+    },
+    "addComment": "Comment",
+    "resizeImage": "Resize image",
+    "moveImage": "Move image",
+    "columnWidth": "Column width"
   },
   "documentOutline": {
     "ariaLabel": "Document outline",
@@ -658,8 +671,13 @@
   },
   "errors": {
     "loadingDocument": "Loading document...",
+    "stillOpening": "This document is still opening. Typing will work once it is ready.",
     "noDocumentLoaded": "No document loaded",
-    "failedToLoad": "Failed to Load Document",
+    "failedToLoad": "Couldn't open this document",
+    "failedToLoadDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "editorUnavailable": "The editor couldn't load",
+    "editorUnavailableDescription": "Check your connection, then reload the page.",
+    "reloadPage": "Reload page",
     "unableToParse": "Unable to Parse Document",
     "somethingWentWrong": "Something went wrong",
     "errorDescription": "An error occurred while rendering this component. Please try again or contact support if the problem persists.",
@@ -811,7 +829,21 @@
     "failedToParse": "Failed to parse document",
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
-    "failedToSave": "Failed to save document"
+    "failedToSave": "Failed to save document",
+    "documentInput": "Document input",
+    "documentPreview": "Document preview",
+    "closeNote": "Close note",
+    "recoverableText": "Recoverable document text",
+    "dismissDraft": "Dismiss draft",
+    "readDocumentText": "Read document text",
+    "documentText": "Document text",
+    "previousText": "Previous text",
+    "nextText": "Next text",
+    "addComment": "Add comment",
+    "noteProperties": "Note properties",
+    "recoverableTextNotice": "This text could not be applied. Copy it to keep your draft, then dismiss it.",
+    "documentTextUnavailable": "Document text is unavailable.",
+    "documentTextChanged": "Document text changed. Read it again."
   },
   "hyperlinkPopup": {
     "displayTextPlaceholder": "Display text",

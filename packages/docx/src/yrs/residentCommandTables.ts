@@ -3,8 +3,8 @@ import { tableAnchors, type TableCellAnchor, type TablePayload } from './storyPl
 import type {
   DocxCommandIntent,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
 
@@ -32,7 +32,7 @@ export function isTableCommandKind(kind: string): kind is TableCommandKind {
 }
 
 function resolveTableTarget(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   selection: DocxCommandSelection
 ): { focused: YrsCellLoc; range: YrsTableRange; table: YrsTableLoc } | null {
   const focused = resolveLiveCell(engine, selection.focus.story);
@@ -49,7 +49,7 @@ function resolveTableTarget(
   return { focused, range, table };
 }
 
-export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc): YrsLoc | null {
+export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {
   const segments = engine.geometryReader.storySegments(table.story);
   let ordinal = 0;
   let target = -1;
@@ -72,7 +72,7 @@ export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc)
 }
 
 /** Live tables holding a story, innermost first; empty outside tables. */
-export function liveTableAncestors(engine: ResidentDocxCommandEngine, story: string): YrsTableLoc[] {
+export function liveTableAncestors(engine: DocxWorkerCommandEngine, story: string): YrsTableLoc[] {
   const tables: YrsTableLoc[] = [];
   for (let cell = resolveLiveCell(engine, story); cell; cell = resolveLiveCell(engine, cell.story)) {
     tables.push({ story: cell.story, tableIndex: cell.tableIndex });
@@ -81,7 +81,7 @@ export function liveTableAncestors(engine: ResidentDocxCommandEngine, story: str
 }
 
 export function preflightTableCommand(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   command: TableCommandIntent,
   selection: DocxCommandSelection
 ): { target: DocxTableCommandTarget } | { reason: string } {
@@ -112,7 +112,7 @@ export function preflightTableCommand(
   return { target: { ...resolved, near: removes ? nearTable(engine, resolved.table) : null } };
 }
 
-function liveAnchors(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+function liveAnchors(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
   return payload && Array.isArray(payload.rows) ? tableAnchors(payload).anchors : null;
 }
@@ -124,7 +124,7 @@ function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): Ta
 }
 
 function expandedRangeAnchorCount(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   at: YrsCellLoc,
   range: YrsTableRange
 ): number {
@@ -155,12 +155,12 @@ function expandedRangeAnchorCount(
     anchor.column >= left && anchor.column + anchor.colspan <= right).length;
 }
 
-function liveAnchor(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+function liveAnchor(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const anchors = liveAnchors(engine, at);
   return anchors ? coveringAnchor(anchors, at) : null;
 }
 
-function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): string | null {
+function nearestCellStory(engine: DocxWorkerCommandEngine, at: YrsCellLoc): string | null {
   const anchors = liveAnchors(engine, at);
   if (!anchors) return null;
   const covering = coveringAnchor(anchors, at);
@@ -174,7 +174,7 @@ function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): st
   return (column[0] ?? ordered[0])?.story ?? null;
 }
 
-export function syncCellSelectionWithCaret(engine: ResidentDocxCommandEngine, story: string): void {
+export function syncCellSelectionWithCaret(engine: DocxWorkerCommandEngine, story: string): void {
   const cell = resolveLiveCell(engine, story);
   if (cell) engine.setCellSelection({ anchor: cell, head: cell });
   else engine.clearCellSelection();
@@ -186,7 +186,7 @@ export interface TableCommandSink {
 }
 
 function caretInCellStory(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   story: string | null,
   keep: YrsLoc
 ): YrsLoc | null {
@@ -202,8 +202,8 @@ function caretInCellStory(
 
 /** Runs inside the caller's discrete undo group. */
 export function applyTableCommand(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   command: TableCommandIntent,
   target: DocxTableCommandTarget,
   keep: YrsLoc,

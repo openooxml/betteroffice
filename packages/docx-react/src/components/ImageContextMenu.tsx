@@ -320,7 +320,7 @@ export const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
             {isCurrent && (
               <span
                 style={{ fontSize: '11px', color: 'var(--doc-primary)' }}
-                aria-label={t('toolbar.imageWrap.current' as never)}
+                aria-label={t('toolbar.imageWrap.current')}
               >
                 ●
               </span>

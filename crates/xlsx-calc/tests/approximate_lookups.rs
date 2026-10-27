@@ -326,30 +326,31 @@ fn blank_target_approximate_array_xlookup_finds_explicit_zero() {
 }
 
 #[test]
-fn blank_target_exact_lookup_is_unchanged() {
+fn blank_target_exact_lookup_skips_blank_cells() {
     check(
         &[CellValue::Empty, n(0.0), n(2.0)],
         &[
-            ("VLOOKUP(Z99,A1:B3,2,FALSE)", n(101.0)),
-            ("HLOOKUP(Z99,C1:E1,1,FALSE)", CellValue::Empty),
-            ("MATCH(Z99,A1:A3,0)", n(1.0)),
+            ("VLOOKUP(Z99,A1:B3,2,FALSE)", n(102.0)),
+            ("HLOOKUP(Z99,C1:E1,1,FALSE)", n(0.0)),
+            ("MATCH(Z99,A1:A3,0)", n(2.0)),
             ("MATCH(Z99,VSTACK(A1:A3),0)", n(1.0)),
-            ("XMATCH(Z99,A1:A3,0)", n(1.0)),
-            ("XLOOKUP(Z99,A1:A3,B1:B3)", n(101.0)),
+            ("XMATCH(Z99,A1:A3,0)", n(2.0)),
+            ("XLOOKUP(Z99,A1:A3,B1:B3)", n(102.0)),
         ],
     );
 }
 
 #[test]
-fn exact_lookup_blank_coercion_is_unchanged() {
+fn exact_lookup_never_matches_a_blank_cell() {
     check(
         &[CellValue::Empty, n(2.0)],
         &[
-            ("VLOOKUP(0,A1:B2,2,FALSE)", n(101.0)),
-            ("HLOOKUP(0,C1:D1,1,FALSE)", CellValue::Empty),
-            ("MATCH(0,A1:A2,0)", n(1.0)),
-            ("XMATCH(0,A1:A2,0,2)", n(1.0)),
-            ("XLOOKUP(0,A1:A2,B1:B2)", n(101.0)),
+            ("VLOOKUP(0,A1:B2,2,FALSE)", na()),
+            ("HLOOKUP(0,C1:D1,1,FALSE)", na()),
+            ("MATCH(0,A1:A2,0)", na()),
+            ("MATCH(0,VSTACK(A1:A2),0)", n(1.0)),
+            ("XMATCH(0,A1:A2,0,2)", na()),
+            ("XLOOKUP(0,A1:A2,B1:B2)", na()),
         ],
     );
 }

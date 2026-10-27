@@ -5,7 +5,9 @@ import { Profiler, StrictMode } from 'react';
 import { flushSync } from 'react-dom';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
-import type { DisplayList, EditResult, WorkbookEditPeer, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
+import * as xlsxWorker from '@betteroffice/xlsx/worker';
+import type { DisplayList, EditResult, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
 import { workbookEditPeerInternals } from '../../../xlsx/src/session/editPeerInternals';
 import { applyWorkbookCommand, createWorkbookCommandState } from '../../../xlsx/src/session/commandHandlers';
@@ -31,7 +33,7 @@ import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, getConfig, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, getConfig, render, waitFor, within } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1, 2, 3]);
 let animationFrames: Map<number, FrameRequestCallback>;
@@ -260,14 +262,14 @@ function harness(realFacade = false, normalizeInput = false) {
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
-      if (op.method === 'editCell') return xlsx.createWorkbookRecoveryMutators(edits).editCell(...op.args);
+      if (op.method === 'editCell') return xlsxWorker.createWorkbookRecoveryMutators(edits).editCell(...op.args);
       if (op.method === 'editCells') return peerMethods.editCells(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
   let attached: WorkbookEditPeer | null = null;
   const attach = spyOn(editableWorkbookSessionBackend, 'attach').mockImplementation((options) => {
-    attached = realFacade ? xlsx.createWorkbookEditPeer(options) : edits;
+    attached = realFacade ? xlsxWorker.createWorkbookEditPeer(options) : edits;
     return attached;
   });
   restorers.push(() => open.mockRestore(), () => hydrate.mockRestore(), () => attach.mockRestore());
@@ -407,7 +409,7 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 function peerlessHarness(toolbarCommands = false, workerCommands = false, defaultToolbar = false) {
-  const listeners = new Set<(ack: xlsx.WorkbookAck) => void>();
+  const listeners = new Set<(ack: xlsxWorker.WorkbookAck) => void>();
   const failures = new Set<Parameters<WorkbookSession['onFailure']>[0]>();
   const sent: PeerlessWorkerCommand[] = [];
   const commandWaiters = new Map<number, ReturnType<typeof deferred<PeerlessWorkerCommand>>>();
@@ -417,7 +419,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     if (!waiter) { waiter = deferred<PeerlessWorkerCommand>(); commandWaiters.set(index, waiter); }
     return waiter.promise;
   };
-  const replies = new Map<number, ReturnType<typeof deferred<xlsx.CommandStatus>>>();
+  const replies = new Map<number, ReturnType<typeof deferred<xlsxWorker.CommandStatus>>>();
   const presentations: { seq: number; resolve(): void }[] = [];
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
   const charts: xlsx.ChartRegion[] = [];
@@ -425,8 +427,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   let throughSeq = 0;
   const confirmedBasis = { epoch: 1, version: 'v1' };
   let presentedThroughSeq = 0;
-  let selection: xlsx.WorkbookCommandSelection | undefined;
-  let editState: Partial<xlsx.WorkbookEditState> = {
+  let selection: xlsxWorker.WorkbookCommandSelection | undefined;
+  let editState: Partial<xlsxWorker.WorkbookEditState> = {
     formatting: { ...PLAIN_FORMATTING }, formattingAvailable: true, selectionEditable: true,
     canUndo: true, canRedo: true, readOnly: false, mergedRanges: [], activeSheet: 0,
     sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }],
@@ -472,10 +474,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     failure: undefined,
     get throughSeq() { return throughSeq; }, get presentedThroughSeq() { return presentedThroughSeq; },
     call: { sheetView, cellInputs, cellGeometry, selectionData, frame } as unknown as WorkbookSession['call'],
-    submit: mock(async (command: xlsx.WorkbookCommand) => {
+    submit: mock(async (command: xlsxWorker.WorkbookCommand) => {
       sent.push(command);
       commandWaiters.get(sent.length - 1)?.resolve(command);
-      const reply = deferred<xlsx.CommandStatus>();
+      const reply = deferred<xlsxWorker.CommandStatus>();
       replies.set(command.seq, reply);
       return reply.promise;
     }),
@@ -507,20 +509,20 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   function Chrome() {
     commands = useXlsxCommands();
     return <EditorToolbar mode="commands">
-      {toolbarCommands && <><EditorToolbar.Toolbar /><ToolbarCommandButton id="exportPng" /></>}
+      {toolbarCommands && <EditorToolbar.Toolbar />}
       <EditorToolbar.FormulaBar />
     </EditorToolbar>;
   }
-  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false) => {
+  const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => {
     editState = { ...editState, readOnly };
     const view = render(<Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} />
+      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
     </Profiler>);
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
     return view;
   };
-  const push = (ack: xlsx.WorkbookAck) => {
+  const push = (ack: xlsxWorker.WorkbookAck) => {
     throughSeq = Math.max(throughSeq, ack.throughSeq);
     confirmedBasis.version = ack.version;
     editState = { ...editState, ...ack.editState };
@@ -552,7 +554,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const commandState = createWorkbookCommandState(session.commandIdentity, session.confirmedBasis,
     { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } }, ['sheet:0', 'sheet:1']);
   const ack = (command: PeerlessWorkerCommand, options: {
-    status?: xlsx.CommandStatus['status']; paint?: boolean; result?: unknown; selection?: xlsx.WorkbookCommandSelection;
+    status?: xlsxWorker.CommandStatus['status']; paint?: boolean; result?: unknown; selection?: xlsxWorker.WorkbookCommandSelection;
   } = {}) => {
     const { frame: _wireFrame, ...applied } = workerCommands ? applyWorkbookCommand(workbook, commandState, command) : {};
     const reading = command.kind === 'select' || command.kind === 'applyOps' && 'toolbar' in command.payload &&
@@ -960,7 +962,7 @@ it('default readiness opens one worker session without a main-thread engine or e
     const api = ready.mock.calls[0]![0];
     expect(api.hydrated).toBe(true);
     expect('handle' in api).toBe(false);
-    expect('save' in api).toBe(false);
+    expect(api.save).toBeFunction();
   } finally { engine.mockRestore(); }
 });
 
@@ -1660,14 +1662,16 @@ describe('peerless chrome locale', () => {
 
   const german = { _lang: 'de', toolbar: { bold: 'Fett', formulaBarLabel: 'Formelzeile',
     formulaPlaceholder: 'Wert oder Formel', nameBoxPlaceholder: 'Zelle' },
-    editor: { appLabel: 'Tabelleneditor', sheetTabsLabel: 'Tabellen', openError: 'Öffnen fehlgeschlagen' },
+    editor: { appLabel: 'Tabelleneditor', sheetTabsLabel: 'Tabellen', openError: 'Öffnen fehlgeschlagen',
+      stoppedError: 'Der Editor hat ein Problem' },
     a11y: { gridLabel: 'Tabellenraster' },
     commands: { reasons: { nothingToUndo: 'Nichts rückgängig zu machen.', inputFailed: 'Eingabe fehlgeschlagen.',
       readOnly: 'Diese Arbeitsmappe ist schreibgeschützt.' } },
   };
   const french = { _lang: 'fr', toolbar: { bold: 'Gras', formulaBarLabel: 'Barre de formule',
     formulaPlaceholder: 'Valeur ou formule', nameBoxPlaceholder: 'Cellule' },
-    editor: { appLabel: 'Éditeur de tableau', sheetTabsLabel: 'Feuilles', openError: 'Échec de chargement' },
+    editor: { appLabel: 'Éditeur de tableau', sheetTabsLabel: 'Feuilles', openError: 'Échec de chargement',
+      stoppedError: "L'éditeur a rencontré un problème" },
     a11y: { gridLabel: 'Grille de tableau' },
     commands: { reasons: { nothingToUndo: 'Rien à annuler.', inputFailed: 'Échec de saisie.',
       readOnly: 'Ce classeur est en lecture seule.' } },
@@ -1679,7 +1683,7 @@ describe('peerless chrome locale', () => {
     const ready = deferred<XlsxAsyncEditorApi>();
     let view!: ReturnType<typeof render>;
     await act(async () => {
-      view = render(<XlsxEditor asyncApi file={file} onReady={(api) => { ready.resolve(api); }} />);
+      view = render(<XlsxEditor file={file} onReady={(api) => { ready.resolve(api); }} />);
     });
     await tick();
     const api = await ready.promise;
@@ -1720,7 +1724,7 @@ describe('peerless chrome locale', () => {
       const ready = deferred<XlsxAsyncEditorApi>();
       const onReady = (api: XlsxAsyncEditorApi) => { ready.resolve(api); };
       const editor = (i18n: typeof german) => entry === 'public'
-        ? <XlsxEditor asyncApi file={file} i18n={i18n} onReady={onReady} />
+        ? <XlsxEditor file={file} i18n={i18n} onReady={onReady} />
         : <XlsxWorkerEditor backend="peerless" file={file} i18n={i18n} onReady={onReady} />;
       let view!: ReturnType<typeof render>;
       await act(async () => { view = render(editor(german)); });
@@ -1750,7 +1754,7 @@ describe('peerless chrome locale', () => {
       const host = peerlessHarness();
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
       const editor = (i18n: typeof german) => entry === 'public'
-        ? <XlsxEditor asyncApi file={file} i18n={i18n} onReady={ready} />
+        ? <XlsxEditor file={file} i18n={i18n} onReady={ready} />
         : <XlsxWorkerEditor backend="peerless" file={file} i18n={i18n} onReady={ready} />;
       let view!: ReturnType<typeof render>;
       await act(async () => { view = render(editor(german)); });
@@ -1800,10 +1804,12 @@ describe('peerless chrome locale', () => {
       expect(view.getByTestId('xlsx-input-refusal').textContent).toContain(french.commands.reasons.inputFailed);
       const failure = new SessionFailure('crash', 'Worker stopped');
       await act(async () => host.fail(failure));
-      expect(view.getByTestId('xlsx-error').textContent).toContain(french.editor.openError);
+      expect(view.getByTestId('xlsx-error').textContent).toContain(french.editor.stoppedError);
+      expect(view.getByTestId('xlsx-error').getAttribute('data-failure')).toBe('stopped');
+      expect(view.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Worker stopped');
       expect(api.commands.getState('bold').enabled).toBe(false);
       await act(async () => view.rerender(editor(german)));
-      expect(view.getByTestId('xlsx-error').textContent).toContain(german.editor.openError);
+      expect(view.getByTestId('xlsx-error').textContent).toContain(german.editor.stoppedError);
       expect(view.getByTestId('xlsx-input-refusal').textContent).toContain(german.commands.reasons.inputFailed);
       expect(view.getByTestId('xlsx-scroll')).toBe(scroll);
       expect(host.open).toHaveBeenCalledTimes(1);
@@ -1819,7 +1825,7 @@ describe('peerless chrome locale', () => {
     const host = peerlessHarness();
     const ready = mock((_api: XlsxAsyncEditorApi) => {});
     let view!: ReturnType<typeof render>;
-    await act(async () => { view = render(<XlsxEditor asyncApi file={file} showToolbar={false} onReady={ready} />); });
+    await act(async () => { view = render(<XlsxEditor file={file} showToolbar={false} onReady={ready} />); });
     await tick();
     expect(ready).toHaveBeenCalledTimes(1);
     const first = ready.mock.calls[0]![0];
@@ -1830,7 +1836,7 @@ describe('peerless chrome locale', () => {
     const next = deferred<WorkbookSession>();
     host.open.mockImplementationOnce(() => next.promise);
     const replacement = file.slice();
-    await act(async () => view.rerender(<XlsxEditor asyncApi file={replacement} showToolbar={false} onReady={ready} />));
+    await act(async () => view.rerender(<XlsxEditor file={replacement} showToolbar={false} onReady={ready} />));
     expect(toolbar.getByRole('button', { name: 'Bold' }).getAttribute('aria-disabled')).toBe('true');
     await expect(first.commands.execute('bold', null)).rejects.toMatchObject({ code: 'document-replaced' });
     await act(async () => next.resolve(host.session));
@@ -2645,6 +2651,36 @@ describe('XlsxEditor async API', () => {
   });
 });
 
+describe('worker editor open and empty states', () => {
+  it('shows a styled, localized open failure with the technical details and reports it once', async () => {
+    const open = spyOn(editableWorkbookSessionBackend, 'open').mockRejectedValue(new Error('Unsupported zip entry'));
+    restorers.push(() => open.mockRestore());
+    const onError = mock((_error: Error) => {});
+    const view = render(<XlsxWorkerEditor backend="peerless" file={file} onError={onError}
+      i18n={{ editor: { openError: 'Öffnen fehlgeschlagen' } }} />);
+    await waitFor(() => expect(view.queryByTestId('xlsx-error')).not.toBeNull());
+    const failure = view.getByTestId('xlsx-error');
+    expect(failure.getAttribute('role')).toBe('alert');
+    expect(failure.getAttribute('data-failure')).toBe('open');
+    expect(failure.textContent).toContain('Öffnen fehlgeschlagen');
+    expect(failure.textContent).toContain('The file may be damaged');
+    expect(failure.querySelector('summary')?.textContent).toBe('Show details');
+    expect(failure.querySelector('details pre')?.textContent).toContain('Unsupported zip entry');
+    expect(view.getByTestId('xlsx-workspace').contains(failure)).toBe(true);
+    expect(within(failure).queryByRole('button')).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toContain('Unsupported zip entry');
+  });
+
+  it('asks for a workbook when no file is given', async () => {
+    const view = render(<XlsxWorkerEditor backend="peerless" />);
+    await waitFor(() => expect(view.queryByTestId('xlsx-empty')).not.toBeNull());
+    expect(view.getByTestId('xlsx-empty').getAttribute('role')).toBe('status');
+    expect(view.getByTestId('xlsx-empty').textContent).toBe('Open an XLSX file');
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+  });
+});
+
 describe('peerless editor chunk failures', () => {
   beforeEach(() => {
     const errors = spyOn(console, 'error').mockImplementation(() => {});
@@ -2665,6 +2701,7 @@ describe('peerless editor chunk failures', () => {
 
     expect(view.queryByText('Host sibling')).not.toBeNull();
     expect(view.getByTestId('xlsx-error').getAttribute('role')).toBe('alert');
+    expect(view.getByTestId('xlsx-error').textContent).toContain("The editor couldn't load");
     expect(view.getByTestId('xlsx-error').textContent).toContain('Failed to load');
   });
 
@@ -2876,7 +2913,7 @@ describe('peerless workbook worker editor', () => {
     const result = { sheet: 0, version: 'v1', cells: [[{ a1: 'B1', input: 'second', isFormula: false }]] };
     host.cellInputs.mockReturnValue(reply.promise);
     await act(async () => fireEvent.keyDown(scroll, { key: 'ArrowRight' }));
-    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 1 },
+    const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 1 },
       range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 0, col: 1 } } };
     expect(host.sent).toHaveLength(1);
     expect(host.sent[0]).toMatchObject({ kind: 'select', payload: { selection } });
@@ -2948,7 +2985,7 @@ describe('peerless workbook worker editor', () => {
   for (const route of ['blur', 'composition'] as const) {
     it(`disables Redo after a same-cell formula ${route} commit`, async () => {
       const host = peerlessHarness(true);
-      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
+      const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 0, col: 0 },
         range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } };
       host.push({ throughSeq: 0, version: 'v1', statuses: [], selection, editState: { canUndo: true, canRedo: false } });
       const view = await host.mount();
@@ -3074,7 +3111,7 @@ describe('peerless workbook worker editor', () => {
     fireEvent.keyDown(scroll, { key: 'ArrowDown' });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
     fireEvent.keyDown(scroll, { key: 'ArrowUp', shiftKey: true });
-    const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 },
+    const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:0', activeCell: { row: 2, col: 0 },
       range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 2, col: 0 } } };
     await act(async () => host.ack(host.sent[3], { paint: true, selection }));
     const formatting = host.commands().execute('bold', null);
@@ -3241,7 +3278,7 @@ describe('peerless workbook worker editor', () => {
       await act(async () => {
         for (const key of ['ArrowRight', 'ArrowRight', 'ArrowDown', 'ArrowDown']) fireEvent.keyDown(scroll, { key });
       });
-      const selection: xlsx.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
+      const selection: xlsxWorker.WorkbookCommandSelection = { sheetId: 'sheet:1', range: { kind: 'a1', a1: 'C3' } };
       await act(async () => host.ack(host.sent[host.sent.length - 1], { selection }));
       scroll.scrollLeft = 192; scroll.scrollTop = 72;
       const undoing = host.commands().execute('undo', null);
@@ -3496,17 +3533,33 @@ describe('peerless workbook worker editor', () => {
     ['searchMenus', 'xlsx-search-menus', 'unsupported-command'],
     ['exportPng', 'xlsx-export-png', 'png-unavailable'],
   ] as const) {
-    it(`${id} is disabled and sends no worker command`, async () => {
+    it(`${id} is ${reason === 'unsupported-command' ? 'hidden' : 'disabled'} and sends no worker command`, async () => {
       const host = peerlessHarness(true);
       const view = await host.mount();
-      const button = view.getByTestId(testId) as HTMLButtonElement;
-      expect(button.disabled).toBe(true);
+      if (reason === 'unsupported-command') expect(view.queryByTestId(testId)).toBeNull();
+      else {
+        const button = view.getByTestId(testId) as HTMLButtonElement;
+        expect(button.disabled).toBe(true);
+        fireEvent.click(button);
+      }
       expect(host.commands().getState(id)).toMatchObject({ enabled: false, disabledReason: { code: reason } });
-      fireEvent.click(button);
       expect(await host.commands().execute(id, null)).toMatchObject({ ok: false, failure: { code: reason } });
       expect(host.sent).toEqual([]);
     });
   }
+
+  it('puts Save and Export PNG in a File group after history, not in the formula row', async () => {
+    const host = peerlessHarness(false, false, true);
+    const view = await host.mount();
+    const file = view.getByTestId('xlsx-save').closest('[role="group"]')!;
+    expect(file.getAttribute('aria-label')).toBe('File');
+    expect(file.contains(view.getByTestId('xlsx-export-png'))).toBe(true);
+    const toolbar = view.getByTestId('xlsx-toolbar');
+    const groups = [...toolbar.querySelectorAll('[role="group"]')].map((group) => group.getAttribute('aria-label'));
+    expect(groups.indexOf('File')).toBe(groups.indexOf('History') + 1);
+    expect(groups).not.toContain('Search');
+    expect(file.contains(view.getByTestId('xlsx-name-box'))).toBe(false);
+  });
 
   for (const action of ['Enter', 'Tab', 'paste', 'delete', 'clear'] as const) {
     it(`${action} paints through command reply`, async () => {
@@ -6309,7 +6362,7 @@ describe('workbook worker editor', () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
       ...host.edits, editCell: (sheet, row, col, input) => {
         host.log.push(`recover:${input}`);
         host.cells.set(`${sheet}:${row}:${col}`, input);
@@ -6343,7 +6396,7 @@ describe('workbook worker editor', () => {
     render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
     await opened();
     act(() => host.fail());
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => {
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => {
       throw new xlsx.WorkbookEditPeerFailedError(new Error('Retained operation unavailable'));
     });
     restorers.push(() => recovery.mockRestore());
@@ -6353,7 +6406,7 @@ describe('workbook worker editor', () => {
 
   it('includes the retained live draft in recovery and continues refusing normal input', async () => {
     const host = harness();
-    const recovery = spyOn(xlsx, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
+    const recovery = spyOn(xlsxWorker, 'createWorkbookRecoveryMutators').mockImplementation(() => ({
       ...host.edits, editCell: (sheet, row, col, input) => {
         host.log.push(`recover:${input}`);
         host.cells.set(`${sheet}:${row}:${col}`, input);
@@ -7880,7 +7933,7 @@ for (const route of ['save', 'saveAsync', 'command', 'shortcut', 'toolbar'] as c
     if (route === 'save' || route === 'saveAsync') act(() => { saving = api[route](); });
     else if (route === 'command') act(() => { saving = api.commands.execute('save', null); });
     else if (route === 'shortcut') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
-    else fireEvent.click(view.getByRole('button', { name: /^save/i }));
+    else fireEvent.click(view.getByTestId('xlsx-save'));
     await advance();
     expect(host.session.save).not.toHaveBeenCalled();
     expect(host.peerMethods.save).not.toHaveBeenCalled();
@@ -8700,4 +8753,63 @@ it('keeps every legacy formula character visible and commits abc after a pending
   await act(async () => hydration.resolve(host.peer));
   await advance();
   expect({ displayed, committed: host.cells.get('0:99:3') }).toEqual({ displayed: 'abc', committed: 'abc' });
+});
+
+for (const status of ['applied', 'noop'] as const) {
+  it(`peerless ${status} remote update reports onChange and onDocumentChange like the in-thread route`, async () => {
+    const host = collaborativePeerlessHarness();
+    const versions: string[] = [];
+    let changes = 0;
+    await host.mount(undefined, false, { onChange: () => changes++,
+      onDocumentChange: ({ version }) => versions.push(version) });
+    const updating = host.replica.async!.applyUpdate(new TextEncoder().encode('remote edit'));
+    const remote = await host.commandAt(0);
+    await act(async () => {
+      host.ack(remote, { status, paint: true });
+      await updating;
+    });
+    expect(changes).toBe(status === 'applied' ? 1 : 0);
+    expect(versions).toEqual(status === 'applied' ? [host.session.confirmedBasis.version] : []);
+  });
+}
+
+it('peerless host props set initial zoom and root style and notify versions', async () => {
+  const host = peerlessHarness();
+  const changes: string[] = [];
+  const view = await host.mount(undefined, false, { initialZoom: 2, style: { height: 321 },
+    onDocumentChange: ({ version }) => changes.push(version) });
+  expect(host.commands().getState('zoom').value).toBe(2);
+  expect(view.getByRole('application').style.height).toBe('321px');
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
+  fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'host change' } });
+  fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+  const command = await host.commandAt(0);
+  await act(async () => { host.ack(command, { paint: true }); });
+  expect(changes).toEqual([host.session.confirmedBasis.version]);
+});
+
+for (const [callback, downloadOnSave, downloads] of [
+  [true, undefined, 0], [false, undefined, 1], [true, true, 1], [false, false, 0],
+] as const) {
+  it(`peerless command save delivers callback=${callback} download=${downloadOnSave}`, async () => {
+    const host = peerlessHarness();
+    const saves: Uint8Array[] = [];
+    const click = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    restorers.push(() => click.mockRestore());
+    await host.mount(callback ? (bytes) => saves.push(bytes) : undefined, false, { downloadOnSave });
+    await act(async () => { await host.commands().execute('save', null); });
+    expect(saves).toHaveLength(callback ? 1 : 0);
+    expect(click).toHaveBeenCalledTimes(downloads);
+  });
+}
+
+it('peerless shows the supplied indicator while the workbook opens', async () => {
+  const host = peerlessHarness();
+  const pending = deferred<WorkbookSession>();
+  host.open.mockReturnValue(pending.promise);
+  const view = render(host.asyncEditor({ loadingIndicator: <span>Workbook opening</span> }));
+  await waitFor(() => expect(view.queryByText('Workbook opening')).not.toBeNull());
+  await act(async () => { pending.resolve(host.session); });
+  await opened();
+  await waitFor(() => expect(view.queryByText('Workbook opening')).toBeNull());
 });

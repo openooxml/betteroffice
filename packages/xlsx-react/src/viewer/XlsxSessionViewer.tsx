@@ -24,6 +24,7 @@ import { useTranslation } from '../i18n';
 import { cellInViewport, deriveLimits, expandRangeToMergedCells, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from './sessionGeometry';
 import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
+import { WorkbookFailure } from '../components/WorkbookFailure';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -55,7 +56,7 @@ function download(bytes: Uint8Array, name: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
+export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & { file?: Uint8Array }) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -501,10 +502,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
               {a11yGrid.charts.map((chart, index) =>
                 <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />)}
             </>}
-            {error && <div data-testid="xlsx-error" role="alert" style={{ position: 'absolute', inset: 0,
-              display: 'grid', placeItems: 'center', padding: 16, textAlign: 'center', color: '#b00020' }}>
-              {t('editor.openError')}: {error}
-            </div>}
+            {error && <WorkbookFailure kind="open" details={error} />}
             {sheets.length > 0 && <div data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
               style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0',
                 background: '#fafafa', overflowX: 'auto' }}>

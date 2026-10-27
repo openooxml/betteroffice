@@ -423,6 +423,111 @@ impl Part {
         parse_text(&self.text, MAX_TREE_NODES).map(|(root, _)| root)
     }
 
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn encode_text(&self, text: &str) -> Vec<u8> {
+        self.encoding.encode(text)
+    }
+
+    pub(crate) fn element_range(&self, element: &Element) -> Result<Range<usize>, ParseError> {
+        let start = self.text[..element.content.start]
+            .rfind('<')
+            .ok_or_else(|| ParseError::Malformed("element has no opening tag".into()))?;
+        let end = if element.self_closing {
+            element.content.end
+        } else {
+            element.content.end
+                + self.text[element.content.end..]
+                    .find('>')
+                    .ok_or_else(|| ParseError::Malformed("element has no closing tag".into()))?
+                + 1
+        };
+        Ok(start..end)
+    }
+
+    pub(crate) fn element_with_attribute(
+        &self,
+        element: &Element,
+        name: &str,
+        value: &str,
+    ) -> Result<String, ParseError> {
+        let mut markup = self.element_markup(element)?;
+        let tag = &self.text[self.element_range(element)?.start..element.content.start];
+        let bytes = tag.as_bytes();
+        let mut cursor = element.name.len() + 1;
+        while cursor < bytes.len() {
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor == bytes.len() || matches!(bytes[cursor], b'/' | b'>') {
+                break;
+            }
+            let start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && bytes[cursor] != b'='
+            {
+                cursor += 1;
+            }
+            let attribute = &tag[start..cursor];
+            while cursor < bytes.len()
+                && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b'=')
+            {
+                cursor += 1;
+            }
+            let quote = *bytes
+                .get(cursor)
+                .ok_or_else(|| ParseError::Malformed("attribute has no quote".into()))?;
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != quote {
+                cursor += 1;
+            }
+            if attribute == name {
+                markup.replace_range(
+                    start..cursor,
+                    &escape_text(value)?
+                        .replace('"', "&quot;")
+                        .replace('\'', "&apos;"),
+                );
+                return Ok(markup);
+            }
+            cursor += 1;
+        }
+        let end = tag.trim_end().len() - if tag.trim_end().ends_with("/>") { 2 } else { 1 };
+        markup.insert_str(
+            end,
+            &format!(" {name}=\"{}\"", escape_text(value)?.replace('"', "&quot;")),
+        );
+        Ok(markup)
+    }
+
+    pub(crate) fn element_markup(&self, element: &Element) -> Result<String, ParseError> {
+        Ok(self.text[self.element_range(element)?].to_owned())
+    }
+
+    pub(crate) fn element_with_content(
+        &self,
+        element: &Element,
+        content: &str,
+    ) -> Result<String, ParseError> {
+        let range = self.element_range(element)?;
+        let opening = &self.text[range.start..element.content.start];
+        if element.self_closing {
+            let opening = opening.strip_suffix("/>").ok_or_else(|| {
+                ParseError::Malformed("empty element has no closing delimiter".into())
+            })?;
+            return Ok(format!("{opening}>{content}</{}>", element.name));
+        }
+        Ok(format!(
+            "{opening}{}{}",
+            content,
+            &self.text[element.content.end..range.end]
+        ))
+    }
+
     /// rewrite disjoint spans of the decoded text and re-encode the result.
     pub(crate) fn splice(&self, edits: &[Edit]) -> Result<Vec<u8>, ParseError> {
         let spliced = splice_text(&self.text, edits)?;

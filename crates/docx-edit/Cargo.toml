@@ -43,7 +43,7 @@ ooxml-opc.workspace = true
 ooxml-text.workspace = true
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 yrs = "0.27.3"
 unicode-segmentation = "1.12"

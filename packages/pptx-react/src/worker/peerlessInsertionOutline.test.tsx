@@ -71,7 +71,7 @@ for (const [start, end] of [[[200.123, 150.456], [400.789, 220.123]],
         expect(box).toBeDefined();
         bounds(outline(h.view), { x: box.x, y: box.y, width: box.w, height: box.h }, scale);
         expect(outline(h.view).getAttribute('style')).toBe(echoStyle);
-        const caret = h.view.getByTestId('pptx-peerless-caret');
+        const caret = h.view.getByTestId('pptx-caret');
         expect(caret.style.visibility).toBe('visible');
         expect(parseFloat(caret.style.left)).toBeGreaterThanOrEqual(box.x);
         expect(parseFloat(caret.style.left)).toBeLessThan(box.x + box.w);

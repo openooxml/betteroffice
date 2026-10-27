@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx-i18n",
-  "version": "0.4.3",
+  "version": "0.5.1",
   "description": "UI locale strings and types for the @betteroffice/docx-react editor.",
   "sideEffects": false,
   "main": "./dist/index.mjs",
@@ -81,6 +81,9 @@
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
     "directory": "packages/docx-i18n"
+  },
+  "bugs": {
+    "url": "https://github.com/openooxml/betteroffice/issues"
   },
   "publishConfig": {
     "access": "public"

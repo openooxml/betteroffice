@@ -190,7 +190,15 @@ export interface InheritedGeometry {
   flipV: boolean;
 }
 
+export interface SlideLayoutSnapshot {
+  name: string | null;
+  type: string | null;
+}
+
 export interface SlideSnapshot {
+  title?: string | null;
+  hidden?: boolean | null;
+  layout?: SlideLayoutSnapshot | null;
   id: string;
   sourcePartPath: string | null;
   layoutPartPath: string | null;
@@ -224,7 +232,7 @@ export interface CommentSnapshot {
   created: string | null;
   xEmu: number;
   yEmu: number;
-  /** Set on a reply; names the thread root. Modern decks only. */
+  /** Set on a reply; names the thread root. */
   parentId: string | null;
   resolved: boolean;
 }
@@ -606,4 +614,12 @@ export interface TextParagraphDraft {
   bullet?: boolean;
   alignment?: ParagraphAlignment | null;
   runs: Array<{ text: string; style?: TextStyle }>;
+}
+
+export interface TableReceipt {
+  slideId: string;
+  shapeId: string;
+  rowCount: number;
+  columnCount: number;
+  newCellRefs: string[];
 }

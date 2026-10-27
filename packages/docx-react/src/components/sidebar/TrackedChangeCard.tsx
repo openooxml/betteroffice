@@ -1,4 +1,4 @@
-import { useCallback, useContext } from 'react';
+import { memo, useCallback, useContext, useMemo } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
 import { truncateText, type TrackedChangeEntry } from './cardUtils';
@@ -44,16 +44,18 @@ export interface TrackedChangeCardProps extends SidebarItemRenderProps {
   onReply?: (revisionId: number, text: string) => void;
 }
 
-export function TrackedChangeCard({
+export const TrackedChangeCard = memo(function TrackedChangeCard({
   change, replies, isExpanded, onToggleExpand, measureRef, onAccept, onReject, onAcceptById, onRejectById, onReply,
   author: suppliedAuthor, defaultKind = 'human', reviewItemId, isActive = isExpanded, index: suppliedIndex, total: suppliedTotal,
   onNext, onPrevious, renderCard,
 }: TrackedChangeCardProps) {
   const { t } = useTranslation();
   const context = useContext(TrackedChangesContext);
-  const author = suppliedAuthor ?? resolveReviewAuthor(change.author || t('trackedChanges.unknown'), defaultKind,
-    context.options, context.peers, context.user, context.clientId);
-  const index = suppliedIndex ?? Math.max(0, context.items?.findIndex(item => item.id === reviewItemId) ?? 0);
+  const author = useMemo(() => suppliedAuthor ?? resolveReviewAuthor(change.author || t('trackedChanges.unknown'), defaultKind,
+    context.options, context.peers, context.user, context.clientId),
+  [suppliedAuthor, change.author, defaultKind, context.options, context.peers, context.user, context.clientId, t]);
+  const index = suppliedIndex ?? Math.max(0, (context.itemIndices
+    ? context.itemIndices.get(reviewItemId ?? '') : context.items?.findIndex(item => item.id === reviewItemId)) ?? 0);
   const total = suppliedTotal ?? context.items?.length ?? 1;
   const accept = () => decideReviewChange(change, onAcceptById, onAccept);
   const reject = () => decideReviewChange(change, onRejectById, onReject);
@@ -66,11 +68,13 @@ export function TrackedChangeCard({
   }, [measureRef, register, reviewItemId]);
   const ambiguous = !!reviewItemId && !!context.ambiguous?.has(reviewItemId);
   const custom = renderCard ?? context.options?.renderCard;
+  const time = useMemo(() => {
+    const date = !custom && change.date && new Date(change.date);
+    return date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+  }, [change.date, custom]);
   if (custom) return custom({ change, author, isActive, index, total, ambiguous, accept, reject, next, previous,
     isExpanded, onToggleExpand, measureRef: measured });
 
-  const date = change.date && new Date(change.date);
-  const time = date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
   return (
     <div ref={measured} className="docx-tracked-change-card docx-review-card" data-active={isActive} data-ambiguous={ambiguous} data-kind={author.kind}
       data-revision-id={change.revisionId} onClick={onToggleExpand} onMouseDown={event => event.stopPropagation()} style={reviewAuthorStyle(author)}>
@@ -95,7 +99,7 @@ export function TrackedChangeCard({
         {isExpanded && <ReplyInput onSubmit={text => onReply?.(change.revisionId, text)} />}</div>
     </div>
   );
-}
+});
 
 const structuralKeys = {
   paragraphMarkInsertion: 'revisions.paragraphMarkInserted', paragraphMarkDeletion: 'revisions.paragraphMarkDeleted',

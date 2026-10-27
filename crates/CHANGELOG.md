@@ -1,5 +1,30 @@
 # @betteroffice/rust-crates
 
+## 0.5.1
+
+### Patch Changes
+
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+- d211451: Chart data labels in Word documents use the number format the chart's values were saved with when the labels name none, so a percentage chart's labels read 20.8% instead of 0.2, as in Word.
+- 02818de: Shapes styled with a theme effect reference now draw the theme's outer shadow, as PowerPoint does. Sessions stored by earlier versions recover these shadows when their source is attached, without changing the stored format.
+
+## 0.5.0
+
+### Minor Changes
+
+- 43f168f: **Breaking:** Public structs and enums gain fields and variants, including `betteroffice-xlsx` `CalculationResult.budget_exhausted` and types the DOCX and PPTX crates re-export, such as `DisplayPage` and `SlideSnapshot`. Update struct literals and exhaustive matches. See https://docs.betteroffice.dev/docs/migrating-to-0-5.
+- c688743: Workbooks add hyperlinks, `moveRange`, collaborative merges and freeze panes, a calculation context and rich text runs (`Workbook::cell_text_runs`); decks add `DeckSession::set_slide_background`.
+
+### Patch Changes
+
+- 1166e8c: Adds opt-in `--preserve-media-size` (`RedactionOptions::preserve_media_size`) to keep image and metafile dimensions, format and approximate byte size. Off by default.
+- 0947281: Redaction now removes custom XML data and DOCX bindings by default while keeping redacted cached content. Custom DOCX and XLSX style names are anonymized, undefined DOCX style references are neutralized, and `RedactionReport::custom_xml_parts` counts removed parts.
+- c688743: Includes the layout, rendering, saving and collaboration fixes for DOCX, XLSX and PPTX. Sanitizing recognizes templates, slideshows and add-ins and removes their macros.
+- 0197c5d: End (and Shift+End) in the xlsx editor goes to the last visible cell with data in the current row, falling back to the used range's last column on an empty row, instead of the sheet's last column.
+
 ## 0.4.3
 
 ### Patch Changes

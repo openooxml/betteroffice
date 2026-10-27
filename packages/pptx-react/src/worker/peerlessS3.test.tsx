@@ -3,15 +3,17 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PptxWorkerSession, PresentationCommandAck, PresentationCommandClient,
-  PresentationCommandEnvelope, PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandEnvelope,
+  PresentationCommandEvents, PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import * as evaluation from '../commands/evaluate';
 
@@ -115,7 +117,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function surface(onSave = mock((_bytes: Uint8Array) => {})) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} onSave={onSave} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onSave={onSave} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   return view;
 }
@@ -131,7 +133,7 @@ async function selectText() {
   return story;
 }
 
-function textSelection(): import('@betteroffice/pptx').PresentationCommandSelection {
+function textSelection(): import('@betteroffice/pptx/worker').PresentationCommandSelection {
   const at = client.state.selection;
   if (!at || at.kind === 'object') throw new Error('Expected text selection');
   return at;

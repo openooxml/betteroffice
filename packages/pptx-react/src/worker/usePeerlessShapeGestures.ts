@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
-import type { PresentationCommandFrameTag, PresentationCommandObjectSelection, ShapeRect } from '@betteroffice/pptx';
+import type { ShapeRect } from '@betteroffice/pptx';
+import type { PresentationCommandFrameTag, PresentationCommandObjectSelection } from '@betteroffice/pptx/worker';
 import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
@@ -128,7 +129,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     const confirmed = visual?.view.confirmed;
     const start = position(event);
     if (!confirmed || !start) return false;
-    const handle = (event.target as HTMLElement).dataset?.peerlessResize as ResizeHandle | undefined;
+    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
     if (handle && !RESIZE_HANDLES.includes(handle)) return false;
     const selected = store.getSnapshot().selection;
     const scale = canvas.current.getBoundingClientRect().width / confirmed.displayList.width;

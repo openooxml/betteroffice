@@ -888,6 +888,12 @@ pub struct EchoRunFacts {
     pub scale: f64,
     #[serde(default)]
     pub can_empty: bool,
+    /// Unstretched width of a line that justification stretches to `right`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<f64>,
+    /// Width a centered line centers in from `x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_width: Option<f64>,
 }
 
 fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
@@ -2600,6 +2606,8 @@ struct ChartSeriesIn {
     #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     values: Vec<f64>,
     #[serde(default)]
+    value_format: Option<String>,
+    #[serde(default)]
     color: Option<String>,
     #[serde(default)]
     points: Vec<ChartPointIn>,
@@ -2676,6 +2684,8 @@ struct ChartAxisIn {
     major_tick_mark: Option<String>,
     #[serde(default)]
     minor_tick_mark: Option<String>,
+    #[serde(default)]
+    tick_label_position: Option<String>,
     #[serde(default)]
     major_gridlines: bool,
     #[serde(default)]
@@ -6328,6 +6338,36 @@ fn authoritative_line_items<'a>(
     Some(out)
 }
 
+pub(crate) fn line_text_insets(
+    indent_left: f64,
+    hanging: f64,
+    first_line: f64,
+    is_first_line: bool,
+    has_list_marker: bool,
+    overrun: f64,
+) -> (f64, f64) {
+    let has_hanging = hanging > 0.0;
+    let has_first_line = first_line > 0.0;
+    let mut pad_left = indent_left;
+    let mut text_indent = 0.0;
+    if is_first_line {
+        if indent_left > 0.0 && has_hanging {
+            text_indent = if has_list_marker {
+                (hanging - indent_left).max(0.0) + overrun
+            } else {
+                -hanging
+            };
+        } else if has_first_line {
+            text_indent = first_line;
+        } else if has_list_marker && has_hanging {
+            text_indent = hanging;
+        }
+    } else if indent_left <= 0.0 && has_hanging {
+        pad_left = hanging;
+    }
+    (pad_left, text_indent)
+}
+
 /// paint one typeset line: pen starts at the indent-derived x, runs advance by
 /// their resolved widths (tabs/images exact, text distributed over the measured
 /// line width), decorations ride with their run in paint order (highlight and
@@ -6356,7 +6396,6 @@ fn emit_line(
 
     // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
-    let has_first_line = geom.first_line > 0.0;
     let overrun = if geom.is_first_line
         && geom.has_list_marker
         && geom.indent_left > 0.0
@@ -6367,26 +6406,14 @@ fn emit_line(
     } else {
         0.0
     };
-    let mut pad_left = geom.indent_left;
-    let mut text_indent = 0.0;
-    if geom.is_first_line {
-        if geom.indent_left > 0.0 && has_hanging {
-            text_indent = if geom.has_list_marker {
-                // The marker consumes the hanging width before body text.
-                (geom.hanging - geom.indent_left).max(0.0) + overrun
-            } else {
-                -geom.hanging
-            };
-        } else if has_first_line {
-            text_indent = geom.first_line;
-        } else if geom.has_list_marker && has_hanging {
-            // no left indent: the marker fills [0, hanging] and body text
-            // follows at the hang (matches the body-line branch below)
-            text_indent = geom.hanging;
-        }
-    } else if geom.indent_left <= 0.0 && has_hanging {
-        pad_left = geom.hanging;
-    }
+    let (pad_left, text_indent) = line_text_insets(
+        geom.indent_left,
+        geom.hanging,
+        geom.first_line,
+        geom.is_first_line,
+        geom.has_list_marker,
+        overrun,
+    );
 
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);
@@ -7033,13 +7060,24 @@ fn emit_line(
         }
     }
 
+    let echo_placement = match geom.alignment {
+        _ if geom.is_rtl => None,
+        None | Some("left") => Some((None, None)),
+        Some("justify") if justified => Some((Some(effective_line_width), None)),
+        Some("justify") => Some((None, None)),
+        Some("center") => Some((None, Some(usable_width))),
+        _ => None,
+    };
     for primitive in &mut prims[echo_start..] {
         if let Primitive::GlyphRun(run) = primitive {
-            if geom.is_rtl || !matches!(geom.alignment, None | Some("left")) {
-                run.echo = None;
-            } else if let Some(echo) = &mut run.echo {
-                echo.x = echo_x;
-                echo.right = echo_x + usable_width;
+            match (echo_placement, &mut run.echo) {
+                (Some((stretch, center_width)), Some(echo)) => {
+                    echo.x = echo_x;
+                    echo.right = echo_x + usable_width;
+                    echo.stretch = stretch;
+                    echo.center_width = center_width;
+                }
+                _ => run.echo = None,
             }
         }
     }
@@ -7777,6 +7815,8 @@ fn try_emit_glyph_runs(
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),
                 can_empty: false,
+                stretch: None,
+                center_width: None,
             }),
             paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
@@ -9120,7 +9160,11 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 max: axis.max,
             }),
         axis_titles: PlotAxisTitles::default(),
-        series: chart.series.iter().map(plot_series_from).collect(),
+        series: chart
+            .series
+            .iter()
+            .map(|series| plot_series_from(series, None))
+            .collect(),
         plot_groups: chart
             .plot_groups
             .iter()
@@ -9130,17 +9174,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 series: group
                     .series
                     .iter()
-                    .map(|series| {
-                        let mut plotted = plot_series_from(series);
-                        plotted.labels = plot_labels_from(
-                            group.data_labels.as_ref(),
-                            series.data_labels.as_ref(),
-                        );
-                        for point in &mut plotted.points {
-                            point.labels = plotted.labels;
-                        }
-                        plotted
-                    })
+                    .map(|series| plot_series_from(series, group.data_labels.as_ref()))
                     .collect(),
                 overlap: group.overlap,
                 gap_width: group.gap_width,
@@ -9248,6 +9282,7 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         minor_unit: axis.minor_unit,
         major_tick_mark: axis.major_tick_mark.as_deref(),
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        tick_label_position: axis.tick_label_position.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
         cross_between: axis.cross_between.as_deref(),
@@ -9270,7 +9305,16 @@ fn plot_line_from(line: &ChartLineIn) -> PlotLine<'_> {
     }
 }
 
-fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
+fn plot_series_from<'a>(
+    series: &'a ChartSeriesIn,
+    group_labels: Option<&'a ChartDataLabelsIn>,
+) -> PlotSeries<'a> {
+    let mut labels = plot_labels_from(group_labels, series.data_labels.as_ref());
+    if let Some(spec) = labels.as_mut()
+        && spec.number_format.is_none()
+    {
+        spec.number_format = series.value_format.as_deref();
+    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -9287,7 +9331,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 label: point.label.as_deref(),
                 label_runs: None,
                 explosion: point.explosion,
-                labels: None,
+                labels,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
@@ -9295,7 +9339,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         x_values: &series.x_values,
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
-        labels: plot_labels_from(None, series.data_labels.as_ref()),
+        labels,
         line: None,
     }
 }

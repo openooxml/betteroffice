@@ -3,7 +3,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { useRef, useState } from 'react';
 import { createT, en } from '@betteroffice/xlsx-i18n';
 import type { ReactNode } from 'react';
-import { selectionAt, type CommandStatus, type WorkbookAck, type WorkbookEditState, type WorkbookSession } from '@betteroffice/xlsx';
+import { selectionAt, type WorkbookSession } from '@betteroffice/xlsx';
+import type { CommandStatus, WorkbookAck, WorkbookEditState } from '@betteroffice/xlsx/worker';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();

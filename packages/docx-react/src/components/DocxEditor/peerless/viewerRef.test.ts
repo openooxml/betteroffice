@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
-import type { ResidentReviewTarget } from '@betteroffice/docx/yrs';
+import type { DocxReviewTarget } from '@betteroffice/docx/yrs';
 import { DocxAsyncOnlyError } from '../hooks/useDocxEditorRefApi';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { createPeerlessShellController, PeerlessSyncApiError } from './shellController';
@@ -82,7 +82,7 @@ test('worker viewer synchronous document reads throw DocxAsyncOnlyError with twi
 test('worker viewer synchronous navigation starts async twins and returns true', async () => {
   const controller = viewer();
   const paragraph = mock(async (_paraId: string) => { throw new Error('gone'); });
-  const review = mock(async (_target: ResidentReviewTarget) => false);
+  const review = mock(async (_target: DocxReviewTarget) => false);
   controller.update({ read: async () => ({} as never), focus() {}, zoom: 1, readOnly: true,
     scrollToParagraph: paragraph, scrollToReviewTarget: review });
   expect(controller.ref.scrollToParaId('p')).toBe(true);
@@ -118,7 +118,7 @@ for (const [member, twin, args] of [
     for (let call = 0; call < 2; call++) expect(() => Reflect.apply(ref[member] as Function, ref, args)).toThrow(PeerlessSyncApiError);
     expect(console.warn).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining(`Use ${twin}.`));
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws PeerlessSyncApiError in worker-only viewer sessions'));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('throws DocxSyncApiError in viewer sessions of the default editor'));
   });
 }
 
@@ -127,7 +127,7 @@ test('worker viewer point reads warn once that they return null', () => {
   expect(ref.getPositionAtPoint(10, 20)).toBeNull();
   expect(ref.getPositionAtPoint(10, 20)).toBeNull();
   expect(console.warn).toHaveBeenCalledTimes(1);
-  expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('returns null in worker-only viewer sessions. Use readPositionAtPoint.'));
+  expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('returns null in viewer sessions of the default editor. Use readPositionAtPoint.'));
 });
 
 test('worker viewer synchronous proposals return false without host permission', () => {

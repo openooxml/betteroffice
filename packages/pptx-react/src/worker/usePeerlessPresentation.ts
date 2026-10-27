@@ -1,14 +1,20 @@
-import { createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION } from '@betteroffice/pptx/worker';
-import { sizeCanvasForSlide, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx/editor';
+import {
+  createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION, PptxWorkerEditorDisposedError,
+  PptxWorkerEditorFailedError,
+} from '@betteroffice/pptx/worker';
+import { sizeCanvasForSlide } from '@betteroffice/pptx';
+import type { DeckSnapshot, PptxFontFace } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxFontFace, PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
-} from '@betteroffice/pptx';
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
+} from '@betteroffice/pptx/worker';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import type { PptxAsyncEditorProps } from '../PptxEditor';
+import { useFontWarning } from '../fontFaces';
+import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
+import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
@@ -39,6 +45,7 @@ export interface PeerlessVisualSnapshot { view: PeerlessViewSnapshot; fit: Slide
 
 export interface PeerlessPresentation {
   readonly fileGeneration: object;
+  readonly collaborationClientId?: number;
   readonly session: PptxWorkerSession;
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
@@ -61,7 +68,7 @@ export interface PeerlessPresentation {
 }
 
 export function usePeerlessPresentation(
-  props: PptxAsyncEditorProps, canvas: RefObject<HTMLCanvasElement | null>,
+  props: PptxAsyncEditorInternalProps, canvas: RefObject<HTMLCanvasElement | null>,
 ): { presentation: PeerlessPresentation | null; pending: PeerlessPresentation | null; failure: Error | null } {
   const fonts = useStableFonts(props.fonts);
   const collaboration = props.collaboration;
@@ -73,6 +80,7 @@ export function usePeerlessPresentation(
   }
   const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
   const callbacks = useRef(props);
@@ -96,6 +104,8 @@ export function usePeerlessPresentation(
     let alive = true;
     let session: PptxWorkerSession | undefined;
     let observedChanges = Boolean(callbacks.current.onChange);
+    const sessionCollaboration = props.collaboration && { ...props.collaboration,
+      clientId: props.collaboration.clientId ?? generateCollaborationClientId() };
     let base: PeerlessViewStore | undefined;
     let run: PeerlessPresentation | undefined;
     let framePainter: ReturnType<typeof createCommandFramePainter> | undefined;
@@ -112,6 +122,13 @@ export function usePeerlessPresentation(
     let draining = false;
     let changeSeq: number | undefined;
     let changeEvent: PresentationCommandAck['change'];
+    let notifiedVersion: string | undefined;
+    const notifyDocumentVersion = (version: string) => {
+      if (notifiedVersion === version) return;
+      notifiedVersion = version;
+      try { callbacks.current.onDocumentChange?.({ version }); }
+      catch (error) { console.error('documentChange listener threw:', error); }
+    };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
     const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
     let checkpoint = { bytes: recoveryBase, throughSeq: 0, version: '' };
@@ -154,11 +171,12 @@ export function usePeerlessPresentation(
       if (!current()) return;
       fatal = cause instanceof PptxWorkerEditorFailedError ? cause : new PptxWorkerEditorFailedError(cause);
       const event = changeEvent;
-      if (changeSeq !== undefined && event && modeClient && event.throughSeq >= changeSeq &&
-        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version) {
+      if (changeSeq !== undefined && modeClient && (!event || (event.throughSeq >= changeSeq &&
+        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version))) {
         changeSeq = undefined;
         changeEvent = undefined;
-        try { callbacks.current.onChange?.(event.snapshot); } catch {}
+        if (event) { try { callbacks.current.onChange?.(event.snapshot); } catch {} }
+        notifyDocumentVersion(event?.version ?? modeClient.state.version);
       }
       cancelIdle?.(); cancelIdle = undefined;
       clearTimeout(checkpointTimer); checkpointTimer = undefined;
@@ -182,7 +200,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current);
+    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts);
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -294,6 +312,7 @@ export function usePeerlessPresentation(
             if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
             if (event.throughSeq <= client.state.throughSeq && event.version === client.state.version) {
               try { callbacks.current.onChange?.(event.snapshot); } catch {}
+              notifyDocumentVersion(event.version);
             }
           } else {
           const reply = await client.read();
@@ -306,9 +325,19 @@ export function usePeerlessPresentation(
             if (!current()) return;
           }
           if (changeSeq !== undefined && changeSeq <= Math.max(pendingSeq, reply.throughSeq)) changeSeq = undefined;
-          if (snapshot) { try { callbacks.current.onChange?.(snapshot); } catch {} }
+          if (snapshot) {
+            try { callbacks.current.onChange?.(snapshot); } catch {}
+            notifyDocumentVersion(client.state.version);
           }
-        } else changeSeq = undefined;
+          }
+        } else if (callbacks.current.onDocumentChange) {
+          await base.fence();
+          if (!current()) return;
+          await whenPainted();
+          changeSeq = undefined;
+          changeEvent = undefined;
+          notifyDocumentVersion(client.state.version);
+        } else { changeSeq = undefined; changeEvent = undefined; }
       }
       if (!current()) return;
       await whenPainted();
@@ -343,7 +372,7 @@ export function usePeerlessPresentation(
 
     try {
       session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: props.collaboration,
+        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
       });
@@ -485,7 +514,7 @@ export function usePeerlessPresentation(
             if (!vanished.has(id) && !dirty.has(id)) dirty.set(id, 0);
           }
           if (ack.outcomes.some((outcome) => outcome.committed)) scheduleCheckpoint(client);
-          if (callbacks.current.onChange && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
+          if ((callbacks.current.onChange || callbacks.current.onDocumentChange) && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
           schedule(client);
         }));
         const subscribeVisual = (listener: () => void) => {
@@ -493,7 +522,7 @@ export function usePeerlessPresentation(
           return () => { visualListeners.delete(listener); };
         };
         run = {
-          fileGeneration, session: owner, client, store, images,
+          fileGeneration, session: owner, client, store, images, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
           get ready() { return whenPainted(); },
@@ -533,7 +562,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
-            await installFonts([face], installedFonts, current);
+            await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
           fit(token) {
@@ -625,7 +654,7 @@ export function usePeerlessPresentation(
       visualListeners.clear(); failureListeners.clear();
       if (!fatal) void session?.dispose().catch(() => {});
     };
-  }, [fileGeneration, canvas]);
+  }, [fileGeneration, canvas, warnFonts]);
 
   useLayoutEffect(() => {
     const run = presentation?.fileGeneration === fileGeneration ? presentation : null;

@@ -210,6 +210,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 rotation_box,
                 rotation_valign,
                 stacked,
+                wrap,
             } => {
                 let run = font::TextRun {
                     x: *x,
@@ -262,6 +263,20 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                             )
                         },
                     );
+                } else if let Some(wrap) = wrap {
+                    let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
+                        font::measure_text(line, *font_size)
+                    });
+                    for (index, line) in lines.iter().enumerate() {
+                        font::paint_text(
+                            &mut pixmap,
+                            &font::TextRun {
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                text: line,
+                                ..run
+                            },
+                        );
+                    }
                 } else {
                     font::paint_text(&mut pixmap, &run);
                 }
@@ -924,6 +939,7 @@ mod tests {
                     rotation_box: None,
                     rotation_valign: None,
                     stacked: false,
+                    wrap: None,
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
@@ -973,6 +989,7 @@ mod tests {
                 rotation_box: Some(cell),
                 rotation_valign: Some(xlsx_render::TextValign::Bottom),
                 stacked: false,
+                wrap: None,
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1034,6 +1051,7 @@ mod tests {
                 rotation_box: Some(cell),
                 rotation_valign: Some(xlsx_render::TextValign::Top),
                 stacked,
+                wrap: None,
             }],
             grid: xlsx_render::GridMeta::default(),
             hyperlinks: Vec::new(),
@@ -1134,6 +1152,61 @@ mod tests {
                 .all(|b| b.1 == bounds[0].1 && b.3 == bounds[0].3),
             "{bounds:?}"
         );
+    }
+
+    #[test]
+    fn wrapped_cell_paints_each_line_centred_in_the_cell() {
+        let mut workbook = xlsx_model::Workbook::default();
+        workbook.styles.cell_xfs.push(xlsx_model::Xf {
+            alignment: Some(xlsx_model::Alignment {
+                h: Some(xlsx_model::HAlign::Center),
+                v: Some(xlsx_model::VAlign::Center),
+                wrap_text: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 10.0);
+        sheet.row_heights.insert(0, 28.8);
+        sheet.set_cell(
+            xlsx_model::CellRef::new(0, 0),
+            xlsx_model::Cell {
+                value: xlsx_model::CellValue::Text {
+                    value: "PURCHASE \nTARGET".into(),
+                },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 120.0,
+                height: 60.0,
+            },
+        )
+        .unwrap();
+        let pixels = Pixmap::decode_png(&render_png(&dl).unwrap()).unwrap();
+        let bands = ink_row_bands(&dl);
+        assert_eq!(bands.len(), 2, "{bands:?}");
+        let cell_w = xlsx_render::geometry::col_chars_to_px(10.0);
+        for ((top, bottom), word) in bands.into_iter().zip(["PURCHASE", "TARGET"]) {
+            let ink: Vec<u32> = (0..pixels.width())
+                .filter(|&x| (top..=bottom).any(|y| pixels.pixel(x, y).unwrap().red() < 128))
+                .collect();
+            let (left, right) = (ink[0] as f32, *ink.last().unwrap() as f32 + 1.0);
+            let width = font::measure_text(word, 11.0);
+            assert!(
+                (right - left - width).abs() < 3.0,
+                "{word}: {left}..{right}"
+            );
+            assert!(((left + right) / 2.0 - cell_w / 2.0).abs() < 2.0, "{word}");
+        }
     }
 
     #[test]

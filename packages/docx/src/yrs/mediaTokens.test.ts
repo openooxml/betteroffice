@@ -84,7 +84,7 @@ for (const [extension, mimeType, image] of [
   });
 }
 
-test('a resident worker opens comment images as a direct open does', async () => {
+test('a document worker opens comment images as a direct open does', async () => {
   const bytes = fixture();
   const direct = await createYrsSession({ clientId: 4 });
   const worker = await createResidentEngineSession();

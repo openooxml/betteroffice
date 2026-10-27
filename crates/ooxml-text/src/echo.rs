@@ -73,7 +73,7 @@ pub fn echo_glyph_set(
             advances[index] = value;
         }
     }
-    let ligature_starts = shaping_barriers(store, font, alphabet, &mut glyph_ids, kern)?;
+    let ligature_pairs = shaping_barriers(store, font, alphabet, &mut glyph_ids, kern)?;
     let supported: Vec<usize> = (0..alphabet.len())
         .filter(|&index| glyph_ids[index] != 0)
         .collect();
@@ -115,6 +115,31 @@ pub fn echo_glyph_set(
                 delta,
             );
         }
+        // a glyph that ligates with its other neighbour in the sequence says nothing about this pair;
+        // a letter keeps the pair shaped alone under the script the sequence resolved to
+        let mut failed: Vec<_> = pairs
+            .iter()
+            .filter(|&(&(left, right), delta)| {
+                delta.is_none()
+                    && (alphabet[left].is_alphabetic() || alphabet[right].is_alphabetic())
+            })
+            .map(|(&key, _)| key)
+            .collect();
+        failed.sort_unstable();
+        for (left, right) in failed {
+            let text: String = [alphabet[left], alphabet[right]].into_iter().collect();
+            let glyphs = shape(&text)?;
+            if let [first, second] = glyphs.as_slice()
+                && first.cluster == 0
+                && second.cluster == alphabet[left].len_utf8() as u32
+                && first.glyph_id == glyph_ids[left]
+                && second.glyph_id == glyph_ids[right]
+                && units(second) == Some(advances[right])
+                && let Some(value) = units(first)
+            {
+                pairs.insert((left, right), Some(value - advances[left]));
+            }
+        }
     }
 
     let mut kerning = Vec::new();
@@ -128,13 +153,7 @@ pub fn echo_glyph_set(
             None => unsafe_pairs.push([key.0 as u32, key.1 as u32]),
         }
     }
-    for (left, &unsafe_start) in ligature_starts.iter().enumerate() {
-        if unsafe_start {
-            for right in 0..alphabet.len() {
-                unsafe_pairs.push([left as u32, right as u32]);
-            }
-        }
-    }
+    unsafe_pairs.extend(ligature_pairs);
     unsafe_pairs.sort_unstable();
     unsafe_pairs.dedup();
     Ok(EchoGlyphSet {
@@ -152,10 +171,11 @@ fn shaping_barriers(
     alphabet: &[char],
     glyph_ids: &mut [u32],
     kern: bool,
-) -> Result<Vec<bool>, FontError> {
+) -> Result<Vec<[u32; 2]>, FontError> {
     use rustybuzz::ttf_parser::{GlyphId, gsub::SubstitutionSubtable};
 
-    let mut ligatures = vec![false; alphabet.len()];
+    // pairs whose left glyph starts a ligature that continues with the right glyph
+    let mut ligatures = Vec::new();
     let Some(face) = store.shaping_face(font)? else {
         glyph_ids.fill(0);
         return Ok(ligatures);
@@ -225,24 +245,36 @@ fn shaping_barriers(
                 return Ok(ligatures);
             };
             for (index, nominal_glyph) in nominal.iter().enumerate() {
+                let coverage = subtable.coverage();
                 let covered = nominal_glyph
-                    .is_some_and(|id| subtable.coverage().contains(GlyphId(id)))
-                    || glyph_ids[index] != 0
-                        && subtable
-                            .coverage()
-                            .contains(GlyphId(glyph_ids[index] as u16));
-                if !covered {
+                    .and_then(|id| coverage.get(GlyphId(id)))
+                    .or_else(|| {
+                        (glyph_ids[index] != 0)
+                            .then(|| coverage.get(GlyphId(glyph_ids[index] as u16)))
+                            .flatten()
+                    });
+                let Some(covered) = covered else {
                     continue;
-                }
+                };
                 match subtable {
                     SubstitutionSubtable::Ligature(table) => {
-                        if table.ligature_sets.into_iter().any(|set| {
-                            set.into_iter()
-                                .any(|ligature| ligature.components.is_empty())
-                        }) {
+                        let Some(set) = table.ligature_sets.get(covered) else {
                             glyph_ids[index] = 0;
-                        } else {
-                            ligatures[index] = true;
+                            continue;
+                        };
+                        for ligature in set {
+                            let Some(next) = ligature.components.get(0) else {
+                                glyph_ids[index] = 0;
+                                break;
+                            };
+                            for (right, right_glyph) in nominal.iter().enumerate() {
+                                if *right_glyph == Some(next.0)
+                                    || glyph_ids[right] != 0
+                                        && glyph_ids[right] == u32::from(next.0)
+                                {
+                                    ligatures.push([index as u32, right as u32]);
+                                }
+                            }
                         }
                     }
                     SubstitutionSubtable::Context(_)
@@ -545,12 +577,14 @@ mod tests {
         assert_eq!(set.unsafe_pairs.contains(&[0, 1]), ligated);
     }
 
-    #[test]
-    fn three_component_ligature_without_pair_ligatures_is_not_echoed() {
+    /// Liberation Sans whose only GSUB lookup ligates `f` followed by `rest` into the `A` glyph.
+    fn f_ligature_font(rest: &[char]) -> (FontStore, FontId) {
         let (store, font) = store();
-        let f = store.glyph_id(font, 'f').unwrap().unwrap();
-        let i = store.glyph_id(font, 'i').unwrap().unwrap();
-        let ligature = store.glyph_id(font, 'A').unwrap().unwrap();
+        let glyph = |ch| store.glyph_id(font, ch).unwrap().unwrap();
+        let f = glyph('f');
+        let ligature = glyph('A');
+        let components: Vec<u16> = rest.iter().map(|&ch| glyph(ch)).collect();
+        let coverage = 16 + 2 * components.len() as u16;
         let mut gsub = Vec::new();
         for value in [1u16, 0, 10, 30, 44, 1] {
             gsub.extend(value.to_be_bytes());
@@ -560,9 +594,13 @@ mod tests {
             gsub.extend(value.to_be_bytes());
         }
         gsub.extend(b"liga");
-        for value in [
-            8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, 20, 1, 8, 1, 4, ligature, 3, f, i, 1, 1, f,
-        ] {
+        let mut tables = vec![
+            8u16, 0, 1, 0, 1, 4, 4, 0, 1, 8, 1, coverage, 1, 8, 1, 4, ligature,
+        ];
+        tables.push(components.len() as u16 + 1);
+        tables.extend(&components);
+        tables.extend([1, 1, f]);
+        for value in tables {
             gsub.extend(value.to_be_bytes());
         }
         let mut bytes = LIBERATION_SANS.to_vec();
@@ -577,6 +615,38 @@ mod tests {
         bytes.extend(gsub);
         let mut store = FontStore::new();
         let font = store.register(bytes).unwrap();
+        (store, font)
+    }
+
+    #[test]
+    fn pairs_beside_a_ligature_in_the_pair_sequence_stay_echoable() {
+        let (store, font) = f_ligature_font(&['i']);
+        let shape = |text| {
+            shape_with_direction(
+                &store,
+                font,
+                text,
+                16.0,
+                &kern_features(false),
+                ShapeDirection::Ltr,
+            )
+            .unwrap()
+        };
+        assert_eq!(shape("fi").len(), 1);
+        assert_eq!(shape("if").len(), 2);
+        assert_eq!(shape("ff").len(), 2);
+        let set = echo_glyph_set(&store, font, 16.0, false, &['f', 'i', 'x']).unwrap();
+        assert!(set.glyph_ids.iter().all(|&id| id != 0));
+        assert_eq!(
+            set.unsafe_pairs,
+            vec![[0, 1]],
+            "only the ligature itself declines, not the pairs its glyphs touch in the sequence"
+        );
+    }
+
+    #[test]
+    fn three_component_ligature_without_pair_ligatures_is_not_echoed() {
+        let (store, font) = f_ligature_font(&['f', 'i']);
         let shape = |text| {
             shape_with_direction(
                 &store,
@@ -597,6 +667,12 @@ mod tests {
                 || set.unsafe_pairs.contains(&[0, 0])
                 || set.unsafe_pairs.contains(&[0, 2]),
             "ffi must decline even when ff and fi shape independently"
+        );
+        assert_ne!(set.glyph_ids[0], 0);
+        assert!(set.unsafe_pairs.contains(&[0, 0]));
+        assert!(
+            !set.unsafe_pairs.contains(&[0, 1]) && !set.unsafe_pairs.contains(&[0, 2]),
+            "a ligature start leaves the pairs no ligature continues with echoable"
         );
     }
 

@@ -41,6 +41,7 @@ async function deck() {
 }
 
 const texts = new WeakMap<HTMLCanvasElement, Set<string>>();
+const drawn = new WeakMap<HTMLCanvasElement, string[]>();
 const commits = [0, 0];
 const editorOf = (canvas: HTMLCanvasElement) => Number(canvas.closest<HTMLElement>('[data-editor]')?.dataset.editor ?? -1);
 const painter = peerlessPainterFactories.frame;
@@ -59,12 +60,17 @@ CanvasRenderingContext2D.prototype.clearRect = function (this: CanvasRenderingCo
   nativeClear.apply(this, args);
   if (!this.canvas.closest('[data-legacy]')) return;
   texts.set(this.canvas, new Set());
+  drawn.set(this.canvas, []);
   commits[editorOf(this.canvas)]! += 1;
 };
 const nativeText = CanvasRenderingContext2D.prototype.fillText;
 CanvasRenderingContext2D.prototype.fillText = function (this: CanvasRenderingContext2D, ...args: Parameters<typeof nativeText>) {
   nativeText.apply(this, args);
-  if (this.canvas.closest('[data-legacy]')) texts.get(this.canvas)?.add(args[0]);
+  if (!this.canvas.closest('[data-legacy]')) return;
+  // The painter may draw a run in pieces, so the run's text is what one paint drew, in order.
+  const pieces = drawn.get(this.canvas);
+  pieces?.push(args[0]);
+  if (pieces) texts.get(this.canvas)?.add(pieces.join(''));
 };
 const painted = (index: number) => {
   const found = new Set<string>();
@@ -193,7 +199,7 @@ function measure(expected: string): Promise<PptxRelayJoinResult> {
       const found = painted(1);
       const key = found.slice().sort().join('\u0000');
       if (key !== last) { last = key; paints++; }
-      if (found.includes(expected)) { resolve(result(Math.round(performance.now() - start))); return; }
+      if (found.some((text) => text.includes(expected))) { resolve(result(Math.round(performance.now() - start))); return; }
       if (now - start > 90_000) { errors.push(`join timed out; painted ${JSON.stringify(found)}`); resolve(result(-1)); return; }
       requestAnimationFrame(sample);
     };

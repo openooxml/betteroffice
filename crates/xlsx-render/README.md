@@ -18,7 +18,7 @@ the number format for a single cell.
 `build_display_list_with_ghosts` overlays `GhostEdit`s, which is how pending
 agent proposals paint as in-cell tracked-change previews.
 
-`region` computes the viewport for a range or for the sheet's used range —
+`region` computes the viewport for a range or for the sheet's used range,
 useful for exporting a fixed region rather than a scroll position.
 
 The browser replays the display list onto Canvas2D;

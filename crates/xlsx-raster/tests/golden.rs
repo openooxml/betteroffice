@@ -40,6 +40,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         rotation_box: None,
         rotation_valign: None,
         stacked: false,
+        wrap: None,
     }
 }
 
@@ -78,6 +79,7 @@ fn styled_text(
         rotation_box: None,
         rotation_valign: None,
         stacked: false,
+        wrap: None,
     }
 }
 

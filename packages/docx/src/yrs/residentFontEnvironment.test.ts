@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { preloadEditWasm } from './wasm/index';
 import { preloadOpcWasm } from '../wasm/opc';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
+import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';

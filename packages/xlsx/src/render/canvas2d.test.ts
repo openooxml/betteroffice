@@ -3,6 +3,8 @@ import fixture from '../../test-fixtures/path-backend-agreement.json';
 import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
+import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
+import { wrapLines } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
   it('cover the specified share of each 8x8 tile', () => {
@@ -573,5 +575,73 @@ describe('Canvas2D text', () => {
     expect(fills.length).toBeLessThanOrEqual(5);
     expect(fills.length).toBeGreaterThan(0);
     expect(measured).toBeLessThanOrEqual(5);
+  });
+});
+
+describe('Canvas2D wrapped text', () => {
+  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60) {
+    const fills: { text: string; x: number; y: number; align: string }[] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(value: string, x: number, y: number) { fills.push({ text: value, x, y, align: this.textAlign }); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 200, height: 200,
+      commands: [{ op: 'text', x: 40, y: 50, text, fontSize: 11, color: '#000000',
+        align, clip: { x: 0, y: 0, w: 200, h: 200 },
+        wrap: { width, lineHeight: 18, valign },
+      } as unknown as TextCmd],
+    }, 1);
+    return fills;
+  }
+
+  it('breaks at explicit newlines and centres the block on the single-line baseline', () => {
+    const fills = wrappedFills('PURCHASE \nTARGET', 'center', 'center', 200);
+    expect(fills).toEqual([
+      { text: 'PURCHASE', x: 40, y: 41, align: 'center' },
+      { text: 'TARGET', x: 40, y: 59, align: 'center' },
+    ]);
+  });
+
+  it('word-wraps at spaces and anchors top and bottom blocks on the baseline', () => {
+    expect(wrappedFills('ab cd ef', 'left', 'top').map((f) => [f.text, f.y])).toEqual([['ab cd', 50], ['ef', 68]]);
+    expect(wrappedFills('ab cd ef', 'right', 'bottom').map((f) => [f.text, f.y])).toEqual([['ab cd', 32], ['ef', 50]]);
+  });
+});
+
+describe('wrapped text breaker', () => {
+  it('follows the rules shared with the Rust breaker', () => {
+    const Segmenter = (Intl as unknown as {
+      Segmenter: new (locales: undefined, options: { granularity: 'grapheme' }) => { segment(value: string): Iterable<unknown> };
+    }).Segmenter;
+    const segmenter = new Segmenter(undefined, { granularity: 'grapheme' });
+    const graphemes = (run: string) => [...segmenter.segment(run)].length;
+    for (const { text, width, lines } of wrapFixture) expect(wrapLines(text, width, graphemes)).toEqual(lines);
+  });
+
+  it('measures each text a bounded number of times', () => {
+    let calls = 0;
+    let measured = 0;
+    const measure = (run: string) => {
+      calls += 1;
+      measured += run.length;
+      return run.replace(/\u200b/g, '').length;
+    };
+    const unbreakable = `aa${'\u200b'.repeat(32_765)}`;
+    expect(wrapLines(unbreakable, 1.5, measure)).toEqual([unbreakable.slice(0, 1), unbreakable.slice(1)]);
+    expect(calls).toBeLessThanOrEqual(64);
+    expect(measured).toBeLessThanOrEqual(8 * unbreakable.length);
+
+    calls = 0;
+    measured = 0;
+    const spaced = 'a '.repeat(16_383);
+    expect(wrapLines(spaced, Number.NaN, measure)).toEqual([spaced]);
+    expect(calls).toBeLessThanOrEqual(64);
+    expect(measured).toBeLessThanOrEqual(8 * spaced.length);
   });
 });
