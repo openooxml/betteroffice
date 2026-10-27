@@ -102,12 +102,12 @@ fn body_gap(output: &Value, index: usize, twips: f64) {
     let pages = output["layout"]["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 1);
     let fragments = pages[0]["fragments"].as_array().unwrap();
+    let height = fragments[index]["height"].as_f64().unwrap();
+    close(height, 16.0);
     close(
         fragments[index + 1]["y"].as_f64().unwrap()
             - fragments[index]["y"].as_f64().unwrap()
-            - output["measured"][index]["measure"]["totalHeight"]
-                .as_f64()
-                .unwrap(),
+            - height,
         twips / 15.0,
     );
 }
