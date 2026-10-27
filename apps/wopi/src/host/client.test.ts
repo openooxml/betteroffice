@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createProofSigner, generateKeyPair } from "../proof";
 import { createHostClient, type HostFetch } from "./client";
-import { WopiHostError } from "./errors";
+import { WopiHostError, type WopiHostErrorKind } from "./errors";
 
 const SRC = "https://cloud.example.com/wopi/files/file1";
 const TOKEN = "DISTINCTIVESECRETTOKEN12345";
@@ -60,7 +60,7 @@ describe("host client requests", () => {
   });
 
   test("maps statuses to typed errors without leaking the token", async () => {
-    const cases: Array<[number, string]> = [
+    const cases: Array<[number, WopiHostErrorKind]> = [
       [401, "unauthorized"],
       [404, "notFound"],
       [412, "preconditionFailed"],

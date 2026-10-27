@@ -290,7 +290,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         return new Response(chunkedBody(file.bytes), { status: 200, headers });
       }
       headers["Content-Length"] = String(file.bytes.byteLength);
-      return new Response(file.bytes, { status: 200, headers });
+      return new Response(file.bytes as BodyInit, { status: 200, headers });
     }
 
     if (isContents && request.method === "POST") {
