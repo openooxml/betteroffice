@@ -8,7 +8,24 @@ type Scope = {
   acts: Set<Promise<unknown>>;
 };
 
-export function testScope(realAct: Act) {
+async function unsettledAfter(pending: Promise<unknown>[], ms: number): Promise<number> {
+  let left = pending.length;
+  for (const promise of pending) {
+    void promise.then(
+      () => { left -= 1; },
+      () => { left -= 1; }
+    );
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled(pending),
+    new Promise((done) => { timer = setTimeout(done, ms); }),
+  ]);
+  clearTimeout(timer);
+  return left;
+}
+
+export function testScope(realAct: Act, { drainMs = 2000 }: { drainMs?: number } = {}) {
   let started = 0;
   let current: Scope | null = null;
 
@@ -19,13 +36,19 @@ export function testScope(realAct: Act) {
   });
   beforeEach(async () => {
     const previous = current;
+    let unfinished = 0;
     if (previous) {
       previous.ended = true;
-      await Promise.allSettled([...previous.polls, ...previous.acts]);
+      unfinished = await unsettledAfter([...previous.polls, ...previous.acts], drainMs);
       await new Promise((done) => setTimeout(done, 0));
     }
     if (current === previous) {
       current = { test: ++started, ended: false, polls: new Set(), acts: new Set() };
+    }
+    if (previous && unfinished > 0) {
+      throw new Error(
+        `test #${previous.test} of this file left ${unfinished} unfinished act() or poll call(s) ${drainMs} ms after it ended; later tests no longer wait for them`
+      );
     }
   });
 
