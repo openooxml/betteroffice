@@ -62,8 +62,6 @@ enum StopKind {
 
 fn stop_kind(val: &str) -> StopKind {
     match val {
-        // `right` is the authored ST_TabJc spelling of `end` (ECMA-376
-        // 17.18.87); `left` falls through to start like any other value.
         "end" | "right" => StopKind::End,
         "center" => StopKind::Center,
         "decimal" => StopKind::Decimal,
