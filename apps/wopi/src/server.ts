@@ -204,8 +204,8 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       format: session.format,
       canWrite: joined.user.canWrite,
       viewOnlyReason: joined.viewOnlyReason ?? session.viewOnlyReason ?? null,
-      postMessageOrigin: session.postMessageOrigin,
-      closeUrl: session.closeUrl,
+      postMessageOrigin: joined.user.postMessageOrigin,
+      closeUrl: joined.user.closeUrl,
       locale: url.searchParams.get("ui"),
       userFriendlyName: joined.user.friendlyName,
       tokenExpiresAt: joined.user.expiresAt,
@@ -297,6 +297,8 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
         await session.leave(user.id);
       } catch (err) {
         if (err instanceof SessionError && err.kind !== "unknownUser") return typedError(err.kind, 502);
+      } finally {
+        ensure().relay.closeUser(user.id, 1000, "session closed");
       }
       return json({ closed: true }, 200, { "Cache-Control": "no-store" });
     }

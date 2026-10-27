@@ -6,6 +6,7 @@ import { initEngines } from "./replica/engines";
 import { openTestClient, sourceBytes } from "../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
+import { SessionRegistry } from "./session/registry";
 
 const TOKEN = "SECRETTOKEN-routes-9f8e7d6c";
 const TOKEN_B = "SECRETTOKEN-routes-b-1a2b3c";
@@ -170,6 +171,43 @@ describe("wopi edit and view routes", () => {
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(pageConfig(html).fileName).toBe(hostile);
     expectNoToken(s);
+  });
+
+  test("postMessageOrigin and closeUrl are kept per user", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "user-a", { name: "Alice A" });
+    addToken(h, TOKEN_B, "user-b", { name: "Bob B" });
+    const hostClient = {
+      ...h.hostClient,
+      checkFileInfo: async (input: { wopiSrc: string; accessToken: string }) => {
+        const info = await h.hostClient.checkFileInfo(input);
+        const who = input.accessToken === TOKEN ? "alice" : "bob";
+        return { ...info, CloseUrl: `https://host.example/${who}`, PostMessageOrigin: `https://${who}.example.com` };
+      },
+    };
+    const registry = new SessionRegistry({ config: h.config, hostClient: hostClient as never, logger: h.logger, now: h.clock.now, scheduler: h.scheduler });
+    const server = startServer({ config: h.config, currentKey: generateKeyPair(), registry }, 0);
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const post = async (token: string): Promise<PageConfig> => {
+      const response = await fetch(`${base}/wopi/edit?WOPISrc=${encodeURIComponent(SRC)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form(token),
+      });
+      expect(response.status).toBe(200);
+      return pageConfig(await response.text());
+    };
+    const a = await post(TOKEN);
+    const b = await post(TOKEN_B);
+    expect(a.closeUrl).toBe("https://host.example/alice");
+    expect(a.postMessageOrigin).toBe("https://alice.example.com");
+    expect(b.closeUrl).toBe("https://host.example/bob");
+    expect(b.postMessageOrigin).toBe("https://bob.example.com");
+    const session = registry.list()[0]!;
+    expect(session.getUser(a.sessionHandle)?.closeUrl).toBe("https://host.example/alice");
+    expect(session.getUser(a.sessionHandle)?.postMessageOrigin).toBe("https://alice.example.com");
+    expect(session.getUser(b.sessionHandle)?.closeUrl).toBe("https://host.example/bob");
   });
 
   test("form body over 64 KiB is 413", async () => {

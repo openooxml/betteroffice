@@ -15,10 +15,12 @@ import { decodeJoinPayload, type EncodedJoinPayload } from "../sessionApi";
 import {
   decodeMessages,
   encodeAwarenessFrame,
+  encodeQueryAwarenessFrame,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdateFrame,
 } from "./frames";
+import { CollabRelay } from "./relay";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -213,16 +215,77 @@ describe("collab relay", () => {
     await expectNoTokens(s);
   });
 
-  test("read only frames close with 4403", async () => {
+  test("read only users sync and receive edits, changing frames close with 4403", async () => {
     const s = setup("xlsx");
+    const writerHandle = await joinPage(s, TOKENS[0]!);
+    const writer = await FrameClient.connect(s, writerHandle, await hydrate(s, writerHandle, 930101));
     const handle = await joinPage(s, "SECRETTOKEN-relay-view-444", "view");
     const client = await hydrate(s, handle, 930001);
-    cleanups.push(() => client.destroy());
+    cleanups.push(() => { client.destroy(); writer.client.destroy(); });
     const frameClient = await FrameClient.connect(s, handle, client);
-    frameClient.client.edit("viewer-edit ", 0);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(frameClient.closeCode).toBeNull();
+    writer.editAndSend("viewer-live ", 0);
+    await waitFor(() => frameClient.client.contains("viewer-live"), "viewer receives live edit");
+    expect(frameClient.closeCode).toBeNull();
+    frameClient.client.edit("viewer-edit ", 1);
     frameClient.send(encodeUpdateFrame(frameClient.client.encodeStateAsUpdate()));
     await frameClient.closed;
     expect(frameClient.closeCode).toBe(4403);
+    await expectNoTokens(s);
+  });
+
+  test("empty handshake replies are not broadcast, websocket payload limit is above the frame limit", async () => {
+    const s = setup("xlsx");
+    expect(new CollabRelay(s.h.registry).websocket.maxPayloadLength).toBeGreaterThan(16 * 1024 * 1024);
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 931001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 931101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    let updates = 0;
+    b.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "update" || m.type === "sync-step-2") updates += 1;
+      }
+    });
+    a.send(encodeSyncStep1(a.client.encodeStateVector()));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(updates).toBe(0);
+    a.editAndSend("counted-edit ", 0);
+    await waitFor(() => b.client.contains("counted-edit"), "b sees counted edit");
+    expect(updates).toBeGreaterThan(0);
+    await expectNoTokens(s);
+  });
+
+  test("closing a user closes their collab socket, session close closes the room", async () => {
+    const s = setup("xlsx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 932001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 932101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    const close = await fetch(`${s.base}/api/session/close`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${handleA}` },
+    });
+    expect(close.status).toBe(200);
+    await close.text();
+    await a.closed;
+    expect([1000, 4401]).toContain(a.closeCode);
+    expect(b.closeCode).toBeNull();
+    b.editAndSend("after-close ", 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const closeB = await fetch(`${s.base}/api/session/close`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${handleB}` },
+    });
+    expect(closeB.status).toBe(200);
+    await closeB.text();
+    await b.closed;
+    expect([1000, 4401]).toContain(b.closeCode);
     await expectNoTokens(s);
   });
 
@@ -266,6 +329,68 @@ describe("collab relay", () => {
     void second;
     await first.closed;
     expect(first.closeCode).toBe(1000);
+    await expectNoTokens(s);
+  });
+
+  test("replacement broadcasts awareness removal for the old client", async () => {
+    const s = setup("xlsx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 951001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 951101));
+    const secondClient = await hydrate(s, handleA, 951201);
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); secondClient.destroy(); });
+    const removals: number[] = [];
+    b.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "awareness") for (const e of m.entries) if (e.isNull) removals.push(e.clientId);
+      }
+    });
+    a.send(encodeAwarenessFrame([{ clientId: a.client.clientId, clock: 1, state: { user: { name: "User 0", color: "#000000" }, cursor: null } }]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await FrameClient.connect(s, handleA, secondClient);
+    await waitFor(() => removals.includes(a.client.clientId), "removal on replacement");
+    await expectNoTokens(s);
+  });
+
+  test("awareness leave clears the cache and another socket cannot clobber a client id", async () => {
+    const s = setup("xlsx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const handleC = await joinPage(s, TOKENS[2]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 952001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 952101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    const removalsAtA: number[] = [];
+    a.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "awareness") for (const e of m.entries) if (e.isNull) removalsAtA.push(e.clientId);
+      }
+    });
+    a.send(encodeAwarenessFrame([{ clientId: a.client.clientId, clock: 1, state: { user: { name: "User 0", color: "#000000" }, cursor: null } }]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    b.send(encodeAwarenessFrame([{ clientId: a.client.clientId, clock: 9, state: { user: { name: "Fake", color: "#000000" }, cursor: null } }]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    b.ws.close();
+    await b.closed;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(removalsAtA).not.toContain(a.client.clientId);
+    a.send(encodeAwarenessFrame([{ clientId: a.client.clientId, clock: 2, state: null }]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const c = await FrameClient.connect(s, handleC, await hydrate(s, handleC, 952201));
+    cleanups.push(() => c.client.destroy());
+    let queried: number[] = [];
+    c.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "awareness") queried.push(...m.entries.map((e) => e.clientId));
+      }
+    });
+    c.send(encodeQueryAwarenessFrame());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(queried.filter((id) => id === a.client.clientId).length).toBe(0);
     await expectNoTokens(s);
   });
 
@@ -358,11 +483,10 @@ async function providerClient(
   let provider: { connect(): void; destroy(): void; synced: boolean };
   let wrapped: TestClient;
   if (format === "docx") {
-    const hostSession = await createYrsSession({ clientId: clientId + 100000 });
-    const host = hostSession.openDocx(source.slice(), false);
     const session = await createYrsSession({ clientId });
     if (payload.format !== "docx") throw new Error("payload format");
-    session.bootstrapPeer(payload.state, payload.peerMetadata, source.slice(), host);
+    session.openDocx(source.slice(), false);
+    session.loadState(payload.initialUpdate.slice());
     replica = session as unknown as CollaborationReplica;
     provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
     wrapped = {
@@ -378,12 +502,12 @@ async function providerClient(
       remove: () => { throw new Error("unused"); },
       contains: (marker) => session.storyIds().sort().flatMap((story) => session.paragraphs(story).map((p) => p.text)).join("\n").includes(marker),
       save: async () => { throw new Error("unused"); },
-      destroy: () => { session.destroy(); hostSession.destroy(); },
+      destroy: () => { session.destroy(); },
     };
   } else if (format === "xlsx") {
     const workbook = openWorkbook(source.slice(), { collaborative: true, clientId });
     if (payload.format !== "xlsx") throw new Error("payload format");
-    workbook.applyUpdate(payload.update.slice());
+    workbook.applyUpdate(payload.initialUpdate.slice());
     replica = workbook as unknown as CollaborationReplica;
     provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
     wrapped = {

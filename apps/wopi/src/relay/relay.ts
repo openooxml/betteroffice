@@ -5,13 +5,15 @@ import type { FileSession } from "../session/fileSession";
 import type { SessionRegistry } from "../session/registry";
 import type { UserSession } from "../session/userSession";
 import {
-  awarenessEntries,
   classifyFrame,
+  encodeAwarenessFrameRaw,
   encodeAwarenessRemoval,
+  encodeAwarenessUpdateRaw,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdateFrame,
   stripReservedSyncEntries,
+  type ParsedAwarenessEntry,
 } from "./frames";
 
 /** Minimal socket surface the relay needs. */
@@ -49,6 +51,10 @@ function safeReason(reason: string): string {
   return reason.slice(0, 120);
 }
 
+function isEmptyUpdate(update: Uint8Array): boolean {
+  return update.length === 0 || (update.length === 2 && update[0] === 0 && update[1] === 0);
+}
+
 /** Finds the file and user session for a handle with a constant time compare. */
 export function findByHandle(registry: SessionRegistry, handle: string): ResolvedHandle | null {
   const candidate = Buffer.from(handle);
@@ -70,6 +76,7 @@ export class CollabRelay {
   #byUser = new Map<string, SocketState>();
   #bySocket = new Map<RelaySocket, SocketState>();
   #rooms = new Map<string, Set<SocketState>>();
+  #subscribed = new Set<FileSession>();
 
   constructor(registry: SessionRegistry) {
     this.#registry = registry;
@@ -88,10 +95,14 @@ export class CollabRelay {
   attach(ws: RelaySocket, resolved: ResolvedHandle): SocketState {
     const previous = this.#byUser.get(resolved.user.id);
     if (previous && previous.ws !== ws) {
-      this.#remove(previous, false);
+      this.#remove(previous, true);
       try {
         previous.ws.close(1000, "replaced");
       } catch {}
+    }
+    if (!this.#subscribed.has(resolved.session)) {
+      this.#subscribed.add(resolved.session);
+      resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
     }
     const state: SocketState = {
       ws,
@@ -127,6 +138,25 @@ export class CollabRelay {
         [...state.awareness.entries()].map(([clientId, clock]) => ({ clientId, clock })),
       );
       this.#broadcast(state, removal);
+    }
+  }
+
+  /** Closes one user's socket and removes it from the relay. */
+  closeUser(userId: string, code = 1000, reason = "session closed"): void {
+    const state = this.#byUser.get(userId);
+    if (!state) return;
+    this.#remove(state, true);
+    this.#close(state, code, reason);
+  }
+
+  /** Closes every socket in one file session room. */
+  closeSession(session: FileSession, code = 1000, reason = "session closed"): void {
+    this.#subscribed.delete(session);
+    const room = this.#rooms.get(session.fileKey);
+    if (!room) return;
+    for (const state of [...room]) {
+      this.#remove(state, false);
+      this.#close(state, code, reason);
     }
   }
 
@@ -193,6 +223,10 @@ export class CollabRelay {
   handleMessage(ws: RelaySocket, data: Uint8Array | ArrayBuffer | string): void {
     const state = this.#bySocket.get(ws);
     if (!state) return;
+    if (state.session.getUser(state.user.id) !== state.user) {
+      this.closeUser(state.user.id, 4401, "session closed");
+      return;
+    }
     if (typeof data === "string") {
       this.#close(state, 1003, "binary frames only");
       return;
@@ -221,6 +255,8 @@ export class CollabRelay {
       return;
     }
     const replica = state.session.replica;
+    const canWrite =
+      state.user.canWrite && !state.session.viewOnly && state.user.isTokenValidAt(Date.now());
     for (const message of classified.messages) {
       if (message.type === "sync-step-1") {
         if (!replica) {
@@ -229,16 +265,18 @@ export class CollabRelay {
         }
         try {
           this.#send(state, encodeSyncStep2(replica.encodeStateAsUpdate(stripReservedSyncEntries(message.stateVector))));
-          this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
+          if (canWrite) this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
         } catch {
           this.#close(state, 1011, "sync failed");
           return;
         }
       } else if (message.type === "sync-step-2" || message.type === "update") {
-        if (!state.user.canWrite || state.session.viewOnly) {
+        if (isEmptyUpdate(message.update)) continue;
+        if (!canWrite) {
           this.#close(state, 4403, "read only");
           return;
         }
+        const before = replica?.version;
         let result: { accepted: true } | { accepted: false; reason: string };
         try {
           result = state.session.applyUpdate(state.user.id, message.update.slice());
@@ -251,19 +289,40 @@ export class CollabRelay {
           this.#close(state, readOnly ? 4403 : 4400, result.reason || "update rejected, resync");
           return;
         }
-        this.#broadcast(state, encodeUpdateFrame(message.update));
-      } else if (message.type === "awareness") {
-        for (const entry of awarenessEntries(message.update)) {
-          state.awareness.set(entry.clientId, entry.clock);
-          state.awarenessFrames.set(entry.clientId, message.update.slice());
+        if (replica && replica.version !== before) {
+          this.#broadcast(state, encodeUpdateFrame(message.update));
         }
-        this.#broadcast(state, bytesForAwareness(message.update));
-      } else if (message.type === "query-awareness") {
+      } else if (message.type === "awareness") {
         const room = this.#rooms.get(state.session.fileKey);
+        const ownedByOther = new Set<number>();
         if (room) {
           for (const peer of room) {
             if (peer === state) continue;
-            for (const payload of peer.awarenessFrames.values()) {
+            for (const clientId of peer.awareness.keys()) ownedByOther.add(clientId);
+          }
+        }
+        const accepted: ParsedAwarenessEntry[] = [];
+        for (const entry of message.entries) {
+          if (ownedByOther.has(entry.clientId)) continue;
+          if (entry.isNull) {
+            state.awareness.delete(entry.clientId);
+            state.awarenessFrames.delete(entry.clientId);
+          } else {
+            state.awareness.set(entry.clientId, entry.clock);
+            state.awarenessFrames.set(entry.clientId, encodeAwarenessUpdateRaw([entry]));
+          }
+          accepted.push(entry);
+        }
+        if (accepted.length > 0) this.#broadcast(state, encodeAwarenessFrameRaw(accepted));
+      } else if (message.type === "query-awareness") {
+        const room = this.#rooms.get(state.session.fileKey);
+        if (room) {
+          const sent = new Set<number>();
+          for (const peer of room) {
+            if (peer === state) continue;
+            for (const [clientId, payload] of peer.awarenessFrames) {
+              if (sent.has(clientId)) continue;
+              sent.add(clientId);
               this.#send(state, bytesForAwareness(payload));
             }
           }
@@ -275,6 +334,7 @@ export class CollabRelay {
   /** Bun WebSocket handlers for this relay. */
   get websocket() {
     return {
+      maxPayloadLength: MAX_COLLABORATION_FRAME_BYTES + 4096,
       open: (ws: RelaySocket) => {
         const handle = ws.data?.handle;
         const resolved = handle ? this.resolve(handle) : null;

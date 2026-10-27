@@ -156,8 +156,6 @@ export class FileSession {
   #userTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
   #format: Format | null = null;
   #sourceBytes: Uint8Array | null = null;
-  #postMessageOrigin = "";
-  #closeUrl = "";
   #journalActive = false;
   #journalVersion: string | null = null;
   #pendingJoins = 0;
@@ -208,15 +206,7 @@ export class FileSession {
   }
 
   get sourceBytes(): Uint8Array | null {
-    return this.#sourceBytes ? this.#sourceBytes.slice() : null;
-  }
-
-  get postMessageOrigin(): string {
-    return this.#postMessageOrigin;
-  }
-
-  get closeUrl(): string {
-    return this.#closeUrl;
+    return this.#sourceBytes;
   }
 
   get lockHeld(): boolean {
@@ -346,8 +336,6 @@ export class FileSession {
         this.#itemVersion = info.Version ?? null;
         const bytes = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
         this.#sourceBytes = bytes;
-        this.#postMessageOrigin = info.PostMessageOrigin ?? "";
-        this.#closeUrl = info.CloseUrl ?? "";
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
         this.#openedClientId = this.#replica!.clientId;
@@ -365,8 +353,6 @@ export class FileSession {
     } else {
       this.#fileName = info.BaseFileName || this.#fileName;
       this.#fileSize = info.Size;
-      if (info.PostMessageOrigin) this.#postMessageOrigin = info.PostMessageOrigin;
-      if (info.CloseUrl !== undefined) this.#closeUrl = info.CloseUrl;
     }
     const lockHeldBefore = this.#lockHeld;
     if (!this.#lockHeld && this.#viewOnlyReason === null && wantsWrite) {
@@ -397,6 +383,8 @@ export class FileSession {
       friendlyName: info.UserFriendlyName ?? info.UserId,
       canWrite,
       joinedAt: now,
+      postMessageOrigin: info.PostMessageOrigin ?? "",
+      closeUrl: info.CloseUrl ?? "",
     });
     this.#users.set(user.id, user);
     this.#history.push(user);

@@ -18,7 +18,7 @@ export type FrameMessage =
   | { type: "sync-step-1"; stateVector: Uint8Array }
   | { type: "sync-step-2"; update: Uint8Array }
   | { type: "update"; update: Uint8Array }
-  | { type: "awareness"; update: Uint8Array; clientIds: number[] }
+  | { type: "awareness"; update: Uint8Array; entries: ParsedAwarenessEntry[] }
   | { type: "auth"; reason: string }
   | { type: "query-awareness" };
 
@@ -143,20 +143,49 @@ export function encodeAwarenessRemoval(entries: readonly { clientId: number; clo
   return encodeAwarenessFrame(entries.map((e) => ({ clientId: e.clientId, clock: e.clock + 1, state: null })));
 }
 
-/** Client ids and clocks in an awareness payload, empty when malformed. */
-export function awarenessEntries(update: Uint8Array): { clientId: number; clock: number }[] {
+/** Encodes a query-awareness frame. */
+export function encodeQueryAwarenessFrame(): Uint8Array {
+  return encodeVarUint(TOP_LEVEL_QUERY_AWARENESS);
+}
+
+/** One parsed awareness entry, with its raw state text. */
+export interface ParsedAwarenessEntry {
+  clientId: number;
+  clock: number;
+  stateRaw: string;
+  isNull: boolean;
+}
+
+/** Encodes an awareness payload from raw state texts. */
+export function encodeAwarenessUpdateRaw(entries: readonly ParsedAwarenessEntry[]): Uint8Array {
+  const parts: Uint8Array[] = [encodeVarUint(entries.length)];
+  for (const entry of entries) {
+    parts.push(encodeVarUint(entry.clientId), encodeVarUint(entry.clock), encodeVarString(entry.stateRaw));
+  }
+  return concat(parts);
+}
+
+/** Encodes an awareness frame from raw state texts. */
+export function encodeAwarenessFrameRaw(entries: readonly ParsedAwarenessEntry[]): Uint8Array {
+  const update = encodeAwarenessUpdateRaw(entries);
+  return concat([encodeVarUint(TOP_LEVEL_AWARENESS), encodeVarUint(update.byteLength), update]);
+}
+
+/** Entries in an awareness payload, empty when malformed or trailing. */
+export function awarenessEntries(update: Uint8Array): ParsedAwarenessEntry[] {
   const decoder = new Decoder(update);
   const count = decoder.readVarUint();
   if (count === null || count > 4096) return [];
-  const entries: { clientId: number; clock: number }[] = [];
+  const entries: ParsedAwarenessEntry[] = [];
   for (let i = 0; i < count; i += 1) {
     const clientId = decoder.readVarUint();
     const clock = decoder.readVarUint();
     const state = decoder.readBytes();
     if (clientId === null || clock === null || state === null) return [];
-    entries.push({ clientId, clock });
+    const stateRaw = new TextDecoder().decode(state);
+    entries.push({ clientId, clock, stateRaw, isNull: stateRaw === "null" });
   }
-  return entries;
+  return decoder.done ? entries : [];
 }
 
 function isValidUtf8(bytes: Uint8Array): boolean {
@@ -247,7 +276,7 @@ export function classifyFrame(frame: Uint8Array): ClassifiedFrame {
       if (payload === null) return invalid;
       hasAwareness = true;
       awarenessBytes += payload.byteLength;
-      messages.push({ type: "awareness", update: payload, clientIds: awarenessEntries(payload).map((e) => e.clientId) });
+      messages.push({ type: "awareness", update: payload, entries: awarenessEntries(payload) });
     } else if (type === TOP_LEVEL_AUTH) {
       const subtype = decoder.readVarUint();
       const reason = decoder.readBytes();
