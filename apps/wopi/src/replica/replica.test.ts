@@ -579,7 +579,15 @@ describe("docx save update", () => {
       }
       peer.applyUpdate(authorUpdate);
       for (const update of emitted) peer.applyUpdate(update);
+      expect(
+        server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+      await syncClient(server, peer);
+      await syncClient(server, author);
       expect([...peer.encodeStateVector()]).toEqual([
+        ...server.encodeStateVector(),
+      ]);
+      expect([...author.encodeStateVector()]).toEqual([
         ...server.encodeStateVector(),
       ]);
     } finally {

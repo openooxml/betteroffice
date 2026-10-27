@@ -112,7 +112,9 @@ function wrapDocx(session: YrsSession, extra?: YrsSession): TestClient {
       const identity = session
         .paragraphIdentities()
         .paragraphs.find((entry) => entry.session?.paraId === para.paraId);
-      if (!identity) throw new Error("second paragraph has no identity");
+      if (!identity?.ooxmlParaId) {
+        throw new Error("second paragraph has no identity");
+      }
       return identity.ooxmlParaId;
     },
     deleteSplitSecondHalf: () => {
