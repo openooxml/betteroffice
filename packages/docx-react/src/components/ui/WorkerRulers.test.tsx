@@ -17,7 +17,7 @@ test('worker tab markers include the page margin and retain alignment and leader
     tabStops={[{ position: 720, alignment: 'right', leader: 'dot' }]} onTabStopsChange={change} onDragStart={start} onDragEnd={end} />);
   const ruler = container.firstElementChild as HTMLElement;
   ruler.getBoundingClientRect = () => ({ left: 50 } as DOMRect);
-  const marker = getByTitle('right tab at 0.50"');
+  const marker = getByTitle('Right tab at 0.50"');
   expect(marker.style.left).toBe('283px');
   fireEvent.mouseDown(marker, { clientX: 338 });
   fireEvent.mouseMove(document, { clientX: 434 });
@@ -37,7 +37,7 @@ test('a blank ruler adds a content-relative tab and read-only markers cannot rem
   fireEvent.doubleClick(ruler, { clientX: 434 });
   expect(change).toHaveBeenCalledWith([{ position: 1440, alignment: 'left' }]);
   rerender(<HorizontalRuler editable={false} tabStops={[{ position: 720, alignment: 'left' }]} onTabStopsChange={change} onTabStopRemove={remove} />);
-  fireEvent.doubleClick(getByTitle('left tab at 0.50"'));
+  fireEvent.doubleClick(getByTitle('Left tab at 0.50"'));
   expect(remove).not.toHaveBeenCalled();
 });
 

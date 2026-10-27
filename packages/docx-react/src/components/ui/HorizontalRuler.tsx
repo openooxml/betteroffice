@@ -80,12 +80,12 @@ function formatValueForTooltip(
 ): string {
   if (unit === 'inch') {
     return (
-      new Intl.NumberFormat(lang, { maximumFractionDigits: 2 }).format(twips / TWIPS_PER_INCH) +
+      new Intl.NumberFormat(lang, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(twips / TWIPS_PER_INCH) +
       t('common.units.inchMark')
     );
   }
   return (
-    new Intl.NumberFormat(lang, { maximumFractionDigits: 1 }).format(twips / TWIPS_PER_CM) +
+    new Intl.NumberFormat(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(twips / TWIPS_PER_CM) +
     ' ' +
     t('common.units.cm')
   );

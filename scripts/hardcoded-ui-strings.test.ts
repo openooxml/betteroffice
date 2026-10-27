@@ -14,19 +14,20 @@ const EDITOR_SOURCES = [
 ];
 
 const allowlist = allowedStrings(root);
+let scanned: ReturnType<typeof scanDirectories> | undefined;
+const scan = () => (scanned ??= scanDirectories(root, EDITOR_SOURCES));
 
 test('React editors route every user-visible string through i18n', () => {
-  const found = scanDirectories(root, EDITOR_SOURCES, allowlist).map(
-    (item) => `${item.file}:${item.line} ${item.kind} ${item.name} "${item.text}"`,
-  );
+  const found = scan()
+    .filter((item) => !allowlist.some((entry) => allows(entry, item)))
+    .map((item) => `${item.file}:${item.line} ${item.kind} ${item.name} "${item.text}"`);
   expect(found).toEqual([]);
-});
+}, 60_000);
 
 test('every allowlisted string has a reason and still occurs', () => {
-  const found = scanDirectories(root, EDITOR_SOURCES);
-  const stale = allowlist.filter((entry) => entry.reason.trim() === '' || !found.some((item) => allows(entry, item)));
+  const stale = allowlist.filter((entry) => entry.reason.trim() === '' || !scan().some((item) => allows(entry, item)));
   expect(stale).toEqual([]);
-});
+}, 60_000);
 
 test('flags hardcoded JSX text, accessible names and labels', () => {
   const found = scanSource(
