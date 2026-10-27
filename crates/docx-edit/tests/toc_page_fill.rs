@@ -196,7 +196,10 @@ fn toc_entries_with_a_right_leader_tab_stay_on_one_line() {
     assert_eq!(pages.len(), 1, "the whole TOC fits the first page");
     let mut entries = 0;
     for fragment in pages[0]["fragments"].as_array().expect("fragments") {
-        let lines = fragment["resolvedLines"].as_array().cloned().unwrap_or_default();
+        let lines = fragment["resolvedLines"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let text: String = lines
             .iter()
             .flat_map(|line| line["segments"].as_array().cloned().unwrap_or_default())
