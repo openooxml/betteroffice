@@ -857,10 +857,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         if !paragraph_runs.is_empty() {
                             let join = field_join.as_mut().unwrap();
                             let offset = (paragraph_pm_start - join.pm_start) as u32;
-                            let defaults = paragraph_run_defaults(
-                                &values,
-                                paragraph_chain_size(env, &values, &paragraph_runs),
-                            );
+                            let defaults =
+                                paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
                             for run in &mut paragraph_runs {
                                 run.pm_start += offset;
                                 run.pm_end += offset;
@@ -923,10 +921,8 @@ fn walk_story_chunks<T: ReadTxn>(
                 if let Some((hidden, target)) = code_join
                     && joinable
                 {
-                    let defaults = paragraph_run_defaults(
-                        &values,
-                        paragraph_chain_size(env, &values, &paragraph_runs),
-                    );
+                    let defaults =
+                        paragraph_run_defaults(&values, paragraph_chain_size(env, &values));
                     for run in &mut paragraph_runs {
                         apply_run_defaults(&mut run.formatting, &defaults);
                     }
@@ -3848,7 +3844,7 @@ fn flush_paragraph<T: ReadTxn>(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
-    let chain_size = paragraph_chain_size(env, &values, &raw_runs);
+    let chain_size = paragraph_chain_size(env, &values);
     let defaults = paragraph_run_defaults(&values, chain_size);
     let semantic_toc = style_id
         .as_ref()
@@ -4929,26 +4925,11 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
     }
 }
 
-fn paragraph_chain_size(
-    env: &RenderEnv,
-    values: &BTreeMap<String, Any>,
-    runs: &[RawRun],
-) -> Option<f64> {
+fn paragraph_chain_size(env: &RenderEnv, values: &BTreeMap<String, Any>) -> Option<f64> {
     if let Some(size) = env.chain_font_size(paragraph_style_id(values).as_deref()) {
         return Some(size);
     }
-    runs.iter()
-        .filter_map(|run| match &run.kind {
-            RawRunKind::Text(_)
-                if !(run.formatting.hyperlink.is_some() && run.inherited_hyperlink.2) =>
-            {
-                run.formatting.font_size
-            }
-            _ => None,
-        })
-        .fold(None::<f64>, |size, next| {
-            Some(size.map_or(next, |current| current.max(next)))
-        })
+    Some(paragraph_default_font_size(values))
 }
 
 fn paragraph_run_defaults(
@@ -4957,7 +4938,6 @@ fn paragraph_run_defaults(
 ) -> RunFormatting {
     let mut result = RunFormatting {
         font_size: Some(chain_size.unwrap_or(10.0)),
-        font_size_cs: chain_size,
         ..RunFormatting::default()
     };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
@@ -4983,9 +4963,7 @@ fn paragraph_run_defaults(
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    if result.font_size_cs.is_none() {
-        result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
-    }
+    result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
