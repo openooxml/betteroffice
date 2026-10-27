@@ -1,236 +1,151 @@
 # @betteroffice/xlsx
 
-Framework-free core for the BetterOffice XLSX editor — the Rust engine (parse,
-calc, render) compiled to WebAssembly, plus display-list, viewport, hit-test,
-and accessibility helpers.
+Framework-free XLSX parsing, formula calculation, editing, and rendering through a Rust/WebAssembly
+engine. Includes canvas painting, viewport, hit-testing, accessibility, and clipboard helpers.
+
+## Install
 
 ```bash
 bun add @betteroffice/xlsx
 ```
 
-Most apps want the turnkey React component in
-[`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react).
-Reach for this package directly to render a spreadsheet onto your own canvas or
-to drive a workbook headlessly.
+No peer dependencies.
 
-## Open, render, edit, save
+## Usage
 
-```ts
-import { initWasm, openWorkbook, paintDisplayList } from "@betteroffice/xlsx";
-
-await initWasm();
-const workbook = openWorkbook(new Uint8Array(await file.arrayBuffer()));
-
-const ctx = canvas.getContext("2d")!;
-const dpr = devicePixelRatio;
-canvas.width = 800 * dpr;
-canvas.height = 600 * dpr;
-const frame = workbook.displayList({ x: 0, y: 0, width: 800, height: 600 });
-paintDisplayList(ctx, frame, dpr);
-
-workbook.editCell(0, 9, 2, "=SUM(C1:C9)"); // recalcs dependents
-const bytes = workbook.save();
-```
-
-`initWasm()` fetches the packaged wasm asset once in browsers; other runtimes
-pass wasm bytes or a precompiled `WebAssembly.Module`.
-`openWorkbookSession` is an experimental, opt-in worker session for async reads, edits, sheet metadata, and saving.
-
-Around the handle, the package exports the helpers a custom grid needs:
-`cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the viewport math,
-`buildA11yGrid` (accessibility tree), and `toTsv` / `fromTsv` (clipboard). The
-handle itself covers styling (`patchRangeStyle`, `setNumberFormat`), undo/redo,
-and PNG export (`renderPng` / `renderRangePng`; guard with
-`isPngExportAvailable`).
-
-## Print a range
-
-`workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range
-without changing workbook data, the active sheet, or screen geometry. Pass
-`PrintMetrics` measured from the workbook's normal font: `dpi`, `maxDigitWidth`,
-`fontAscent`, and `fontDescent` use the layout device's pixels; `fontSizePt` and
-`defaultRowHeightPt` use points. `fontFamily` supplies the default face, and
-optional `defaultColumnWidth` uses the stored OOXML character width.
-
-The result uses 96-DPI logical coordinates. Paint it with `paintDisplayList(ctx,
-frame, scale, { x, y })`; the optional origin uses backing-store pixels, so page
-margins need no intermediate image. Cell ranges, paper size, and pagination are
-chosen by the caller. See the [Office comparison harness](../../scripts/office-quality).
-
-## AI agents / human-in-the-loop
-
-An agent stages edits as a proposal instead of applying them; a human reviews
-per-cell before/after previews and accepts or rejects. Accepting applies the
-proposal as one undo step and recalcs dependents, and throws
-`StaleProposalError` if the workbook drifted under the proposal since it was
-staged.
+Sheet, row and column indices are zero-based, so `editCell(0, 9, 2, ...)` writes cell C10 on the
+first sheet.
 
 ```ts
-import { isProposalsAvailable } from "@betteroffice/xlsx";
+import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 
-if (isProposalsAvailable()) {
-  const proposal = workbook.propose("copilot", "add totals", [
-    { sheet: 0, row: 9, col: 2, input: "=SUM(C1:C9)" },
-  ]);
-  workbook.listProposals(); // pending proposals, oldest first
-  workbook.acceptProposal(proposal.id); // or workbook.rejectProposal(proposal.id)
+export async function updateWorkbook(bytes: Uint8Array): Promise<Uint8Array> {
+  await initWasm();
+  const workbook = openWorkbook(bytes);
+  try {
+    workbook.editCell(0, 9, 2, '=SUM(C1:C9)');
+    return workbook.save();
+  } finally {
+    workbook.dispose();
+  }
 }
 ```
 
-The React editor paints pending proposals as in-cell tracked-change ghosts with
-an accept/reject panel. `isProposalsAvailable()` reports proposal availability.
-`StaleProposalError.targets` names each drifted cell's sheet beside `cells`.
+Cell input parses text, numbers, booleans, and formulas;
+formulas start with `=`. Editing a cell recalculates its dependents.
+
+## Entry points
+
+These entry points are exported from `@betteroffice/xlsx`:
+
+| entry point | description |
+| --- | --- |
+| `initWasm(input?)` | Initialize the engine; concurrent calls share initialization. |
+| `openWorkbook(bytes, options?)` | Open XLSX bytes as a synchronous `WorkbookHandle` after initialization. |
+| `openWorkbookSession(bytes, options?)` | Open a workbook in a dedicated worker with asynchronous access. |
+| `paintDisplayList(ctx, frame, dpr, origin?)` | Paint a display list onto a canvas 2D context. |
+| `isPngExportAvailable()` | Check whether the initialized engine supports PNG export. |
+| `isProposalsAvailable()` | Check whether the initialized engine supports edit proposals. |
+| `exportXlsxStructured(bytes, options?)` | Asynchronously export stored workbook content from bytes. |
+| `exportXlsxMarkdown(bytes, options?, markdownOptions?)` | Asynchronously export Markdown from bytes. |
+
+`initWasm()` loads the packaged WASM asset by default. Pass WASM bytes or a compiled
+`WebAssembly.Module` in runtimes that cannot fetch that URL. Dispose workbook handles when finished.
+
+## Canvas rendering and grid helpers
+
+`WorkbookHandle.displayList(viewport)` returns the active sheet's display list. Size the backing store
+for the device pixel ratio and give the canvas its logical CSS dimensions:
+
+```ts
+import { paintDisplayList, type WorkbookHandle } from '@betteroffice/xlsx';
+
+export function drawWorkbook(workbook: WorkbookHandle, canvas: HTMLCanvasElement) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = 800 * dpr;
+  canvas.height = 600 * dpr;
+  canvas.style.width = '800px';
+  canvas.style.height = '600px';
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D is unavailable');
+  const frame = workbook.displayList({ x: 0, y: 0, width: 800, height: 600 });
+  paintDisplayList(ctx, frame, dpr);
+}
+```
+
+For a custom grid, use `cellAtPoint`, `cellRect`, and `rangeRect` for hit-testing and geometry,
+`buildA11yGrid` for accessibility data, and `toTsv` / `fromTsv` for clipboard text.
+The `@betteroffice/xlsx/headless` entry exports pure grid helpers and types without the canvas painter
+or WASM loader.
+
+## Range moves
+
+`workbook.moveRange(sheet, source, destination)` moves an A1 range within a sheet and rewrites
+references in one undo step; the destination is the new top-left cell. Surface errors when a move is
+refused rather than discarding the source workbook.
+
+## Printing and PNG export
+
+`workbook.printDisplayList(sheet, range, metrics, gridlines)` renders an A1 range using `PrintMetrics`
+measured from the workbook's normal font. The caller chooses paper size, margins, and pagination;
+`paintDisplayList` accepts an optional origin in backing-store pixels for positioning the result.
+
+`workbook.renderPng(viewport)` exports the active sheet's viewport. `workbook.renderRangePng()` exports
+its used range, or accepts `{ range, scale }` to select an A1 range and raster scale. Both return PNG
+bytes synchronously; check `isPngExportAvailable()` before calling them.
+
+## Worker sessions
+
+The low-level `openWorkbookSession` API (also exported from `@betteroffice/xlsx/worker`) is
+experimental. It returns a `WorkbookSession` with
+promise-returning operations through `session.call`, plus asynchronous `session.save()` and
+`session.dispose()` methods.
+
+The React editor uses a worker by default and exposes its own asynchronous API. Use
+[`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) for the editor UI.
+
+## Edit proposals
+
+`workbook.propose(agentId, note, edits)` stages cell edits for review without applying them.
+`listProposals`, `acceptProposal`, and `rejectProposal` manage that queue; acceptance applies the
+proposal as one undo step and recalculates dependents. Check `isProposalsAvailable()` first;
+acceptance throws `StaleProposalError` if targeted cells have changed since staging.
 
 ## Version-checked edit batches
 
-Read cells with the version they were read at, then apply a batch against it.
-Every step commits as one recalculated change and one undo step, or the batch
-returns a typed refusal and nothing changes:
-
-```ts
-const read = workbook.readCells({
-  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }],
-});
-if (!read.ok) throw new Error(read.failure.message);
-
-const result = workbook.applyEdits({
-  expectVersion: read.version,
-  steps: [
-    {
-      op: "setCellInputs",
-      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
-      inputs: [["120"]],
-      expect: { cells: [[{ value: read.ranges[0].cells[0][0].value }]] },
-    },
-    { op: "setNumberFormat", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } }, format: "currency" },
-  ],
-});
-if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
-```
-
-- Steps: `setCellInputs` (parsed like typing, against each cell's current
-  number format), `setFormulas` (source without `=`, stored as formulas whatever
-  the format), `setNumberFormat` and `patchStyle`. Content and formatting may
-  combine on the same cells; writing one property twice refuses with
-  `overlapping-steps`.
-- Targets name a sheet id from the current catalog (`sheet:{index}` standalone,
-  the replica's sheet keys in collaboration) and an A1 range or zero-based
-  corners. Matrices and guards match the target's shape exactly. Guards compare
-  a cell's value, formula (`null` for none) or display text before the batch.
-- `validateEdits` stages a batch without changing anything; `findText` searches
-  display text exactly and case-sensitively. Update listeners run once, before
-  `applyEdits` returns, and see the recalculated state and its new version.
-  `changedSheets` names every sheet the batch or its recalculation changed.
-- Requests over 16 MiB and results over 64 MiB refuse with `limit-exceeded`;
-  calculation diagnostics stop at 10,000 cells per list and set `truncated`.
-- `history: "none"` keeps a batch out of undo; standalone undo still replays
-  older steps over its cells. `source` records provenance only. Volatile
-  functions see only `calculation.nowSerial`.
-- Versions and sheet ids are session-scoped; standalone sheet ids are
-  positional, so each is valid only for the version it was read at.
+`readCells` returns cells with their version; `validateEdits` checks a batch without committing it,
+and `applyEdits` applies all steps or returns a typed refusal without changing the workbook.
+See [Edit XLSX in version-checked batches](https://docs.betteroffice.dev/docs/javascript#edit-xlsx-in-version-checked-batches)
+for targets, guards, supported steps, and limits.
 
 ## Structured export
 
-XLSX exports bounded sparse worksheet content and Markdown with positional
-anchors, formulas, stored values, formatted text, explicit hidden-content
-options, and omission diagnostics. Export reads stored values:
-
-```ts
-import { exportXlsxStructured } from "@betteroffice/xlsx";
-
-const read = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
-if (read.ok) console.log(read.content.sheets[0].cells);
-
-const markdown = workbook.exportMarkdown({}, { maxRows: 100 });
-const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
-```
-
-- Each sheet lists its stored cells in row-major order (formula cells and
-  styled empty cells included, empty positions skipped) with value, formula,
-  display text, number format and merge membership, plus merges, tables,
-  hyperlinks, hidden row and column spans, and charts, pictures and shapes as
-  placeholders with alt text. Defined names are listed read-only.
-- Anchors are `{ sheet: { sheetId, index, name }, a1 }` positions in the
-  exported version (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`);
-  neither follows later row, column or sheet edits. `sheetId` is the id edit
-  batches take in that session (`sheet:{index}` for bytes), so a cell or range
-  anchor's `{ sheetId: anchor.sheet.sheetId, range: { kind: "a1", a1: anchor.a1 } }`
-  is its batch target at the exported version. Retained drawings carry a `sourcePart`
-  provenance with the part's SHA-256.
-- Formula results are the stored values (`calculation.policy: "asStored"`,
-  `freshness: "unverified"`); cells mark results the file did not store as
-  `missing` (`uncertain` once anything has calculated, or where it cannot be
-  traced) and the last calculation's `cycle` and `limited` cells. Live exports
-  reflect whatever calculation already ran, and the same version and options
-  always export the same content; `exportXlsxStructured` reads bytes without
-  recalculating.
-- Hidden sheets, rows, columns and names are excluded unless requested
-  (`includeHiddenSheets`, `includeHiddenRows`, `includeHiddenColumns`,
-  `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
-  whose visibility is unknown, such as one from a model handed in without its
-  package, counts as hidden.
-- `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
-  record with `truncated: true` and a `truncated` diagnostic; an absent cell is
-  empty only before that point. Scope refusals (`invalid-scope`,
-  `invalid-options`, `limit-exceeded`) return `{ ok: false, version, failure }`.
-- Markdown renders one grid per sheet labelled with its A1 columns and row
-  numbers (200 rows, 50 columns and 10,000 positions by default), using an
-  escaped HTML table where merges need spans, and `<!-- xlsx-export:N -->`
-  markers whose anchors come back in `anchors`. Document text is escaped and
-  kept on one line, and hyperlinks become Markdown links only for `http`,
-  `https` and `mailto` destinations. `renderXlsxMarkdown` renders content you
-  already hold, refusing content that does not validate.
+`exportStructured` and `exportMarkdown` read committed content with positional anchors and diagnostics
+without recalculating formulas. See
+[Export XLSX content with anchors](https://docs.betteroffice.dev/docs/javascript#export-xlsx-content-with-anchors)
+for scopes, hidden content, limits, and byte-based exports.
 
 ## Collaboration
 
-Open a collaborative replica, then connect it to any reliable binary transport:
+The `@betteroffice/xlsx/collaboration` entry exports `CollaborationProvider` for connecting replicas
+to a binary transport. See the [collaboration guide](https://docs.betteroffice.dev/docs/collaboration)
+for provider lifecycle, transport setup, and shared starting state.
 
-```ts
-import { initWasm, openWorkbook } from "@betteroffice/xlsx";
-import {
-  CollaborationProvider,
-  type CollaborationTransport,
-} from "@betteroffice/xlsx/collaboration";
+Open the workbook with `openWorkbook(bytes, { collaborative: true })`. Collaborative workbooks
+synchronize cell content, formulas, styles, column widths and row heights, with local undo and
+redo whose effects synchronize.
+Structural edits throw: inserting or deleting rows and columns, adding, removing, moving or renaming
+sheets, and changing charts or defined names.
 
-await initWasm();
-const workbook = openWorkbook(bytes, { collaborative: true });
-const transport: CollaborationTransport = createTransport();
-const provider = new CollaborationProvider(workbook, transport, {
-  user: { name: "Ada" }, // identity for this peer's selection flag
-});
-provider.connect();
+## Operation profiles
 
-function dispose() {
-  provider.destroy();
-  workbook.dispose();
-}
-```
+`editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled` return engine stage durations in
+milliseconds alongside their results. See
+[Operation profiles](https://docs.betteroffice.dev/docs/javascript#operation-profiles).
 
-The provider handles Yjs sync-v1 and awareness. Room routing, authentication,
-WebRTC signaling, and reconnection remain transport concerns; document updates
-flow directly into the Rust/WASM Yrs replica.
-After a close, the transport may reopen itself or the caller may invoke
-`provider.connect()` for another connection attempt.
-Call `provider.destroy()` before discarding its transport or workbook.
+## Documentation
 
-Collaborative sessions synchronize cell content, formulas, styles, column widths,
-and row heights, with Yrs-backed undo and redo. Structural operations throw.
-
-## Development
-
-The generated `.wasm` binary is intentionally not committed. From the repository
-root, install `wasm-pack` 0.15.0 and `binaryen`, then run
-`bun run build:xlsx-wasm`. Package builds, tests, demo startup, and CI run this
-step automatically.
-
-[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
-[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/xlsx/CHANGELOG.md) · Apache-2.0.
-
-### Operation profiles
-
-`editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled` perform the same
-operations as their unprofiled counterparts and return engine stage durations
-in milliseconds. Edit results include `profile` (validate, apply, recalc, result);
-display results contain `{ displayList, profile }` (build, encode). The normal
-entry points do not read profiling clocks. See the
-[corpus and browser tests](../../e2e/README.md) for usage and timing limits.
+- [JavaScript guide](https://docs.betteroffice.dev/docs/javascript)
+- [Package guide](https://docs.betteroffice.dev/docs/packages)
+- [React editor on npm](https://www.npmjs.com/package/@betteroffice/xlsx-react)
+- [Repository](https://github.com/openooxml/betteroffice)

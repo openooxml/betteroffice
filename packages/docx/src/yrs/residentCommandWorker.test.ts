@@ -11,10 +11,15 @@ import * as projectionModule from './yrsToDocument';
 import * as facadeModule from './yrsSessionFacade';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
-import type { DocxCommandEnvelope, DocxCommandFrame, ResidentCommandInitRequest } from './residentCommandProtocol';
-import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
+import { createYrsSession } from './index';
+import { resolveReservations, type DocxReservation } from './reservations';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest } from './residentCommandProtocol';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { DocxReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
+import type { LayoutBlock } from '../layout/pagination/types';
 
 const TIMEOUT = 20_000;
 const LAYOUT = JSON.stringify({
@@ -35,7 +40,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -52,6 +57,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     (sectPr ?? (headersFooters ? '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>' : '<w:sectPr/>')) +
     '</w:body></w:document>'
   ));
+  if (imageMedia) {
+    parts.set('word/media/picture.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')));
+    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>'));
+    parts.set('[Content_Types].xml', toBytes(new TextDecoder().decode(parts.get('[Content_Types].xml')!).replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>')));
+  }
   if (headersFooters) {
     const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
     parts.set('[Content_Types].xml', toBytes(types.replace('</Types>',
@@ -91,11 +101,13 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
+export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
-  const client = new ResidentEngineWorkerClient(worker);
+  const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
-    await client.open(syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml), { generation: 'd1-command-worker' });
+    const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia);
+    if (client instanceof DocxSourceWorkerClient) await client.openSource({ bytes, collaboration: { clientId: 8301 } });
+    else await client.open(bytes, { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
     if (options.propertyImages || options.objects) engine.applyRawOps('body', [1, 2].map(index => ({
       op: 'insertEmbed', index, kind: 'image', payload: {
@@ -133,7 +145,7 @@ export async function openWorker(options: { headersFooters?: boolean; layoutWith
         measurement, renderEnv: {},
       });
     }
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'd1-command-worker', incarnation: 1, epoch: 1, readOnly: false,
       selection: { anchor: point, focus: point },
       fonts, layoutInput, layoutWithRegions: options.layoutWithRegions ?? true, layoutRevision: 1, extras,
@@ -151,6 +163,35 @@ export function intent(seq: number, version: number, kind: string, payload: Docx
   return { session: 'd1-command-worker', incarnation: 1, seq, basis: { epoch: 1, version }, kind, payload };
 }
 
+async function editWithFrame(client: ResidentEngineWorkerClient, command: DocxCommandEnvelope): Promise<DocxCommandAck> {
+  let resolveFrame!: (frame: DocxCommandFrame) => void;
+  const deferred = new Promise<DocxCommandFrame>((resolve) => { resolveFrame = resolve; });
+  const unsubscribe = client.onFrame((frame) => {
+    if (frame.coversThroughSeq === command.seq) resolveFrame(frame);
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const ack = await client.edit(command);
+    if (ack.frame) return ack;
+    expect(['select', 'navigate', 'selectPoint', 'extendSelection', 'selectTableCells', 'navigateCell']).toContain(command.kind);
+    expect(ack.outcomes[0]?.status).toBe('noop');
+    expect(ack.throughSeq).toBe(command.seq);
+    const frame = await Promise.race([
+      deferred,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Missing command frame through seq ${ack.throughSeq}`)), 5_000);
+      }),
+    ]);
+    expect(frame.coversThroughSeq).toBe(ack.throughSeq);
+    expect(frame.revision).toBe(decodeFrameDelta(frame.payload.frame).frameEpoch);
+    expect(frame.payload.caret.frameEpoch).toBe(frame.revision);
+    return { ...ack, frame };
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    unsubscribe();
+  }
+}
+
 function frameText(frame: RetainedFrame): string {
   return frame.displayList.pages.flatMap(({ primitives }) => primitives)
     .map((primitive) => primitive.kind === 'glyphRun' || primitive.kind === 'text' ? primitive.text : '').join('');
@@ -159,21 +200,59 @@ function frameText(frame: RetainedFrame): string {
 test('worker frames include highlights for keyboard and point range selections', async () => {
   const { client, point } = await openWorker();
   try {
-    const selected = await client.edit(intent(1, 0, 'select', {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', {
       selection: { anchor: { ...point, offset: 0 }, focus: point },
     }));
     expect(selected.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
     const rect = selected.frame!.payload.selectionRects![0]!;
-    const collapsed = await client.edit(intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
+    const collapsed = await editWithFrame(client, intent(2, 0, 'navigate', { unit: 'character', direction: 'forward', extend: false }));
     expect(collapsed.frame!.payload.selectionRects).toEqual([]);
-    const keyboard = await client.edit(intent(3, 0, 'navigate', { unit: 'character', direction: 'backward', extend: true }));
+    const keyboard = await editWithFrame(client, intent(3, 0, 'navigate', { unit: 'character', direction: 'backward', extend: true }));
     expect(keyboard.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
-    const pointer = await client.edit(intent(4, 0, 'extendSelection', {
+    const pointer = await editWithFrame(client, intent(4, 0, 'extendSelection', {
       page: { pageId: '1', pageIndex: rect.pageIndex }, x: rect.x, y: rect.y + rect.height / 2,
       layoutRevision: keyboard.frame!.payload.layoutRevision, frameEpoch: keyboard.frame!.revision, clickCount: 1,
       modifiers: { shift: true, alt: false, ctrl: false, meta: false },
     }));
     expect(pointer.frame!.payload.selectionRects?.length).toBeGreaterThan(0);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker frames highlight one rect per cell of a selected table', async () => {
+  const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const borders = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+    .map((side) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`).join('');
+  const { client, engine } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    `<w:tbl><w:tblPr><w:tblW w:w="5760" w:type="dxa"/><w:tblBorders>${borders}</w:tblBorders></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="2880"/></w:tblGrid>` +
+    `<w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl>`,
+  });
+  try {
+    const story = engine.geometryReader.storyIds().find((candidate) => engine.paragraphs(candidate)[0]?.text === 'A');
+    if (!story) throw new Error('Cell story missing');
+    const paraId = engine.paragraphs(story)[0]!.paraId;
+    const at = { story, paraId, offset: 0 };
+    await client.edit(intent(1, 0, 'select', { selection: { anchor: at, focus: at } }));
+    const tabled = await editWithFrame(client, intent(2, 0, 'selectTableCells', { target: 'table' }));
+    expect(tabled.outcomes[0]?.status).toBe('noop');
+    const rects = tabled.frame!.payload.selectionRects!;
+    expect(rects.length).toBe(4);
+    for (const rect of rects) {
+      expect(rect.pageIndex).toBe(0);
+      expect(rect.x).toBeGreaterThanOrEqual(0);
+      expect(rect.y).toBeGreaterThanOrEqual(0);
+      expect(rect.width).toBeGreaterThan(0);
+      expect(rect.height).toBeGreaterThan(0);
+    }
+    expect(new Set(rects.map((rect) => `${rect.x},${rect.y}`)).size).toBe(4);
+    const first = rects[0]!;
+    const clicked = await editWithFrame(client, intent(3, 0, 'selectPoint', {
+      page: { pageId: '1', pageIndex: first.pageIndex }, x: first.x + first.width / 2, y: first.y + first.height / 2,
+      layoutRevision: tabled.frame!.payload.layoutRevision, frameEpoch: tabled.frame!.revision,
+      clickCount: 1, modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    }));
+    expect(clicked.frame!.payload.selectionRects).toEqual([]);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -219,6 +298,258 @@ test('render environment commands change hidden text and theme colors without ed
     expect(layouts).toHaveBeenCalledTimes(1);
     layouts.mockRestore();
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('render environment reservations lay out at their document version and never reach the document', async () => {
+  const { client, engine, initial, point } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>Gamma</w:t></w:r></w:p>',
+  });
+  try {
+    const at = (offset: number) => ({ paraId: point.paraId, offset });
+    const inline = (version: string, width: number) => ({
+      id: 'box', kind: 'inline', width, height: 30,
+      anchor: { kind: 'range', version, range: { story: 'body', start: at(6), end: at(6), view: 'accepted' } },
+    });
+    const environment = (reservations: unknown) => ({ themeColors: {}, showHiddenText: false, reservations } as never);
+    const nativeVersion = engine.proposalEngine.version();
+    const before = new Uint8Array((await client.save({ comments: [] })).bytes);
+    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    const boxes = () => frame.displayList.pages.flatMap((page) => page.reservations ?? []);
+    expect(boxes()).toEqual([]);
+
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment({
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [inline(nativeVersion, 40)] }],
+    })));
+    expect(set.outcomes[0]?.status).toBe('noop');
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(set.frame!.payload.frame));
+    expect(boxes()).toEqual([expect.objectContaining({ owner: 'plugin', id: 'box', width: 40, height: 30 })]);
+    expect(frameText(frame)).toBe('Alpha betaGamma');
+    expect(engine.proposalEngine.version()).toBe(nativeVersion);
+    expect(new Uint8Array((await client.save({ comments: [] })).bytes)).toEqual(before);
+
+    const stale = await client.edit(intent(2, 0, 'setRenderEnvironment', environment({
+      version: '5', sets: [{ owner: 'plugin', items: [inline('5', 80)] }],
+    })));
+    expect(stale.outcomes[0]?.status).toBe('noop');
+    if (stale.frame) frame = applyFrameDeltaOwned(frame, decodeFrameDelta(stale.frame.payload.frame));
+    expect(boxes()).toEqual([expect.objectContaining({ id: 'box', width: 40 })]);
+
+    const invalid = await client.edit(intent(3, 0, 'setRenderEnvironment', environment({
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [inline(nativeVersion, -1)] }],
+    })));
+    expect(invalid.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+    if (invalid.frame) frame = applyFrameDeltaOwned(frame, decodeFrameDelta(invalid.frame.payload.frame));
+
+    const locked = await client.edit(intent(4, 0, 'setReadOnly', { readOnly: true }));
+    expect(locked.outcomes[0]?.status).toBe('noop');
+    if (locked.frame) frame = applyFrameDeltaOwned(frame, decodeFrameDelta(locked.frame.payload.frame));
+    const readOnly = await client.edit(intent(5, 0, 'setRenderEnvironment', environment({
+      version: nativeVersion, sets: [{ owner: 'plugin', items: [{
+        id: 'gap', kind: 'block', side: 'after', height: 50,
+        anchor: { kind: 'paragraph', paragraph: {
+          kind: 'session', sessionId: engine.paragraphIdentities().sessionId, story: 'body', paraId: point.paraId,
+        } },
+      }] }],
+    })));
+    expect(readOnly.outcomes[0]?.status).toBe('noop');
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(readOnly.frame!.payload.frame));
+    expect(boxes()).toEqual([expect.objectContaining({ id: 'gap', height: 50 })]);
+
+    const cleared = await client.edit(intent(6, 0, 'setRenderEnvironment', environment({ version: nativeVersion, sets: [] })));
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(cleared.frame!.payload.frame));
+    expect(boxes()).toEqual([]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('stale render environment reservations retain listed owners and clear removed owners after an edit', async () => {
+  const { client, engine, initial, point } = await openWorker();
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
+  try {
+    const version = initial.frame!.payload.documentVersion!;
+    const inline = (id: string, width: number, hideAnchor = false) => ({
+      id, kind: 'inline', width, height: 20, hideAnchor,
+      anchor: { kind: 'range', version, range: {
+        story: 'body', view: 'accepted',
+        start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 2 },
+      } },
+    });
+    const environment = (sets: unknown[]) => ({
+      themeColors: {}, showHiddenText: false, reservations: { version, sets },
+    } as never);
+    const applied = () => JSON.parse(layouts.mock.calls.at(-1)![0]).renderEnv.reservations;
+    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment([
+      { owner: 'A', items: [inline('a', 35, true)] },
+      { owner: 'B', items: [inline('b', 20)] },
+    ])));
+    expect(set.outcomes[0]?.status).toBe('noop');
+    expect(Object.values(applied())).toHaveLength(2);
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(set.frame!.payload.frame));
+    expect(frameText(frame)).toBe('ed');
+    const retained = applied()[JSON.stringify(['A', 'a'])];
+
+    const edited = await client.edit(intent(2, 0, 'insertText', { text: '!' }));
+    expect(edited.outcomes[0]?.status).toBe('applied');
+    expect(edited.version).toBe(1);
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(edited.frame!.payload.frame));
+
+    const stale = await client.edit(intent(3, 1, 'setRenderEnvironment', environment([
+      { owner: 'A', items: [inline('a', 80)] },
+    ])));
+    expect(stale.outcomes[0]?.status).toBe('noop');
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(stale.frame!.payload.frame));
+    expect(applied()).toEqual({ [JSON.stringify(['A', 'a'])]: retained });
+    expect(frame.displayList.pages.flatMap((page) => page.reservations ?? []))
+      .toEqual([expect.objectContaining({ owner: 'A', id: 'a', width: 35 })]);
+    expect(frameText(frame)).toBe('ed!');
+
+    const cleared = await client.edit(intent(4, 1, 'setRenderEnvironment', environment([])));
+    expect(cleared.outcomes[0]?.status).toBe('noop');
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(cleared.frame!.payload.frame));
+    expect(applied()).toEqual({});
+    expect(frame.displayList.pages.flatMap((page) => page.reservations ?? [])).toEqual([]);
+    expect(frameText(frame)).toBe('Seed!');
+  } finally {
+    layouts.mockRestore();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('frames name the reservation set their layout includes, or none current for a stale set', async () => {
+  const { client, initial, point } = await openWorker();
+  try {
+    const environment = (version: string, key: string) => ({ themeColors: {}, showHiddenText: false, reservations: { version, key, sets: [{ owner: 'A', items: [{
+      id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version, range: {
+        story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } },
+    }] }] } } as never);
+    expect(initial.frame!.payload.reservations).toBeUndefined();
+    const opened = initial.frame!.payload.documentVersion!;
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', environment(opened, 'k1')));
+    expect(set.frame!.payload.reservations).toEqual({ version: opened, key: 'k1' });
+    const edited = await client.edit(intent(2, 0, 'insertText', { text: '!' }));
+    expect(edited.frame!.payload.reservations).toEqual({ version: opened, key: 'k1' });
+    const stale = await client.edit(intent(3, 1, 'setRenderEnvironment', environment(opened, 'k2')));
+    expect(stale.frame!.payload.reservations).toEqual({ version: opened, key: null });
+    const changed = edited.frame!.payload.documentVersion!;
+    const current = await client.edit(intent(4, 1, 'setRenderEnvironment', environment(changed, 'k3')));
+    expect(current.frame!.payload.reservations).toEqual({ version: changed, key: 'k3' });
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('a render environment command without reservations keeps the set its frames name', async () => {
+  const { client, initial, point } = await openWorker();
+  try {
+    const version = initial.frame!.payload.documentVersion!;
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false, reservations: {
+      version, key: 'k1', sets: [{ owner: 'A', items: [{ id: 'a', kind: 'inline', width: 30, height: 20, anchor: { kind: 'range', version,
+        range: { story: 'body', view: 'accepted', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 } } } }] }],
+    } } as never));
+    expect(set.frame!.payload.reservations).toEqual({ version, key: 'k1' });
+    const themed = await client.edit(intent(2, 0, 'setRenderEnvironment', { themeColors: { accent1: 'FF0000' }, showHiddenText: true } as never));
+    expect(themed.outcomes[0]?.status).toBe('noop');
+    expect(themed.frame!.payload.reservations).toEqual({ version, key: 'k1' });
+    const frame = [set, themed].reduce((retained, ack) => applyFrameDeltaOwned(retained, decodeFrameDelta(ack.frame!.payload.frame)),
+      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)));
+    expect(frame.displayList.pages.flatMap((page) => page.reservations ?? [])).toEqual([expect.objectContaining({ owner: 'A', id: 'a', width: 30 })]);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test.each([true, false])('render environment reservations survive a review preview relayout (regions=%s)', async (layoutWithRegions) => {
+  const { client, initial, point } = await openWorker({ layoutWithRegions });
+  try {
+    let frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame));
+    const boxes = () => frame.displayList.pages.flatMap((page) => page.reservations ?? []);
+    const version = initial.frame!.payload.documentVersion!;
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', {
+      themeColors: {}, showHiddenText: false, reservations: { version, sets: [{ owner: 'plugin', items: [{
+        id: 'box', kind: 'inline', width: 40, height: 20,
+        anchor: { kind: 'range', version, range: {
+          story: 'body', view: 'accepted',
+          start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 0 },
+        } },
+      }] }] },
+    } as never));
+    expect(set.outcomes[0]?.status).toBe('noop');
+    frame = applyFrameDeltaOwned(frame, decodeFrameDelta(set.frame!.payload.frame));
+    expect(boxes()).toEqual([expect.objectContaining({ owner: 'plugin', id: 'box', width: 40 })]);
+
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    const proposed = await client.edit(intent(2, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!, search: 'Seed', replaceWith: 'Bud',
+      suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    expect(proposed.outcomes[0]?.status).toBe('applied');
+    frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
+    expect(boxes()).toEqual([expect.objectContaining({ owner: 'plugin', id: 'box', width: 40 })]);
+
+    const review = await client.documentRead({ kind: 'reviewSnapshot' });
+    const previewed = await client.edit(intent(3, 1, 'setProposalStates', {
+      expectVersion: review.version, expectPreviewVersion: review.value!.proposals.previewVersion,
+      changes: [{ id: 'one', state: 'accepted' }],
+    }));
+    expect(previewed.outcomes[0]?.status).toBe('applied');
+    frame = applyFrameDeltaOwned(null, decodeFrameDelta((await client.requestFullFrame()).frame!.payload.frame));
+    expect(frameText(frame)).toBe('Bud');
+    expect(boxes()).toEqual([expect.objectContaining({ owner: 'plugin', id: 'box', width: 40 })]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('the worker and a main-thread session lay out one reservation set identically', async () => {
+  const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t>Alpha beta gamma</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>Next</w:t></w:r></w:p>';
+  const { client, engine, init, initial, point } = await openWorker({ bodyXml });
+  const host = await createYrsSession({ clientId: 8302 });
+  try {
+    host.seedFromDocx(syntheticDocument(false, false, false, bodyXml));
+    const items = (sessionId: string): DocxReservation[] => {
+      const paragraph = { kind: 'session' as const, sessionId, story: 'body', paraId: point.paraId };
+      return [
+        { id: 'chip', kind: 'inline', width: 40, height: 24, anchor: { kind: 'search', paragraph, text: 'beta' } },
+        { id: 'gap', kind: 'block', side: 'after', height: 50, anchor: { kind: 'paragraph', paragraph } },
+        { id: 'cut', kind: 'hide', anchor: { kind: 'search', paragraph, text: 'gamma' } },
+      ];
+    };
+    const set = await client.edit(intent(1, 0, 'setRenderEnvironment', {
+      themeColors: {}, showHiddenText: false,
+      reservations: { version: initial.frame!.payload.documentVersion!, sets: [{ owner: 'plugin', items: items(engine.paragraphIdentities().sessionId) }] },
+    } as never));
+    const worker = applyFrameDeltaOwned(
+      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame!.payload.frame)),
+      decodeFrameDelta(set.frame!.payload.frame)
+    );
+
+    const font = host.registerFont(new Uint8Array(readFileSync(resolve(
+      process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+    ))));
+    const reservations = resolveReservations(host, {
+      version: host.version(),
+      sets: [{ owner: 'plugin', items: items(host.paragraphIdentities().sessionId) }],
+    });
+    const request = JSON.parse(init.layoutInput);
+    request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+    request.renderEnv = { ...request.renderEnv, reservations };
+    host.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+    const main = applyFrameDeltaOwned(null, decodeFrameDelta(host.buildDisplayListFrame(JSON.stringify({
+      fontChains: { 'liberation sans|0|0': [font], 'calibri|0|0': [font] },
+    }), 0)));
+
+    const shape = (frame: RetainedFrame) => frame.displayList.pages.map((page) => ({
+      reservations: page.reservations,
+      text: page.primitives.flatMap((primitive) => primitive.kind === 'glyphRun' || primitive.kind === 'text'
+        ? [[primitive.text, Math.round(primitive.kind === 'text' ? primitive.x : primitive.glyphs[0]?.x ?? 0)]] : []),
+    }));
+    expect(shape(worker)[0]!.reservations?.map(({ id }) => id).sort()).toEqual(['chip', 'gap']);
+    expect(frameText(worker)).toBe('Alpha beta Next');
+    expect(shape(main)).toEqual(shape(worker));
+  } finally {
+    host.destroy();
+    client.destroy();
+  }
 }, TIMEOUT);
 
 function expectFrameRegions(frame: RetainedFrame, headerText: string, footerText: string): void {
@@ -703,7 +1034,7 @@ test('worker property queries and section mutations preserve versions undo layou
     const retained = applyFrameDeltaOwned(applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), decodeFrameDelta(changed.frame!.payload.frame));
     expect(retained.displayList.pages[0]!.width).toBeCloseTo(10000 / 15);
     const current = changed.frame!.payload.documentVersion!;
-    const refused = await new Promise<ResidentEngineWorkerResponse>(resolve => {
+    const refused = await new Promise<DocxEngineWorkerResponse>(resolve => {
       const handler = worker.onmessage;
       worker.onmessage = event => {
         if (event.data.id !== 1000000) { handler?.(event); return; }
@@ -712,7 +1043,7 @@ test('worker property queries and section mutations preserve versions undo layou
       };
       worker.postMessage({ id: 1000000, type: 'proposal', operation: { kind: 'removeComment', id: 'unissued' } });
     });
-    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a resident command session' });
+    expect(refused).toMatchObject({ ok: false, error: 'Legacy mutations are unavailable in a worker command session' });
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'section', section: 'final' } })).value)
       .toMatchObject({ properties: { marginLeft: 2880, pageWidth: 10000 } });
     const noop = await client.edit(intent(2, 1, 'setSectionProperties', {
@@ -727,6 +1058,52 @@ test('worker property queries and section mutations preserve versions undo layou
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'section', section: 'final' } })).value)
       .not.toHaveProperty('properties.marginLeft', 2880);
     expect((await client.edit(intent(4, 2, 'redo', {}))).outcomes[0]?.status).toBe('applied');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker hyperlink properties expand contiguous runs at both caret boundaries', async () => {
+  const { client, point } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:hyperlink w:anchor="target"><w:r><w:t>First</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r></w:hyperlink><w:r><w:t> plain</w:t></w:r></w:p>' });
+  try {
+    for (const offset of [0, 3, 5, 11]) {
+      const at = { ...point, offset };
+      const result = await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: at, focus: at } } });
+      expect(result.value).toMatchObject({ kind: 'hyperlink', hyperlink: { href: '#target' }, range: {
+        story: 'body', start: { paraId: point.paraId, offset: 0 }, end: { paraId: point.paraId, offset: 11 },
+      } });
+    }
+    const at = { ...point, offset: 14 };
+    expect((await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: at, focus: at } } })).value)
+      .toMatchObject({ hyperlink: null, range: { story: 'body', start: { paraId: point.paraId, offset: 14 }, end: { paraId: point.paraId, offset: 14 } } });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker setHyperlink inserts and replaces display text', async () => {
+  const { client, engine, initial, point } = await openWorker();
+  try {
+    const at = { ...point, offset: 0 };
+    const selection = { anchor: at, focus: at };
+    const version = initial.frame.payload.documentVersion!;
+    const refused = await client.edit(intent(1, 0, 'setHyperlink', { selection, hyperlink: { href: 'https://example.com/link' }, expectVersion: version }));
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-range' });
+    const inserted = await client.edit(intent(2, 0, 'setHyperlink', { selection, hyperlink: { href: 'https://example.com/link', tooltip: 'Tip' }, displayText: 'Linked', expectVersion: version }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]).toMatchObject({ text: 'Linked', attributes: { hyperlink: { href: 'https://example.com/link' } } });
+    for (const offset of [0, 3, 6]) {
+      const caret = { ...at, offset };
+      const read = await client.documentRead({ kind: 'properties', target: { kind: 'hyperlink', selection: { anchor: caret, focus: caret } } });
+      expect(read.value).toMatchObject({ kind: 'hyperlink', range: { story: 'body', start: { paraId: at.paraId, offset: 0 }, end: { paraId: at.paraId, offset: 6 } }, hyperlink: { href: 'https://example.com/link' } });
+    }
+    const changed = await client.edit(intent(3, 1, 'setHyperlink', { selection: { anchor: at, focus: { ...at, offset: 6 } }, hyperlink: { href: '#target' }, displayText: 'Changed', expectVersion: inserted.frame!.payload.documentVersion! }));
+    expect(changed.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]).toMatchObject({ text: 'Changed', attributes: { hyperlink: { href: '#target' } } });
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('w:anchor="target"');
+    expect(xml).toContain('Changed');
+    expect(xml).not.toContain('Linked');
+    const removed = await client.edit(intent(4, 2, 'setHyperlink', { selection: { anchor: at, focus: { ...at, offset: 7 } }, hyperlink: null, expectVersion: saved.version }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body')[0]?.attributes.hyperlink).toBeUndefined();
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1252,7 +1629,7 @@ test('toolbar_metadata_and_insertion_commands_are_versioned_worker_services', as
     const table = await client.edit(intent(3, 2, 'insertTable', { selection: { anchor: point, focus: point }, rows: 2, columns: 2 }));
     expect(table.outcomes[0]?.status).toBe('applied');
     expect(table.editState?.tableContext).toMatchObject({ rowCount: 2, columnCount: 2 });
-    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+    expect(table.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
     expect(engine.geometryReader.storyIds().length).toBe(5);
     expect(await client.documentReadAt({ kind: 'toolbarMetadata' }, metadata.version)).toEqual({ status: 'superseded' });
     const undone = await client.edit(intent(4, 3, 'undo', {}));
@@ -1280,7 +1657,7 @@ test('worker frames publish selection and distinct stable image handles', async 
     expect(images).toHaveLength(2);
     expect(new Set(images.map(object => object.handle)).size).toBe(2);
     expect(images.every(object => object.rects.length > 0)).toBe(true);
-    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { ...point, offset: 0 }, focus: { ...point, offset: 1 },
     } }));
     expect(selected.frame!.payload.geometry!.selection.length).toBeGreaterThan(0);
@@ -1290,6 +1667,241 @@ test('worker frames publish selection and distinct stable image handles', async 
     expect(typed.frame!.payload.geometry!.objects.filter(object => object.kind === 'image').map(object => object.handle))
       .toEqual(images.map(object => object.handle));
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('the public session has no embed move, so collaborating replicas cannot duplicate a picture', async () => {
+  const session = await createYrsSession({ clientId: 8321 });
+  try { expect('moveEmbed' in session).toBe(false); } finally { session.destroy(); }
+});
+
+for (const destination of ['forward', 'backward', 'self'] as const) {
+  test(`worker moveEmbed same paragraph ${destination} preserves the picture`, async () => {
+    const { client, engine, initial } = await openWorker({ prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!;
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+      const box = destination === 'self' ? { x: image.rects[0]!.x, y: image.rects[0]!.y, w: image.rects[0]!.width, h: image.rects[0]!.height }
+        : displayPrimitiveRect(glyphs[destination === 'backward' ? 0 : glyphs.length - 1]!);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + (destination === 'forward' ? box.w : 0), y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: image.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(moved.outcomes[0]?.status).toBe(destination === 'self' ? 'noop' : 'applied');
+      expect(moved.version).toBe(destination === 'self' ? 0 : 1);
+      if (destination === 'self') expect(engine.canUndo()).toBe(false);
+      else {
+        expect(moved.selection!.anchor.offset).toBe(destination === 'backward' ? 0 : 4);
+        expect(moved.selection!.focus.offset).toBe(moved.selection!.anchor.offset + 1);
+      }
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const refusal of ['unsupported-suggesting', 'read-only', 'stale-version', 'unsupported-object', 'stale-object', 'stale-epoch', 'locked-target'] as const) {
+  test(`worker moveEmbed refuses ${refusal === 'locked-target' ? 'tracked deletion with locked-target' : refusal} without mutation`, async () => {
+    const { client, engine, initial } = await openWorker({ prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+        id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20,
+        ...(refusal === 'unsupported-object' ? { displayMode: 'float', wrapType: 'square', position: { horizontal: { relativeTo: 'page', posOffset: 0 }, vertical: { relativeTo: 'page', posOffset: 0 } } } : {}),
+      } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const image = initial.frame.payload.geometry!.objects.find(o => o.kind === 'image');
+      const glyph = frame.displayList.pages[0]!.primitives.find(p => p.kind === 'glyphRun' || p.kind === 'text')!;
+      const box = displayPrimitiveRect(glyph);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      if (refusal === 'read-only') await client.edit(intent(1, 0, 'setReadOnly', { readOnly: true }));
+      if (refusal === 'locked-target') engine.applyRawOps('body', [{ op: 'format', index: 1, len: 1, attrs: { del: { id: 'pending-removal', author: 'Ada', date: '2026-01-01' } } }]);
+      const before = engine.encodeStateVector();
+      const request = intent(2, 0, 'moveEmbed', { handle: refusal === 'stale-object' ? 'missing' : image?.handle ?? 'missing',
+        expectVersion: refusal === 'stale-version' ? 'stale' : engine.proposalEngine.version(), drop,
+        ...(refusal === 'unsupported-suggesting' ? { suggesting: { name: 'Ada', date: '2026-01-01' } } : {}) } as never);
+      if (refusal === 'stale-epoch') request.basis.epoch = 0;
+      const result = await client.edit(request);
+      expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: refusal });
+      expect(result.version).toBe(0);
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const stale of ['layoutRevision', 'frameEpoch', 'pageId', 'pageIndex', 'collaboration'] as const) {
+  test(`worker moveEmbed ${stale === 'frameEpoch' ? 'accepts a drop from an earlier frame of the same layout' : `refuses stale drop ${stale}`}`, async () => {
+    const { client, engine, initial } = await openWorker({ collaboration: stale === 'collaboration', objects: true });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const glyph = frame.displayList.pages[0]!.primitives.find(p => p.kind === 'glyphRun' || p.kind === 'text')!;
+      const box = displayPrimitiveRect(glyph);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      if (stale === 'layoutRevision') drop.layoutRevision++;
+      if (stale === 'frameEpoch') drop.frameEpoch++;
+      if (stale === 'pageId') drop.page.pageId = 'obsolete';
+      if (stale === 'pageIndex') drop.page.pageIndex++;
+      const before = engine.encodeStateVector();
+      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
+        expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      if (stale === 'frameEpoch') {
+        // A selection-only frame does not move text, so a drop captured on the previous frame still applies.
+        expect(result.outcomes[0]!.status).not.toBe('refused');
+        return;
+      }
+      expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: stale === 'collaboration' ? 'unsupported-command' : 'stale-anchor' });
+      expect(result.version).toBe(0);
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const tracked of ['source', 'destination'] as const) {
+  test(`worker moveEmbed refuses a tracked row at the ${tracked}`, async () => {
+    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
+      const story = tracked === 'source' ? 'body:t0:r0c0' : 'body';
+      engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const story = tracked === 'source' ? 'body' : 'body:t0:r0c0';
+      const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)!.rects[0]!;
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const before = engine.encodeStateVector();
+      const result = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle,
+        expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(result.outcomes[0]).toMatchObject({ status: 'refused', reason: 'tracked-revision-conflict' });
+      expect(result.version).toBe(0);
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+for (const tracked of [false, true]) {
+  test(`worker moveEmbed moves across paragraphs in one undo step with a tracked insertion: ${tracked}`, async () => {
+    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>AB</w:t></w:r></w:p><w:p><w:r><w:t>CD</w:t></w:r></w:p>', prepare(engine) {
+      engine.applyRawOps('body', [{ op: 'insertEmbed', index: tracked ? 0 : 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20, nested: { locks: [true, false] } }, attrs: { bold: true, ...(tracked ? { ins: { id: 'pending-image', author: 'Ada', date: '2026-01-01' } } : {}) } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const before = engine.storySegments('body');
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+      const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(moved.outcomes[0]).toMatchObject({ status: 'applied' });
+      expect(moved.selection!.focus.offset - moved.selection!.anchor.offset).toBe(1);
+      expect(moved.selection!.anchor.paraId).toBe(engine.geometryReader.paragraphSpans('body')[1]!.paraId);
+      const after = engine.storySegments('body');
+      expect(after.filter(s => s.kind === 'embed')).toEqual(before.filter(s => s.kind === 'embed'));
+      const undone = await client.edit(intent(2, 1, 'undo', {}));
+      expect(undone.outcomes[0]?.status).toBe('applied');
+      expect(engine.storySegments('body')).toEqual(before);
+      const redone = await client.edit(intent(3, 2, 'redo', {}));
+      expect(redone.outcomes[0]?.status).toBe('applied');
+      expect(engine.storySegments('body')).toEqual(after);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('worker moveEmbed moves from body text into a table cell in the body part', async () => {
+  const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>', prepare(engine) {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === 'body:t0:r0c0')?.rects[0];
+    if (!rect) throw new Error('Cell text rectangle unavailable');
+    const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(moved.selection!.anchor.story).toBe('body:t0:r0c0');
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(0);
+    expect(engine.storySegments('body:t0:r0c0').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(1);
+    await client.edit(intent(2, 1, 'undo', {}));
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(1);
+    expect(engine.storySegments('body:t0:r0c0').filter(s => s.kind === 'embed' && s.embedKind === 'image')).toHaveLength(0);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+for (const locked of ['source', 'destination'] as const) {
+  test(`worker moveEmbed refuses a locked content control at the ${locked}`, async () => {
+    const { client, engine, initial } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sdt><w:sdtPr><w:id w:val="7"/><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Locked</w:t></w:r></w:p></w:sdtContent></w:sdt>', prepare(engine) {
+      const story = locked === 'source' ? engine.geometryReader.storyIds().find(id => id.startsWith('body:'))! : 'body';
+      engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: { id: 'inline', src: 'data:image/png;base64,', width: 40, height: 20 } }]);
+      return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+    } });
+    try {
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+      const story = locked === 'source' ? 'body' : engine.geometryReader.storyIds().find(id => id.startsWith('body:'));
+      const rect = initial.frame.payload.geometry!.objects.find(o => o.kind === 'text' && o.story === story)?.rects[0];
+      if (!rect) throw new Error('Control text rectangle unavailable');
+      const box = { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+      const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w / 2, y: box.y + box.h / 2,
+        frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+        modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+      const before = engine.encodeStateVector();
+      const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+      expect(moved.outcomes[0]).toMatchObject({ status: 'refused', reason: 'locked-target' });
+      expect(engine.encodeStateVector()).toEqual(before);
+    } finally { client.destroy(); }
+  }, TIMEOUT);
+}
+
+test('worker moveEmbed save and reopen retain one drawing and its relationship', async () => {
+  const drawing = '<w:r><w:rPr><w:b/></w:rPr><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:extent cx="381000" cy="190500"/><wp:docPr id="9" name="Picture"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const bodyXml = `<w:p><w:r><w:t>A</w:t></w:r>${drawing}</w:p><w:p><w:r><w:t>Destination</w:t></w:r></w:p>`;
+  const { client, engine, initial, init } = await openWorker({ imageMedia: true, bodyXml });
+  const baseline = await openWorker({ imageMedia: true, bodyXml });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8302));
+  try {
+    const original = engine.storySegments('body').filter(s => s.kind === 'embed');
+    expect(original.every(s => s.kind === 'embed' && s.payload.docPr === undefined)).toBe(true);
+    const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
+    const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
+    const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
+    const drop = { page: { pageId: String(frame.pages[0]!.pageId), pageIndex: 0 }, x: box.x + box.w, y: box.y + box.h / 2,
+      frameEpoch: frame.frameEpoch, layoutRevision: initial.frame.payload.layoutRevision, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false } };
+    const moved = await client.edit(intent(1, 0, 'moveEmbed', { handle: initial.frame.payload.geometry!.objects.find(o => o.kind === 'image')!.handle, expectVersion: initial.frame.payload.documentVersion!, drop } as never));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(engine.storySegments('body').filter(s => s.kind === 'embed')).toEqual(original);
+    const saved = await client.save({ comments: [] });
+    const parts = unzipContainer(new Uint8Array(saved.bytes));
+    const xml = new TextDecoder().decode(parts['word/document.xml']!);
+    expect(xml.match(/<w:drawing[ >]/g)).toHaveLength(1);
+    expect(xml.match(/r:embed="rIdImage"/g)).toHaveLength(1);
+    const ids = [...xml.matchAll(/<wp:docPr\b[^>]*\bid="([^"]*)"/g)].map(match => match[1]);
+    expect(ids).toHaveLength(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    await baseline.client.edit(intent(1, 0, 'insertText', { text: 'X' }));
+    const edited = unzipContainer(new Uint8Array((await baseline.client.save({ comments: [] })).bytes));
+    const editedXml = new TextDecoder().decode(edited['word/document.xml']!);
+    expect(xml.match(/<w:drawing[ >][\s\S]*?<\/w:drawing>/g)).toEqual(editedXml.match(/<w:drawing[ >][\s\S]*?<\/w:drawing>/g));
+    expect(xml).toContain('noChangeAspect="1"');
+    const rels = new TextDecoder().decode(parts['word/_rels/document.xml.rels']!);
+    expect(rels.match(/Id="rIdImage"/g)).toHaveLength(1);
+    expect(Object.keys(parts).filter(key => key === 'word/media/picture.png')).toHaveLength(1);
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit({ ...init, selection: null });
+    expect(restored.frame.payload.geometry!.objects.filter(o => o.kind === 'image')).toHaveLength(1);
+  } finally { baseline.client.destroy(); reopened.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('worker orders versioned image resize and move with undo and stale-handle refusal', async () => {
@@ -1322,6 +1934,168 @@ test('worker orders versioned image resize and move with undo and stale-handle r
     }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-object' });
     expect(engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker moves a floating image without changing its wrap and flags which images float', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'floating-image', wrapType: 'behind', displayMode: 'float', cssFloat: 'none',
+        position: { behindDoc: true, horizontal: { relativeTo: 'margin', posOffset: 0 }, vertical: { relativeTo: 'margin', posOffset: 0 } } } },
+      { op: 'insertEmbed', index: 2, kind: 'image', payload: { ...image, id: 'inline-image' } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images(initial).map(object => object.floating)).toEqual([true, false]);
+    expect(images(initial).map(object => object.behindText)).toEqual([true, undefined]);
+    const payload = (id: string) => engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.payload.id === id)!;
+    const original = structuredClone(payload('floating-image'));
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: images(initial)[0]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toMatchObject({ payload: { wrapType: 'behind', displayMode: 'float', position: {
+      behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
+    const undone = await client.edit(intent(2, 1, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    expect(payload('floating-image')).toEqual(original);
+    const floated = await client.edit(intent(3, 2, 'moveObject', {
+      handle: images(undone)[1]!.handle, hOffsetEmu: 0, vOffsetEmu: 0, expectVersion: undone.frame!.payload.documentVersion!,
+    }));
+    expect(floated.outcomes[0]?.status).toBe('applied');
+    expect(payload('inline-image')).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float' } });
+    expect(images(floated).map(object => object.floating)).toEqual([true, true]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker preserves picture aspect locks through resize, move, save and reopen', async () => {
+  const picture = (container: 'inline' | 'anchor', id: number, lock: 'frame' | 'picture' | undefined) =>
+    `<w:p><w:r><w:drawing><wp:${container} xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    (container === 'anchor' ? '<wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' : '') +
+    '<wp:extent cx="381000" cy="190500"/>' + (container === 'anchor' ? '<wp:wrapNone/>' : '') +
+    `<wp:docPr id="${id}"/>` + (lock === 'frame' ? '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' : '') +
+    '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr>' +
+    (lock === 'picture' ? '<a:picLocks noChangeAspect="1"/>' : '') +
+    '</pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic>' +
+    `</wp:${container}></w:drawing></w:r></w:p>`;
+  const { client, engine, initial, init } = await openWorker({ bodyXml:
+    picture('inline', 1, 'frame') + picture('anchor', 2, 'picture') + picture('inline', 3, undefined) + picture('anchor', 4, undefined),
+  });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8302));
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    const expectLocks = (response: { frame?: typeof initial.frame }) => {
+      expect(images(response)).toHaveLength(4);
+      expect(images(response).map(object => object.noChangeAspect)).toEqual([true, true, undefined, undefined]);
+      for (const object of images(response).slice(2)) expect(object).not.toHaveProperty('noChangeAspect');
+    };
+    expectLocks(initial);
+    const { readResidentFrameGeometry: referenceGeometry } = await import('./residentObjectGeometry.reference');
+    const reference = await referenceGeometry(engine,
+      applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame)), init.selection ?? null, init.layoutRevision);
+    expect(reference.objects.filter(object => object.kind === 'image').map(object => object.noChangeAspect))
+      .toEqual(images(initial).map(object => object.noChangeAspect));
+    expect(engine.storySegments('body').flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image'
+      ? [segment.payload.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    expect((engine.yrsBlocksForStory('body') as LayoutBlock[])
+      .flatMap(block => block.kind === 'paragraph' ? block.runs : [])
+      .flatMap(run => run.kind === 'image' ? [run.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: images(initial)[0]!.handle, widthEmu: 762000, heightEmu: 381000, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expectLocks(resized);
+    const moved = await client.edit(intent(2, 1, 'moveObject', {
+      handle: images(resized)[1]!.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: resized.frame!.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    expectLocks(moved);
+    // Edits rewrite the unlocked pictures' paragraphs too; saving them must not invent a lock.
+    const resizedUnlocked = await client.edit(intent(3, 2, 'resizeObject', {
+      handle: images(moved)[2]!.handle, widthEmu: 762000, heightEmu: 95250, expectVersion: moved.frame!.payload.documentVersion!,
+    }));
+    expect(resizedUnlocked.outcomes[0]?.status).toBe('applied');
+    const movedUnlocked = await client.edit(intent(4, 3, 'moveObject', {
+      handle: images(resizedUnlocked)[3]!.handle, hOffsetEmu: 190500, vOffsetEmu: 285750, expectVersion: resizedUnlocked.frame!.payload.documentVersion!,
+    }));
+    expect(movedUnlocked.outcomes[0]?.status).toBe('applied');
+    expectLocks(movedUnlocked);
+    const saved = await client.save({ comments: [] });
+    const { parseDocx } = await import('../docx/parser');
+    const { documentToYrs } = await import('./documentToYrs');
+    const parsed = await parseDocx(saved.bytes, { preloadFonts: false });
+    const projected = await createYrsSession();
+    try {
+      documentToYrs(projected, parsed);
+      expect(projected.storySegments('body').flatMap(segment => segment.kind === 'embed' && segment.embedKind === 'image'
+        ? [segment.payload.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+      expect(projectionModule.yrsToDocument(projected, parsed).package.document.content
+        .flatMap(block => block.type === 'paragraph' ? block.content : [])
+        .flatMap(content => content.type === 'run' ? content.content : [])
+        .flatMap(content => content.type === 'drawing' ? [content.image.noChangeAspect] : [])).toEqual([true, true, undefined, undefined]);
+    } finally { projected.destroy(); }
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit(init);
+    expectLocks(restored);
+    expect(images(restored)[0]!.rects[0]).toMatchObject({ width: 80, height: 40 });
+  } finally { reopened.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('worker selects a picture by its handle, refuses a stale version, and flags the selected embed', async () => {
+  const drawing = (id: number) => `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<wp:extent cx="381000" cy="190500"/><wp:docPr id="${id}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPicPr/></pic:nvPicPr>` +
+    '<pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  // The second picture is alone in its paragraph, whose selection rects also carry an empty-line marker.
+  const { client, engine, initial } = await openWorker({ bodyXml: `<w:p><w:r><w:t>ab</w:t></w:r>${drawing(1)}</w:p><w:p>${drawing(2)}</w:p>` });
+  try {
+    const images = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images(initial).map(object => object.selected)).toEqual([undefined, undefined]);
+    const [first, second] = images(initial).map(object => object.handle);
+    const staleVersion = initial.frame.payload.documentVersion!;
+    const paraId = engine.geometryReader.paragraphSpans('body')[0]!.paraId;
+    const start = { story: 'body', paraId, offset: 0 };
+    await editWithFrame(client, intent(1, 0, 'select', { selection: { anchor: start, focus: start } }));
+    const typed = await client.edit(intent(2, 0, 'insertText', { text: 'x' }));
+    expect(typed.outcomes[0]?.status).toBe('applied');
+    // A press on the picture as drawn before the edit: its version is stale, so nothing is selected and no text can be.
+    const stale = await client.edit(intent(3, 1, 'select', { object: { handle: first!, expectVersion: staleVersion } }));
+    expect(stale.outcomes[0]).toMatchObject({ status: 'refused', reason: 'stale-version' });
+    // The handle follows the picture to offset 3 after the insert before it.
+    const selected = await editWithFrame(client, intent(4, 1, 'select', { object: { handle: first!, expectVersion: typed.frame!.payload.documentVersion! } }));
+    expect(images(selected).map(object => object.selected)).toEqual([true, undefined]);
+    const alone = await editWithFrame(client, intent(5, 1, 'select', { object: { handle: second!, expectVersion: typed.frame!.payload.documentVersion! } }));
+    expect(images(alone).map(object => object.selected)).toEqual([undefined, true]);
+    const removed = await client.edit(intent(6, 1, 'deleteForward', {}));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    // Delete removes the selected picture only; the text before the first picture is intact.
+    expect(engine.storySegments('body').filter(segment => segment.kind === 'embed')).toHaveLength(1);
+    expect(engine.storySegments('body').filter(segment => segment.kind === 'text').map(segment => segment.text).join('')).toBe('xab');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker moves a Top and Bottom picture by floating it, since layout keeps that wrap in the text flow', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20 };
+  const { client, engine, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'top-bottom-image', wrapType: 'topAndBottom', displayMode: 'block',
+        position: { behindDoc: false, horizontal: { relativeTo: 'column', posOffset: 0 }, vertical: { relativeTo: 'paragraph', posOffset: 0 } } } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const image = initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const moved = await client.edit(intent(1, 0, 'moveObject', {
+      handle: image.handle, hOffsetEmu: 95250, vOffsetEmu: 190500, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(moved.outcomes[0]?.status).toBe('applied');
+    const segment = engine.storySegments('body').find(part => part.kind === 'embed' && part.payload.id === 'top-bottom-image')!;
+    expect(segment).toMatchObject({ payload: { wrapType: 'square', displayMode: 'float', position: {
+      horizontal: { relativeTo: 'page', posOffset: 95250 }, vertical: { relativeTo: 'page', posOffset: 190500 },
+    } } });
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1403,7 +2177,7 @@ test('worker safety resizes the issued cell rather than the table story suffix o
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, selection: { anchor: point, focus: point } }));
     const cell = inserted.frame!.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === inserted.selection!.focus.story)!;
-    expect(cell.story).toBe('body:t1:r0c0');
+    expect(cell.story).toMatch(/^body:t1:r0c0~\d+$/);
     const resized = await client.edit(intent(2, 1, 'resizeObject', { handle: cell.handle, widthTwips: 1234, expectVersion: inserted.frame!.payload.documentVersion! }));
     expect(resized.outcomes[0]?.status).toBe('applied');
     expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [1234]);
@@ -1457,7 +2231,7 @@ test('worker safety never labels an old frame with a queued proposal preview ver
     const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
     const decided = client.edit(intent(2, 1, 'setProposalStates', { expectVersion: before.version, expectPreviewVersion: before.previewVersion, changes: [{ id: 'one', state: 'accepted' }] }));
     const read = client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + 1 });
-    const selected = client.edit({ ...intent(3, 2, 'select', { selection: { anchor: point, focus: point } }), afterSeq: 2 });
+    const selected = editWithFrame(client, { ...intent(3, 2, 'select', { selection: { anchor: point, focus: point } }), afterSeq: 2 });
     const [decision, snapshot, selection] = await Promise.all([decided, read, selected]);
     expect(decision.outcomes[0]?.status).toBe('applied');
     expect(snapshot.value === null || snapshot.value.frameEpoch > before.frameEpoch).toBe(true);
@@ -1471,7 +2245,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   const { client, engine } = await openWorker();
   try {
     const inserted = await client.edit(intent(1, 0, 'insertTable', { rows: 1, columns: 1, suggesting: { name: 'Ada', date: '2026-01-01' } }));
-    expect(inserted.selection!.focus.story).toBe('body:t0:r0c0');
+    expect(inserted.selection!.focus.story).toMatch(/^body:t0:r0c0~\d+$/);
     const revisionId = engine.geometryReader.listRevisions()[0]!.revisionId;
     const rejected = await client.edit(intent(2, 1, 'rejectRevision', { revisionId, expectVersion: engine.proposalEngine.version() }));
     expect(rejected.outcomes[0]?.status).toBe('applied');
@@ -1480,7 +2254,7 @@ test('worker safety repairs selection after rejecting a suggested table before o
   } finally { client.destroy(); }
 }, TIMEOUT);
 
-test('worker safety refuses unknown withdrawal targets before settling any proposal', async () => {
+test('worker withdrawal ignores missing targets and retries after settlement as a no-op', async () => {
   const { client, engine } = await openWorker();
   try {
     const identities = await client.documentRead({ kind: 'paragraphIdentities' });
@@ -1489,13 +2263,14 @@ test('worker safety refuses unknown withdrawal targets before settling any propo
       text: '!', suggest: { author: 'Ada', date: '2026-01-01' },
     }] }));
     const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
-    const refused = await client.edit(intent(2, 1, 'withdrawProposals', { ids: ['one', 'missing'], expectVersion: before.version }));
-    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-proposal' });
-    expect(engine.proposalEngine.version()).toBe(before.version);
+    const withdrawn = await client.edit(intent(2, 1, 'withdrawProposals', { ids: ['one', 'missing'], expectVersion: before.version }));
+    expect(withdrawn.outcomes[0]).toMatchObject({ status: 'applied' });
     const after = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
-    expect(after.proposals).toEqual(before.proposals);
-    expect(after.revisions).toEqual(before.revisions);
-    expect((await client.edit(intent(3, 1, 'withdrawProposals', { ids: ['one'], expectVersion: before.version }))).outcomes[0]?.status).toBe('applied');
+    expect(after.proposals.proposals).toEqual([]);
+    expect(after.revisions).toEqual([]);
+    const settled = engine.encodeState();
+    expect((await client.edit(intent(3, 2, 'withdrawProposals', { ids: ['one'], expectVersion: after.version }))).outcomes[0]?.status).toBe('noop');
+    expect(engine.encodeState()).toEqual(settled);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1516,6 +2291,88 @@ test('round two page release retains a matching review preview frame', async () 
     expect(review).not.toBeNull();
     expect(review!.previewVersion).toBe(before.previewVersion);
     expect(review!.frameEpoch).toBeGreaterThan(before.frameEpoch);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a proposal decision computes its review once for all the reads of its frame', async () => {
+  const { client, engine } = await openWorker();
+  try {
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const before = (await client.documentRead({ kind: 'reviewSnapshot' })).value!;
+    const computed = spyOn(engine, 'commentProjection');
+    try {
+      for (const [seq, state] of [[2, 'rejected'], [3, 'proposed']] as const) {
+        computed.mockClear();
+        const decided = await client.edit(intent(seq, seq - 1, 'setProposalStates', {
+          expectVersion: before.version, expectPreviewVersion: before.previewVersion + seq - 2, changes: [{ id: 'one', state }],
+        }));
+        expect(decided.outcomes[0]?.status).toBe('applied');
+        const reads = await Promise.all([
+          client.documentRead({ kind: 'reviewSnapshot' }),
+          client.documentRead({ kind: 'reviewSnapshot', expectPreviewVersion: before.previewVersion + seq - 1 }),
+          client.documentRead({ kind: 'reviewSnapshot' }),
+        ]);
+        expect(reads.map(read => read.value?.proposals.proposals[0]?.state)).toEqual([state, state, state]);
+        expect(computed.mock.calls.length).toBeLessThanOrEqual(new Set(reads.map(read => read.value!.frameEpoch)).size);
+      }
+    } finally { computed.mockRestore(); }
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('repeated review reads follow proposal decisions, comments, edits and undo', async () => {
+  const { client, engine } = await openWorker({ bodyXml: syntheticParagraphs(2) });
+  try {
+    const review = async () => {
+      const [first, second] = await Promise.all([
+        client.documentRead({ kind: 'reviewSnapshot' }), client.documentRead({ kind: 'reviewSnapshot' }),
+      ]);
+      expect(second.value).toEqual(first.value);
+      expect(first.value!.version).toBe(engine.proposalEngine.version());
+      expect(first.value!.comments).toEqual(engine.listComments());
+      expect(first.value!.revisions).toEqual(engine.geometryReader.listRevisions());
+      return first.value!;
+    };
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    await client.edit(intent(1, 0, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!,
+      search: 'Seed', replaceWith: 'Bud', suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    const proposed = await review();
+    expect(proposed.proposals.proposals[0]?.state).toBe('proposed');
+    await client.edit(intent(2, 1, 'setProposalStates', {
+      expectVersion: proposed.version, expectPreviewVersion: proposed.previewVersion, changes: [{ id: 'one', state: 'rejected' }],
+    }));
+    const rejected = await review();
+    expect(rejected.version).toBe(proposed.version);
+    expect(rejected.previewVersion).toBe(proposed.previewVersion + 1);
+    expect(rejected.proposals.proposals[0]?.state).toBe('rejected');
+    const paraId = engine.geometryReader.paragraphSpans('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 4 } };
+    await client.edit(intent(3, 2, 'addComment', { ranges: [range], author: 'Ada', date: '2026-01-01', body: 'Note', expectVersion: rejected.version }));
+    const commented = await review();
+    expect(commented.comments).toHaveLength(1);
+    expect(commented.uiComments).toHaveLength(1);
+    const id = commented.comments[0]!.id;
+    expect(commented.commentGeometry[id]!.length).toBeGreaterThan(0);
+    await client.edit(intent(4, 3, 'updateComment', { id, patch: { done: true }, expectVersion: commented.version }));
+    const resolved = await review();
+    expect(resolved.comments[0]).toMatchObject({ id, done: true });
+    expect(resolved.uiComments?.[0]?.done).toBe(true);
+    const at = { story: 'body', paraId, offset: 0 };
+    await client.edit(intent(5, 4, 'insertText', {
+      text: 'New ', selection: { anchor: at, focus: at }, suggesting: { name: 'Ada', date: '2026-01-01' },
+    }));
+    const edited = await review();
+    expect(edited.version).not.toBe(resolved.version);
+    expect(edited.revisions.length).toBeGreaterThan(resolved.revisions.length);
+    expect((await client.edit(intent(6, 5, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    const undone = await review();
+    expect(undone.version).not.toBe(edited.version);
+    expect(undone.revisions.length).toBeLessThan(edited.revisions.length);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -1616,7 +2473,7 @@ for (const offset of [0, 4]) {
       expect(inserted.outcomes[0]?.status).toBe('applied');
       expect(inserted.version).toBe(1);
       expect(inserted.selection!.focus.offset).toBe(1);
-      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(offset ? ['Seed', ''] : ['Seed']);
+      expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(offset ? ['Seed', '', ''] : ['Seed']);
       const { parseDocx } = await import('../docx/parser');
       const reopened = await parseDocx((await client.save({ comments: [] })).bytes);
       expect(JSON.stringify(reopened.package.document)).toContain('"breakType":"page"');
@@ -1626,6 +2483,32 @@ for (const offset of [0, 4]) {
     } finally { client.destroy(); }
   }, TIMEOUT);
 }
+
+test('a page break at the end of the document keeps two pages after saving and reopening', async () => {
+  const text = 'Seed';
+  const { client, engine, init } = await openWorker({
+    bodyXml: `<w:p w14:paraId="00000001">${textRun(text)}</w:p>`,
+  });
+  const reopened = await createResidentEngineSession();
+  try {
+    const at = { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: text.length };
+    const inserted = await client.edit(intent(1, 0, 'insertPageBreak', { selection: { anchor: at, focus: at } }));
+    expect(inserted.outcomes[0]?.status).toBe('applied');
+    expect(JSON.parse(engine.retainedLayoutJson()).layout.pages).toHaveLength(2);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const paragraphs = savedBody(bytes).match(/<w:p\b[^>]*(?:\/>|>[\s\S]*?<\/w:p>)/g)!;
+    expect(paragraphs.at(-2)).toContain('<w:br w:type="page"/>');
+    expect(paragraphs.at(-1)).not.toMatch(/<w:(?:r|hyperlink|sdt)\b/);
+    reopened.openDocx(new Uint8Array(bytes));
+    const fontBytes = init.fonts[0]!;
+    if (!(fontBytes instanceof Uint8Array)) throw new Error('Font bytes unavailable');
+    const font = reopened.registerFont(fontBytes);
+    const request = JSON.parse(init.layoutInput);
+    request.measurement.fontChains = { 'liberation sans|0|0': [font] };
+    reopened.layoutDocumentWithRegionsRetained(JSON.stringify(request));
+    expect(JSON.parse(reopened.retainedLayoutJson()).layout.pages).toHaveLength(2);
+  } finally { reopened.destroy(); client.destroy(); }
+}, TIMEOUT);
 
 test('round two break commands refuse a cell before mutation', async () => {
   const { client, engine } = await openWorker({ bodyXml: OUTER_TABLE, prepare(engine) {
@@ -1686,6 +2569,182 @@ test('round two break sections preserve current and existing closing properties'
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
     expect(engine.sectionProperties().sections).toHaveLength(2);
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break lowers on the worker as a section split', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8311 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed', 'Tail']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'continuous', marginLeft: 1800 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 1800 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in the final section copies its properties and keeps its start', async () => {
+  const bodyXml = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:type w:val="evenPage"/><w:pgMar w:left="2000"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr, headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8312 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Ta', 'il']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[0]!.properties).toMatchObject({ sectionStart: 'evenPage', marginLeft: 2000 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2000 });
+    const { parseDocx } = await import('../docx/parser');
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.headers?.size).toBe(1);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a resident section break undoes in one step', async () => {
+  const { client, engine } = await openWorker({ sectPr: '<w:sectPr><w:pgMar w:left="1800"/></w:sectPr>' });
+  try {
+    const paraId = engine.paragraphs('body')[0]!.paraId;
+    engine.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    expect(engine.undo()).toBe(true);
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed']);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break keeps the closing section margins on both halves', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:pPr><w:sectPr><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8314 });
+  try {
+    engine.setSectionMargins(engine.sectionProperties().sections[0]!.section, { marginLeft: 2400 });
+    remote.loadState(engine.encodeState());
+    const paraId = remote.paragraphs('body')[0]!.paraId;
+    remote.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { other: { sectPr: { marginLeft: 1800 } } });
+    remote.insertSectionBreak({ story: 'body', paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(3);
+    expect(sections[0]!.properties).toMatchObject({ marginLeft: 2400 });
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage', marginLeft: 2400 });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break refuses table cells and state-only final sections', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8315 });
+  try {
+    remote.loadState(engine.encodeState());
+    const cell = remote.paragraphs('body:t0:r0c0');
+    expect(cell.map(paragraph => paragraph.text)).toEqual(['Cell']);
+    expect(() => remote.insertSectionBreak({ story: 'body:t0:r0c0', paraId: cell[0]!.paraId, offset: 2 }, 'nextPage')).toThrow('body paragraphs');
+    expect(remote.paragraphs('body:t0:r0c0')).toHaveLength(1);
+    expect(remote.paragraphs('body').map(paragraph => paragraph.text)).toEqual(engine.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { remote.destroy(); client.destroy(); }
+  const origin = await createYrsSession({ clientId: 8316 });
+  const stateOnly = await createYrsSession({ clientId: 8317 });
+  try {
+    origin.openDocx(syntheticDocument(false, false, false, bodyXml), true);
+    stateOnly.loadState(origin.encodeState());
+    const tail = stateOnly.paragraphs('body').at(-1)!;
+    expect(() => stateOnly.insertSectionBreak({ story: 'body', paraId: tail.paraId, offset: 2 }, 'nextPage')).toThrow('section properties');
+    expect(stateOnly.paragraphs('body').map(paragraph => paragraph.text)).toEqual(origin.paragraphs('body').map(paragraph => paragraph.text));
+  } finally { stateOnly.destroy(); origin.destroy(); }
+}, TIMEOUT);
+
+test('a legacy section break in a final section with an empty sectPr lowers on the worker', async () => {
+  const { client, engine } = await openWorker();
+  const remote = await createYrsSession({ clientId: 8318 });
+  try {
+    remote.openDocx(syntheticDocument(), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections).toHaveLength(2);
+    expect(sections[1]!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break gives the closed section the headers it inherits', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr: '<w:sectPr/>', headersFooters: true });
+  const remote = await createYrsSession({ clientId: 8319 });
+  try {
+    remote.openDocx(syntheticDocument(true, false, false, bodyXml, '<w:sectPr/>'), false);
+    remote.loadState(engine.encodeState());
+    const sectPr = (text: string) => {
+      const properties = remote.paragraphs('body').find(paragraph => paragraph.text === text)!.properties;
+      return (properties.sectPr ?? properties._sectionProperties) as SectionProperties;
+    };
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[1]!.paraId, offset: 2 }, 'nextPage');
+    expect(sectPr('Se').headerReferences).toEqual(sectPr('First').headerReferences);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.sectionProperties().sections).toHaveLength(3);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy final-section break after an earlier split keeps each section on the worker', async () => {
+  const bodyXml = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const sectPr = '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>';
+  const { client, engine } = await openWorker({ bodyXml, sectPr });
+  const remote = await createYrsSession({ clientId: 8320 });
+  try {
+    remote.openDocx(syntheticDocument(false, false, false, bodyXml, sectPr), false);
+    remote.loadState(engine.encodeState());
+    remote.insertSectionBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 }, 'continuous');
+    const seed = remote.paragraphs('body').find(paragraph => paragraph.text === 'Seed')!;
+    remote.insertSectionBreak({ story: 'body', paraId: seed.paraId, offset: 2 }, 'nextPage');
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Fi', 'rst', 'Se', 'ed']);
+    const sections = engine.sectionProperties().sections;
+    expect(sections.map(section => section.properties.pageWidth)).toEqual([12240, 12240, 11906, 11906]);
+    expect(sections.at(-1)!.properties).toMatchObject({ sectionStart: 'nextPage' });
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('page breaks land past leading blocks on both session kinds', async () => {
+  const bodyXml = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml });
+  const remote = await createYrsSession({ clientId: 8316 });
+  try {
+    remote.loadState(engine.encodeState());
+    const spans = engine.geometryReader.paragraphSpans('body').length;
+    const tail = remote.paragraphs('body').findIndex(paragraph => paragraph.text === 'Tail');
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[tail]!.paraId, offset: 0 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans);
+    expect(engine.paragraphSegments('body', [tail])[0]!.slice(0, 2).map(segment => segment.kind === 'embed' ? segment.embedKind : segment.kind)).toEqual(['table', 'pageBreak']);
+    const seed = engine.paragraphs('body').findIndex(paragraph => paragraph.text === 'Seed');
+    const target = engine.insertPageBreak({ story: 'body', paraId: engine.paragraphs('body')[seed]!.paraId, offset: 2 });
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(spans + 1);
+    expect(target).toMatchObject({ paraId: engine.paragraphs('body')[seed + 1]!.paraId, offset: 0 });
+    expect(engine.paragraphSegments('body', [seed + 1])[0]![0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect((await client.save({ comments: [] })).bytes.byteLength).toBeGreaterThan(0);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a legacy page break inside a paragraph splits it before the break', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8313 });
+  try {
+    remote.loadState(engine.encodeState());
+    remote.insertPageBreak({ story: 'body', paraId: remote.paragraphs('body')[0]!.paraId, offset: 2 });
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    expect(engine.geometryReader.paragraphSpans('body')).toHaveLength(3);
+    const segments = engine.paragraphSegments('body', [1])[0]!;
+    expect(segments[0]).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
+    expect(segments.flatMap(segment => segment.kind === 'text' ? [segment.text] : []).join('')).toBe('ed');
+  } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
 test('round two break sections remain editable through section property commands', async () => {
@@ -2359,7 +3418,7 @@ test('resident geometry, object rects and selection after inline controls match 
     const located = <T extends { pageIndex: number }>(rects: T[]) => rects.map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
     const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort();
 
-    const geometry = engine.residentGeometry('body', [[0, 10_000]]);
+    const geometry = engine.storyGeometry('body', [[0, 10_000]]);
     expect(sorted(geometry.paragraphs.map(({ paraId, from, to }) => ({ paraId, from, to }))))
       .toEqual(sorted(layout.map(block => ({ paraId: block.paraId, from: block.pmStart! + 1, to: block.pmEnd! - 1 }))));
     const storyOf = (paraId: string | undefined) => geometry.paragraphs.find(paragraph => paragraph.paraId === paraId)!.story;
@@ -2382,7 +3441,7 @@ test('resident geometry, object rects and selection after inline controls match 
       .toEqual(sorted(images.map(position => located([queries.imageByPos(position, 'body')!.rect]))));
 
     const end = layout.find(block => block.paraId === '00000004')!.runs!.find(run => run.text === 'End')!;
-    const selected = await client.edit(intent(1, 0, 'select', { selection: {
+    const selected = await editWithFrame(client, intent(1, 0, 'select', { selection: {
       anchor: { story: 'body', paraId: '00000004', offset: 6 }, focus: { story: 'body', paraId: '00000004', offset: 9 },
     } }));
     const expected = located(queries.rangeRects(end.pmStart!, end.pmEnd!));
@@ -2486,6 +3545,38 @@ test('worker saves table cell shading and reopens it from the bytes', async () =
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('worker_table_formatting_saves_and_reopens', async () => {
+  const { client, engine } = await openWorker({ bodyXml: TABLE_BODY });
+  try {
+    const cellA = cellPoint(engine, 'A');
+    await client.edit(intent(1, 0, 'select', { selection: cellA.selection }));
+    const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+    const bordered = await client.edit(intent(2, 0, 'setTableBorders', {
+      borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line },
+    }));
+    expect(bordered.outcomes[0]?.status).toBe('applied');
+    const styled = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(styled.outcomes[0]?.status).toBe('applied');
+    const duplicate = await client.edit(intent(3, 1, 'setTableProperties', {
+      op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+    }));
+    expect(duplicate.outcomes).toEqual(styled.outcomes);
+    const saved = await client.save({ comments: [] });
+    const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.bytes))['word/document.xml']!);
+    expect(xml).toContain('w:tcBorders');
+    expect(xml).toContain('<w:tblW w:w="2500" w:type="pct"/>');
+    expect(xml).toContain('<w:jc w:val="center"/>');
+    expect(xml).not.toContain('w:tblStyle');
+    const { parseDocx } = await import('../docx');
+    const reopened = await parseDocx(saved.bytes, { preloadFonts: false });
+    const tables = reopened.package.document.content.filter((block): block is Extract<typeof block, { type: 'table' }> => block.type === 'table');
+    expect(tables).toHaveLength(1);
+    expect(JSON.stringify(tables[0]!.formatting)).toContain('2500');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker refuses table structure commands in header stories', async () => {
   const { client, engine } = await openWorker({ headersFooters: true });
   try {
@@ -2499,5 +3590,266 @@ test('worker refuses table structure commands in header stories', async () => {
     const refused = await client.edit(intent(2, 1, 'insertTableRow', { side: 'below' }));
     expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-selection' });
     expect(refused.version).toBe(1);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const TRACKED_PARAGRAPH = '<w:p w14:paraId="00000003"><w:r><w:t>Old </w:t></w:r>' +
+  '<w:ins w:id="9" w:author="A" w:date="2026-10-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins></w:p>';
+
+test('review target reads resolve a comment by its public id and a revision by its id', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body + TRACKED_PARAGRAPH, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [comment] = engine.listComments();
+    const [revision] = engine.geometryReader.listRevisions();
+    if (!comment || !revision) throw new Error('Source review items unavailable');
+    const publicId = engine.commentProjection()!.ids[comment.id]!;
+    const first = engine.paragraphs('body')[0]!.paraId;
+    const read = async (target: DocxReviewTarget) => (await client.documentRead({ kind: 'reviewTarget', target })).value;
+    expect(await read({ kind: 'comment', id: publicId })).toEqual({ id: comment.id,
+      ranges: [{ story: 'body', start: { paraId: first, offset: 0 }, end: { paraId: first, offset: 4 } }] });
+    expect(await read({ kind: 'revision', revisionId: revision.revisionId })).toEqual({ id: revision.revisionId,
+      ranges: [{ story: revision.story, start: revision.range.start, end: revision.range.end }] });
+    expect(await read({ kind: 'comment', id: publicId + 40 })).toBeNull();
+    expect(await read({ kind: 'revision', revisionId: 'missing' })).toBeNull();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a reply comment links its parent in one undo step and comment commands report every comment', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const reply = (seq: number, version: number, parent: string) => client.edit(intent(seq, version, 'addComment', {
+      ranges, author: 'B', date: '2026-01-02', body: 'Reply', parentId: parent, expectVersion: engine.proposalEngine.version() }));
+    const unknown = await reply(1, 0, 'missing');
+    expect(unknown.outcomes[0]).toMatchObject({ status: 'refused', reason: 'unknown-comment' });
+    const replied = await reply(2, unknown.version, parent.id);
+    expect(replied.outcomes[0]?.status).toBe('applied');
+    const added = engine.listComments().find(comment => comment.id !== parent.id)!;
+    expect(added.parentId).toBe(parent.id);
+    const replyId = replied.editState!.comment!.id;
+    expect(replied.editState!.comment!.comments.find(comment => comment.id === replyId)).toMatchObject({ parentId, author: 'B' });
+    const done = await client.edit(intent(3, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.editState!.commentChange).toMatchObject({ seq: 3, comments: expect.arrayContaining([expect.objectContaining({ id: parentId, done: true })]) });
+    expect(done.editState!.comment).toBeUndefined();
+    const undone = await client.edit(intent(4, done.version, 'undo', {}));
+    expect(undone.outcomes[0]?.status).toBe('applied');
+    const undoneReply = await client.edit(intent(5, undone.version, 'undo', {}));
+    expect(undoneReply.outcomes[0]?.status).toBe('applied');
+    expect(engine.listComments().map(comment => comment.id)).toEqual([parent.id]);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker saves a reply added through comment commands with its parent and the parent done state', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [parent] = engine.listComments();
+    if (!parent) throw new Error('Source comment unavailable');
+    const parentId = engine.commentProjection()!.ids[parent.id]!;
+    const { ranges } = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: parentId } })).value!;
+    const replied = await client.edit(intent(1, 0, 'addComment', { ranges, author: 'B', date: '2026-01-02T00:00:00Z', body: 'Reply',
+      parentId: parent.id, expectVersion: engine.proposalEngine.version() }));
+    const done = await client.edit(intent(2, replied.version, 'updateComment', { id: parent.id, patch: { done: true }, expectVersion: engine.proposalEngine.version() }));
+    expect(done.outcomes[0]?.status).toBe('applied');
+    const saved = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments ?? [];
+    expect(saved.find(comment => comment.id === parentId)).toMatchObject({ done: true });
+    expect(saved.find(comment => comment.id === replied.editState!.comment!.id)).toMatchObject({ parentId, author: 'B' });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+
+test('reopening an imported resolved comment updates the projection and saved extended metadata', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended,
+    prepare: engine => {
+      expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+      return { story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 };
+    } });
+  try {
+    const result = await client.edit(intent(1, 0, 'updateComment', { id: '0', patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(result.outcomes[0]?.status).toBe('applied');
+    expect(result.editState?.commentChange?.comments.find(comment => comment.id === 0)?.done).toBe(false);
+    const bytes = (await client.save({ comments: [] })).bytes;
+    const comments = (await parseDocx(bytes)).package.document.comments!;
+    expect(comments.find(comment => comment.id === 0)?.done ?? false).toBe(false);
+    const parts = unzipContainer(new Uint8Array(bytes));
+    expect(new TextDecoder().decode(parts['word/commentsExtended.xml'])).toMatch(/w15:paraId="0C000001"[^>]*w15:done="0"/);
+    expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect(engine.commentProjection()?.comments.find(comment => comment.id === 0)?.done).toBe(true);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 0)?.done).toBe(true);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('an imported reply without range markers inherits its ancestor anchor and supports reply resolve and removal', async () => {
+  const { parseDocx } = await import('../docx/parser');
+  const { client, engine } = await openWorker({ bodyXml: RESOLVED_THREAD.bodies[0], commentsXml: RESOLVED_THREAD.comments, commentsExtendedXml: RESOLVED_THREAD.extended });
+  try {
+    const parent = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 0 } })).value!;
+    const reply = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value;
+    expect(reply).toEqual({ id: '1', ranges: parent.ranges });
+    const added = await client.edit(intent(1, 0, 'addComment', { ranges: reply!.ranges, parentId: reply!.id, body: 'Nested reply', author: 'C', date: '2026-01-03', expectVersion: engine.proposalEngine.version() }));
+    expect(added.outcomes[0]?.status).toBe('applied');
+    expect(added.editState?.comment?.comments.find(comment => comment.id === added.editState?.comment?.id)?.parentId).toBe(1);
+    const reopened = await client.edit(intent(2, 1, 'updateComment', { id: reply!.id, patch: { done: false }, expectVersion: engine.proposalEngine.version() }));
+    expect(reopened.outcomes[0]?.status).toBe('applied');
+    expect(reopened.editState?.commentChange?.comments.find(comment => comment.id === 1)?.done).toBe(false);
+    const removed = await client.edit(intent(3, 2, 'removeComment', { id: reply!.id, expectVersion: engine.proposalEngine.version() }));
+    expect(removed.outcomes[0]?.status).toBe('applied');
+    expect(removed.editState?.commentChange?.comments.some(comment => comment.id === 1)).toBe(false);
+    expect((await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.some(comment => comment.id === 1)).toBe(false);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: 1 } })).value).toEqual(reply);
+    const restored = (await parseDocx((await client.save({ comments: [] })).bytes)).package.document.comments?.find(comment => comment.id === 1);
+    expect(restored).toMatchObject({ parentId: 0 });
+    expect(restored?.done ?? false).toBe(false);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+const note = (id: number, text: string) => ({ id, author: 'Host', date: '2026-02-01T00:00:00Z',
+  content: [{ type: 'paragraph' as const, formatting: {}, content: [{ type: 'run' as const, formatting: {}, content: [{ type: 'text' as const, text }] }] }] });
+
+test('a host comment list wins over the worker comment projection on save and keeps native anchors', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const [source] = engine.listComments();
+    const id = engine.commentProjection()!.ids[source!.id]!;
+    const part = async (request: Parameters<typeof client.save>[0], name: string) =>
+      new TextDecoder().decode(unzipContainer(new Uint8Array((await client.save(request)).bytes))[name] ?? new Uint8Array());
+    const hosted = { comments: [note(id, 'Host note'), note(id + 40, 'Host only')], commentsSource: 'host' as const };
+    const comments = await part(hosted, 'word/comments.xml');
+    expect(comments).toContain('Host note');
+    expect(comments).toContain('Host only');
+    expect(comments).not.toContain('Parent');
+    const anchored = comments.match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host note/)?.[1];
+    expect(await part(hosted, 'word/document.xml')).toContain(`<w:commentRangeStart w:id="${anchored}"`);
+    expect(await part({ comments: [], commentsSource: 'host' }, 'word/comments.xml')).not.toContain('Parent');
+    expect(await part({ comments: [note(id, 'Ignored')] }, 'word/comments.xml')).toContain('Parent');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a host comment list saves on the comment ids the worker handed out after a removal', async () => {
+  const { client, engine } = await openWorker({ bodyXml: SOURCE_COMMENT.body, commentsXml: SOURCE_COMMENT.comments });
+  try {
+    const paraId = engine.paragraphs('body')[1]!.paraId;
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } };
+    const ids: number[] = [];
+    for (const [index, body] of ['First', 'Second'].entries()) {
+      const added = await client.edit(intent(index + 1, index, 'addComment', { ranges: [range], author: 'A', date: '2026-01-01', body,
+        expectVersion: engine.proposalEngine.version() }));
+      ids.push(added.editState!.comment!.id);
+    }
+    const first = (await client.documentRead({ kind: 'reviewTarget', target: { kind: 'comment', id: ids[0]! } })).value!;
+    expect((await client.edit(intent(3, 2, 'removeComment', { id: first.id, expectVersion: engine.proposalEngine.version() }))).outcomes[0]?.status).toBe('applied');
+    const parts = unzipContainer(new Uint8Array((await client.save({ comments: [note(0, 'Host parent'), note(ids[1]!, 'Host second')], commentsSource: 'host' })).bytes));
+    const part = (name: string) => new TextDecoder().decode(parts[name] ?? new Uint8Array());
+    const saved = part('word/comments.xml').match(/<w:comment [^>]*w:id="(\d+)"(?:(?!<\/w:comment>)[\s\S])*Host second/)?.[1];
+    expect(saved).toBeDefined();
+    expect(part('word/document.xml')).toContain(`<w:commentRangeStart w:id="${saved}"`);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a comment selection range follows its issued sticky positions across later edits', async () => {
+  const { client, engine, point } = await openWorker();
+  try {
+    const locs = [{ ...point, offset: 1 }, { ...point, offset: 3 }];
+    const [anchor, focus] = (await client.documentRead({ kind: 'stickyAnchors', locs, version: engine.proposalEngine.version() })).value;
+    const atStart = { ...point, offset: 0 };
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '--', selection: { anchor: atStart, focus: atStart } }))).outcomes[0]?.status).toBe('applied');
+    const read = await client.documentRead({ kind: 'commentSelectionRange', selection: {
+      anchor: { ...locs[0]!, sticky: anchor!.encoded }, focus: { ...locs[1]!, sticky: focus!.encoded } } });
+    expect(read.value).toEqual({ story: point.story, start: { paraId: point.paraId, offset: 3 }, end: { paraId: point.paraId, offset: 5 } });
+    expect(read.version).toBe(engine.proposalEngine.version());
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker picture geometry carries renderer paint order across document order and relativeHeight', async () => {
+  const image = { src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', cssFloat: 'none' };
+  const { client, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [
+      { op: 'insertEmbed', index: 1, kind: 'image', payload: { ...image, id: 'front', wrapType: 'inFront',
+        position: { relativeHeight: 1, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+      { op: 'insertEmbed', index: 2, kind: 'image', payload: { ...image, id: 'high-behind', wrapType: 'behind',
+        position: { behindDoc: true, relativeHeight: 9, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+      { op: 'insertEmbed', index: 3, kind: 'image', payload: { ...image, id: 'low-behind', wrapType: 'behind',
+        position: { behindDoc: true, relativeHeight: 2, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } } } },
+    ]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images).toHaveLength(3);
+    expect(images.map(object => object.paintOrder)).toEqual([2, 1, 0]);
+    expect(images.map(object => object.rects[0])).toEqual(Array(3).fill(images[0]!.rects[0]));
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker picture geometry marks cell anchors as nested', async () => {
+  const { client, initial } = await openWorker({ bodyXml: OUTER_TABLE, prepare: engine => {
+    const story = 'body:t0:r0c0';
+    engine.applyRawOps(story, [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      src: 'data:image/png;base64,', width: 40, height: 20, displayMode: 'float', wrapType: 'inFront',
+      position: { horizontal: { relativeTo: 'page', posOffset: 0 }, vertical: { relativeTo: 'page', posOffset: 0 } },
+    } }]);
+    return { story, paraId: engine.geometryReader.paragraphSpans(story)[0]!.paraId, offset: 0 };
+  } });
+  try {
+    const images = initial.frame.payload.geometry!.objects.filter(object => object.kind === 'image');
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({ floating: true, nested: true });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker commits floating resize position and dimensions in one undo step', async () => {
+  const { client, engine, initial, init } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      id: 'resize-position', src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', width: 40, height: 20, displayMode: 'float', wrapType: 'behind',
+      position: { behindDoc: true, horizontal: { relativeTo: 'page', posOffset: 952500 }, vertical: { relativeTo: 'page', posOffset: 476250 } },
+    } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  const reopened = new ResidentEngineWorkerClient(startWorker(8399));
+  try {
+    const image = (response: { frame?: typeof initial.frame }) => response.frame!.payload.geometry!.objects.find(object => object.kind === 'image')!;
+    const original = image(initial).rects[0]!;
+    expect(original).toMatchObject({ x: 100, y: 50, width: 40, height: 20 });
+    let seq = 0;
+    for (const position of [{ hOffsetEmu: 0 }, { vOffsetEmu: 0 }, { hOffsetEmu: 0, vOffsetEmu: Infinity }]) {
+      const refused = await client.edit(intent(++seq, 0, 'resizeObject', {
+        handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+        widthEmu: 285750, heightEmu: 142875, ...position,
+      }));
+      expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+      expect(engine.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'image'))
+        .toMatchObject({ payload: { width: 40, height: 20 } });
+    }
+    const resized = await client.edit(intent(++seq, 0, 'resizeObject', {
+      handle: image(initial).handle, expectVersion: initial.frame.payload.documentVersion!,
+      widthEmu: 285750, heightEmu: 142875, hOffsetEmu: 1047750, vOffsetEmu: 523875,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(image(resized).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
+    const saved = await client.save({ comments: [] });
+    await reopened.open(new Uint8Array(saved.bytes), { generation: 'd1-command-worker' });
+    const restored = await reopened.commandInit(init);
+    expect(image(restored).rects[0]).toMatchObject({ x: 110, y: 55, width: 30, height: 15 });
+    const undone = await client.edit(intent(++seq, 1, 'undo', {}));
+    expect(image(undone).rects[0]).toEqual(original);
+    const redone = await client.edit(intent(++seq, 2, 'redo', {}));
+    expect(image(redone).rects[0]).toEqual(image(resized).rects[0]);
+  } finally { reopened.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('worker geometry exposes picture rotation for resize admission', async () => {
+  const { client, initial } = await openWorker({ prepare: engine => {
+    engine.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'image', payload: {
+      id: 'rotated', src: 'data:image/png;base64,', width: 100, height: 50, transform: 'rotate(90deg)',
+    } }]);
+    return { story: 'body', paraId: engine.geometryReader.paragraphSpans('body')[0]!.paraId, offset: 0 };
+  } });
+  try {
+    expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
   } finally { client.destroy(); }
 }, TIMEOUT);

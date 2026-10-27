@@ -38,8 +38,9 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::ops::bookmarks::{Carry, Change};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{Chunk, ChunkKind, inherit_block_revisions, snapshot};
+use crate::ops::{After, Chunk, ChunkKind, inherit_block_revisions, remove_units, snapshot};
 use crate::queries::revision_parts;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId, StoryRange,
@@ -273,6 +274,8 @@ fn resolve_story(
     resolved: &mut Vec<String>,
 ) -> u32 {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
+    let carry = Carry::capture(story, txn, span_start, span_end, None);
+    let mut changes = Vec::new();
     let chunks = snapshot(story, txn);
     let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
         ChunkKind::Pilcrow(_) => Some(chunk.start),
@@ -331,7 +334,11 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    story.remove_range(txn, chunk.start, 1);
+                    remove_units(txn, story, chunk.start, 1, &chunks, After::Changed);
+                    changes.push(Change::Remove {
+                        from: chunk.start,
+                        to: chunk.start + 1,
+                    });
                     removed += 1;
                     continue;
                 }
@@ -370,7 +377,18 @@ fn resolve_story(
                         ResolveMode::Accept => record(resolved, del.as_ref()),
                         ResolveMode::Reject => record(resolved, ins.as_ref()),
                     }
-                    story.remove_range(txn, overlap_start, overlap_end - overlap_start);
+                    remove_units(
+                        txn,
+                        story,
+                        overlap_start,
+                        overlap_end - overlap_start,
+                        &chunks,
+                        After::Changed,
+                    );
+                    changes.push(Change::Remove {
+                        from: overlap_start,
+                        to: overlap_end,
+                    });
                     removed += overlap_end - overlap_start;
                     if overlap_start > chunk.start || overlap_end < chunk.end() {
                         next_block_revisions = None;
@@ -415,6 +433,9 @@ fn resolve_story(
                 }
             }
         }
+    }
+    if let Some(carry) = carry {
+        carry.apply(txn, &changes, &[]);
     }
     removed
 }
@@ -493,8 +514,9 @@ impl EditingDoc {
                     let Some(stories) = txn.get_map(crate::STORIES) else {
                         return Err(OpError::UnknownChange(revision_id.clone()));
                     };
-                    let mut ids: Vec<String> =
-                        stories.keys(&txn).map(|key| key.to_string()).collect();
+                    let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+                        .map(|(id, _)| id.to_owned())
+                        .collect();
                     ids.sort();
                     ids.into_iter()
                         .filter_map(|story_id| match stories.get(&txn, &story_id) {

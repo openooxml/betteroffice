@@ -109,6 +109,23 @@ pub fn balance_terminal_continuous_text_columns(
     Ok(())
 }
 
+pub(crate) fn balance_terminal_continuous_text_columns_with_marks(
+    measured: &[MeasuredBlock],
+    paginator: &mut Paginator,
+    start: usize,
+    end: usize,
+    section_marks: &[bool],
+) -> Result<(), LayoutError> {
+    column_balancing::balance_terminal_continuous_text_columns_with_marks(
+        measured,
+        paginator,
+        start,
+        end,
+        section_marks,
+    );
+    Ok(())
+}
+
 /// Length of the leading run of `w:tblHeader` rows, the band that repeats on
 /// continuation fragments. Header rows after a non-header row do not count.
 fn tally_header_rows(block: &TableBlock) -> usize {
@@ -562,6 +579,16 @@ fn layout_table_with_position(
                     row_capacity,
                 )
             };
+            if cell_slice.as_ref().is_some_and(|slice| slice.gap_only)
+                && (used > 0.0
+                    || paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top)
+            {
+                if row_end > start_row {
+                    break;
+                }
+                paginator.advance_for_overflow();
+                continue 'rows;
+            }
             // A row moves whole rather than leave a cell with content no line on
             // the page, where a whole column lets every cell start.
             let cell_slice = match cell_slice {

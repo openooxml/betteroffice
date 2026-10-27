@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { createPresenter } from '../../../../../../shared/office-session/commands/presenter';
-import type { DocxCommandFrame } from '@betteroffice/docx/peerless';
+import type { DocxCommandFrame } from '@betteroffice/docx/worker';
 import { createEchoPainter, type PeerlessEchoIntent } from './echoPainter';
 import { createFramePresentation } from './framePresentation';
 import { createPeerlessViewStore, type PeerlessFrameGeometry } from './viewStore';

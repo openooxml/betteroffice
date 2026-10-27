@@ -1,9 +1,9 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange } from '@betteroffice/xlsx';
+import type { WorkbookHandle, WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
-  WorkbookHandle, WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
-  WorkbookSession, XlsxRangeTarget,
-} from '@betteroffice/xlsx';
+  WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
+} from '@betteroffice/xlsx/worker';
 import type { WorkbookFormatTokenResult } from '../../../xlsx/src/session/commandProtocol';
 
 import {
@@ -108,7 +108,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
     const sheetId = session?.editState.sheets?.find((sheet) => sheet.index === view.sheet)?.id;
     if (!sheetId || !view.selection) return undefined;
     const range = normalizeRange(view.selection);
-    return { sheetId, activeCell: { ...view.selection.focus }, range: { kind: 'rowCol',
+    return { sheetId, activeCell: { ...view.selection.anchor }, range: { kind: 'rowCol',
       start: { row: range.top, col: range.left }, end: { row: range.bottom, col: range.right } } };
   };
 

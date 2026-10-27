@@ -7,7 +7,7 @@ use yrs::{ReadTxn, StateVector, Transact, Update};
 
 use crate::{
     DeckSession, DeckSnapshot, EditError, EditResult, decode_update_v1, doc_with_client_id,
-    hydrate_doc,
+    hydrate_doc, session_doc,
 };
 
 /// Origin of adoptions that stay out of local undo history.
@@ -37,7 +37,7 @@ fn pending<T: ReadTxn>(txn: &T) -> bool {
 impl DeckSession {
     /// A private replica of the committed state that allocates ids where this session would.
     pub(crate) fn stage(&self) -> EditResult<DeckSession> {
-        let doc = doc_with_client_id(self.client_id);
+        let doc = session_doc(self.client_id);
         hydrate_doc(&doc, &self.state_update_v1())?;
         DeckSession::assemble(
             doc,

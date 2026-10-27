@@ -13,17 +13,17 @@ export class WorkerExportVersions {
 
   adapt(result: WorkerPageExportResult, peer: string, worker: string): WorkerPageExportResult {
     if (result.version !== worker) {
-      throw new ResidentWorkerFailureError('Resident engine worker returned an unexpected export version');
+      throw new ResidentWorkerFailureError('Document worker returned an unexpected export version');
     }
     if (!result.ok) return { ...result, version: peer };
     const layout = result.content.layout;
     if (layout.documentVersion !== worker || !layout.layoutVersion.startsWith(`${worker}:`)) {
-      throw new ResidentWorkerFailureError('Resident engine worker returned an unexpected layout version');
+      throw new ResidentWorkerFailureError('Document worker returned an unexpected layout version');
     }
     const outward = `${peer}:${this.generation}` + layout.layoutVersion.slice(worker.length);
     const previous = this.layouts.get(outward);
     if (previous !== undefined && previous !== layout.layoutVersion) {
-      throw new ResidentWorkerFailureError('Resident engine worker reused an export layout token');
+      throw new ResidentWorkerFailureError('Document worker reused an export layout token');
     }
     this.layouts.set(outward, layout.layoutVersion);
     return {

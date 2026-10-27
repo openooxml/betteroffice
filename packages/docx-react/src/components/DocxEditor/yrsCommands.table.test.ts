@@ -7,6 +7,7 @@ import {
   currentYrsSplitCellConfig,
   currentYrsTableContext,
   currentYrsTableProperties,
+  yrsCellLocFromStory,
   yrsCellStory,
   yrsTableSelectionStories,
 } from './yrsCommands';
@@ -83,4 +84,15 @@ test('table state reads its own table, not the whole story', async () => {
     story,
   ]);
   expect(wholeStoryReads).toBe(0);
+});
+
+test('cell locations read the cells an edit created', () => {
+  expect(yrsCellLocFromStory('body:t0:r1c2~51')).toEqual({ story: 'body', tableIndex: 0, row: 1, column: 2 });
+  expect(yrsCellLocFromStory('body:t0:r0c0~51:t1:r1c2~52')).toEqual({
+    story: 'body:t0:r0c0~51',
+    tableIndex: 1,
+    row: 1,
+    column: 2,
+  });
+  expect(yrsCellLocFromStory('body:t0:r1c2')).toEqual({ story: 'body', tableIndex: 0, row: 1, column: 2 });
 });

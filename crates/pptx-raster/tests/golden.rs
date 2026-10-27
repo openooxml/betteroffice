@@ -181,6 +181,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
             runs: Vec::new(),
         }],
         lines: vec![PositionedTextLine {
+            column_offset: 0.0,
             x,
             y,
             width,
@@ -322,6 +323,7 @@ fn golden_image() {
     check(
         "image",
         &slide(vec![Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 3,
@@ -355,6 +357,7 @@ fn golden_picture_shadow() {
     check(
         "picture-shadow",
         &slide(vec![Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 5,
@@ -389,6 +392,7 @@ fn golden_picture_fill() {
     check(
         "picture-fill",
         &slide(vec![Primitive::Image {
+            destination: None,
             tile: None,
             geometry_fallback: false,
             object_id: 4,

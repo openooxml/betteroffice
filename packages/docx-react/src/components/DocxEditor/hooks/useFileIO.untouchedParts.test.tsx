@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -236,7 +237,7 @@ async function mount(bytes: ArrayBuffer, options: { experimentalWorkerOpen?: boo
   const errors: Error[] = [];
   const onError = (error: Error) => errors.push(error);
   const view = render(
-    <DocxEditor ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false}
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false}
       {...engineProps} />
   );
   await until(
@@ -262,7 +263,7 @@ async function mount(bytes: ArrayBuffer, options: { experimentalWorkerOpen?: boo
     },
     setComments(comments: Comment[]) {
       view.rerender(
-        <DocxEditor
+        <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
           ref={ref}
           {...engineProps}
           documentBuffer={bytes}
@@ -1309,7 +1310,7 @@ describe('DocxEditor saves (worker engine)', () => {
     const errors: Error[] = [];
     const onError = (error: Error) => errors.push(error);
     const view = render(
-      <DocxEditor ref={ref} experimentalWorkerOpen documentBuffer={bytes} onError={onError} downloadOnSave={false} />
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen documentBuffer={bytes} onError={onError} downloadOnSave={false} />
     );
     await until(() => ref.current?.commands.getState('save').enabled === true);
     if (unzipContainer(new Uint8Array(bytes))['word/comments.xml']) {

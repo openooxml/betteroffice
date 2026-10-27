@@ -213,3 +213,142 @@ fn a_line_wider_than_its_shape_remains_clickable() {
         })
     );
 }
+
+fn unwrapped_slide(configure: impl FnOnce(&mut pptx_parse::Shape)) -> RenderedSlide {
+    let mut package = pptx_parse::parse_pptx(DECK).unwrap();
+    package.slides[0].shapes.retain(|shape| shape.id() == 2);
+    let pptx_parse::ShapeNode::Shape(shape) = &mut package.slides[0].shapes[0] else {
+        unreachable!()
+    };
+    shape.base.transform.width = 381_000;
+    shape.base.transform.height = 1_905_000;
+    shape.text.as_mut().unwrap().wrap = Some(false);
+    configure(shape);
+    let session = DeckSession::from_package(package, 295).unwrap();
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    renderer
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+}
+
+#[test]
+fn unwrapped_text_overflows_horizontally_without_vertical_overflow() {
+    let rendered = unwrapped_slide(|_| {});
+    let Primitive::TextBox {
+        x,
+        w,
+        h,
+        lines,
+        overflow,
+        ..
+    } = text(&rendered, 2)
+    else {
+        unreachable!()
+    };
+    assert_eq!(*w, 40.0);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].height < *h);
+    assert!(lines[0].x + lines[0].width > x + w);
+    assert!(*overflow);
+}
+
+#[test]
+fn unwrapped_text_respects_explicit_clipping() {
+    for horizontal in [false, true] {
+        let rendered = unwrapped_slide(|shape| {
+            let body = shape.text.as_mut().unwrap();
+            if horizontal {
+                body.horizontal_overflow = Some(pptx_parse::TextOverflow::Clip);
+            } else {
+                body.vertical_overflow = Some(pptx_parse::TextOverflow::Clip);
+            }
+        });
+        let Primitive::TextBox {
+            x,
+            w,
+            lines,
+            overflow,
+            ..
+        } = text(&rendered, 2)
+        else {
+            unreachable!()
+        };
+        let stop = lines[0].caret_stops.last().unwrap();
+        assert!(stop.x > x + w);
+        assert!(!*overflow);
+        assert_eq!(rendered.hit_test(stop.x, lines[0].baseline), None);
+    }
+}
+
+#[test]
+fn text_overflows_when_the_left_inset_exceeds_the_shape_width() {
+    let rendered = unwrapped_slide(|shape| {
+        let body = shape.text.as_mut().unwrap();
+        body.inset_left = Some(476_617);
+        body.paragraphs[0].runs[0].text = "A".to_owned();
+        body.paragraphs[0].runs[0].properties.font_size_pt = Some(12.0);
+    });
+    let Primitive::TextBox {
+        x,
+        w,
+        h,
+        lines,
+        overflow,
+        ..
+    } = text(&rendered, 2)
+    else {
+        unreachable!()
+    };
+    assert!(lines[0].width < *w);
+    assert!(lines[0].height < *h);
+    assert!(lines[0].runs[0].x > x + w);
+    assert!(*overflow);
+}
+
+#[test]
+fn unwrapped_overflow_carets_remain_clickable_in_the_text_frame() {
+    for vertical in ["horz", "vert", "vert270", "mongolianVert"] {
+        let rendered = unwrapped_slide(|shape| {
+            shape.base.transform.rotation_deg = 35.0;
+            shape.base.transform.flip_h = true;
+            shape.base.transform.flip_v = true;
+            if vertical != "horz" {
+                shape.base.transform.width = 1_905_000;
+                shape.base.transform.height = 381_000;
+            }
+            shape.text.as_mut().unwrap().vertical = Some(vertical.to_owned());
+        });
+        let Primitive::TextBox {
+            shape_id,
+            story_id,
+            x,
+            y,
+            w,
+            h,
+            lines,
+            transform,
+            ..
+        } = text(&rendered, 2)
+        else {
+            unreachable!()
+        };
+        assert!(lines[0].height < *h);
+        let stop = lines[0].caret_stops.last().unwrap();
+        assert!(stop.x > x + w);
+        let cx = x + w / 2.0;
+        let cy = y + h / 2.0;
+        let dx = stop.x - cx;
+        let dy = lines[0].baseline - cy;
+        let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+        assert_eq!(
+            rendered.hit_test(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos),
+            Some(HitTestResult::Text {
+                shape_id: shape_id.clone().unwrap(),
+                story_id: story_id.clone().unwrap(),
+                position: stop.position,
+            }),
+            "vertical {vertical}"
+        );
+    }
+}

@@ -1,4 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
+import { renderedBox } from '../rendered-box';
 
 interface Probe {
   editor: {
@@ -35,7 +37,7 @@ async function open(page: Page, engine: 'legacy' | 'worker') {
 }
 
 async function zoom(page: Page, scale: number | 'fit') {
-  await page.evaluate(
+  await pinnedEvaluate(page,
     (value) =>
       (window as unknown as { __probe: Probe }).__probe.editor!.commands.execute('zoom', {
         scale: value,
@@ -46,7 +48,7 @@ async function zoom(page: Page, scale: number | 'fit') {
 
 /** How far the overlay boxes are from where the canvas shows the slide and a shape on it. */
 async function misalignment(page: Page): Promise<number> {
-  return page.evaluate(async () => {
+  return pinnedEvaluate(page, async () => {
     const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
     const canvas = document
       .querySelector('[data-testid="pptx-slide-canvas"]')!
@@ -104,9 +106,7 @@ test('pptx: overlays land on the presented slide at every zoom and while scrolle
 
 test('pptx: overlays leave the pointer to the slide beneath them', async ({ page }) => {
   await open(page, engine);
-  const shape = page.locator('[data-probe-shape]');
-  await expect(shape).toBeAttached();
-  const box = (await shape.boundingBox())!;
+  const box = await renderedBox(page.locator('[data-probe-shape]'));
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect.poll(async () => (await probe(page)).selection?.target.kind).not.toBe('slide');
 });
@@ -197,12 +197,12 @@ test('pptx: plugin text fields keep their keys; built-in shortcuts in plugin chr
   await page.setViewportSize({ width: 1920, height: 1000 });
   await open(page, engine);
   const state = () =>
-    page.evaluate(async () => {
+    pinnedEvaluate(page, async () => {
       const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
       const read = await editor.readContent();
       return { notes: read.slides[0].notes ?? '', text: read.stories[0].text };
     });
-  await page.evaluate(async () => {
+  await pinnedEvaluate(page, async () => {
     const editor = (window as unknown as { __probe: Probe }).__probe.editor!;
     const read = await editor.readContent();
     await editor.applyEdits({

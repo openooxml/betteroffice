@@ -83,6 +83,7 @@ interface VersionReads {
   proposalRevisions?: { ids: string; revisions: readonly ProposalGeometryRevision[] };
   spans: Map<string, ReturnType<AnchorReader['paragraphSpans']>>;
   segments: Map<string, readonly YrsStorySegment[]>;
+  views: Map<string, Map<DocxTextView, ViewParagraphIndex>>;
   anchors: Map<string, ReturnType<AnchorReader['resolveParagraphAnchor']>>;
 }
 
@@ -91,7 +92,7 @@ const versionReads = new WeakMap<AnchorReader, VersionReads>();
 function readsAt(session: AnchorReader, version: string): VersionReads {
   let reads = versionReads.get(session);
   if (reads?.version !== version) {
-    reads = { version, spans: new Map(), segments: new Map(), anchors: new Map() };
+    reads = { version, spans: new Map(), segments: new Map(), views: new Map(), anchors: new Map() };
     versionReads.set(session, reads);
   }
   return reads;
@@ -141,6 +142,7 @@ interface ViewSpan {
 }
 
 interface ViewParagraph {
+  index: number;
   paraId: string;
   inlineStart: number;
   rawLength: number;
@@ -159,7 +161,7 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
   let inlineStart = 0;
   for (const segment of segments) {
     if (segment.kind === 'pilcrow') {
-      paragraphs.push({ paraId: segment.paraId, inlineStart, rawLength, viewLength, spans });
+      paragraphs.push({ index: paragraphs.length, paraId: segment.paraId, inlineStart, rawLength, viewLength, spans });
       inlineStart = 0;
       rawLength = 0;
       viewLength = 0;
@@ -184,16 +186,38 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
   return paragraphs;
 }
 
+interface ViewParagraphIndex {
+  byId: Map<string, ViewParagraph | null>;
+}
+
+function indexViewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView): ViewParagraphIndex {
+  const byId = new Map<string, ViewParagraph | null>();
+  for (const paragraph of viewParagraphs(segments, view)) {
+    byId.set(paragraph.paraId, byId.has(paragraph.paraId) ? null : paragraph);
+  }
+  return { byId };
+}
+
+function viewsAt(session: AnchorReader, version: string, story: string, view: DocxTextView) {
+  const views = once(readsAt(session, version).views, story, () => new Map<DocxTextView, ViewParagraphIndex>());
+  return once(views, view, () => indexViewParagraphs(segmentsAt(session, version, story), view));
+}
+
+/** @internal The block embeds `paraId` opens with, which its Loc offsets count before its first inline unit. */
+export function paragraphInlineStart(session: AnchorReader, version: string, story: string, paraId: string): number {
+  return viewsAt(session, version, story, 'accepted').byId.get(paraId)?.inlineStart ?? 0;
+}
+
 function rawRange(
-  paragraphs: readonly ViewParagraph[],
+  paragraphs: ViewParagraphIndex,
   range: DocxTextRange
 ): { ok: true; range: RawAnchorRange } | AnchorResolutionFailure {
   const locate = (paraId: string): ViewParagraph | AnchorResolutionFailure => {
-    const matches = paragraphs.filter((paragraph) => paragraph.paraId === paraId);
-    if (matches.length > 1) {
+    const paragraph = paragraphs.byId.get(paraId);
+    if (paragraph === null) {
       return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
     }
-    return matches[0] ?? anchorFailure('missing-target', 'The paragraph no longer exists');
+    return paragraph ?? anchorFailure('missing-target', 'The paragraph no longer exists');
   };
   const start = locate(range.start.paraId);
   if ('ok' in start) return start;
@@ -206,7 +230,7 @@ function rawRange(
     range.end.offset < 0 ||
     range.start.offset > start.viewLength ||
     range.end.offset > end.viewLength ||
-    paragraphs.indexOf(start) > paragraphs.indexOf(end) ||
+    start.index > end.index ||
     (start === end && range.start.offset > range.end.offset)
   ) {
     return anchorFailure('missing-target', 'The range is outside the paragraph text');
@@ -244,7 +268,7 @@ export function textRangeToRaw(
   segments: readonly YrsStorySegment[],
   range: DocxTextRange
 ): { ok: true; range: RawAnchorRange } | AnchorResolutionFailure {
-  return rawRange(viewParagraphs(segments, range.view), range);
+  return rawRange(indexViewParagraphs(segments, range.view), range);
 }
 
 function resolveParagraph(
@@ -329,7 +353,7 @@ export function resolveAnchorTarget(
     if (!session.hasStory(target.range.story)) {
       return anchorFailure('missing-target', 'The story no longer exists');
     }
-    const mapped = textRangeToRaw(segmentsAt(session, version, target.range.story), target.range);
+    const mapped = rawRange(viewsAt(session, version, target.range.story, target.range.view), target.range);
     return mapped.ok
       ? {
           ok: true,
@@ -435,9 +459,7 @@ export function resolveAnchorTarget(
       `The requested search occurrence (${occurrence}) is unavailable`
     );
   }
-  const paragraphs = viewParagraphs(segmentsAt(session, version, story), 'accepted').filter(
-    (entry) => entry.paraId === paraId
-  );
+  const paragraphs = viewsAt(session, version, story, 'accepted');
   const ranges: RawAnchorRange[] = [];
   for (const range of selected) {
     const mapped = rawRange(paragraphs, range);

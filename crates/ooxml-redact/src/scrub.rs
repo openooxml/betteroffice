@@ -7,16 +7,16 @@ use quick_xml::{Reader, Writer, XmlVersion};
 use crate::RedactError;
 use crate::rels::{self, unqualified_value};
 
-/// Drop scrubbed parts together with the relationship parts they own, the
-/// internal parts those relationships target (unless a retained part also
-/// references them), their content-type declarations, and the internal
-/// relationships that target any of them. Returns the scrubbed parts a
-/// surviving relationship still points at: those keep their zip entry,
-/// declaration and relationship, and the caller empties their bytes.
+/// Prunes explicit removals, then scrubs binary parts and their owned targets.
 pub(crate) fn prune_scrubbed_parts(
     parts: &mut Vec<(String, Vec<u8>)>,
     scrubbed: &HashSet<String>,
+    discarded: &HashSet<String>,
 ) -> Result<HashSet<String>, RedactError> {
+    prune_parts(parts, discarded)?;
+    if scrubbed.is_empty() {
+        return Ok(HashSet::new());
+    }
     let known: HashSet<String> = parts
         .iter()
         .map(|(path, _)| normalize_part_name(path))
@@ -26,6 +26,17 @@ pub(crate) fn prune_scrubbed_parts(
     }
     let (mut removed, blanked) = cascade_owned_relationships(parts, scrubbed)?;
     removed.retain(|name| !blanked.contains(name));
+    prune_parts(parts, &removed)?;
+    Ok(blanked)
+}
+
+fn prune_parts(
+    parts: &mut Vec<(String, Vec<u8>)>,
+    removed: &HashSet<String>,
+) -> Result<(), RedactError> {
+    if removed.is_empty() {
+        return Ok(());
+    }
     parts.retain(|(path, _)| !removed.contains(&normalize_part_name(path)));
     let kept_extensions: HashSet<String> = parts
         .iter()
@@ -34,16 +45,87 @@ pub(crate) fn prune_scrubbed_parts(
     for (path, bytes) in parts.iter_mut() {
         let lower = normalize_part_name(path);
         if lower == CONTENT_TYPES {
-            *bytes = prune_content_types(bytes, &removed, &kept_extensions, path)?;
+            *bytes = prune_content_types(bytes, removed, &kept_extensions, path)?;
         } else if lower.ends_with(".rels") {
-            *bytes = prune_relationships(bytes, &removed, path)?;
+            *bytes = prune_relationships(bytes, removed, path)?;
         }
     }
-    Ok(blanked)
+    Ok(())
 }
 
 const CONTENT_TYPES: &str = "[content_types].xml";
 const ROOT_RELATIONSHIPS: &str = "_rels/.rels";
+
+pub(crate) fn collect_custom_xml_parts(
+    parts: &[(String, Vec<u8>)],
+) -> Result<HashSet<String>, RedactError> {
+    let known: HashSet<String> = parts
+        .iter()
+        .map(|(path, _)| normalize_part_name(path))
+        .collect();
+    let mut removed: HashSet<String> = known
+        .iter()
+        .filter(|name| name.starts_with("customxml/"))
+        .cloned()
+        .collect();
+    for (path, bytes) in parts {
+        let name = normalize_part_name(path);
+        if !name.ends_with(".rels") && name != CONTENT_TYPES {
+            continue;
+        }
+        let mut reader = Reader::from_reader(bytes.as_slice());
+        loop {
+            let event = reader
+                .read_event()
+                .map_err(|error| xml_error(path, error))?;
+            match event {
+                Event::Start(start) | Event::Empty(start) => {
+                    let values = attributes(&reader, &start, path)?;
+                    if name == CONTENT_TYPES {
+                        if start.local_name().as_ref() == b"Override"
+                            && unqualified_value(&values, "ContentType")
+                                == Some(
+                                    "application/vnd.openxmlformats-officedocument.customXmlProperties+xml",
+                                )
+                            && let Some(target) = unqualified_value(&values, "PartName")
+                        {
+                            removed.insert(normalize_part_name(target));
+                        }
+                    } else if start.local_name().as_ref() == b"Relationship"
+                        && !rels::external_relationship(&values, true)
+                        && unqualified_value(&values, "Type").is_some_and(custom_xml_relationship)
+                        && let Some(target) = unqualified_value(&values, "Target")
+                            .and_then(|target| resolve_relationship_target(&name, target))
+                    {
+                        removed.insert(target);
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    let mut queue: Vec<String> = removed.iter().cloned().collect();
+    while let Some(part) = queue.pop() {
+        let owned = owned_rels_path(&part);
+        if known.contains(&owned) && removed.insert(owned.clone()) {
+            queue.push(owned);
+        }
+    }
+    Ok(removed)
+}
+
+fn custom_xml_relationship(kind: &str) -> bool {
+    [
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/",
+    ]
+    .iter()
+    .any(|prefix| {
+        kind.strip_prefix(prefix)
+            .is_some_and(|name| matches!(name, "customXml" | "customXmlProps"))
+    })
+}
 
 /// Whether a relationship part that can outlive scrubbing names an internal
 /// target that would not survive deletion. No deletion can then be proven safe,

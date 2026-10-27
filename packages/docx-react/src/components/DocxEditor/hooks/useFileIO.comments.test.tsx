@@ -75,6 +75,7 @@ afterEach(() => {
   for (const created of sessions.splice(0)) created.destroy();
 });
 afterAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 10));
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 

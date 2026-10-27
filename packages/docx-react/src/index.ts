@@ -22,6 +22,11 @@ export type {
 export {
   DocxEditor,
   type DocxEditorProps,
+  type DocxEditorBaseProps,
+  type DocxAsyncEditorProps,
+  type DocxLegacyEditorProps,
+  type DocxInThreadEditorProps,
+  type DocxErrorInfo,
   type DocxEditorRef,
   type DocxParagraphMatch,
   type DocxSelectionInfo,
@@ -33,9 +38,18 @@ export {
 export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 export { DocxWorkerEditorChunkLoadError } from './components/DocxEditor/peerless/PeerlessDocxEditorLoader';
+export { DocxEditorNotReadyError, PeerlessSyncApiError as DocxSyncApiError } from './components/DocxEditor/peerless/contracts';
+export type {
+  TrackedChangeAuthorKind,
+  TrackedChangeAuthorAppearance,
+  TrackedChangeAuthor,
+  TrackedChangeCardRenderProps,
+  TrackedChangesOptions,
+} from './components/sidebar/trackedChanges';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';
+export { DocxCommandAdmissionError, type DocxCommandAdmissionCode } from './commands/createDocxCommandStore';
 export {
   useDocxCommands,
   useDocxCommandState,
@@ -119,6 +133,7 @@ export type {
   DocxPluginLayout,
   DocxPluginNavigation,
   DocxPluginNavigationFailureCode,
+  DocxPluginPageRect,
   DocxPluginPanel,
   DocxPluginPointPosition,
   DocxPluginReadClient,
@@ -127,6 +142,10 @@ export type {
   DocxPluginSelection,
   DocxPluginSidebarItem,
   DocxPluginSnapshot,
+  DocxReservation,
+  DocxReservationAnchor,
+  DocxReservationParagraph,
+  DocxReservationSet,
   MaybePromise,
   PluginCleanupReason,
   PluginGrant,
@@ -182,3 +201,5 @@ export type {
   DocxProposalStateRequest,
   DocxProposalWithdrawRequest,
 } from '@betteroffice/docx/yrs';
+
+export type { DocxParagraphText, DocxParagraphList } from '@betteroffice/docx/yrs';

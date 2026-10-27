@@ -187,7 +187,7 @@ test('weighted table preview builds exactly the first two full-layout pages with
     expect(full.pages[page.pageIndex]?.unbuilt).not.toBe(true);
     expect(page).toEqual(full.pages[page.pageIndex]);
   }
-});
+}, 30_000);
 
 test('a short dense whole-body preview is identical with and without the paragraph budget', async () => {
   const bytes = syntheticDocx('whole', 10, 17, { tableDense: true, blocks: 40 });

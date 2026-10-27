@@ -47,8 +47,8 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   const grid = painted?.displayList.grid;
   const expanded = visible ? expandRangeToMergedCells(normalizeRange(visible), painted?.mergedRanges ?? []) : null;
   const selectionRect = grid && expanded ? rangeRect(grid, expanded) : null;
-  const focused = visible ? expandRangeToMergedCells({ top: visible.focus.row, left: visible.focus.col,
-    bottom: visible.focus.row, right: visible.focus.col }, painted?.mergedRanges ?? []) : null;
+  const focused = visible ? expandRangeToMergedCells({ top: visible.anchor.row, left: visible.anchor.col,
+    bottom: visible.anchor.row, right: visible.anchor.col }, painted?.mergedRanges ?? []) : null;
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const chartRect = selectedChart ? painted?.displayList.charts?.find((chart) => chart.id === selectedChart.id)?.rect : null;
   const rect = useCallback((row: number, col: number, sheet: number) =>

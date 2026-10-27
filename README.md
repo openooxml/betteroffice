@@ -25,7 +25,7 @@
 
 - **Agent editing with human review.** Review attributed agent edits through
   tracked changes, inline diffs, and before-and-after previews. Accept or
-  reject changes directly in the editor.
+  reject DOCX proposals in the optional proposal sidebar.
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,
@@ -46,7 +46,7 @@
 
 ## Packages
 
-### Documents — `.docx`
+### Documents (`.docx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -55,7 +55,7 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-### Spreadsheets — `.xlsx`
+### Spreadsheets (`.xlsx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -64,7 +64,7 @@
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
 | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
 
-### Presentations — `.pptx`
+### Presentations (`.pptx`)
 
 | package | registry | what it does |
 |---|---|---|
@@ -79,25 +79,28 @@ VSDX packages build from this repository; see the [VSDX guide](https://docs.bett
 
 ### Agent tools
 
-[`@betteroffice/agents`](packages/agents) lets agents search, read, edit and preview DOCX, XLSX
-and PPTX files through a TypeScript SDK or the `betteroffice-mcp` server.
+| package | registry | what it does |
+|---|---|---|
+| [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents) | npm | TypeScript SDK and `betteroffice-mcp` server for agents to search, read, edit and preview DOCX, XLSX and PPTX files |
+
+### Fonts and localization
+
+| package | registry | what it does |
+|---|---|---|
+| [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts) | npm | metric-compatible substitutes for common Office fonts, plus Hebrew and Arabic coverage |
+| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | npm | optional Chinese, Japanese and Korean faces |
+| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | npm | UI translations for the React DOCX editor |
+| [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n) | npm | UI translations for the React XLSX editor |
+| [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n) | npm | UI translations for the React PPTX editor |
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
-## Evals
+## Upgrading to 0.5
 
-`gpt-6-luna` via `codex exec`, one run per task, on the [format eval suite](eval/README.md): 10 DOCX, 10 XLSX and 10 PPTX edits. A task passes only if the edit is correct and the rest of the file is untouched.
-
-| | Generic file tools | BetterOffice MCP |
-|---|---|---|
-| DOCX | 6/10 | **10/10** |
-| XLSX | 0/10 | **10/10** |
-| PPTX | 8/10 | **10/10** |
-
-Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+In 0.5 the default editor in `@betteroffice/docx-react`, `@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its engine in a worker, and the editor API is async. Apps that only mount an editor and use `onSave` need no code change. [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5) covers the opt-outs, the replacement for each synchronous call, and the hosting requirements.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
@@ -144,15 +147,43 @@ For how scores, timings and coverage are measured, see the [benchmark methodolog
 
 <!-- END GENERATED VISUAL FIDELITY -->
 
+## Evals
+
+`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+
+Basic tier: 96 single edits, 32 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 43/96 | **76/96** |
+| XLSX | 49/96 | **94/96** |
+| PPTX | 84/96 | **92/96** |
+
+Basic: 262/288 for BetterOffice, 176/288 for generic file tools.
+
+Complex tier: 33 multi-step tasks, 11 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 2/33 | **19/33** |
+| XLSX | 13/33 | **31/33** |
+| PPTX | 21/33 | **31/33** |
+
+Complex: 81/99 for BetterOffice, 36/99 for generic file tools.
+
+Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
+[Per-task results and methodology](https://evals.betteroffice.dev).
+
 ## Structure
 
-- `crates/` — the Rust engines
-- `packages/` — the TypeScript editor packages
-- `bindings/` — the Python bindings
-- `e2e/` — browser tests, corpus scenarios, and the shared test harness
-- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
-- `apps/demo` — editor playground
-- `apps/docs` — documentation
+- `crates/`: the Rust engines
+- `packages/`: the TypeScript editor packages
+- `bindings/`: the Python bindings
+- `e2e/`: browser tests, corpus scenarios, and the shared test harness
+- `apps/web`: [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo`: editor playground
+- `apps/docs`: documentation
 
 ## Development
 
@@ -170,12 +201,10 @@ cross-SDK checks, and operation profiles.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
 
-
-
 ## Contributing
 
 Contributions are welcome. We ask for a one-time signature of the [Contributor License Agreement](CLA.md) on your first pull request ([corporate version](CCLA.md)).
 
 ## License
 
-[Apache-2.0](LICENSE) — third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[Apache-2.0](LICENSE). Third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

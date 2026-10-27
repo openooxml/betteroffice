@@ -1,6 +1,6 @@
 /**
- * Shared locale data, types, and runtime helpers for the @openooxml
- * docx adapters.
+ * Locale data, types, and runtime helpers for the @betteroffice/docx-react
+ * editor.
  *
  * Import everything from the package root. `sideEffects: false` lets
  * consumer bundlers tree-shake unused locales.
@@ -17,9 +17,9 @@
  * } from '@betteroffice/docx-i18n';
  * ```
  *
- * The React and Vue adapters wrap `createT` in framework-native bindings
- * (`useTranslation`, `LocaleProvider`, etc.); use those for app code.
- * Reach for `createT` directly when building a non-React/Vue host.
+ * The React editor wraps `createT` in its own bindings (`LocaleProvider`
+ * and the `i18n` prop); use those for app code. Reach for `createT`
+ * directly when building a host that does not use React.
  *
  * @packageDocumentation
  * @public
@@ -170,8 +170,8 @@ type DotPath<T, Prefix extends string = ''> = {
 export type TranslationKey = DotPath<LocaleStrings>;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Runtime helpers — used by the React and Vue adapters; exported here so
-// non-React/Vue hosts can build a typed `t()` without re-implementing the
+// Runtime helpers, used by the React editor and exported so hosts that
+// do not use React can build a typed `t()` without re-implementing the
 // merge + ICU format logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -280,8 +280,8 @@ export type TFunction = (key: TranslationKey, vars?: Record<string, string | num
  * - **Fallback**: missing keys return the key string itself, useful for
  *   spotting un-translated UI in development.
  *
- * The React/Vue adapters wrap this in `useTranslation()`; use it directly
- * when building a non-React/Vue host (server-rendered docs, CLI, etc.).
+ * The React editor wraps this for its components; use it directly when
+ * building a host that does not use React (server-rendered docs, CLI, etc.).
  *
  * @example
  * ```ts

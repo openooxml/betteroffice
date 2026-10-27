@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface SourceAnchor {
   kind: 'source';
@@ -223,7 +224,7 @@ function snapshotOf(result: ProposalResult) {
 }
 
 async function getProposals(page: Page) {
-  return page.evaluate(() => (window as unknown as ProbeWindow).__workerGeometryProbe.editor!.getProposals());
+  return pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__workerGeometryProbe.editor!.getProposals());
 }
 
 async function waitForPreview(page: Page, snapshot: ProposalSnapshot) {
@@ -314,12 +315,12 @@ test('worker viewers preserve plugin anchor geometry without loading a main-thre
         return !!probe.editor && !!probe.context?.geometry && probe.layoutComplete !== null;
       })).toBe(true);
       expect((await status(page)).readOnly).toBe(true);
-      const read = await page.evaluate(() => (window as unknown as ProbeWindow).__workerGeometryProbe.readParagraphs());
+      const read = await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__workerGeometryProbe.readParagraphs());
       const paragraphs = pickParagraphs(read.paragraphs);
       const proposals = proposalsFor(paragraphs);
       transcript.paragraphs = paragraphs.map((paragraph) => ({ ordinal: paragraph.anchor!.paragraphOrdinal, length: paragraph.text.length }));
       transcript.proposals = proposals;
-      const proposed = snapshotOf(await page.evaluate((request) =>
+      const proposed = snapshotOf(await pinnedEvaluate(page, (request) =>
         (window as unknown as ProbeWindow).__workerGeometryProbe.editor!.proposeChanges(request),
         { expectVersion: read.version, proposals }
       ));
@@ -337,7 +338,7 @@ test('worker viewers preserve plugin anchor geometry without loading a main-thre
       transcript.scrolls = { proposed: await renderPages(page, worker ? arms[0].scrolls!.proposed : undefined) };
       await geometry(page, targets, snapshot, transcript, 'proposed');
       transcript.pending.afterProposedReads = (await status(page)).pending;
-      const accepted = snapshotOf(await page.evaluate((request) =>
+      const accepted = snapshotOf(await pinnedEvaluate(page, (request) =>
         (window as unknown as ProbeWindow).__workerGeometryProbe.editor!.setProposalStates(request),
         {
           expectVersion: snapshot.version,

@@ -584,7 +584,14 @@
     "replaced": "Ersetzt",
     "with": "durch",
     "added": "Hinzugefügt",
-    "deleted": "Gelöscht"
+    "deleted": "Gelöscht",
+    "agent": "Agent",
+    "previousChange": "Vorherige Änderung",
+    "nextChange": "Nächste Änderung",
+    "changeBy": "Änderung von {author}",
+    "changeCount": "{count, plural, one {# Änderung} other {# Änderungen}}",
+    "acceptAll": "Alle annehmen",
+    "acceptAllChanges": "Alle Änderungen annehmen"
   },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
@@ -633,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "Dokument wird geladen...",
+    "stillOpening": null,
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
     "unableToParse": "Dokument konnte nicht verarbeitet werden",
@@ -661,6 +669,7 @@
     "borderColor": "Rahmenfarbe",
     "borderWidth": "Rahmenbreite",
     "unknownAction": "Unbekannte Aktion",
+    "viewGridlines": "Gitternetzlinien anzeigen",
     "borders": {
       "all": "Alle Rahmenlinien",
       "outside": "Äußere Rahmenlinien",
@@ -892,8 +901,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Änderung annehmen",
+    "reviewReject": "Änderung ablehnen",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

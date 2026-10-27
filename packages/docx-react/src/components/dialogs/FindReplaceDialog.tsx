@@ -50,7 +50,7 @@ export interface FindReplaceDialogProps {
   /** Whether the dialog is open */
   isOpen: boolean;
   /** Callback when dialog is closed */
-  onClose: () => void;
+  onClose: (searchText: string, options: FindOptions) => void;
   /** Callback when searching for text */
   onFind: (searchText: string, options: FindOptions) => FindResult | null;
   /** Callback when navigating to next match */
@@ -328,6 +328,7 @@ export function FindReplaceDialog({
   const onFindRef = useRef(onFind);
   const onHighlightMatchesRef = useRef(onHighlightMatches);
   const onClearHighlightsRef = useRef(onClearHighlights);
+  const searchTimeoutRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     onFindRef.current = onFind;
@@ -392,12 +393,18 @@ export function FindReplaceDialog({
       return;
     }
 
-    const timeoutId = window.setTimeout(() => {
+    searchTimeoutRef.current = window.setTimeout(() => {
+      searchTimeoutRef.current = undefined;
       performSearch(searchText, { matchCase, matchWholeWord });
     }, AUTO_SEARCH_DELAY_MS);
 
-    return () => window.clearTimeout(timeoutId);
+    return () => window.clearTimeout(searchTimeoutRef.current);
   }, [isOpen, searchText, matchCase, matchWholeWord, performSearch, clearSearchResult]);
+
+  const handleClose = useCallback(() => {
+    window.clearTimeout(searchTimeoutRef.current);
+    onClose(searchText, { matchCase, matchWholeWord });
+  }, [onClose, searchText, matchCase, matchWholeWord]);
 
   const handleSearchChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     setSearchText(e.target.value);
@@ -460,7 +467,8 @@ export function FindReplaceDialog({
           }
         }
       } else if (e.key === 'Escape') {
-        onClose();
+        e.stopPropagation();
+        handleClose();
       }
     },
     [
@@ -471,7 +479,7 @@ export function FindReplaceDialog({
       performSearch,
       handleFindNext,
       handleFindPrevious,
-      onClose,
+      handleClose,
     ]
   );
 
@@ -503,10 +511,11 @@ export function FindReplaceDialog({
         e.preventDefault();
         handleReplace();
       } else if (e.key === 'Escape') {
-        onClose();
+        e.stopPropagation();
+        handleClose();
       }
     },
-    [handleReplace, onClose]
+    [handleReplace, handleClose]
   );
 
   const handleReplaceAll = useCallback(() => {
@@ -541,10 +550,10 @@ export function FindReplaceDialog({
   const handleDialogKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Escape') {
-        onClose();
+        handleClose();
       }
     },
-    [onClose]
+    [handleClose]
   );
 
   if (!isOpen) {
@@ -580,7 +589,7 @@ export function FindReplaceDialog({
             type="button"
             className="docx-find-replace-dialog-close"
             style={CLOSE_BUTTON_STYLE}
-            onClick={onClose}
+            onClick={handleClose}
             aria-label={t('common.closeDialog')}
           >
             &times;

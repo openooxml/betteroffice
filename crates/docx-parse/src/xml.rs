@@ -8,6 +8,9 @@ use thiserror::Error;
 /// Maximum block and inline nesting depth.
 pub const MAX_NESTING_DEPTH: usize = 64;
 
+const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
+
 /// OOXML namespace URIs.
 pub mod namespaces {
     pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -92,6 +95,8 @@ pub struct ParseBudget<'a> {
     source_ordinals: bool,
     media: Option<&'a crate::media::MediaTable>,
     media_error: Option<String>,
+    group_text_box_bytes: usize,
+    group_text_box_depth: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -113,6 +118,8 @@ impl<'a> ParseBudget<'a> {
             source_ordinals: false,
             media: None,
             media_error: None,
+            group_text_box_bytes: 0,
+            group_text_box_depth: 0,
         }
     }
 
@@ -157,6 +164,40 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn limits(&self) -> &ParseLimits {
         self.limits
+    }
+
+    pub(crate) fn begin_group_text_box_materialization(&mut self) -> Option<bool> {
+        if self.group_text_box_depth >= MAX_GROUP_TEXT_BOX_NESTING {
+            return None;
+        }
+        self.group_text_box_depth += 1;
+        Some(self.group_text_box_depth > 1)
+    }
+
+    pub(crate) fn end_group_text_box_materialization(&mut self) {
+        self.group_text_box_depth = self.group_text_box_depth.saturating_sub(1);
+    }
+
+    fn group_text_box_limit(&self) -> usize {
+        self.limits.max_xml_bytes.min(MAX_GROUP_TEXT_BOX_BYTES)
+    }
+
+    pub(crate) fn group_text_box_budget_spent(&self) -> bool {
+        self.group_text_box_bytes >= self.group_text_box_limit()
+    }
+
+    pub(crate) fn charge_group_text_box_materialization<T: serde::Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+    ) -> bool {
+        let limit = self.group_text_box_limit();
+        let mut meter = GroupTextBoxMeter {
+            used: self.group_text_box_bytes,
+            limit,
+        };
+        let within = serde_json::to_writer(&mut meter, value).is_ok();
+        self.group_text_box_bytes = if within { meter.used } else { limit };
+        within
     }
 
     /// XML events charged so far.
@@ -279,6 +320,27 @@ impl<'a> ParseBudget<'a> {
     }
 }
 
+struct GroupTextBoxMeter {
+    used: usize,
+    limit: usize,
+}
+
+impl std::io::Write for GroupTextBoxMeter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.used = self.used.saturating_add(bytes.len());
+        if self.used > self.limit {
+            return Err(std::io::Error::other(
+                "group text box materialization limit",
+            ));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn charge(
     used: &mut usize,
     amount: usize,
@@ -352,6 +414,7 @@ pub struct XmlElement {
     /// Word 2010 `paraId` under the namespace bindings in scope; see
     /// [`crate::paragraph_identity::word_para_id_name`].
     pub para_id_attribute: Option<String>,
+    pub bookmark_xml: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -436,6 +499,19 @@ impl XmlElement {
             .find_map(|name| self.attributes.get(*name).map(String::as_str))
     }
 
+    pub fn parse_boolean_attribute(&self, namespace: Option<&str>, name: &str) -> Option<bool> {
+        parse_on_off(self.attribute(namespace, name)?)
+    }
+
+    pub(crate) fn parse_boolean_attribute_or_false(
+        &self,
+        namespace: Option<&str>,
+        name: &str,
+    ) -> Option<bool> {
+        self.attribute(namespace, name)
+            .map(|value| parse_on_off(value).unwrap_or(false))
+    }
+
     pub fn text_content(&self) -> String {
         let mut text = String::new();
         self.append_text(&mut text);
@@ -481,10 +557,7 @@ impl XmlElement {
     }
 
     pub fn parse_boolean(&self, namespace: &str) -> bool {
-        !matches!(
-            self.attribute(Some(namespace), "val"),
-            Some("0" | "false" | "off")
-        )
+        self.parse_boolean_attribute(Some(namespace), "val") != Some(false)
     }
 
     pub fn find_deep(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -600,6 +673,20 @@ impl XmlElement {
         output.push_str("</");
         output.push_str(&self.name);
         output.push('>');
+    }
+}
+
+pub fn parse_on_off(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on") {
+        Some(true)
+    } else if value == "0"
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -1156,6 +1243,7 @@ pub(crate) fn parse_xml_strict(
 
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
+    let mut starts = Vec::new();
     let mut paragraphs = 0u32;
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
         if element.name == "w:p" {
@@ -1176,6 +1264,7 @@ pub(crate) fn parse_xml_strict(
         element
     };
     loop {
+        let offset = reader.buffer_position() as usize;
         let event = reader
             .read_event()
             .map_err(|error| malformed(&reader, part, error))?;
@@ -1191,6 +1280,7 @@ pub(crate) fn parse_xml_strict(
                 let element = decode_element(&reader, start, part, budget)?;
                 let element = number(element, &stack);
                 stack.push(element);
+                starts.push(offset);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -1201,7 +1291,8 @@ pub(crate) fn parse_xml_strict(
                 }
                 let element = decode_element(&reader, start, part, budget)?;
                 let mut element = number(element, &stack);
-                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
+                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
@@ -1210,7 +1301,9 @@ pub(crate) fn parse_xml_strict(
                     offset: reader.buffer_position(),
                     message: "unexpected closing element".to_owned(),
                 })?;
-                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                let start = starts.pop().unwrap();
+                retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
+                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -1301,13 +1394,14 @@ pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
         .map(|(_, namespace)| *namespace)
 }
 
-fn retain_drawing_namespace_aliases(
+fn retain_replayed_namespace_aliases(
     element: &mut XmlElement,
     ancestors: &[XmlElement],
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
-    if !matches!(element.local_name(), "pict" | "object") {
+    let row = element.name == "w:tr" && !element.attributes.is_empty();
+    if !row && !matches!(element.local_name(), "pict" | "object") {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1322,6 +1416,16 @@ fn retain_drawing_namespace_aliases(
                 }
             }
         }
+    }
+    if row
+        && let Some(root) = ancestors.first()
+        && matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr")
+    {
+        bindings.retain(|name, value| {
+            let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+            crate::serializer::parts::is_story_root_prefix(prefix)
+                || root.attributes.get(*name).map(String::as_str) != Some(*value)
+        });
     }
     if bindings.is_empty() {
         return Ok(());
@@ -1355,7 +1459,9 @@ fn retain_drawing_namespace_aliases(
                 used_prefixes.insert(prefix.to_owned());
             }
         }
-        pending.extend(node.child_elements());
+        if !row {
+            pending.extend(node.child_elements());
+        }
     }
     let mut attribute_bytes: usize = element
         .attributes
@@ -1372,7 +1478,11 @@ fn retain_drawing_namespace_aliases(
             || attribute_bytes > budget.limits.max_attribute_bytes
         {
             return Err(ParseError::ResourceLimit {
-                kind: "drawingNamespaceAliases",
+                kind: if row {
+                    "rowNamespaceAliases"
+                } else {
+                    "drawingNamespaceAliases"
+                },
                 part: part.to_owned(),
             });
         }
@@ -1380,6 +1490,14 @@ fn retain_drawing_namespace_aliases(
         element.attributes.insert(name.to_owned(), value.to_owned());
     }
     Ok(())
+}
+
+fn retain_bookmark_xml(element: &mut XmlElement, xml: &[u8], start: usize, end: usize) {
+    if matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
+        element.bookmark_xml = std::str::from_utf8(&xml[start..end])
+            .ok()
+            .map(str::to_owned);
+    }
 }
 
 fn decode_element(
@@ -1451,6 +1569,7 @@ fn decode_element(
         children: Vec::new(),
         paragraph_ordinal: None,
         para_id_attribute: None,
+        bookmark_xml: None,
     })
 }
 
@@ -1661,6 +1780,98 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_attributes_retain_local_namespace_bindings() {
+        let document = parse(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:root" xmlns:bofx="urn:root"><w:body><w:tbl xmlns:x="urn:table"><w:tr x:keep="1" bofx:keep="2"/></w:tbl></w:body></w:document>"#,
+        )
+        .unwrap();
+        let row = document
+            .root()
+            .unwrap()
+            .child("w", "body")
+            .unwrap()
+            .child("w", "tbl")
+            .unwrap()
+            .child("w", "tr")
+            .unwrap();
+        assert_eq!(
+            row.attributes.get("xmlns:x").map(String::as_str),
+            Some("urn:table")
+        );
+        assert!(!row.attributes.contains_key("xmlns:bofx"));
+        assert!(!row.attributes.contains_key("xmlns:w"));
+    }
+
+    #[test]
+    fn note_and_comment_rows_retain_root_namespace_bindings() {
+        for root in ["footnotes", "endnotes", "comments"] {
+            let document = parse(&format!(
+                r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:root"><w:tr x:keep="1"/></w:{root}>"#,
+            ))
+            .unwrap();
+            let row = document.root().unwrap().child("w", "tr").unwrap();
+            assert_eq!(
+                row.attributes.get("xmlns:x").map(String::as_str),
+                Some("urn:root")
+            );
+        }
+    }
+
+    #[test]
+    fn row_attributes_retain_rebound_root_prefixes() {
+        let document = parse(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="urn:custom"><w:tr w14:keep="1"/></w:document>"#,
+        )
+        .unwrap();
+        let row = document.root().unwrap().child("w", "tr").unwrap();
+        assert_eq!(
+            row.attributes.get("xmlns:w14").map(String::as_str),
+            Some("urn:custom")
+        );
+    }
+
+    #[test]
+    fn parses_on_off_values() {
+        for (value, expected) in [
+            ("1", Some(true)),
+            ("true", Some(true)),
+            ("on", Some(true)),
+            ("ON", Some(true)),
+            ("0", Some(false)),
+            ("false", Some(false)),
+            ("off", Some(false)),
+            ("FALSE", Some(false)),
+            ("Off", Some(false)),
+            (" \tTrUe\r\n", Some(true)),
+            (" off ", Some(false)),
+            ("garbage", None),
+            ("", None),
+            ("   ", None),
+        ] {
+            assert_eq!(parse_on_off(value), expected, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn parses_boolean_attributes() {
+        let doc = parse(
+            r#"<w:spacing w:beforeAutospacing=" On " w:afterAutospacing="off" invalid="garbage"/>"#,
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "beforeAutospacing"),
+            Some(true)
+        );
+        assert_eq!(
+            root.parse_boolean_attribute(Some("w"), "afterAutospacing"),
+            Some(false)
+        );
+        assert_eq!(root.parse_boolean_attribute(None, "invalid"), None);
+        assert_eq!(root.parse_boolean_attribute(None, "missing"), None);
+    }
 
     #[test]
     fn twips_measures_convert_supported_units_and_validate_the_entire_value() {

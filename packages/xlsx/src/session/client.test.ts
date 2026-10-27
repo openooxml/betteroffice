@@ -14,7 +14,7 @@ import { workbookPeerSources } from './clientInternals';
 import { createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
-import { WORKBOOK_SESSION_POLICIES } from './methods';
+import { WORKBOOK_SESSION_POLICIES, type WorkbookCheckpoint } from './methods';
 import type { WorkbookSharedCommand } from './commandProtocol';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { workbookSessionInternals, type WorkbookReplayEnvelope, type WorkbookReplayOp } from './replay';
@@ -283,22 +283,164 @@ test('recovery retains opening bytes and the default calculation context', async
   } finally { opener.mockRestore(); await session.dispose(); }
 });
 
-test('recovery bounds admission without dropping retained commands', async () => {
+function checkpointReplies(host: ReturnType<typeof crashableHost>,
+  rewrite?: (value: WorkbookCheckpoint) => WorkbookCheckpoint) {
+  const calls = new Set<number>();
+  let held: (() => void) | undefined;
+  let arrived!: () => void;
+  const reached = new Promise<void>((resolve) => { arrived = resolve; });
+  return {
+    reached,
+    release: () => held?.(),
+    wrap: (transport: SessionTransport) => host.wrap({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'checkpoint') calls.add(message.id);
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'reply' && calls.delete(message.id)) {
+          arrived();
+          if (rewrite && message.ok) message = { ...message, value: rewrite(message.value as WorkbookCheckpoint) };
+          else if (!rewrite && !held) { held = () => transport.post(message, transfer); return; }
+        }
+        transport.post(message, transfer);
+      },
+    }),
+  };
+}
+
+test('headless recovery checkpoints its own log instead of refusing admitted commands', async () => {
   const host = crashableHost();
   const opener = recoveryWorker();
   const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true });
   try {
-    for (let seq = 1; seq <= 256; seq += 1) await session.submit(recoveryCommand(session, seq, 1, String(seq)));
     const recovery = workbookSessionRecovery.get(session)!;
-    expect(recovery.retainedCommands).toBe(256);
-    const rejected = session.submit(recoveryCommand(session, 257, 1, 'blocked'));
-    await expect(rejected).rejects.toBeInstanceOf(WorkbookRecoveryReplayError);
-    await expect(rejected).rejects.toMatchObject({ seq: 257, reason: 'log-full' });
+    let retained = 0;
+    for (let seq = 1; seq <= 1000; seq += 1) {
+      expect(await session.submit(recoveryCommand(session, seq, seq % 40, String(seq)))).toMatchObject({ status: 'applied' });
+      retained = Math.max(retained, recovery.retainedCommands);
+    }
+    expect(retained).toBeLessThan(300);
+    expect(recovery.throughSeq).toBeGreaterThanOrEqual(700);
+    expect(session.failure).toBeUndefined();
+    const expected = await session.save();
+    host.crash();
+    expect(await recovery.save(() => {})).toEqual(expected);
+  } finally { opener.mockRestore(); await session.dispose(); }
+}, 30_000);
+
+test('recovery admits commands overlapping a slow checkpoint and restores them', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const slow = checkpointReplies(host);
+  const session = await createTestWorkbookSession(await initialPaintBook(), slow.wrap, { includeEditState: true });
+  try {
+    for (let seq = 1; seq <= 256; seq += 1) await session.submit(recoveryCommand(session, seq, seq % 40, String(seq)));
+    await slow.reached;
+    const recovery = workbookSessionRecovery.get(session)!;
+    const overlapping = Array.from({ length: 300 }, (_, index) =>
+      session.submit(recoveryCommand(session, 257 + index, index % 40, `late ${index}`)));
+    expect(recovery.retainedCommands).toBe(556);
+    expect(recovery.throughSeq).toBe(0);
+    slow.release();
+    for (const status of await Promise.all(overlapping)) expect(status).toMatchObject({ status: 'applied' });
+    expect(recovery.throughSeq).toBeGreaterThanOrEqual(256);
+    expect(session.failure).toBeUndefined();
     const expected = await session.save();
     host.crash();
     expect(await recovery.save(() => {})).toEqual(expected);
   } finally { opener.mockRestore(); await session.dispose(); }
 });
+
+test('headless recovery bounds 1000 selection moves through checkpoints', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const session = await createTestWorkbookSession(await initialPaintBook(), host.wrap, { includeEditState: true });
+  try {
+    const recovery = workbookSessionRecovery.get(session)!;
+    const sheetId = session.state.sheets[0].id;
+    let retained = 0;
+    for (let seq = 1; seq <= 1000; seq += 1) {
+      expect(await session.submit({ ...session.commandIdentity, seq, basis: session.confirmedBasis, kind: 'select',
+        payload: { selection: { sheetId, range: { kind: 'a1', a1: `A${seq % 2 + 1}` } } } })).toMatchObject({ status: 'applied' });
+      retained = Math.max(retained, recovery.retainedCommands);
+    }
+    expect(retained).toBeLessThan(300);
+    expect(session.failure).toBeUndefined();
+    const expected = await session.save();
+    host.crash();
+    expect(await recovery.save(() => {})).toEqual(expected);
+  } finally { opener.mockRestore(); await session.dispose(); }
+}, 30_000);
+
+test('a failed recovery checkpoint fails the session with its typed cause', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const corrupt = checkpointReplies(host, (value) => ({ ...value, epoch: value.epoch + 1 }));
+  const session = await createTestWorkbookSession(await initialPaintBook(), corrupt.wrap, { includeEditState: true });
+  try {
+    const failed = new Promise<SessionFailure>((resolve) => { session.onFailure(resolve); });
+    for (let seq = 1; seq <= 256; seq += 1) await session.submit(recoveryCommand(session, seq, 1, String(seq)));
+    const failure = await failed;
+    expect(failure).toBeInstanceOf(SessionFailure);
+    expect(failure.cause).toBeInstanceOf(WorkbookRecoveryReplayError);
+    expect(failure.cause).toMatchObject({ reason: 'invalid-checkpoint' });
+    expect(session.state.stage).toBe('failed');
+    await expect(session.submit(recoveryCommand(session, 257, 1, 'blocked'))).rejects.toBeInstanceOf(SessionFailure);
+    const bytes = await workbookSessionRecovery.get(session)!.save(() => {});
+    const reopened = await createTestWorkbookSession(bytes);
+    try { expect((await reopened.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('256'); }
+    finally { await reopened.dispose(); }
+  } finally { opener.mockRestore(); await session.dispose(); }
+});
+
+function rejectedCheckpoints(host: ReturnType<typeof crashableHost>, succeed: number) {
+  const calls = new Set<number>();
+  let replies = 0;
+  return {
+    get replies() { return replies; },
+    wrap: (transport: SessionTransport) => host.wrap({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'checkpoint') calls.add(message.id);
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'reply' && calls.delete(message.id) && ++replies > succeed) {
+          message = { protocol: 1, kind: 'reply', id: message.id, ok: false,
+            error: { name: 'Error', message: 'malformed request: Recovery projection cannot be reconstructed' } };
+        }
+        transport.post(message, transfer);
+      },
+    }),
+  };
+}
+
+test('rejected checkpoints keep the session and the log until a later capture', async () => {
+  const host = crashableHost();
+  const opener = recoveryWorker();
+  const rejected = rejectedCheckpoints(host, 1);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const session = await createTestWorkbookSession(await initialPaintBook(), rejected.wrap, { includeEditState: true });
+  try {
+    const recovery = workbookSessionRecovery.get(session)!;
+    for (let seq = 1; seq <= 800; seq += 1) {
+      expect(await session.submit(recoveryCommand(session, seq, seq % 40, String(seq)))).toMatchObject({ status: 'applied' });
+    }
+    expect(session.failure).toBeUndefined();
+    expect(session.state.stage).not.toBe('failed');
+    const throughSeq = recovery.throughSeq;
+    expect(throughSeq).toBeGreaterThanOrEqual(256);
+    expect(recovery.retainedCommands).toBe(800 - throughSeq);
+    expect(rejected.replies).toBeGreaterThan(2);
+    expect(rejected.replies).toBeLessThan(12);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Recovery projection cannot be reconstructed'));
+    const expected = await session.save();
+    host.crash();
+    expect(await recovery.save(() => {})).toEqual(expected);
+  } finally { warn.mockRestore(); opener.mockRestore(); await session.dispose(); }
+}, 30_000);
 
 async function initialPaintBook() {
   const zip = new JSZip();

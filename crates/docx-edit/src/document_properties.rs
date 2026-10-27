@@ -1,6 +1,6 @@
 use crate::{EditCtx, EditingDoc, map_string};
 use serde_json::{Map as JsonMap, Value};
-use yrs::{Map, MapPrelim, ReadTxn, Text, TextPrelim, Transact};
+use yrs::{Map, MapPrelim, ReadTxn, Text, Transact};
 
 pub(crate) const DOCUMENT_PROPERTIES: &str = "documentProperties";
 
@@ -58,8 +58,8 @@ impl EditingDoc {
                         .find_map(|(alias, canonical)| (alias == id).then_some(canonical.as_str()))
                         .unwrap_or(id);
                     let story_id = format!("hf:{canonical}");
-                    if !stories.contains_key(&txn, &story_id) {
-                        let story = stories.insert(&mut txn, story_id, TextPrelim::new(""));
+                    if !crate::story_id_taken(&stories, &txn, &story_id) {
+                        let story = crate::insert_story(&mut txn, &stories, story_id);
                         let pilcrow = story.insert_embed_with_attributes(
                             &mut txn,
                             0,

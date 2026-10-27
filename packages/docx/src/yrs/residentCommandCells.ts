@@ -1,5 +1,5 @@
 import type { YrsCellLoc, YrsTableRange } from './index';
-import type { DocxCommandPayloads, DocxCommandSelection, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandPayloads, DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 
 export interface DocxCellNavigationPlan {
@@ -8,7 +8,7 @@ export interface DocxCellNavigationPlan {
   insertRow?: YrsCellLoc;
 }
 
-function cellSelection(engine: ResidentDocxCommandEngine, story: string): DocxCommandSelection | null {
+function cellSelection(engine: DocxWorkerCommandEngine, story: string): DocxCommandSelection | null {
   const paragraph = engine.geometryReader.paragraphSpans(story)[0];
   if (!paragraph) return null;
   const at = { story, paraId: paragraph.paraId, offset: 0 };
@@ -16,13 +16,13 @@ function cellSelection(engine: ResidentDocxCommandEngine, story: string): DocxCo
 }
 
 export function resolveCellNavigation(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   selection: DocxCommandSelection,
   intent: DocxCommandPayloads['navigateCell'],
   readOnly: boolean
 ): DocxCellNavigationPlan | 'read-only' | null {
   const story = selection.focus.story;
-  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?=:|$)/g));
+  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?:~\d+)?(?=:|$)/g));
   const match = matches.at(-1);
   if (!match || match.index === undefined) return { selection, cells: null };
   const table = { story: story.slice(0, match.index), tableIndex: Number(match[1]) };
@@ -54,7 +54,7 @@ export function resolveCellNavigation(
 }
 
 export function applyCellNavigation(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   plan: DocxCellNavigationPlan,
   intent: DocxCommandPayloads['navigateCell']
 ): DocxCommandSelection {

@@ -22,6 +22,10 @@ export { DUPLICATE_OFFSET, PASTE_OFFSET, buildClipboardEntry, canCopyShape, copy
 export type { VsdxClipboardEntry, VsdxClipboardGlue } from './components/ribbon/clipboard';
 export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
+export { DataBindingPanel } from './components/dataBinding/DataBindingPanel';
+export type { DataBindingPanelProps } from './components/dataBinding/DataBindingPanel';
+export { bindRowToShape, matchColumnsToRows } from './components/dataBinding/bindTable';
+export type { BindOutcome, ColumnBinding, ImportedTable } from './components/dataBinding/bindTable';
 export { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 export type { ShapeDataPanelProps } from './components/shapeData/ShapeDataPanel';
 export { LayersPanel } from './components/layers/LayersPanel';

@@ -8,7 +8,7 @@ The six rows at x=16 are: control, biLevel at 50%, duotone, colour change follow
 by duotone, colour change with `useA="0"`, and grayscale. The pictures at x=336
 exercise the layout and master paths. The background is `D0D0D0`.
 
-Duotone uses `bg2` (white `lt2`) shaded to `737373`, then white. Colour change
+Duotone uses `bg2` (white `lt2`) shaded to `B3B3B3`, then white. Colour change
 maps white to transparent red. `useA="0"` instead changes RGB and preserves the
 original alpha. The default matches both RGB and alpha, keeping translucent
 white edges intact. See [MS-OI29500, §2.1.1287](https://officeprotocoldoc.z19.web.core.windows.net/files/MS-OI29500/%5BMS-OI29500%5D-170919.pdf), page 506.
@@ -17,7 +17,7 @@ white edges intact. See [MS-OI29500, §2.1.1287](https://officeprotocoldoc.z19.w
 | --- | --- | --- |
 | Control (40,40) | `03A7DF` | `03A7DF` |
 | biLevel (40,100) | `03A7DF` | `000000` |
-| duotone (40,160) | `03A7DF` | `B7B7B7` |
+| duotone (40,160) | `03A7DF` | `D8D8D8` |
 | knockout (136,220) | `FFFFFF` | `D0D0D0` background |
 | useA=0 (136,280) | `FFFFFF` | `FF0000` |
 | useA=0, half alpha (232,280) | `E8E8E8` | `E86868` |

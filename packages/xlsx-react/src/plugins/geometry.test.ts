@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import type { DisplayList } from '@betteroffice/xlsx';
+import type { DisplayList, GridMeta } from '@betteroffice/xlsx';
 import { createPeerlessPluginGeometry } from './createPeerlessPluginDocument';
 import {
   createPluginGeometry,
+  frozenGridExtent,
   gridRectToOverlay,
   pluginLayout,
+  visibleGridRange,
   type PaintedGrid,
 } from './geometry';
 
@@ -45,6 +47,69 @@ function painted(overrides: Partial<PaintedGrid> = {}): PaintedGrid {
     ...overrides,
   };
 }
+
+describe('grid track geometry', () => {
+  test('frozen extents count visible frozen tracks after hidden tracks are compacted', () => {
+    const grid: GridMeta = {
+      ...frozenFrame().grid!,
+      rowIndices: [0, 4, 8, 10, 12],
+      colIndices: [0, 6, 11, 13],
+    };
+    expect(frozenGridExtent(grid, 8, 10, { width: 300, height: 100 })).toEqual({
+      width: 128,
+      height: 40,
+    });
+  });
+
+  test('frozen extents preserve dense tracks and missing-frame fallbacks', () => {
+    const grid: GridMeta = {
+      ...frozenFrame().grid!,
+      rowIndices: undefined,
+      colIndices: undefined,
+    };
+    expect(frozenGridExtent(grid, 2, 1)).toEqual({ width: 64, height: 40 });
+    expect(frozenGridExtent(grid, 0, 0)).toEqual({ width: 0, height: 0 });
+    expect(frozenGridExtent(undefined, 2, 1)).toEqual({ width: 0, height: 0 });
+    expect(frozenGridExtent(undefined, 2, 1, { width: 300, height: 100 })).toEqual({
+      width: 300,
+      height: 100,
+    });
+  });
+
+  test('frozen extents handle hidden prefixes without explicit track indices', () => {
+    const grid: GridMeta = {
+      ...frozenFrame().grid!,
+      startRow: 2,
+      startCol: 1,
+      rowIndices: undefined,
+      colIndices: undefined,
+    };
+    expect(frozenGridExtent(grid, 4, 2)).toEqual({ width: 64, height: 40 });
+    expect(frozenGridExtent(grid, 2, 1)).toEqual({ width: 0, height: 0 });
+  });
+
+  test('merged-range queries reach the last compacted body tracks', () => {
+    const grid: GridMeta = {
+      ...frozenFrame().grid!,
+      rowIndices: [0, 4, 8, 10, 12],
+      colIndices: [0, 6, 11, 13],
+    };
+    expect(visibleGridRange(grid)).toEqual({ top: 0, left: 0, bottom: 12, right: 13 });
+  });
+
+  test('merged-range queries preserve dense ranges and skip empty grids', () => {
+    const grid: GridMeta = {
+      ...frozenFrame().grid!,
+      startRow: 10,
+      startCol: 4,
+      rowIndices: undefined,
+      colIndices: undefined,
+    };
+    expect(visibleGridRange(grid)).toEqual({ top: 10, left: 4, bottom: 14, right: 7 });
+    expect(visibleGridRange({ ...grid, rowOffsets: [] })).toBeNull();
+    expect(visibleGridRange({ ...grid, colOffsets: [0] })).toBeNull();
+  });
+});
 
 describe('plugin layouts', () => {
   test('exist only while the painted frame shows the current version', () => {

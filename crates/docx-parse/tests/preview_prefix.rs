@@ -508,11 +508,16 @@ fn an_exhausted_budget_keeps_trailing_non_block_children() {
         let (preview, stopped) = weighted_preview(&body, 200, 256);
         assert!(!stopped);
         let content = &preview.document.package.document.content;
-        assert_eq!(content.len(), 32);
+        assert_eq!(content.len(), 32 + if markers.is_empty() { 0 } else { 2 });
         assert!(
-            content
+            content[..32]
                 .iter()
                 .all(|block| matches!(block, docx_parse::BlockContent::Table(_)))
+        );
+        assert!(
+            content[32..]
+                .iter()
+                .all(|block| matches!(block, docx_parse::BlockContent::RawXml(_)))
         );
         let whole_body = !stopped && content.len() < 200;
         assert!(whole_body);

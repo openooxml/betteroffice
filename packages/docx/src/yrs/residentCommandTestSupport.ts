@@ -11,14 +11,14 @@ import type {
   DocxCommandKind,
   DocxCommandPayloads,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 import type { EditSession } from './wasm/index';
 import type { ResidentEngineSession } from './residentEngineSession';
 
 export const TIMEOUT = 20_000;
-const owned: ResidentDocxCommandEngine[] = [];
+const owned: DocxWorkerCommandEngine[] = [];
 
 export function closeCommandEngines(): void {
   for (const engine of owned.splice(0)) engine.destroy();
@@ -31,7 +31,7 @@ export function selection(paraId: string, anchor: number, focus = anchor, story 
   };
 }
 
-function stateAt(selected: DocxCommandSelection | null): ResidentDocxCommandState {
+function stateAt(selected: DocxCommandSelection | null): DocxWorkerCommandState {
   return { readOnly: false, selection: selected, storedMarks: null, stickyPositions: new Map() };
 }
 
@@ -44,9 +44,9 @@ function envelope<K extends DocxCommandKind>(kind: K, payload: DocxCommandPayloa
 }
 
 export interface CommandArm {
-  engine: ResidentDocxCommandEngine;
+  engine: DocxWorkerCommandEngine;
   native: EditSession;
-  state: ResidentDocxCommandState;
+  state: DocxWorkerCommandState;
   version: number;
   seq: number;
 }
@@ -57,10 +57,10 @@ export interface OpenedCommandArm extends CommandArm {
 
 export async function openCommandEngine(
   texts = ['Alpha beta', 'Second'],
-  options: { editState?: boolean; bodyXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
+  options: { editState?: boolean; bodyXml?: string; stylesXml?: string; clientId?: number; checkpoint?: Uint8Array; preview?: number } = {}
 ): Promise<OpenedCommandArm> {
   const initial = stateAt(null);
-  const unloaded = {} as ResidentDocxCommandEngine;
+  const unloaded = {} as DocxWorkerCommandEngine;
   expect(() => options.editState
     ? projectDocxEditState(unloaded, initial)
     : preflightDocxCommand(unloaded, initial, envelope('setReadOnly', { readOnly: false }, 1, 0), basis(0))
@@ -86,7 +86,7 @@ export async function openCommandEngine(
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rIdLink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/d1" TargetMode="External"/></Relationships>'
   ));
   parts.set('word/styles.xml', toBytes(
-    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/></w:style></w:styles>'
+    options.stylesXml ?? '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/></w:style></w:styles>'
   ));
   const escaped = (text: string) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   parts.set('word/document.xml', toBytes(
@@ -108,14 +108,14 @@ export async function openCommandEngine(
   } finally {
     capture.mockRestore();
   }
-  if (!captured.native) throw new Error('Resident native session was not captured');
+  if (!captured.native) throw new Error('Native session was not captured');
   const raw = captured.native;
   let trackingUndo = false;
   const args = (range: YrsStoryRange): [string, string, number, string, number] =>
     [range.story, range.start.paraId, range.start.offset, range.end.paraId, range.end.offset];
   const methods: Pick<YrsSession,
     'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload' |
-    'insertText' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' |
+    'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' |
     'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' |
     'beginUndoCapture' | 'canUndo' | 'canRedo'
   > = {
@@ -128,6 +128,7 @@ export async function openCommandEngine(
       return json === undefined ? null : JSON.parse(json);
     },
     insertText: (at, text, author) => JSON.parse(raw.insert_text(at.story, at.paraId, at.offset, text, author?.name, author?.date)),
+    insertLineBreak: (at, author) => JSON.parse(raw.insert_line_break(at.story, at.paraId, at.offset, author?.name, author?.date)),
     replaceRange: (range, text, author) => JSON.parse(raw.replace_range(...args(range), text, author?.name, author?.date)),
     deleteRange: (range, author) => JSON.parse(raw.delete_range(...args(range), author?.name, author?.date)),
     splitParagraph: (at, author) => JSON.parse(raw.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date)),

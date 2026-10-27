@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
-import { readCommentInsertionRange } from './residentCommentProjection';
+import { readCommentInsertionRange, savedCommentIds } from './residentCommentProjection';
 
 afterEach(closeCommandEngines);
 
@@ -24,3 +24,9 @@ test('comment insertion ranges start at the match after a tracked deletion', asy
   expect(readCommentInsertionRange(resident, first!, 'cd')).toEqual({ story: 'body', start: at(first!, 4), end: at(first!, 6) });
   expect(readCommentInsertionRange(resident, second!, 'ef')).toEqual({ story: 'body', start: at(second!, 2), end: at(second!, 4) });
 }, TIMEOUT);
+
+test('saved comment ids keep source and free numeric ids and number the rest after the source ids', () => {
+  expect([...savedCommentIds([], [{ id: '5' }, { id: '9201:0' }])]).toEqual([['5', 5], ['9201:0', 1]]);
+  expect([...savedCommentIds([1], [{ id: '9201:0' }, { id: '5' }, { id: '1' }, { id: '01' }])])
+    .toEqual([['1', 1], ['9201:0', 2], ['5', 5], ['01', 3]]);
+});

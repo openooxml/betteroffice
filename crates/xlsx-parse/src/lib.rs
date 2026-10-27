@@ -11,6 +11,9 @@ mod package_facts;
 mod patch;
 mod read;
 mod reference;
+mod rich_text;
+#[cfg(test)]
+mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
@@ -19,26 +22,34 @@ mod write;
 mod xml;
 
 pub use axis::SheetAxes;
-pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
+pub use chart::{
+    ChartMetadata, ChartRefresh, ChartRefreshPlan, ChartSeriesInfo, chart_bytes, chart_metadata,
+    chart_references, chart_space, edit_chart, edited_chart_space, preserved_chart_space,
+};
 #[cfg(feature = "test-counters")]
-pub use chart::{chart_counters, reset_chart_counters};
+pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
+pub use formula::translate_formula;
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
-pub use patch::keeps_source;
+pub use patch::{keeps_source, keeps_source_conditional_formats};
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
+pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
 #[cfg(any(test, feature = "test-oracle"))]
 #[doc(hidden)]
 pub use save_oracle::with_legacy_save_path;
+#[cfg(feature = "test-counters")]
+pub use styles::legacy_style_reads;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
+    validate_defined_name_edits,
 };
 
 use xlsx_model::{SheetId, Workbook};
@@ -54,6 +65,13 @@ pub struct ParsedWorkbook {
     /// The style table releases that needed an explicit `applyX` flag read.
     /// Only a legacy collaboration fingerprint needs it.
     pub legacy_styles: Option<xlsx_model::Stylesheet>,
+}
+
+#[doc(hidden)]
+pub struct LegacyStyleReadings {
+    pub workbook: Workbook,
+    pub dimensions: Vec<LegacySheetDimensions>,
+    pub styles: Vec<xlsx_model::Stylesheet>,
 }
 
 /// Parses the model and captures source package state.
@@ -96,8 +114,12 @@ pub const MAX_CELLS: u64 = 10_000_000;
 /// upper bound on entries in the shared string table.
 pub const MAX_SHARED_STRINGS: usize = 10_000_000;
 
-/// upper bound on workbook- and sheet-scoped defined names.
-pub const MAX_DEFINED_NAMES: usize = 65_536;
+/// no longer enforced: the name table is bounded by [`MAX_DEFINED_NAME_BYTES`].
+pub const MAX_DEFINED_NAMES: usize = xlsx_model::workbook::MAX_DEFINED_NAMES;
+
+/// upper bound on the bytes the workbook- and sheet-scoped defined names hold,
+/// counted by [`xlsx_model::workbook::defined_names_bytes`].
+pub const MAX_DEFINED_NAME_BYTES: usize = xlsx_model::workbook::MAX_DEFINED_NAME_BYTES;
 
 /// upper bound on hyperlinks in one worksheet.
 pub const MAX_HYPERLINKS: usize = 65_536;
@@ -153,7 +175,7 @@ pub enum ParseError {
     TooManyCells,
     /// the shared string table exceeded [`MAX_SHARED_STRINGS`].
     TooManyStrings,
-    /// the defined-name table exceeded [`MAX_DEFINED_NAMES`].
+    /// the defined-name table exceeded [`MAX_DEFINED_NAME_BYTES`].
     TooManyDefinedNames,
     /// a worksheet exceeded [`MAX_HYPERLINKS`].
     TooManyHyperlinks,
@@ -182,7 +204,7 @@ impl core::fmt::Display for ParseError {
             ParseError::DepthExceeded => write!(f, "xml nesting exceeded depth cap"),
             ParseError::TooManyCells => write!(f, "worksheet cell count exceeded cap"),
             ParseError::TooManyStrings => write!(f, "shared string count exceeded cap"),
-            ParseError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
+            ParseError::TooManyDefinedNames => write!(f, "defined name table exceeded cap"),
             ParseError::TooManyHyperlinks => write!(f, "worksheet hyperlink count exceeded cap"),
             ParseError::TooManyColumnStyles => {
                 write!(f, "worksheet column style count exceeded cap")

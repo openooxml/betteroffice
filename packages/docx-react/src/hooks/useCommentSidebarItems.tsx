@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { ReactSidebarItem } from '../plugin-api/types';
+import type { ReviewSidebarItem } from '../components/sidebar/trackedChanges';
 import type { TrackedChangeEntry } from '../components/sidebar/cardUtils';
 import { CommentCard } from '../components/sidebar/CommentCard';
 import { TrackedChangeCard } from '../components/sidebar/TrackedChangeCard';
@@ -12,7 +12,8 @@ export interface CommentCallbacks {
   onCommentResolve?: (commentId: number) => void;
   onCommentUnresolve?: (commentId: number) => void;
   onCommentDelete?: (commentId: number) => void;
-  onAddComment?: (text: string) => void;
+  /** Resolving to false keeps the composer and its text. */
+  onAddComment?: (text: string) => void | Promise<boolean>;
   onCancelAddComment?: () => void;
   onAcceptChange?: (from: number, to: number) => void;
   onRejectChange?: (from: number, to: number) => void;
@@ -44,7 +45,7 @@ export function useCommentSidebarItems({
   showResolved = false,
   isAddingComment = false,
   addCommentYPosition = null,
-}: UseCommentSidebarItemsProps): ReactSidebarItem[] {
+}: UseCommentSidebarItemsProps): ReviewSidebarItem[] {
   // Active comments always, resolved only when showResolved
   const visibleComments = useMemo(
     () =>
@@ -70,7 +71,7 @@ export function useCommentSidebarItems({
   }, [comments]);
 
   return useMemo(() => {
-    const items: ReactSidebarItem[] = [];
+    const items: ReviewSidebarItem[] = [];
 
     // "Add comment" input (temporary item with pre-computed Y)
     if (isAddingComment && addCommentYPosition != null) {
@@ -120,8 +121,10 @@ export function useCommentSidebarItems({
     // Tracked change cards
     trackedChanges.forEach((change, idx) => {
       const replies = repliesByParent.get(change.revisionId) ?? [];
+      const id = `tc-${change.revisionId}-${idx}`;
       items.push({
-        id: `tc-${change.revisionId}-${idx}`,
+        id,
+        review: { change, kind: 'human' },
         anchorPos: change.from,
         anchorKey: `revision-${change.revisionId}`,
         priority: 1,
@@ -130,6 +133,7 @@ export function useCommentSidebarItems({
           <TrackedChangeCard
             {...props}
             change={change}
+            reviewItemId={id}
             replies={replies}
             onAccept={callbacks.onAcceptChange}
             onReject={callbacks.onRejectChange}

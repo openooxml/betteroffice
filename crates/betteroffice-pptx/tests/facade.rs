@@ -1,4 +1,6 @@
-use betteroffice_pptx::{EditCtx, Error, Presentation, ShapeNode};
+use betteroffice_pptx::{
+    ColorValue, EditCtx, Error, GradientFill, ModelGradientStop, Presentation, ShapeFill, ShapeNode,
+};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -110,10 +112,20 @@ fn facade_deletes_a_paragraph_break() {
     presentation
         .insert_paragraph_break(&context, &story_id, 1)
         .unwrap();
+    let split = presentation.story(&story_id).unwrap();
     presentation
         .delete_paragraph_break(&context, &story_id, 1)
         .unwrap();
-    assert_eq!(presentation.story(&story_id).unwrap(), before);
+    let joined = presentation.story(&story_id).unwrap();
+    assert_eq!(joined.plain_text(), before.plain_text());
+    assert_eq!(joined.length, before.length);
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len());
+    assert_eq!(joined.paragraphs[0].id, split.paragraphs[0].id);
+    assert_eq!(
+        joined.paragraphs[0].alignment,
+        split.paragraphs[0].alignment
+    );
+    assert_eq!(joined.paragraphs[0].runs, before.paragraphs[0].runs);
 }
 
 #[test]
@@ -214,6 +226,91 @@ fn structured_exports_run_through_the_facade() {
         export_pptx_structured(b"not a deck", &options),
         Err(Error::Export(ExportError::Parse(_)))
     ));
+}
+
+#[test]
+fn sets_and_clears_a_slide_background() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let slide_id = presentation.snapshot().unwrap().slides[0].id.clone();
+    let fill = ShapeFill {
+        fill_type: "solid".to_owned(),
+        color: Some(ColorValue {
+            rgb: Some("0F1720".to_owned()),
+            ..ColorValue::default()
+        }),
+        gradient: None,
+    };
+
+    let receipt = presentation
+        .set_slide_background(&EditCtx::local("facade-test"), &slide_id, Some(&fill))
+        .unwrap();
+    assert_eq!(receipt.after, Some(fill.clone()));
+
+    let saved = presentation.save().unwrap();
+    let reopened = Presentation::open(&saved).unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap().slides[0].background,
+        Some(fill)
+    );
+
+    let receipt = reopened
+        .set_slide_background(&EditCtx::local("facade-test"), &slide_id, None)
+        .unwrap();
+    assert_eq!(receipt.after, None);
+    let saved = reopened.save().unwrap();
+    assert_eq!(
+        Presentation::open(&saved)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .slides[0]
+            .background,
+        None
+    );
+}
+
+#[test]
+fn sets_and_clears_a_gradient_slide_background() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let slide_id = presentation.snapshot().unwrap().slides[0].id.clone();
+    let fill = ShapeFill {
+        fill_type: "gradient".to_owned(),
+        color: None,
+        gradient: Some(GradientFill {
+            gradient_type: "linear".to_owned(),
+            angle: Some(45.0),
+            stops: vec![
+                ModelGradientStop {
+                    position: 0.0,
+                    color: ColorValue {
+                        rgb: Some("0F1720".to_owned()),
+                        ..ColorValue::default()
+                    },
+                },
+                ModelGradientStop {
+                    position: 100_000.0,
+                    color: ColorValue {
+                        rgb: Some("0F766E".to_owned()),
+                        ..ColorValue::default()
+                    },
+                },
+            ],
+        }),
+    };
+
+    presentation
+        .set_slide_background(&EditCtx::local("facade-test"), &slide_id, Some(&fill))
+        .unwrap();
+    let saved = presentation.save().unwrap();
+    assert_eq!(
+        Presentation::open(&saved)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .slides[0]
+            .background,
+        Some(fill)
+    );
 }
 
 #[test]

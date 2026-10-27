@@ -9,8 +9,8 @@ use docx_edit::{
     EditTarget, EditTextView, EditingDoc, FindTextRequest, FormatPolicy, ParaAttrDelta,
     ParaSelector, ParagraphIdOrigin, ParagraphIdentity, ParagraphInput, ParagraphOrigin,
     ParagraphRef, ParagraphTarget, Position, RawOp, ReadParagraphsRequest, ReadStoriesRequest,
-    SearchScope, SegmentContent, StoryRange, StorySelection, StoryText, TargetEdge, TextPosition,
-    TextRange, TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
+    SearchScope, SegmentContent, StoryRange, StorySelection, StoryText, StyleResolver, TargetEdge,
+    TextPosition, TextRange, TextTarget, UndoCaptureMode, UndoSession, seed_from_docx,
 };
 use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
@@ -109,6 +109,246 @@ fn open_package(bytes: &[u8]) -> EditingDoc {
     let doc = EditingDoc::new(7001);
     seed_from_docx(&doc, bytes).unwrap();
     doc
+}
+
+const RESTYLE_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="22"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:color w:val="2F5496"/><w:sz w:val="56"/></w:rPr></w:style><w:style w:type="character" w:styleId="Large"><w:name w:val="Large"/><w:rPr><w:sz w:val="56"/></w:rPr></w:style>"#;
+
+fn open_restyle(body: &str) -> (EditingDoc, StyleResolver) {
+    let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
+    let xml = format!(r#"<w:styles {NS}>{RESTYLE_STYLES}</w:styles>"#).into_bytes();
+    let styles_part = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap();
+    styles_part.1 = xml;
+    let styles = StyleResolver::from_parts(&parts).unwrap();
+    (
+        open_package(&ooxml_opc::rezip_parts(&parts).unwrap()),
+        styles,
+    )
+}
+
+#[test]
+fn restyle_empty_heading_rebases_the_pilcrow_and_typed_runs() {
+    for deleted in [false, true] {
+        let mut body = styled("00000001", "Heading1", &r("Title"));
+        if deleted {
+            body.push_str(&styled("00000002", "Normal", &r("Body one")));
+            body.push_str(&styled("00000003", "Normal", &r("Body two")));
+        }
+        let (doc, styles) = open_restyle(&body);
+        let ctx = EditCtx::local("", "");
+        if deleted {
+            doc.delete_range(
+                &ctx,
+                StoryRange::new("body", 5, doc.story_len("body").unwrap() - 1),
+            )
+            .unwrap();
+            assert_eq!(accepted(&doc), ["Title"]);
+        }
+        doc.split_paragraph(&ctx, Position::new("body", 5), None)
+            .unwrap();
+        let at = if deleted {
+            6
+        } else {
+            doc.split_paragraph(&ctx, Position::new("body", 6), None)
+                .unwrap();
+            7
+        };
+        let id = doc
+            .paragraphs("body")
+            .unwrap()
+            .last()
+            .unwrap()
+            .para_id
+            .clone();
+        let selector = ParaSelector::One(id.clone());
+        let previous = properties(&doc, &id);
+        let undo = UndoSession::new();
+        undo.track(&doc);
+        doc.restyle_paragraphs(&ctx, &selector, "Normal", &styles)
+            .unwrap();
+        let current = properties(&doc, &id);
+        assert_eq!(current.get("pStyle"), Some(&Any::from("Normal")));
+        let Some(Any::Map(defaults)) = current.get("defaultTextFormatting") else {
+            panic!("missing paragraph defaults");
+        };
+        assert_eq!(number(defaults.get("fontSize")), Some(22.0));
+        assert!(!defaults.contains_key("bold"));
+        assert!(!defaults.contains_key("color"));
+        assert!(undo.undo());
+        assert_eq!(properties(&doc, &id), previous);
+        assert!(!undo.can_undo());
+        assert!(undo.redo());
+        assert_eq!(properties(&doc, &id), current);
+        doc.insert_text(
+            &ctx,
+            Position::new("body", at),
+            "body",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        let attrs = marks(&doc, "body", "body");
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(22.0));
+        assert!(!active(&attrs, "bold"));
+        assert!(!active(&attrs, "textColor"));
+    }
+}
+
+#[test]
+fn restyle_suggestion_preserves_run_and_pilcrow_formatting() {
+    let (doc, styles) = open_restyle(&styled(
+        "00000001",
+        "Heading1",
+        r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Title</w:t></w:r>"#,
+    ));
+    let previous_attrs = marks(&doc, "body", "Title");
+    let previous_props = properties(&doc, "00000001");
+    let ctx = EditCtx::local("Ann", DATE).suggesting();
+    let receipt = doc
+        .restyle_paragraphs(
+            &ctx,
+            &ParaSelector::One("00000001".to_owned()),
+            "Normal",
+            &styles,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    let attrs = marks(&doc, "body", "Title");
+    assert_eq!(attrs, previous_attrs);
+    assert!(active(&attrs, "italic"));
+    let props = properties(&doc, "00000001");
+    assert_eq!(props.get("pStyle"), Some(&Any::from("Normal")));
+    assert!(matches!(
+        previous_props.get("defaultTextFormatting"),
+        Some(Any::Map(_))
+    ));
+    assert_eq!(
+        props.get("defaultTextFormatting"),
+        previous_props.get("defaultTextFormatting")
+    );
+    let Some(Any::Array(changes)) = props.get("pPrChange") else {
+        panic!("missing paragraph property revision");
+    };
+    let Any::Map(change) = &changes[0] else {
+        panic!("invalid paragraph property revision");
+    };
+    for (key, style) in [
+        ("previousFormatting", "Heading1"),
+        ("currentFormatting", "Normal"),
+    ] {
+        let Any::Map(formatting) = &change[key] else {
+            panic!("missing revision formatting");
+        };
+        assert_eq!(formatting.get("pStyle"), Some(&Any::from(style)));
+    }
+    doc.reject_change(
+        &EditCtx::local("", ""),
+        &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_eq!(marks(&doc, "body", "Title"), previous_attrs);
+    assert_eq!(properties(&doc, "00000001"), previous_props);
+}
+
+#[test]
+fn restyle_pilcrow_preserves_character_style_size() {
+    let (doc, styles) = open_restyle(&p(
+        "00000001",
+        concat!(
+            r#"<w:pPr><w:pStyle w:val="Heading1"/>"#,
+            r#"<w:rPr><w:rStyle w:val="Large"/></w:rPr></w:pPr>"#,
+            "<w:r><w:t>Title</w:t></w:r>",
+        ),
+    ));
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    let props = properties(&doc, "00000001");
+    let Some(Any::Map(defaults)) = props.get("defaultTextFormatting") else {
+        panic!("missing paragraph defaults");
+    };
+    assert_eq!(defaults.get("styleId"), Some(&Any::from("Large")));
+    assert_eq!(number(defaults.get("fontSize")), Some(56.0));
+    assert!(!defaults.contains_key("bold"));
+    assert!(!defaults.contains_key("color"));
+}
+
+#[test]
+fn restyle_many_paragraphs_rebases_runs_and_preserves_direct_italic() {
+    let (doc, styles) = open_restyle(
+        &[
+            styled("00000001", "Heading1", &r("First")),
+            styled("00000002", "Normal", &r("Body")),
+            styled(
+                "00000003",
+                "Heading1",
+                r#"<w:r><w:rPr><w:i/></w:rPr><w:t>Last</w:t></w:r>"#,
+            ),
+        ]
+        .concat(),
+    );
+    let body_attrs = marks(&doc, "body", "Body");
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::Many(
+            ["00000003", "00000002", "00000001"]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    for text in ["First", "Last"] {
+        let attrs = marks(&doc, "body", text);
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(22.0));
+        assert!(!active(&attrs, "bold"));
+        assert!(!active(&attrs, "textColor"));
+    }
+    assert!(active(&marks(&doc, "body", "Last"), "italic"));
+    assert_eq!(marks(&doc, "body", "Body"), body_attrs);
+}
+
+#[test]
+fn restyle_rebases_note_reference_marks_and_keeps_direct_formatting() {
+    let (doc, styles) = open_restyle(&styled(
+        "00000001",
+        "Heading1",
+        &[
+            r("Title"),
+            r#"<w:r><w:rPr><w:i/></w:rPr><w:footnoteReference w:id="1"/></w:r>"#.to_owned(),
+        ]
+        .concat(),
+    ));
+    let before = embed_marks(&doc, "noteRef");
+    assert!(active(&before, "bold"));
+    doc.restyle_paragraphs(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        "Normal",
+        &styles,
+    )
+    .unwrap();
+    let attrs = embed_marks(&doc, "noteRef");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing reference size");
+    };
+    assert_eq!(number(size.get("size")), Some(22.0));
+    assert!(!active(&attrs, "bold"));
+    assert!(!active(&attrs, "textColor"));
+    assert!(active(&attrs, "italic"));
+    assert_eq!(attrs.get("footnoteRef"), before.get("footnoteRef"));
 }
 
 fn basic_body() -> String {
@@ -304,6 +544,20 @@ fn marks(doc: &EditingDoc, story: &str, marker: &str) -> std::collections::BTree
             _ => None,
         })
         .unwrap_or_else(|| panic!("no text segment holds {marker:?}"))
+}
+
+/// Formatting attributes of the first `kind` embed in the body.
+fn embed_marks(doc: &EditingDoc, kind: &str) -> std::collections::BTreeMap<String, Any> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find_map(|segment| match segment.content {
+            SegmentContent::OtherEmbed { kind: found, .. } if found == kind => {
+                Some(segment.attributes)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no {kind:?} embed"))
 }
 
 fn number(value: Option<&Any>) -> Option<f64> {
@@ -1661,9 +1915,8 @@ fn budgets_return_limit_exceeded() {
     );
 }
 
-#[test]
-fn pending_updates_make_batches_unsupported() {
-    let doc = basic();
+/// Applies a peer's second edit without its first, so `doc` holds an update it cannot integrate.
+fn hold_pending_update(doc: &EditingDoc) {
     let peer = EditingDoc::new(7005);
     peer.apply_update_v1(&doc.encode_state_as_update_v1())
         .unwrap();
@@ -1684,10 +1937,52 @@ fn pending_updates_make_batches_unsupported() {
     .unwrap();
     doc.apply_update_v1(&peer.encode_diff_v1(&known).unwrap())
         .unwrap();
+}
+
+#[test]
+fn pending_updates_make_batches_unsupported() {
+    let doc = basic();
+    hold_pending_update(&doc);
     assert_eq!(
         code(&doc, vec![replace(search("beta", "00000001"), "x")]),
         EditFailureCode::Unsupported
     );
+}
+
+#[test]
+fn pending_updates_make_settling_unsupported() {
+    let doc = basic();
+    let undo = UndoSession::new();
+    let mut proposed = request(
+        &doc,
+        vec![suggested(
+            replace(search("beta", "00000001"), "delta"),
+            "Ann",
+        )],
+    );
+    proposed.history = EditHistory::None;
+    let replaced = apply_request(&doc, &undo, &proposed).receipts[0]
+        .revision_ids
+        .clone();
+    hold_pending_update(&doc);
+    let revision_ids = |doc: &EditingDoc| {
+        doc.list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect::<Vec<_>>()
+    };
+    let (version, texts, revisions) = (doc.version(), accepted(&doc), revision_ids(&doc));
+
+    let refused = doc
+        .settle_revisions(&[], &replaced, &undo)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.failure.code, EditFailureCode::Unsupported);
+    assert_eq!(refused.version, version);
+    assert_eq!(doc.version(), version);
+    assert_eq!(accepted(&doc), texts);
+    assert_eq!(revision_ids(&doc), revisions);
 }
 
 #[test]
@@ -2264,6 +2559,7 @@ fn settled_revisions_apply_outside_undo_history() {
             &[replaced.clone(), vec!["404".to_owned()]].concat(),
             &undo,
         )
+        .unwrap()
         .unwrap();
     assert_eq!(
         resolved.iter().collect::<std::collections::BTreeSet<_>>(),
@@ -2318,7 +2614,9 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
         .revision_ids;
     assert_eq!(styled.len(), 1);
 
-    doc.settle_revisions(&[], &replaced, &undo).unwrap();
+    doc.settle_revisions(&[], &replaced, &undo)
+        .unwrap()
+        .unwrap();
     let ids = |doc: &EditingDoc| {
         doc.list_revisions()
             .unwrap()
@@ -2329,4 +2627,123 @@ fn settling_keeps_another_paragraphs_format_revision_undoable() {
     assert_eq!(ids(&doc), styled);
     assert!(undo.undo());
     assert!(ids(&doc).is_empty());
+}
+
+#[test]
+fn body_bookmarks_do_not_apply_opaque_block_restrictions() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+    let start = r#"<w:bookmarkStart w:id="7" w:name="Range"/>"#;
+    let end = r#"<w:bookmarkEnd w:id="7"/>"#;
+    for body in [
+        format!(
+            "{}{start}{}{end}{table}{}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor")),
+            p("00000003", &r("After"))
+        ),
+        format!(
+            "{}{start}{}{end}",
+            p("00000001", &r("Before")),
+            p("00000002", &r("Anchor"))
+        ),
+    ] {
+        let doc = open(&body);
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![delete_paragraphs("00000002", "00000002")],
+        );
+        assert_eq!(accepted(&doc)[0], "Before");
+    }
+}
+
+fn formatted(text: &str) -> String {
+    format!(
+        r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:b/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#
+    )
+}
+
+/// The formatting of every unit of the body that is not text.
+fn embed_formatting(doc: &EditingDoc) -> Vec<std::collections::BTreeMap<String, Any>> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter(|segment| !matches!(segment.content, SegmentContent::Text(_)))
+        .map(|segment| segment.attributes)
+        .collect()
+}
+
+#[test]
+fn replacing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_and_table_after_it() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="00000003"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let doc = open(
+        &[
+            p("00000001", &formatted("Dose of [compound]")),
+            p("00000002", ""),
+            table.to_owned(),
+            p("00000004", &formatted("Tail")),
+        ]
+        .concat(),
+    );
+    let before = embed_formatting(&doc);
+    let replica = EditingDoc::new(7002);
+    replica
+        .apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![replace(search("[compound]", "00000001"), "Agent X")],
+    );
+    assert_eq!(accepted(&doc)[0], "Dose of Agent X");
+    assert_eq!(embed_formatting(&doc), before);
+    replica
+        .apply_update_v1(
+            &doc.encode_diff_v1(&replica.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(embed_formatting(&replica), before);
+    assert_eq!(accepted(&replica), accepted(&doc));
+    let body = doc
+        .paragraph_save_plan()
+        .spliced_parts
+        .into_iter()
+        .find(|part| part.part == "word/document.xml")
+        .expect("the body splices");
+    assert_eq!(body.changed, vec![0]);
+}
+
+#[test]
+fn removing_the_end_of_a_paragraph_keeps_the_formatting_of_the_marks_after_it() {
+    let doc = open(
+        &[
+            p("00000001", &formatted("One")),
+            p("00000002", ""),
+            p("00000003", &formatted("Two")),
+        ]
+        .concat(),
+    );
+    let before = embed_formatting(&doc);
+    let undo = UndoSession::new();
+    let at = |id: &str, start: u32, end: u32| range(id, start, end, EditTextView::Accepted);
+    apply(&doc, &undo, vec![delete(at("00000001", 2, 3))]);
+    assert_eq!(embed_formatting(&doc), before);
+    let ann = EditCtx::local("Ann", DATE).suggesting();
+    let typed = doc
+        .insert_text(&ann, Position::new("body", 2), "ly", FormatPolicy::Inherit)
+        .unwrap();
+    doc.delete_range(&ann, StoryRange::new("body", 3, 4))
+        .unwrap();
+    assert_eq!(accepted(&doc)[0], "Onl");
+    assert_eq!(embed_formatting(&doc), before);
+    doc.reject_change(
+        &EditCtx::local("", ""),
+        &ChangeTarget::Revision(typed.revision_ids[0].clone()),
+    )
+    .unwrap();
+    assert_eq!(embed_formatting(&doc), before);
+    apply(&doc, &undo, vec![delete(at("00000003", 2, 3))]);
+    assert_eq!(embed_formatting(&doc), before);
+    assert_eq!(accepted(&doc), ["On", "", "Tw"]);
 }

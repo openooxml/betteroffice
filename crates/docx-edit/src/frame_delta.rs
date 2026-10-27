@@ -2472,6 +2472,32 @@ mod tests {
         assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), before);
     }
 
+    #[test]
+    fn page_reservations_round_trip_and_a_moved_one_resends_its_page() {
+        let mut value =
+            serde_json::to_value(list_pages(&[("P1", "first"), ("P2", "second")])).unwrap();
+        value["pages"][0]["reservations"] = serde_json::json!([
+            {"owner": "plugin", "id": "box", "x": 10, "y": 20, "width": 30, "height": 40}
+        ]);
+        let before: DisplayList = serde_json::from_value(value.clone()).unwrap();
+        let mut next_id = 0;
+        let (full, snapshots) =
+            encode_frame_delta(&before, &[], placeholder_epochs(1), true, &mut next_id).unwrap();
+        let mut retained = HashMap::new();
+        assert_eq!(apply_placeholder_test_frame(&full, &mut retained), before);
+        value["pages"][0]["reservations"][0]["x"] = serde_json::json!(15);
+        let moved: DisplayList = serde_json::from_value(value).unwrap();
+        let (bytes, _) = encode_frame_delta_incremental(
+            &moved,
+            &snapshots,
+            placeholder_epochs(2),
+            &mut next_id,
+            &HashSet::from([0]),
+        )
+        .unwrap();
+        assert_eq!(apply_placeholder_test_frame(&bytes, &mut retained), moved);
+    }
+
     /// Built pages, placeholders and inert extensions decode identically through both encoders.
     #[test]
     fn uniform_page_ranges_encode_as_one_operation() {

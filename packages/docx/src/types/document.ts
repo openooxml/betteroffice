@@ -17,7 +17,7 @@
 import type { Chart } from './content/chart';
 
 // Color & Styling Primitives
-export type { ThemeColorSlot, ColorValue, BorderSpec, ShadingProperties } from './colors';
+export type { ThemeColorSlot, ColorTransform, ColorValue, BorderSpec, ShadingProperties } from './colors';
 
 // Text & Paragraph Formatting
 export type {
@@ -33,6 +33,7 @@ export type {
   TabStop,
   LineSpacingRule,
   ParagraphAlignment,
+  ParagraphCnfStyle,
   ParagraphFormatting,
   TableWidthType,
   TableMeasurement,

@@ -175,6 +175,26 @@ describe('command gate', () => {
     }
   });
 
+  test('shell table allowlist gates actions the worker does not wire', () => {
+    const table = {
+      isInTable: true,
+      rowCount: 2,
+      columnCount: 2,
+      hasMultiCellSelection: true,
+      canSplitCell: true,
+    };
+    const base = testEnvironment({ table });
+    expect(codeOf('tableAction', base, 'selectTable')).toBeNull();
+    expect(codeOf('tableAction', base, 'deleteRow')).toBeNull();
+    const limited = testEnvironment({ table, tableActions: new Set(['selectTable', 'selectRow', 'selectColumn']) });
+    expect(codeOf('tableAction', limited)).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectTable')).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectRow')).toBeNull();
+    expect(codeOf('tableAction', limited, 'selectColumn')).toBeNull();
+    expect(codeOf('tableAction', limited, 'deleteRow')).toBe('unsupported-command');
+    expect(codeOf('tableAction', limited, 'mergeCells')).toBe('unsupported-command');
+  });
+
   test('table structure limits are argument specific', () => {
     const env = testEnvironment({
       table: {
@@ -233,6 +253,13 @@ describe('command gate', () => {
     const host = testEnvironment({ modeControl: 'host', sidebarControl: 'host' });
     expect(codeOf('editingMode', host, { mode: 'suggesting' })).toBeNull();
     expect(codeOf('commentsSidebar', host)).toBeNull();
+  });
+
+  test('table gridlines report their view state where the editor draws them', () => {
+    expect(codeOf('tableGridlines', testEnvironment({ tableGridlines: undefined }))).toBe('unsupported-command');
+    const off = evaluateDocxCommand('tableGridlines', null, testEnvironment({ readOnly: true, tableGridlines: false }));
+    expect([off.enabled, off.active]).toEqual([true, false]);
+    expect(evaluateDocxCommand('tableGridlines', null, testEnvironment({ tableGridlines: true })).active).toBe(true);
   });
 
   test('review resolution needs a live revision and navigation needs any', () => {
@@ -413,5 +440,21 @@ describe('execution re-checks the gate', () => {
     release();
     expect(await pending).toEqual({ ok: true, status: 'executed' });
     expect(writes).toBe(1);
+  });
+});
+
+describe('zoom and history defaults', () => {
+  test('zoom accepts 10% to 500% and offers the shared presets', () => {
+    const env = testEnvironment();
+    expect(codeOf('zoom', env, { scale: 0.1 })).toBeNull();
+    expect(codeOf('zoom', env, { scale: 5 })).toBeNull();
+    expect(codeOf('zoom', env, { scale: 0.09 })).toBe('invalid-arguments');
+    expect(codeOf('zoom', env, { scale: 5.01 })).toBe('invalid-arguments');
+    const state = evaluateDocxCommand('zoom', undefined, env);
+    expect(state.options?.map((option) => option.label)).toEqual(['50%', '75%', '90%', '100%', '125%', '150%', '200%']);
+  });
+
+  test('redo lists Mod+Shift+Z first and keeps Mod+Y', () => {
+    expect(DOCX_COMMAND_DESCRIPTORS.redo.shortcuts.map((shortcut) => shortcut.chord)).toEqual(['Mod+Shift+Z', 'Mod+Y']);
   });
 });

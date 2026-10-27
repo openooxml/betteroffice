@@ -7,8 +7,8 @@ use yrs::{ArrayRef, Map, MapRef, ReadTxn, Transact};
 
 use crate::comments::{snapshot_comments, snapshot_flavor};
 use crate::deck::{
-    live_shape_order, map_string, map_string_array, required_map, required_order, slide_notes,
-    slide_ref, slide_shape_order, snapshot_shape, string_array_ref,
+    live_shape_order, live_slide_ids, map_string, map_string_array, required_map, slide_notes,
+    slide_ref, slide_shape_order, snapshot_shape,
 };
 use crate::inherit::{SlideContext, record_inherited};
 use crate::proposals::{apply_edit, shape_text};
@@ -290,11 +290,7 @@ fn scoped_stale_targets<T: ReadTxn>(
 fn story_owner<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<Option<(String, String)>> {
     let slides = required_map(txn, SLIDES)?;
     let shapes = required_map(txn, SHAPES)?;
-    let mut seen_slides = HashSet::new();
-    for slide_id in string_array_ref(&required_order(txn)?, txn) {
-        if !seen_slides.insert(slide_id.clone()) {
-            continue;
-        }
+    for slide_id in live_slide_ids(txn)? {
         let slide = slides
             .get(txn, &slide_id)
             .and_then(|value| value.cast::<MapRef>().ok())

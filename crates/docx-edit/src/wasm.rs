@@ -52,7 +52,7 @@ use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::{Any, Assoc, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
 use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
@@ -71,7 +71,7 @@ use crate::{
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, ReadStoriesRequest, SeedParagraph, SegmentContent, SimpleFormat,
     SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
-    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession,
 };
 
 #[wasm_bindgen]
@@ -193,6 +193,7 @@ enum DeleteDirection {
 enum AdjacentStoryUnit {
     Content(u32),
     Pilcrow,
+    Table,
 }
 
 /// Resolves a paragraph to its story span via the committed paragraph index.
@@ -311,7 +312,21 @@ fn adjacent_story_unit(
             AdjacentStoryUnit::Content(width)
         }
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+        SegKind::Embed if table_embed_at(doc, story, segment.start)? => AdjacentStoryUnit::Table,
         SegKind::Embed => AdjacentStoryUnit::Content(1),
+    }))
+}
+
+fn table_embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
+    let txn = doc.yrs_doc().transact();
+    let text = crate::story_ref(&txn, story).map_err(js_err)?;
+    let chunks = crate::ops::snapshot_range(&text, &txn, index, index.saturating_add(1));
+    Ok(chunks.first().is_some_and(|chunk| {
+        matches!(
+            &chunk.kind,
+            crate::ops::ChunkKind::Embed(Some(map))
+                if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("table")
+        )
     }))
 }
 
@@ -805,7 +820,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
-/// "showHiddenText": bool, "defaultParagraphStyleId": string,
+/// "showHiddenText": bool, "showTableGridlines": bool,
+/// "defaultParagraphStyleId": string,
 /// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
@@ -830,6 +846,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .map(str::to_owned);
     env.show_hidden_text = value
         .get("showHiddenText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    env.show_table_gridlines = value
+        .get("showTableGridlines")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     env.media_tokens = value
@@ -1120,6 +1140,7 @@ pub struct EditSession {
     /// This session's measurement fonts; see the module docs.
     fonts: docx_layout::MeasureFonts,
     docx_source: RefCell<Option<PackageBytes>>,
+    paragraph_styles: RefCell<Option<crate::seed::StyleResolver>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
     awaiting_comment_baseline: Cell<bool>,
@@ -1252,6 +1273,30 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 }
 
 impl EditSession {
+    /// The source package's style cascade, built on first use and cached until the source changes.
+    fn paragraph_style_resolver(
+        &self,
+    ) -> Result<std::cell::RefMut<'_, Option<crate::seed::StyleResolver>>, JsValue> {
+        let mut styles = self.paragraph_styles.borrow_mut();
+        if styles.is_none()
+            && let Some(source) = self.docx_source.borrow().as_ref()
+        {
+            let parts = ooxml_opc::unzip_parts_where(
+                source,
+                ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
+                |name| {
+                    matches!(
+                        name,
+                        "word/styles.xml" | "word/theme/theme1.xml" | "word/settings.xml"
+                    )
+                },
+            )
+            .map_err(js_err)?;
+            *styles = Some(crate::seed::StyleResolver::from_parts(&parts).map_err(js_err)?);
+        }
+        Ok(styles)
+    }
+
     pub fn seed_from_docx(
         &self,
         bytes: &[u8],
@@ -1330,6 +1375,8 @@ impl EditSession {
         let (envelope, parts, media) =
             crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
+        // Only stories seeded into an empty replica are what a fresh seed of the package holds.
+        let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
         let fonts = if seed_stories {
             let seed_media = if self.media_tokens.get() {
                 crate::seed::SeedMedia::AsParsed
@@ -1378,10 +1425,14 @@ impl EditSession {
         };
         let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
         self.docx_source.replace(Some(source));
+        self.paragraph_styles.replace(None);
         self.docx_digest.replace(Some(digest));
         self.engine.set_partial_document(false);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(js_entropy());
+        if fresh_seed {
+            self.engine.doc().mark_seeded();
+        }
         Ok(json)
     }
 
@@ -1430,18 +1481,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("resident input requires a selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "resident input currently requires a collapsed selection",
@@ -1524,6 +1568,11 @@ impl EditSession {
         let ctx = EditCtx::local("", "");
 
         match (direction, adjacent) {
+            (_, Some(AdjacentStoryUnit::Table)) => {
+                return Err(js_err(
+                    "resident input state is not ready for this paragraph",
+                ));
+            }
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
                 self.engine
                     .edit_resident_text(
@@ -1612,6 +1661,7 @@ impl EditSession {
             paragraph_identities_cache: RefCell::new(None),
             fonts: docx_layout::MeasureFonts::default(),
             docx_source: RefCell::new(None),
+            paragraph_styles: RefCell::new(None),
             docx_digest: RefCell::new(None),
             awaiting_comment_baseline: Cell::new(false),
             update_observer: None,
@@ -1947,10 +1997,18 @@ impl EditSession {
             if selection.story != "body" {
                 None
             } else {
-                let txn = self.engine.doc().yrs_doc().transact();
-                let anchor = selection.anchor.get_offset(&txn).map(|offset| offset.index);
-                let head = selection.head.get_offset(&txn).map(|offset| offset.index);
-                drop(txn);
+                let doc = self.engine.doc();
+                let anchor = doc
+                    .cached_sticky_offset(&selection.story, &selection.anchor)
+                    .ok()
+                    .flatten();
+                let head = if selection.anchor == selection.head {
+                    anchor
+                } else {
+                    doc.cached_sticky_offset(&selection.story, &selection.head)
+                        .ok()
+                        .flatten()
+                };
                 match (anchor, head) {
                     (Some(anchor), Some(head)) if anchor == head => {
                         let loc = index_loc(self.engine.doc(), &selection.story, head)?;
@@ -2005,18 +2063,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -2071,18 +2122,11 @@ impl EditSession {
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
         let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor, head) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -2321,8 +2365,10 @@ impl EditSession {
         ranges: Vec<f64>,
     ) -> Result<Vec<f64>, JsValue> {
         let ranges: Vec<(i64, i64)> = ranges
-            .chunks_exact(2)
-            .map(|pair| (pair[0] as i64, pair[1] as i64))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[from, to]| (from as i64, to as i64))
             .collect();
         let batches = self
             .engine
@@ -2418,6 +2464,7 @@ impl EditSession {
             .install_peer_bootstrap(bootstrap, js_entropy())
             .map_err(peer_metadata_js_err)?;
         self.docx_source.replace(Some(retained.source));
+        self.paragraph_styles.replace(None);
         self.docx_digest.replace(Some(retained.digest));
         self.awaiting_comment_baseline.set(true);
         self.engine.set_partial_document(false);
@@ -2708,6 +2755,11 @@ impl EditSession {
         self.engine.doc().encode_state_vector_v1()
     }
 
+    /// Whether a remote update is waiting on one that has not arrived yet.
+    pub fn has_pending_update(&self) -> bool {
+        self.engine.doc().holds_pending_update()
+    }
+
     /// The yrs v1 update carrying everything this replica has that the peer
     /// described by `remote_state_vector` does not. Errors on a malformed
     /// state vector.
@@ -2718,11 +2770,53 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// [`EditSession::encode_diff`] as ordered updates for a sync that must
+    /// travel in bounded frames: the whole diff when it fits
+    /// `max_chunk_bytes`, otherwise causally ordered struct updates followed
+    /// by the delete set alone. Each fits the limit except one that carries a
+    /// single larger struct. Errors on a malformed state vector or a zero
+    /// limit.
+    pub fn encode_diff_chunks(
+        &self,
+        remote_state_vector: &[u8],
+        max_chunk_bytes: u32,
+    ) -> Result<js_sys::Array, JsValue> {
+        let chunks = self
+            .engine
+            .doc()
+            .encode_diff_chunks_v1(remote_state_vector, max_chunk_bytes as usize)
+            .map_err(js_err)?;
+        Ok(chunks
+            .iter()
+            .map(|chunk| Uint8Array::from(chunk.as_slice()))
+            .collect())
+    }
+
     /// Applies a remote or incremental yrs v1 update. It commits without a
     /// local origin, so this replica's undo manager never claims it. Errors on
     /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
+    }
+
+    /// Applies the ordered updates of one sync in a single remote transaction,
+    /// so the result matches [`EditSession::apply_update`] on the whole diff.
+    /// Errors on a non-`Uint8Array` entry or a malformed or oversized update,
+    /// before applying any.
+    pub fn apply_update_chunks(&self, updates: js_sys::Array) -> Result<(), JsValue> {
+        let chunks = updates
+            .iter()
+            .map(|update| {
+                update
+                    .dyn_into::<Uint8Array>()
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| js_err("sync updates must be Uint8Arrays"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.engine
+            .doc()
+            .apply_update_chunks_v1(&chunks)
+            .map_err(js_err)
     }
 
     /// [`EditSession::apply_update`] plus an inference about where the peer
@@ -2772,19 +2866,20 @@ impl EditSession {
     /// committed transaction. `update` is v1-encoded — feed it straight to
     /// [`EditSession::apply_update`] on a peer — and is copied out of wasm
     /// memory, so JS may hold it across later edits. The second argument is
-    /// `1` when the transaction had no local origin. One observer per session;
-    /// a second call replaces the first, and a throwing callback is ignored.
+    /// `1` when the transaction had no local origin; a remote update's own
+    /// formatting cleanup follows it as a `0` update to forward. One observer
+    /// per session; a second call replaces the first, and a throwing callback
+    /// is ignored.
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
+            .observe_update_v1(move |update, remote| {
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
-                let bytes = Uint8Array::from(event.update.as_slice());
-                let origin = if txn.origin().is_none() { 1.0 } else { 0.0 };
+                let bytes = Uint8Array::from(update);
+                let origin = if remote { 1.0 } else { 0.0 };
                 let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
             .map_err(js_err)?;
@@ -2809,11 +2904,10 @@ impl EditSession {
         let subscription = self
             .engine
             .doc()
-            .yrs_doc()
-            .observe_update_v1(move |txn, event| {
-                let mut encoded = Vec::with_capacity(event.update.len() + 1);
-                encoded.push(if txn.origin().is_none() { 1 } else { 0 });
-                encoded.extend_from_slice(&event.update);
+            .observe_update_v1(move |update, remote| {
+                let mut encoded = Vec::with_capacity(update.len() + 1);
+                encoded.push(u8::from(remote));
+                encoded.extend_from_slice(update);
                 observed.borrow_mut().push_back(encoded);
             })
             .map_err(js_err)?;
@@ -2969,15 +3063,18 @@ impl EditSession {
         anchor_index: u32,
         head_index: u32,
     ) -> Result<(), JsValue> {
-        let txn = self.engine.doc().yrs_doc().transact();
-        let text = story_ref(&txn, story).map_err(js_err)?;
-        let anchor = text
-            .sticky_index(&txn, anchor_index, Assoc::After)
+        let doc = self.engine.doc();
+        let anchor = doc
+            .cached_sticky_index(story, anchor_index, Assoc::After)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("selection anchor could not be made sticky"))?;
-        let head = text
-            .sticky_index(&txn, head_index, Assoc::After)
-            .ok_or_else(|| js_err("selection head could not be made sticky"))?;
-        drop(txn);
+        let head = if anchor_index == head_index {
+            anchor.clone()
+        } else {
+            doc.cached_sticky_index(story, head_index, Assoc::After)
+                .map_err(js_err)?
+                .ok_or_else(|| js_err("selection head could not be made sticky"))?
+        };
         self.engine.set_resident_caret_head(
             (story == "body" || story.starts_with("body:"))
                 .then(|| (story.to_owned(), head.clone())),
@@ -3002,10 +3099,11 @@ impl EditSession {
         offset: u32,
     ) -> Result<Vec<u8>, JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        let text = story_ref(&txn, story).map_err(js_err)?;
-        let position = text
-            .sticky_index(&txn, index, Assoc::After)
+        let position = self
+            .engine
+            .doc()
+            .cached_sticky_index(story, index, Assoc::After)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("position could not be made sticky"))?;
         Ok(encode_sticky(&position))
     }
@@ -3014,7 +3112,10 @@ impl EditSession {
     /// to `{"story","paraId","offset"}`. Errors when the bytes are malformed
     /// or the position no longer resolves in `story`.
     pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
-        let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
+        let index = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_position(story, position)
             .map_err(js_err)?;
         let loc = index_loc(self.engine.doc(), story, index)?;
         Ok(json!({
@@ -3033,18 +3134,11 @@ impl EditSession {
         let Some(selection) = selection.as_ref() else {
             return Ok("null".to_owned());
         };
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor_index = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head_index = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (anchor_index, head_index) = self
+            .engine
+            .doc()
+            .resolve_cached_sticky_selection(&selection.story, &selection.anchor, &selection.head)
+            .map_err(js_err)?;
         let anchor = index_loc(self.engine.doc(), &selection.story, anchor_index)?;
         let head = index_loc(self.engine.doc(), &selection.story, head_index)?;
         Ok(json!({
@@ -3137,12 +3231,12 @@ impl EditSession {
             .doc()
             .table_embed_index(&locator)
             .map_err(js_err)?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        let story = story_ref(&txn, &locator.story).map_err(js_err)?;
-        let table = story
-            .sticky_index(&txn, table_index, Assoc::Before)
+        let table = self
+            .engine
+            .doc()
+            .cached_sticky_index(&locator.story, table_index, Assoc::Before)
+            .map_err(js_err)?
             .ok_or_else(|| js_err("table selection could not be made sticky"))?;
-        drop(txn);
         *self.cell_selection.borrow_mut() = Some(LocalCellSelection {
             parent_story: locator.story,
             table,
@@ -3168,13 +3262,12 @@ impl EditSession {
         let Some(selection) = selection.as_ref() else {
             return Ok("null".to_owned());
         };
-        let txn = self.engine.doc().yrs_doc().transact();
-        let table_index = selection
-            .table
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("cell selection table no longer resolves"))?
-            .index;
-        drop(txn);
+        let table_index = self
+            .engine
+            .doc()
+            .cached_sticky_offset(&selection.parent_story, &selection.table)
+            .map_err(js_err)?
+            .ok_or_else(|| js_err("cell selection table no longer resolves"))?;
         let locator = self
             .engine
             .doc()
@@ -3205,10 +3298,11 @@ impl EditSession {
 
     pub fn clear_cell_selection(&self) -> Option<String> {
         let selection = self.cell_selection.borrow_mut().take()?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        story_ref(&txn, &selection.parent_story).ok()?;
-        let index = selection.table.get_offset(&txn)?.index;
-        drop(txn);
+        let index = self
+            .engine
+            .doc()
+            .cached_sticky_offset(&selection.parent_story, &selection.table)
+            .ok()??;
         let paragraphs = self
             .engine
             .doc()
@@ -3247,6 +3341,11 @@ impl EditSession {
             .doc()
             .set_document_property(&EditCtx::local("", ""), key, json)
             .map_err(js_err)
+    }
+
+    pub fn list_sections_json(&self) -> Result<String, JsValue> {
+        let sections = self.engine.doc().list_sections().map_err(js_err)?;
+        serde_json::to_string(&sections).map_err(js_err)
     }
 
     pub fn section_margins_json(&self) -> String {
@@ -3541,6 +3640,21 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    pub fn set_table_properties(
+        &self,
+        table_json: &str,
+        patch_json: &str,
+    ) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let patch = parse_any_object(patch_json, "table properties patch")?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_table_properties(&EditCtx::local("", ""), &table, &patch)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
     /// Inserts `text` at `(story, para_id, offset)`. It must contain no
     /// paragraph or line breaks, and it inherits the formatting at the
     /// insertion point. Receipt: `{"revisionId": string|null, "range"}` —
@@ -3718,6 +3832,24 @@ impl EditSession {
         Ok(text_receipt_json(receipt))
     }
 
+    pub fn insert_line_break(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let receipt = self
+            .engine
+            .doc()
+            .insert_hard_break(&ctx, Position::new(story, at))
+            .map_err(js_err)?;
+        Ok(text_receipt_json(receipt))
+    }
+
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
     /// pilcrow. The FIRST half keeps the original paraId and the second is
     /// re-minted. A split at the paragraph end leaves the empty second half
@@ -3734,12 +3866,21 @@ impl EditSession {
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .split_paragraph(&ctx, Position::new(story, at), None)
-            .map_err(js_err)?;
+        let receipt = if author_name.is_none() && author_date.is_none() {
+            let receipt = self
+                .engine
+                .split_resident_paragraph(Position::new(story, at))
+                .map_err(js_err)?;
+            self.resident_text_edit
+                .replace(Some((story.to_owned(), self.engine.doc_epoch())));
+            receipt
+        } else {
+            let ctx = edit_ctx(author_name, author_date)?;
+            self.engine
+                .doc()
+                .split_paragraph(&ctx, Position::new(story, at), None)
+                .map_err(js_err)?
+        };
         Ok(json!({
             "firstParaId": receipt.first_para_id,
             "secondParaId": receipt.second_para_id,
@@ -3896,11 +4037,34 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Writes `style_id` as the `pStyle` of every paragraph intersecting
-    /// `[start, end)`. Only that key changes: this boundary has no style
-    /// resolver, so it never fabricates the paragraph attributes or run marks
-    /// the style definition would imply. In suggesting mode the property
-    /// change is recorded as a `pPrChange` revision.
+    /// The style a paragraph break at `(story, para_id, offset)` gives the new paragraph: the
+    /// paragraph style's `w:next` when the break falls at the paragraph end and `w:next` names
+    /// another paragraph style. `None` otherwise, and for a session without a source package.
+    pub fn next_paragraph_style(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<Option<String>, JsValue> {
+        let span = find_para_span(self.engine.doc(), story, para_id)?;
+        if offset != span.pilcrow - span.start {
+            return Ok(None);
+        }
+        let styles = self.paragraph_style_resolver()?;
+        let Some(styles) = styles.as_ref() else {
+            return Ok(None);
+        };
+        let current = self
+            .engine
+            .doc()
+            .selection_context(&StoryRange::new(story, span.pilcrow, span.pilcrow))
+            .map_err(js_err)?
+            .style_id;
+        Ok(styles.next_paragraph_style(current.as_deref()))
+    }
+
+    /// Applies a paragraph style and rebases inherited character formatting, preserving direct
+    /// formatting. Without a source package, only `pStyle` changes.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -3916,16 +4080,25 @@ impl EditSession {
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
-        let mut delta = ParaAttrDelta::default();
-        delta
-            .other
-            .insert("pStyle".to_owned(), Some(Any::from(style_id)));
         let ctx = edit_ctx(author_name, author_date)?;
-        self.engine
-            .doc()
-            .set_paragraph_attrs(&ctx, &selector, &delta)
-            .map(|_| ())
-            .map_err(js_err)
+        let styles = self.paragraph_style_resolver()?;
+        if let Some(styles) = styles.as_ref() {
+            self.engine
+                .doc()
+                .restyle_paragraphs(&ctx, &selector, style_id, styles)
+                .map(|_| ())
+                .map_err(js_err)
+        } else {
+            let mut delta = ParaAttrDelta::default();
+            delta
+                .other
+                .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+            self.engine
+                .doc()
+                .set_paragraph_attrs(&ctx, &selector, &delta)
+                .map(|_| ())
+                .map_err(js_err)
+        }
     }
 
     /// Applies a tri-state paragraph-property delta to every paragraph
@@ -3967,7 +4140,6 @@ impl EditSession {
     }
 
     /// Inserts one inline image embed at `(story, para_id, offset)`.
-    /// `payload_json` is the image's authored payload object, stored as given.
     /// The embed occupies one story unit. Receipt:
     /// `{"revisionId": string|null, "range"}`, the range being where the image
     /// landed. Errors when the payload is not an object.
@@ -3985,18 +4157,43 @@ impl EditSession {
         let Any::Map(payload) = Any::from_json(payload_json).map_err(js_err)? else {
             return Err(js_err("insert_image expects a JSON object"));
         };
+        let mut entries: Vec<_> = payload
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !payload.contains_key("noChangeAspect") {
+            entries.push(("noChangeAspect".to_owned(), Any::Bool(true)));
+        }
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
             .engine
             .doc()
-            .insert_embed(
+            .insert_embed(&ctx, Position::new(story, index), "image", entries)
+            .map_err(js_err)?;
+        Ok(text_receipt_json(receipt))
+    }
+
+    /// Moves one inline embed in one local transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_embed(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        to_story: &str,
+        to_para_id: &str,
+        to_offset: u32,
+    ) -> Result<String, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let to_index = loc_index(self.engine.doc(), to_story, to_para_id, to_offset)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        let receipt = self
+            .engine
+            .doc()
+            .move_embed(
                 &ctx,
                 Position::new(story, index),
-                "image",
-                payload
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
+                Position::new(to_story, to_index),
             )
             .map_err(js_err)?;
         Ok(text_receipt_json(receipt))
@@ -4261,6 +4458,26 @@ impl EditSession {
             .map_err(js_err)
     }
 
+    /// Initializes imported metadata, creating an unanchored comment when absent.
+    pub fn seed_comment_metadata_json(
+        &self,
+        comment_id: &str,
+        patch_json: &str,
+    ) -> Result<(), JsValue> {
+        let patch: Value = serde_json::from_str(patch_json).map_err(js_err)?;
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| js_err("comment metadata must be an object"))?;
+        let patch = fields
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), json_to_any(value)?)))
+            .collect::<Result<_, JsValue>>()?;
+        self.engine
+            .doc()
+            .seed_comment_metadata(comment_id, patch)
+            .map_err(js_err)
+    }
+
     pub fn update_comment_metadata_json(
         &self,
         comment_id: &str,
@@ -4323,8 +4540,9 @@ impl EditSession {
     }
 
     /// Resolves tracked changes by revision id outside undo history:
-    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"revisionIds":[string, …]}`, the ids
-    /// resolved. An id that matches nothing is skipped. See [`EditingDoc::settle_revisions`].
+    /// `{"accept":[string, …],"reject":[string, …]}` -> `{"ok":true,"revisionIds":[string, …]}`,
+    /// the ids resolved, or `{"ok":false,"version","failure"}`. An id that matches nothing is
+    /// skipped. See [`EditingDoc::settle_revisions`].
     pub fn settle_revisions_json(&self, request: &str) -> Result<String, JsValue> {
         #[derive(serde::Deserialize)]
         struct Settle {
@@ -4334,12 +4552,13 @@ impl EditSession {
             reject: Vec<String>,
         }
         let request: Settle = serde_json::from_str(request).map_err(js_err)?;
-        let resolved = self
+        let outcome = self
             .engine
             .doc()
             .settle_revisions(&request.accept, &request.reject, &self.undo)
-            .map_err(js_err)?;
-        Ok(json!({ "revisionIds": resolved }).to_string())
+            .map_err(js_err)?
+            .map(|resolved| json!({ "revisionIds": resolved }));
+        outcome_json(&outcome).map_err(js_err)
     }
 
     /// Applies a batch of raw story mutations in ONE transaction. Unlike every
@@ -4417,9 +4636,11 @@ impl EditSession {
     }
 
     /// Every story: `{"ok":true,"version","stories":[{"story","kind","parent"?,"root","part"?,
-    /// "uses"?}]}`, sorted by id.
+    /// "uses"?:[{"sectionIndex","variant","shown"?}]}]}`, sorted by id. `shown` is present only
+    /// while a complete layout of the current version is retained.
     pub fn list_stories_json(&self) -> Result<String, JsValue> {
-        let mut listed = serde_json::to_value(self.engine.doc().list_stories()).map_err(js_err)?;
+        let mut listed =
+            serde_json::to_value(self.engine.list_stories_with_layout()).map_err(js_err)?;
         listed["ok"] = Value::Bool(true);
         Ok(listed.to_string())
     }
@@ -4488,6 +4709,7 @@ impl EditSession {
         let txn = self.engine.doc().yrs_doc().transact();
         let inventory = crate::content_controls::Inventory::build(self.engine.doc(), &txn)
             .map_err(|failure| js_err(failure.message))?;
+        drop(txn);
         let mut values = Vec::new();
         for record in inventory
             .records
@@ -4499,9 +4721,11 @@ impl EditSession {
                 | crate::content_controls::Site::Block { raw, .. } => raw,
                 _ => continue,
             };
-            let story = story_ref(&txn, &record.story).map_err(js_err)?;
-            let position = story
-                .sticky_index(&txn, raw, Assoc::After)
+            let position = self
+                .engine
+                .doc()
+                .cached_sticky_index(&record.story, raw, Assoc::After)
+                .map_err(js_err)?
                 .ok_or_else(|| js_err("control could not be made sticky"))?;
             values.push(serde_json::json!({"control":record.control,"at":{"story":record.story,"index":raw,"encoded":encode_sticky(&position)}}));
         }
@@ -4664,6 +4888,7 @@ impl EditSession {
         if let CompareOutcome::Applied(applied) = outcome {
             self.engine.set_relayout_trigger(RelayoutTrigger::Open);
             self.docx_source.replace(Some(PackageBytes::from(original)));
+            self.paragraph_styles.replace(None);
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }
@@ -4964,8 +5189,7 @@ impl EditSession {
     /// Whether the document has a story with this id.
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        txn.get_map(STORIES)
-            .is_some_and(|stories| stories.contains_key(&txn, story))
+        crate::story_ref(&txn, story).is_ok()
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
@@ -4982,7 +5206,9 @@ impl EditSession {
         let Some(stories) = txn.get_map(STORIES) else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_string())
+            .collect();
         ids.sort();
         ids
     }
@@ -5138,6 +5364,37 @@ impl EditSession {
     pub fn locate_paragraph(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
+    }
+
+    /// The index of the first paragraph of `story` that carries `para_id`, in
+    /// `paragraph_spans` order, or -1. Errors on an unknown story.
+    pub fn paragraph_unit(&self, story: &str, para_id: &str) -> Result<i32, JsValue> {
+        Ok(self
+            .engine
+            .doc()
+            .paragraph_index(story)
+            .map_err(js_err)?
+            .para_slot(para_id)
+            .map_or(-1, |slot| slot as i32))
+    }
+
+    /// Ids of the tracked changes of `story` whose range holds the caret at
+    /// `para_id`/`offset`, in `list_revisions` order: `["id", …]`. The caret
+    /// and both range ends resolve through their paragraph's span start as
+    /// `locate_paragraph` gives it; a range whose paragraph does not resolve
+    /// holds nothing. Reads only `story`, unlike `list_revisions`.
+    pub fn revision_ids_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<String, JsValue> {
+        let doc = self.engine.doc();
+        find_para_span(doc, story, para_id)?;
+        let ids = doc
+            .revision_ids_at(story, para_id, offset)
+            .map_err(js_err)?;
+        serde_json::to_string(&ids).map_err(js_err)
     }
 
     /// How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
@@ -5359,6 +5616,10 @@ impl EditSession {
                         "sha256": part.sha256,
                         "paragraphs": part.paragraphs,
                         "changed": part.changed,
+                        "sectionOnly": part.section_only,
+                        "paragraphPatches": part.paragraph_patches,
+                        "legacyParagraphs": part.legacy_paragraphs,
+                        "tablePatches": part.table_patches,
                         "inserted": part
                             .inserted
                             .iter()
@@ -5371,6 +5632,19 @@ impl EditSession {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "sectionSplicedParts": plan.section_spliced_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs,
+                "changed": part.changed,
+                "sectionOnly": part.section_only,
+                "tablePatches": part.table_patches,
+                "inserted": part.inserted.iter().map(|anchor| match anchor {
+                    SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
+                    SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),
+                }).collect::<Vec<_>>(),
+                "removed": part.removed,
+            })).collect::<Vec<_>>(),
         }))
         .map_err(js_err)
     }
@@ -5511,7 +5785,169 @@ pub fn render_docx_markdown_with_pages_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditCtx, RawOp};
+    use crate::{EditCtx, RawOp, story_ref};
+    use yrs::{IndexedSequence, Map};
+
+    #[test]
+    fn collapsed_command_positions_share_sticky_walks() {
+        use crate::sticky_positions::{STICKY_INDEX_WALKS, STICKY_OFFSET_WALKS};
+
+        let session = EditSession::new(77.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "abcdef", "Normal", "left")
+            .unwrap();
+        let txn = doc.yrs_doc().transact();
+        let text = story_ref(&txn, "body").unwrap();
+        let expected = text.sticky_index(&txn, 3, Assoc::After).unwrap();
+        drop(txn);
+        STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+        STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+        session.set_selection("body", "p1", 3, "p1", 3).unwrap();
+        for _ in 0..2 {
+            let bytes = session.encode_sticky_position("body", "p1", 3).unwrap();
+            assert_eq!(bytes, encode_sticky(&expected));
+            let resolved: Value =
+                serde_json::from_str(&session.resolve_sticky_position("body", &bytes).unwrap())
+                    .unwrap();
+            assert_eq!(
+                resolved,
+                json!({"story": "body", "paraId": "p1", "offset": 3})
+            );
+        }
+        let selection = session.selection.borrow();
+        let selection = selection.as_ref().unwrap();
+        assert_eq!(selection.anchor, expected);
+        assert_eq!(selection.head, expected);
+        assert_eq!(
+            doc.cached_sticky_offset("body", &selection.head).unwrap(),
+            Some(3)
+        );
+        STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+        STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+    }
+
+    #[test]
+    fn collapsed_input_positions_share_sticky_walks() {
+        use crate::sticky_positions::{STICKY_INDEX_WALKS, STICKY_OFFSET_WALKS};
+
+        for repeats in [1, 32, 256] {
+            for reads in [1, 8] {
+                let session = EditSession::new(77.0).unwrap();
+                let doc = session.engine.doc();
+                let initial = "abcdef".repeat(repeats);
+                let offset = initial.len() as u32 / 2;
+                doc.create_story_with_paragraph_id("body", "p1", &initial, "Normal", "left")
+                    .unwrap();
+                let font_id = session
+                    .register_measure_font(include_bytes!(
+                        "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+                    ))
+                    .unwrap();
+                let request = json!({
+                    "bodyStory": "body",
+                    "regions": {"sections": [{
+                        "sectionId": "main",
+                        "properties": {
+                            "pageWidth": 4320,
+                            "pageHeight": 2880,
+                            "marginTop": 300,
+                            "marginRight": 300,
+                            "marginBottom": 300,
+                            "marginLeft": 300
+                        }
+                    }]},
+                    "measurement": {
+                        "fontChains": {"calibri|0|0": [font_id]},
+                        "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                        "authoritativeShaping": true
+                    },
+                    "renderEnv": {}
+                });
+                session
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap();
+                session
+                    .build_display_list_frame(
+                        &json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                        0.0,
+                    )
+                    .unwrap();
+                session.engine.set_display_window(Some(0..1));
+                session.set_windowed_incremental_builds(true);
+                STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+                STICKY_OFFSET_WALKS.with(|walks| walks.set(0));
+                session
+                    .set_selection("body", "p1", offset, "p1", offset)
+                    .unwrap();
+                let bytes = session
+                    .encode_sticky_position("body", "p1", offset)
+                    .unwrap();
+                let before: Value =
+                    serde_json::from_str(&session.resolve_sticky_position("body", &bytes).unwrap())
+                        .unwrap();
+                assert_eq!(before["offset"], offset);
+
+                session.apply_input("x", 1.0).unwrap();
+                for _ in 0..reads {
+                    let selection: Value =
+                        serde_json::from_str(&session.selection().unwrap()).unwrap();
+                    let peer: Value = serde_json::from_str(
+                        &session
+                            .resolve_encoded_selection("body", &bytes, &bytes)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(selection, peer);
+                    assert_eq!(selection["anchor"]["offset"], offset + 1);
+                    assert_eq!(selection["head"], selection["anchor"]);
+                    let snapshot: Value =
+                        serde_json::from_str(&session.resident_caret_snapshot_json().unwrap())
+                            .unwrap();
+                    assert_eq!(snapshot["frameEpoch"], 2);
+                    assert!(snapshot["caretRect"].is_object());
+                }
+                let mut expected = initial;
+                expected.insert(offset as usize, 'x');
+                assert_eq!(doc.paragraphs("body").unwrap()[0].text, expected);
+                STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 1));
+                STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 2));
+            }
+        }
+    }
+
+    #[test]
+    fn line_break_inserts_one_inline_unit_and_is_undoable() {
+        let mut session = EditSession::new(76.0).unwrap();
+        session.undo = UndoSession::with_clock(Arc::new(|| 0));
+        session
+            .engine
+            .doc()
+            .create_story_with_paragraph_id("body", "p1", "ab", "Normal", "left")
+            .unwrap();
+        session.track_undo();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .insert_line_break("body", "p1", 1, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["range"]["start"]["offset"], 1);
+        assert_eq!(receipt["range"]["end"]["offset"], 2);
+        let segments = session.story_segments("body").unwrap();
+        let parsed: Value = serde_json::from_str(&segments).unwrap();
+        assert_eq!(parsed[0]["text"], "a");
+        assert_eq!(parsed[1]["embedKind"], "break");
+        assert_eq!(parsed[2]["text"], "b");
+        assert_eq!(session.engine.doc().paragraphs("body").unwrap().len(), 1);
+        session.add_undo_boundary();
+        assert!(session.undo());
+        assert_eq!(
+            session.engine.doc().paragraphs("body").unwrap()[0].text,
+            "ab"
+        );
+        assert!(session.redo());
+        assert_eq!(session.story_segments("body").unwrap(), segments);
+    }
 
     #[test]
     fn paragraph_segments_build_only_requested_units() {
@@ -6713,6 +7149,189 @@ mod tests {
 
     /// A package whose paragraph text id is invalid, so parsing generates
     /// one from the package digest.
+    fn fixture_packages() -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut pending = vec![root.join("tests/fixtures")];
+        let mut found = Vec::new();
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "docx")
+                {
+                    let bytes = std::fs::read(&path).unwrap();
+                    found.push((path, bytes));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn an_unchanged_session_plans_its_save_from_what_a_reseed_would_hold() {
+        let mut checked = 0;
+        for (path, bytes) in fixture_packages() {
+            let label = path.display().to_string();
+            let session = EditSession::new(81.0).unwrap();
+            if session
+                .open_docx_retaining(&bytes, true, None, None)
+                .is_err()
+            {
+                continue;
+            }
+            let doc = session.engine.doc();
+            assert!(doc.unchanged_since_seeded(), "{label}");
+            let reused = doc.paragraph_save_plan();
+            crate::identity::assert_seed_states_match_a_reseed(doc, &label);
+            let reseeding = EditSession::new(82.0).unwrap();
+            reseeding
+                .open_docx_retaining(&bytes, true, None, None)
+                .unwrap();
+            reseeding.engine.doc().forget_seeding();
+            assert_eq!(
+                reseeding.engine.doc().paragraph_save_plan(),
+                reused,
+                "{label}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 50, "{checked} fixtures opened");
+    }
+
+    #[test]
+    fn an_open_into_a_session_holding_stories_plans_from_a_reseed() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .create_story("fn:99", "Existing note", "Normal", "left")
+                .unwrap();
+            session
+                .open_docx_retaining(&bytes, true, None, None)
+                .unwrap();
+            session
+        };
+        let session = opened(86.0);
+        assert!(!session.engine.doc().unchanged_since_seeded());
+        let plan = session.engine.doc().paragraph_save_plan();
+        let reseeding = opened(87.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+    }
+
+    #[test]
+    fn seeding_comment_metadata_keeps_a_session_planning_from_its_own_stories() {
+        let bytes = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/structured-export/principal.docx"),
+        )
+        .unwrap();
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .open_docx_retaining(&bytes, true, None, None)
+                .unwrap();
+            let comments: Vec<Value> =
+                serde_json::from_str(&session.list_comments().unwrap()).unwrap();
+            assert!(!comments.is_empty());
+            for comment in &comments {
+                let id = match &comment["id"] {
+                    Value::String(id) => id.clone(),
+                    id => id.to_string(),
+                };
+                session
+                    .seed_comment_metadata_json(
+                        &id,
+                        r#"{"author":"A","date":"2026-01-01T00:00:00Z","done":true,"parentId":null,"body":null}"#,
+                    )
+                    .unwrap();
+            }
+            session
+                .seed_comment_metadata_json("reply-1", r#"{"author":"B","parentId":"1"}"#)
+                .unwrap();
+            session
+        };
+        let session = opened(88.0);
+        assert!(session.engine.doc().unchanged_since_seeded());
+        let plan = session.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(session.engine.doc(), "principal");
+        let reseeding = opened(89.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+    }
+
+    #[test]
+    fn an_open_under_another_digest_plans_from_a_reseed() {
+        let bytes = unidentified_docx("Alpha");
+        let digest = "0".repeat(64);
+        let opened = |client: f64| {
+            let session = EditSession::new(client).unwrap();
+            session
+                .open_docx_retaining(&bytes, true, Some("fixed"), Some(&digest))
+                .unwrap();
+            session
+        };
+        let session = opened(91.0);
+        let plan = session.engine.doc().paragraph_save_plan();
+        let reseeding = opened(92.0);
+        reseeding.engine.doc().forget_seeding();
+        assert_eq!(reseeding.engine.doc().paragraph_save_plan(), plan);
+    }
+
+    #[test]
+    fn a_session_edited_since_seeding_plans_from_a_reseed() {
+        let session = EditSession::new(83.0).unwrap();
+        session
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        assert!(session.engine.doc().unchanged_since_seeded());
+        let para_id = session.engine.doc().paragraphs("body").unwrap()[0]
+            .para_id
+            .clone();
+        session
+            .insert_text("body", &para_id, 1, "!", None, None)
+            .unwrap();
+        assert!(!session.engine.doc().unchanged_since_seeded());
+        session.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(session.engine.doc(), "edited");
+
+        let restored = EditSession::new(84.0).unwrap();
+        restored
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        let para_id = restored.engine.doc().paragraphs("body").unwrap()[0]
+            .para_id
+            .clone();
+        restored
+            .insert_text("body", &para_id, 1, "!", None, None)
+            .unwrap();
+        restored
+            .delete_range("body", &para_id, 1, &para_id, 2, None, None)
+            .unwrap();
+        assert_eq!(
+            restored.engine.doc().paragraphs("body").unwrap()[0].text,
+            "Alpha"
+        );
+        assert!(!restored.engine.doc().unchanged_since_seeded());
+
+        let remote = EditSession::new(85.0).unwrap();
+        remote
+            .open_docx_retaining(&unidentified_docx("Alpha"), true, None, None)
+            .unwrap();
+        remote.apply_update(&session.encode_state()).unwrap();
+        assert!(!remote.engine.doc().unchanged_since_seeded());
+        remote.engine.doc().paragraph_save_plan();
+        crate::identity::assert_seed_states_match_a_reseed(remote.engine.doc(), "remote");
+    }
+
     fn unidentified_docx(text: &str) -> Vec<u8> {
         let document = format!(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:textId="invalid"><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"#
@@ -6785,6 +7404,11 @@ mod tests {
         assert_eq!(
             unused_script_fonts(&latin(text_box), "", true),
             json!(["Batang", "Times New Roman", "宋体"])
+        );
+        let vml_text_box = r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape style="width:72pt;height:36pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>漢字</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#;
+        assert_eq!(
+            unused_script_fonts(&latin(vml_text_box), "", true),
+            json!(["Times New Roman"])
         );
     }
 
@@ -7424,6 +8048,31 @@ mod tests {
         );
         session.delete_resident_units("backward", 1).unwrap();
         assert_resident_surrogate_texts(&session, &["a😀", "b"]);
+    }
+
+    #[test]
+    fn resident_caret_snapshot_returns_null_for_a_removed_story() {
+        let session = EditSession::new(21.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "ABCDE", "Normal", "left")
+            .unwrap();
+        session.layout_document_json(&caret_layout_input()).unwrap();
+        session.build_display_list_frame("{}", 0.0).unwrap();
+        session.set_selection("body", "p1", 2, "p1", 2).unwrap();
+        let before: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert!(before["caretRect"].is_object());
+        let peer = EditingDoc::new(22);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        peer.delete_story("body").unwrap();
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert!(session.selection.borrow().is_some());
+        let snapshot: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        assert_eq!(snapshot["frameEpoch"], before["frameEpoch"]);
+        assert!(snapshot["caretRect"].is_null());
     }
 
     #[test]

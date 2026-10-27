@@ -1,3 +1,8 @@
+import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { validPresenceCursor } from '../collaboration/presence';
+import type { PptxPresenceCursor } from '../collaboration/types';
+import { createPresentationCollaboration } from './collaboration';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -7,7 +12,8 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting, type PresentationCommandReadResult,
+  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
+  presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
@@ -35,6 +41,7 @@ import {
 
 const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
+const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
 function normalizeFontSize(size: number): number {
   return Math.round(size * 100) / 100;
@@ -42,11 +49,13 @@ function normalizeFontSize(size: number): number {
 
 export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
+  onPipeOutput?(): void;
 }
 
 export interface PresentationCommandRegistration {
   handlers: MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
+  drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   dispose(): void;
 }
 
@@ -61,7 +70,7 @@ export function registerPresentationCommandHandlers(
   type Admission =
     | { kind: 'observer'; enabled: boolean }
     | { kind: 'invoke'; run(): unknown; result?: unknown; method: string; receipt?: PresentationHistoryReceipt }
-    | { kind: 'remote'; bytes: ArrayBuffer; receipt?: PresentationHistoryReceipt }
+    | { kind: 'remote'; bytes?: readonly ArrayBuffer[]; pipe?: PipeCommandPayload<PptxPresenceCursor>; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
     | { kind: 'font'; font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback: boolean; fontId?: number }
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
@@ -86,6 +95,7 @@ export function registerPresentationCommandHandlers(
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
       result: FormattingProjection };
     source: Map<string, { text: string; fields: PptxTextField[]; editable: boolean }> };
+  let pipe: ReturnType<typeof createPresentationCollaboration> | undefined;
   let offUpdates: (() => void) | undefined;
   const pendingUpdates: NonNullable<PresentationCommandAck['updates']> = [];
   let handle: PresentationHandle | undefined;
@@ -170,7 +180,7 @@ export function registerPresentationCommandHandlers(
     }
   }
 
-  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt): string[] {
+  function refreshHistory(seq: number, receipt: PresentationHistoryReceipt, selectAppeared = false): string[] {
     const opened = presentation();
     const dirty = new Set(receipt.changedSlideIds);
     if (receipt.deckSizeChanged || receipt.slideOrderChanged) {
@@ -192,6 +202,8 @@ export function registerPresentationCommandHandlers(
       if (activeSlideId === null || !ids.has(activeSlideId)) {
         activeSlideId = metadata.slides[Math.max(0, Math.min(index, metadata.slides.length - 1))]?.id ?? null;
       }
+      const appeared = selectAppeared ? metadata.slides.find((slide) => !previous.has(slide.id)) : undefined;
+      if (appeared) activeSlideId = appeared.id;
     }
     const content = opened.readCommandContent({ slideIds: [...dirty].filter((id) => revisions.has(id)) });
     if (!content.ok) throw new Error(`Presentation history read refused: ${content.failure.message}`);
@@ -257,7 +269,8 @@ export function registerPresentationCommandHandlers(
     return { kind: 'object', slideId, shapeId, storyId: story?.id ?? '',
       anchor: 0, focus: 0, affinity: 'downstream', token: objectToken(slideId, shape), bounds, rect,
       canMove: slide!.shapes.includes(shape) && canMoveShape(shape),
-      canResize: slide!.shapes.includes(shape) && canResizeShape(shape), units };
+      canResize: slide!.shapes.includes(shape) && canResizeShape(shape),
+      aspectRatioLocked: shape.aspectRatioLocked ?? false, units };
   }
 
   function objectStory(object: PresentationCommandObjectSelection): PresentationCommandSelection | null {
@@ -485,7 +498,7 @@ export function registerPresentationCommandHandlers(
     const slide = objectSelection ? opened.snapshot().slides.find((slide) => slide.id === objectSelection!.slideId) : null;
     const shape = slide && slide.shapes.find((shape) => shape.id === objectSelection!.shapeId);
     const color = (value: string | null | undefined) => value && /^[#]?[0-9a-f]{6}$/i.test(value) ? `#${value.replace(/^#/, '')}` : null;
-    lastEditState = { readOnly, proposals: opened.listProposals(), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
+    lastEditState = { readOnly, ...(opened.isProposalsAvailable() ? { proposals: opened.listProposals() } : {}), notes: activeSlideId ? { slideId: activeSlideId, text: notes.get(activeSlideId) ?? '' } : null,
       object: shape && slide ? { formattable: shape.kind === 'shape', geometry: shape.geometry ?? null,
         fill: shape.fill?.type === 'none' ? null : color(shape.resolvedFillColor), stroke: color(shape.resolvedOutlineColor),
         strokeWidth: shape.resolvedOutlineColor ? (shape.outline?.width ?? 12700) / 12700 : null,
@@ -563,13 +576,15 @@ export function registerPresentationCommandHandlers(
     const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
     retainVersions();
     const updates = pendingUpdates.splice(0);
-    return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
+    const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
+    for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
+    return reply;
   }
 
   function admit(command: PresentationCommandEnvelope): Admission | PresentationCommandRefusalReason {
@@ -635,10 +650,19 @@ export function registerPresentationCommandHandlers(
       const run = prepareCommandOperation(presentation(), command.payload);
       return run ? { kind: 'invoke', run, method: command.payload.method } : 'invalid-payload';
     }
+    if (command.kind === 'collabPipe') {
+      return pipe && validPipePayload(command.payload, DEFAULT_MAX_FRAME_BYTES, {
+        validCursor: validPresenceCursor, optionKeys: PIPE_OPTION_KEYS,
+      }) ? { kind: 'remote', pipe: command.payload } : 'invalid-payload';
+    }
     if (command.kind === 'applyRemoteUpdate') {
-      const bytes = command.payload.bytes;
-      return bytes instanceof ArrayBuffer && bytes.byteLength > 0 && bytes.byteLength <= 16 * 1024 * 1024
-        ? { kind: 'remote', bytes } : 'invalid-payload';
+      const bytes: readonly unknown[] = Array.isArray(command.payload.bytes) ? command.payload.bytes : [command.payload.bytes];
+      let total = 0;
+      for (const update of bytes) {
+        if (!(update instanceof ArrayBuffer) || update.byteLength === 0) return 'invalid-payload';
+        total += update.byteLength;
+      }
+      return bytes.length > 0 && total <= 16 * 1024 * 1024 ? { kind: 'remote', bytes: bytes as ArrayBuffer[] } : 'invalid-payload';
     }
     if (command.kind === 'applyEdits') {
       if (composition) return 'invalid-composition';
@@ -865,7 +889,8 @@ export function registerPresentationCommandHandlers(
       return { kind: 'selection', selection: at };
     }
     if (command.kind === 'moveSelection') {
-      if (!['left', 'right', 'wordLeft', 'wordRight', 'lineStart', 'lineEnd', 'storyStart', 'storyEnd', 'up', 'down'].includes(command.payload.motion) ||
+      if (!['left', 'right', 'wordLeft', 'wordRight', 'lineStart', 'lineEnd', 'storyStart', 'storyEnd', 'up', 'down',
+        'nextCell', 'previousCell'].includes(command.payload.motion) ||
         typeof command.payload.extend !== 'boolean') return 'invalid-payload';
       const geometry = authoritativeGeometry(at.slideId);
       if (!geometry) return 'bad-target';
@@ -945,11 +970,6 @@ export function registerPresentationCommandHandlers(
           return 'invalid-payload';
         }
         if (start === end) {
-          if (story.paragraphs.some((paragraph, index) => command.kind === 'deleteBackward'
-            ? index > 0 && paragraph.start === start
-            : index < story.paragraphs.length - 1 && paragraph.end === end)) {
-            return { kind: 'text', selection: { ...at }, start, end, text: '' };
-          }
           for (let index = 0; index < count; index += 1) {
             if (command.kind === 'deleteBackward') {
               if (start === 0) break;
@@ -974,11 +994,10 @@ export function registerPresentationCommandHandlers(
       return { kind: 'text', selection: { ...at }, start, end, text };
     }
     const cached = stories.get(storyKey(at))!;
+    const joinsParagraphs = story.paragraphs.some((paragraph) => start <= paragraph.end && paragraph.end < end);
     for (const paragraph of story.paragraphs) {
-      if (start <= paragraph.end && end >= paragraph.start && !paragraph.editable) return 'unsupported';
-      if (start <= paragraph.end && paragraph.end < end && paragraph !== story.paragraphs[story.paragraphs.length - 1]) {
-        return 'unsupported';
-      }
+      if (start <= paragraph.end && end >= paragraph.start &&
+        (!paragraph.editable || joinsParagraphs && paragraph.fields.length > 0)) return 'unsupported';
       if (paragraph.fields.some((field) =>
         (start > field.start && start < field.end) || (end > field.start && end < field.end))) return 'unsupported';
       if (text.includes('\n') && paragraph.start <= start && start <= paragraph.end &&
@@ -1070,6 +1089,29 @@ export function registerPresentationCommandHandlers(
   function apply(command: PresentationCommandEnvelope, admitted: Admission): boolean {
     const opened = presentation();
     if (admitted.kind === 'noop') return false;
+    if (admitted.kind === 'remote') {
+      const selected = selection ? anchor(selection) : null;
+      const composed = composition ? anchor(composition.selection) : null;
+      const retained = new Map(selections);
+      if (!admitted.pipe) { pointerRange = undefined; closeTyping(); }
+      const before = opened.version();
+      if (admitted.pipe) pipe!.run(admitted.pipe);
+      else for (const update of admitted.bytes!) opened.applyUpdate(new Uint8Array(update));
+      if (before === opened.version()) return false;
+      if (admitted.pipe) { pointerRange = undefined; closeTyping(); }
+      admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: true, slideOrderChanged: true };
+      refreshHistory(command.seq, admitted.receipt);
+      for (const [seq, value] of retained) selections.set(seq, value);
+      selection = selected ? resolve(selected) : null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
+      if (composition && composed) {
+        const next = resolve(composed);
+        if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
+      }
+      objectSelection = null;
+      clearMarks();
+      return true;
+    }
     if (command.kind !== 'selectAtPoint') pointerRange = undefined;
     if (admitted.kind === 'history') {
       if (!(admitted.direction === 'undo' ? opened.canUndo() : opened.canRedo())) return false;
@@ -1111,28 +1153,8 @@ export function registerPresentationCommandHandlers(
       refreshHistory(command.seq, admitted.receipt);
       if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
-      objectSelection = object && slideIndices.has(object.slideId) ? selectedObject(object.slideId, object.shapeId) : null;
-      clearMarks();
-      return true;
-    }
-    if (admitted.kind === 'remote') {
-      const selected = selection ? anchor(selection) : null;
-      const composed = composition ? anchor(composition.selection) : null;
-      const retained = new Map(selections);
-      const before = opened.version();
-      opened.applyUpdate(new Uint8Array(admitted.bytes));
-      if (before === opened.version()) return false;
-      admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: true, slideOrderChanged: true };
-      refreshHistory(command.seq, admitted.receipt);
-      for (const [seq, value] of retained) selections.set(seq, value);
-      selection = selected ? resolve(selected) : null;
-      if (selection && !target(selection)) selection = null;
-      if (composition && composed) {
-        const next = resolve(composed);
-        if (next && target(next)) composition = { ...composition, selection: next }; else composition = undefined;
-      }
-      objectSelection = null;
+      if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
+      objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;
       clearMarks();
       return true;
     }
@@ -1243,13 +1265,19 @@ export function registerPresentationCommandHandlers(
       return false;
     }
     if (start !== end || text.length > 0) {
-      const grouped = command.kind === 'insertText' || command.kind === 'deleteBackward' || command.kind === 'deleteForward';
+      const joinsParagraphs = stories.get(storyKey(at))!.text.paragraphs
+        .some((paragraph) => start <= paragraph.end && paragraph.end < end);
+      const grouped = !joinsParagraphs &&
+        (command.kind === 'insertText' || command.kind === 'deleteBackward' || command.kind === 'deleteForward');
       const time = command.payload.inputTime!;
       const group = command.payload.undoGroup!;
       if (!grouped || !typing || typing.target !== storyKey(at) || typing.group !== group ||
         typing.kind !== command.kind || time < typing.time || time - typing.time >= 500 ||
         at.anchor !== typing.position || at.focus !== typing.position) opened.addUndoBoundary();
-      if (end > start) opened.deleteText(at.storyId, start, end);
+      if (end > start) {
+        if (joinsParagraphs) presentationDeleteTextJoiningParagraphs(opened, at.storyId, start, end);
+        else opened.deleteText(at.storyId, start, end);
+      }
       let offset = start;
       const paragraphs = text.split('\n');
       for (const [index, paragraph] of paragraphs.entries()) {
@@ -1292,6 +1320,7 @@ export function registerPresentationCommandHandlers(
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
+        if (input.collaboration) pipe = createPresentationCollaboration(handle, options.onPipeOutput);
         const openedMetadata = refreshMetadata();
         const index = input.activeSlideIndex ?? 0;
         if (!Number.isSafeInteger(index)) {
@@ -1350,7 +1379,7 @@ export function registerPresentationCommandHandlers(
         const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
         const committed = apply(command, admitted);
         const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
         if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
         if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
           const cached = stories.get(storyKey(admitted.selection))!;
@@ -1365,7 +1394,8 @@ export function registerPresentationCommandHandlers(
         if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
         const outcome: PresentationCommandOutcome = { seq: command.seq,
           status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
-            : committed || admitted.kind === 'format' || admitted.kind === 'alignment' ||
+            : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
+            admitted.kind === 'format' || admitted.kind === 'alignment' ||
             admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
             command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
           committed };
@@ -1447,6 +1477,7 @@ export function registerPresentationCommandHandlers(
       }
       if (request.knownRevision === slideRevision) return { ...base, status: 'unchanged' as const };
       const result = frame(request.slideId, false);
+      for (const { assetId } of result.value.media) sentMedia.add(assetId);
       return transferable({ ...base, status: 'frame' as const, frame: result.value }, result.transfer);
     },
     flushCommandEditor(_, request) {
@@ -1509,6 +1540,7 @@ export function registerPresentationCommandHandlers(
     if (disposed) return;
     disposed = true;
     const opened = handle;
+    pipe?.dispose(); pipe = undefined;
     offUpdates?.(); offUpdates = undefined; pendingUpdates.length = 0;
     handle = undefined;
     metadata = undefined;
@@ -1537,8 +1569,10 @@ export function registerPresentationCommandHandlers(
 
   return { handlers, policies: {
     openCommandEditor: { lane: 'interactive' },
-    command: { lane: 'input', mutates: true, userInput: true },
-    edit: { lane: 'input', mutates: true, userInput: true },
+    command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
+    edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
+      mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },
     thumbnailFrame: { lane: 'interactive' },
     flushCommandEditor: { lane: 'interactive' },
@@ -1547,7 +1581,7 @@ export function registerPresentationCommandHandlers(
     prepareCommandPicture: { lane: 'interactive' },
     accessCommandEditor: { lane: 'interactive' },
     checkpointCommandEditor: { lane: 'interactive' },
-  }, dispose };
+  }, drainPipe: () => pipe?.drain(), dispose };
 }
 
 function storyKey(value: PptxStoryTarget): string {

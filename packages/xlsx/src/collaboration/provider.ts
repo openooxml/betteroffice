@@ -1,3 +1,5 @@
+import { PipedCollaboration } from '../../../../shared/collaboration-pipe/main';
+import type { PipeArrival } from '../../../../shared/collaboration-pipe/worker';
 import {
   decodeAwarenessUpdate,
   decodeMessages,
@@ -9,6 +11,9 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  parseSyncRequest,
+  withOpenSyncRequest,
+  withoutDocumentFingerprint,
   type ProtocolError,
 } from './protocol';
 import {
@@ -18,6 +23,7 @@ import {
   AWARENESS_PEER_TIMEOUT_MS,
   awarenessPeers,
   expireAwarenessPeers,
+  validAwarenessCursor,
   MAX_AWARENESS_SHEET_LENGTH,
   MAX_TRACKED_AWARENESS_PEERS,
   normalizeCollaborationUser,
@@ -39,13 +45,12 @@ import {
   type CollaborationTransport,
   type CollaborationTransportEvent,
 } from './types';
-import { asyncReplicaFor, type AsyncCollaborationReplica } from './asyncReplica';
+import { asyncReplicaFor, collaborationPipeFor, type AsyncCollaborationReplica } from './asyncReplica';
 
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
+
+type UpdateBatch = { connection: number; bytes: number; updates: Uint8Array[] };
 const AWARENESS_EXPIRY_INTERVAL_MS = 1000;
-const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
-  '\0betteroffice-document-fingerprint-v1\0'
-);
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -76,46 +81,32 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
   return value.slice();
 }
 
-function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
-  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
-  const tagOffset = payload.byteLength - suffixLength;
-  if (tagOffset < 0) return payload;
-  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
-    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
-  }
-  return payload.subarray(0, tagOffset);
-}
-
 function unrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>): void {
   const handle = timer as unknown as { unref?: () => void };
   handle.unref?.();
 }
 
-function encodableCell(cell: AwarenessCursor['anchor'] | undefined): boolean {
-  return (
-    !!cell &&
-    Number.isSafeInteger(cell.row) &&
-    cell.row >= 0 &&
-    Number.isSafeInteger(cell.col) &&
-    cell.col >= 0
-  );
+const arrivals = new WeakMap<CollaborationProvider, () => PipeArrival>();
+const leaves = new WeakMap<CollaborationProvider, () => { clock: number; frame: Uint8Array } | null>();
+
+/** @internal */
+export function providerArrival(provider: CollaborationProvider): PipeArrival {
+  return arrivals.get(provider)!();
 }
 
-function encodableCursor(cursor: AwarenessCursor): boolean {
-  return (
-    typeof cursor.sheet === 'string' &&
-    cursor.sheet.length > 0 &&
-    cursor.sheet.length <= MAX_AWARENESS_SHEET_LENGTH &&
-    encodableCell(cursor.anchor) &&
-    encodableCell(cursor.head)
-  );
+/** @internal */
+export function providerLeave(provider: CollaborationProvider): { clock: number; frame: Uint8Array } | null {
+  return leaves.get(provider)!();
 }
 
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
+  private readonly piped: PipedCollaboration<CollaborationError, AwarenessCursor, AwarenessPeer> | undefined;
   private readonly asyncReplica: AsyncCollaborationReplica | undefined;
   private replicaTail: Promise<void> = Promise.resolve();
   private replicaBytes = 0;
+  private updateBatch: UpdateBatch | null = null;
+  private syncArrival: { deferred: boolean } | undefined;
   private openEpoch = 0;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
@@ -175,6 +166,53 @@ export class CollaborationProvider {
       true
     );
     this.awarenessUser = normalizeCollaborationUser(options.user, replica.clientId);
+    arrivals.set(this, () => this.beginArrival());
+    leaves.set(this, () => this.leaveFrame());
+    const channel = collaborationPipeFor(replica);
+    if (channel) {
+      this.unsubscribeReplica = () => {};
+      let subscribe: (() => void) | undefined;
+      this.piped = new PipedCollaboration(channel, {
+        connect: () => this.connectPipedTransport(() => subscribe?.()),
+        disconnect: () => {
+          this.wantsConnection = false;
+          this.connectAttempt += 1;
+          const errors = this.cleanupTransport(() => {}, true);
+          if (errors.length) throw errors[0];
+        },
+        send: (data) => transport.send(data),
+        onEvent: (listener) => {
+          if (!this.transportCleanup) return transport.onEvent(listener);
+          let active = true;
+          let unsubscribe = () => {};
+          const start = () => {
+            subscribe = undefined;
+            try {
+              const stop = transport.onEvent(listener);
+              if (typeof stop !== 'function') throw new TypeError('Transport event subscription must return a function');
+              if (active) unsubscribe = stop;
+              else stop();
+            } catch (cause) {
+              throw normalizeError('transport', 'Failed to subscribe to transport events', cause);
+            }
+          };
+          subscribe = start;
+          return () => {
+            active = false;
+            if (subscribe === start) subscribe = undefined;
+            unsubscribe();
+          };
+        },
+      }, {
+        worker: { maxFrameBytes: this.maxFrameBytes, maxMessagesPerFrame: this.maxMessagesPerFrame,
+          user: { ...this.awarenessUser } },
+        maxPendingBytes: this.maxPendingBytes,
+        hasUser: true,
+        makeError: (code, message, cause) => new CollaborationError(code, message, cause),
+        normalize: normalizeError,
+      });
+      return;
+    }
 
     try {
       this.unsubscribeReplica = replica.onUpdate((update, origin) => {
@@ -186,28 +224,41 @@ export class CollaborationProvider {
   }
 
   get status(): CollaborationStatus {
-    return this.connectionStatus;
+    return this.piped ? this.piped.status : this.connectionStatus;
   }
 
   get synced(): boolean {
-    return this.isSynced;
+    return this.piped ? this.piped.synced : this.isSynced;
   }
 
   get pendingBytes(): number {
-    return this.queuedBytes;
+    return this.piped ? this.piped.pendingBytes : this.queuedBytes;
   }
 
   get peers(): readonly AwarenessPeer[] {
-    return awarenessPeers(this.awarenessStore);
+    return this.piped ? this.piped.peers : awarenessPeers(this.awarenessStore);
   }
 
   connect(): void {
+    if (this.piped) return this.piped.connect();
     if (this.isDestroyed || this.isOpen || this.connectionStatus === 'connecting') return;
 
     this.wantsConnection = true;
     this.setStatus('connecting', false);
     if (this.transportCleanup || this.isDestroyed || !this.wantsConnection) return;
     this.startConnection();
+  }
+
+  private connectPipedTransport(subscribe: () => void): void | Promise<void> {
+    this.wantsConnection = true;
+    const attempt = ++this.connectAttempt;
+    if (!this.transportCleanup) return this.transport.connect();
+    return this.transportCleanup.then(() => {
+      if (this.isDestroyed || !this.wantsConnection || attempt !== this.connectAttempt) return;
+      subscribe();
+      if (this.isDestroyed || !this.wantsConnection || attempt !== this.connectAttempt) return;
+      return this.transport.connect();
+    });
   }
 
   private startConnection(): void {
@@ -266,6 +317,7 @@ export class CollaborationProvider {
   }
 
   disconnect(): void {
+    if (this.piped) return this.piped.disconnect();
     if (this.isDestroyed) return;
     const active =
       this.wantsConnection ||
@@ -291,6 +343,12 @@ export class CollaborationProvider {
   }
 
   destroy(): void {
+    if (this.piped) {
+      this.isDestroyed = true;
+      this.piped.destroy();
+      this.errorListeners.clear();
+      return;
+    }
     if (this.isDestroyed) return;
 
     const active =
@@ -328,6 +386,7 @@ export class CollaborationProvider {
   onStatus(listener: CollaborationStatusListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('status listener must be a function');
+    if (this.piped) return this.piped.onStatus(listener);
     const id = this.nextListenerId++;
     this.statusListeners.set(id, listener);
     return () => this.statusListeners.delete(id);
@@ -336,14 +395,18 @@ export class CollaborationProvider {
   onError(listener: CollaborationErrorListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('error listener must be a function');
+    const stopPipe = this.piped?.onError(listener);
     const id = this.nextListenerId++;
     this.errorListeners.set(id, listener);
-    return () => this.errorListeners.delete(id);
+    return () => { stopPipe?.(); this.errorListeners.delete(id); };
   }
 
   onAwareness(listener: AwarenessListener): () => void {
     if (this.isDestroyed) return () => {};
     if (typeof listener !== 'function') throw new TypeError('awareness listener must be a function');
+    if (this.piped) return this.piped.onPeers((peers) => {
+      try { listener(peers); } catch {}
+    });
     const id = this.nextListenerId++;
     this.awarenessListeners.set(id, listener);
     try {
@@ -354,7 +417,7 @@ export class CollaborationProvider {
 
   setCursor(cursor: AwarenessCursor | null): void {
     if (this.isDestroyed) return;
-    const encodable = cursor ? encodableCursor(cursor) : false;
+    const encodable = cursor ? validAwarenessCursor(cursor) : false;
     this.awarenessCursor =
       cursor && encodable
         ? {
@@ -370,6 +433,10 @@ export class CollaborationProvider {
           `Awareness cursor needs a sheet identifier of 1 to ${MAX_AWARENESS_SHEET_LENGTH} characters and non-negative cell coordinates; cursor dropped`
         )
       );
+    }
+    if (this.piped) {
+      this.piped.setCursor(this.awarenessCursor, true);
+      return;
     }
     if (!this.isOpen || !this.wantsConnection) return;
 
@@ -442,12 +509,15 @@ export class CollaborationProvider {
           })
           .finally(() => {
             if (this.transportCleanup !== cleanup) return;
+            if (failed && !this.isDestroyed) {
+              this.wantsConnection = false;
+              this.piped?.disconnect();
+            }
             this.transportCleanup = undefined;
             if (this.isDestroyed) return;
             if (failed) {
-              this.wantsConnection = false;
-              this.setStatus('disconnected', false);
-            } else if (this.wantsConnection) {
+              if (!this.piped) this.setStatus('disconnected', false);
+            } else if (this.wantsConnection && !this.piped) {
               this.startConnection();
             }
           });
@@ -501,6 +571,7 @@ export class CollaborationProvider {
     const connection = ++this.openEpoch;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
     this.isOpen = true;
     this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
@@ -538,8 +609,10 @@ export class CollaborationProvider {
 
   private sendHandshake(token: number, stateVector: Uint8Array, connection: number): void {
     if (!this.isCurrentOpen(token, connection)) return;
+    let marked: Uint8Array | undefined;
     try {
-      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+      marked = withOpenSyncRequest(stateVector);
+      this.sendFrame(encodeSyncStep1(marked ?? stateVector, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(
         token,
@@ -547,6 +620,7 @@ export class CollaborationProvider {
       );
       return;
     }
+    if (!marked && this.isCurrentOpen(token, connection)) this.sendFullUpdate(token, connection);
     if (!this.isCurrentOpen(token, connection)) return;
 
     try {
@@ -558,6 +632,36 @@ export class CollaborationProvider {
     if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
     if (!this.isCurrentOpen(token, connection)) return;
     this.startAwarenessTimers();
+  }
+
+  private sendFullUpdate(token: number, connection: number): void {
+    const send = (update: Uint8Array) => {
+      if (!this.isCurrentOpen(token, connection)) return;
+      try {
+        this.sendFrame(encodeUpdate(update, this.maxFrameBytes));
+      } catch (cause) {
+        this.failConnection(token, normalizeError('protocol', 'Failed to encode collaboration handshake', cause));
+      }
+    };
+    const fail = (cause: unknown) => {
+      if (this.isCurrentOpen(token, connection)) {
+        this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
+      }
+    };
+    if (this.asyncReplica) {
+      void this.asyncReplica.encodeStateAsUpdate()
+        .then((update) => requireBytes(update, 'encodeStateAsUpdate'))
+        .then(send, fail);
+      return;
+    }
+    let update: Uint8Array;
+    try {
+      update = requireBytes(this.replica.encodeStateAsUpdate(), 'encodeStateAsUpdate');
+    } catch (cause) {
+      fail(cause);
+      return;
+    }
+    send(update);
   }
 
   private handleMessage(token: number, data: Uint8Array, decoded?: ReturnType<typeof decodeMessages>): void {
@@ -585,7 +689,9 @@ export class CollaborationProvider {
         } else this.handleMessage(token, new Uint8Array(), [message]);
       }
       if (replicaMessages.length && this.isCurrent(token) && this.isOpen) {
-        this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
+        if (this.asyncReplica.applyUpdateChunks && replicaMessages.every((message) => message.type === 'update')) {
+          this.enqueueRemoteUpdates(token, data.byteLength, replicaMessages.map((message) => message.update));
+        } else this.enqueueReplicaMessages(token, data.byteLength, replicaMessages);
       }
       return;
     }
@@ -597,11 +703,16 @@ export class CollaborationProvider {
         case 'sync-step-1':
           this.respondToSyncStep1(token, message.stateVector);
           break;
-        case 'sync-step-2':
-          if (this.applyRemoteUpdate(token, message.update) && this.isCurrent(token)) {
-            this.setStatus('connected', true);
-          }
+        case 'sync-step-2': {
+          const previous = this.syncArrival;
+          const arrival = this.syncArrival = { deferred: false };
+          try {
+            if (this.applyRemoteUpdate(token, message.update) && this.isCurrent(token) && !arrival.deferred) {
+              this.setStatus('connected', true);
+            }
+          } finally { this.syncArrival = previous; }
           break;
+        }
         case 'update':
           this.applyRemoteUpdate(token, message.update);
           break;
@@ -667,6 +778,7 @@ export class CollaborationProvider {
     this.openEpoch += 1;
     this.replicaTail = Promise.resolve();
     this.replicaBytes = 0;
+    this.updateBatch = null;
   }
 
   private enqueueReplicaMessages(token: number, bytes: number, messages: ReturnType<typeof decodeMessages>): void {
@@ -675,14 +787,21 @@ export class CollaborationProvider {
       return;
     }
     this.replicaBytes += bytes;
+    this.updateBatch = null;
     const connection = this.openEpoch;
     const operation = this.replicaTail.then(async () => {
       for (const message of messages) {
         if (!this.isCurrentOpen(token, connection)) return;
         try {
           if (message.type === 'sync-step-1') {
-            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(message.stateVector).slice());
-            if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
+            const request = parseSyncRequest(message.stateVector);
+            const update = await this.asyncReplica!.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice());
+            if (!this.isCurrentOpen(token, connection)) return;
+            this.sendFrame(encodeSyncStep2(requireBytes(update, 'encodeStateAsUpdate'), this.maxFrameBytes));
+            if (request.open && this.isCurrentOpen(token, connection)) {
+              const vector = requireBytes(await this.asyncReplica!.encodeStateVector(), 'encodeStateVector');
+              if (this.isCurrentOpen(token, connection)) this.sendFrame(encodeSyncStep1(vector, this.maxFrameBytes));
+            }
           } else if (message.type === 'sync-step-2' || message.type === 'update') {
             await this.asyncReplica!.applyUpdate(withoutDocumentFingerprint(message.update).slice());
             if (message.type === 'sync-step-2' && this.isCurrentOpen(token, connection)) this.setStatus('connected', true);
@@ -699,11 +818,45 @@ export class CollaborationProvider {
     this.replicaTail = operation.catch(() => {});
   }
 
+  /** Remote updates that arrive while the replica is busy join the queued batch and merge in one call. */
+  private enqueueRemoteUpdates(token: number, bytes: number, updates: Uint8Array[]): void {
+    if (bytes > this.maxPendingBytes - this.replicaBytes) {
+      this.failConnection(token, new CollaborationError('backpressure', 'Pending replica data exceeds the byte limit'));
+      return;
+    }
+    this.replicaBytes += bytes;
+    const connection = this.openEpoch;
+    const stripped = updates.map((update) => withoutDocumentFingerprint(update).slice());
+    const pending = this.updateBatch;
+    if (pending?.connection === connection) {
+      pending.updates.push(...stripped);
+      pending.bytes += bytes;
+      return;
+    }
+    const batch: UpdateBatch = { connection, bytes, updates: stripped };
+    this.updateBatch = batch;
+    const operation = this.replicaTail.then(async () => {
+      if (this.updateBatch === batch) this.updateBatch = null;
+      if (!this.isCurrentOpen(token, connection)) return;
+      try {
+        if (batch.updates.length === 1) await this.asyncReplica!.applyUpdate(batch.updates[0]!);
+        else await this.asyncReplica!.applyUpdateChunks!(batch.updates);
+      } catch (cause) {
+        if (this.isCurrentOpen(token, connection)) this.failConnection(token,
+          normalizeError('replica', 'Async replica operation failed', cause));
+      }
+    }).finally(() => {
+      if (connection === this.openEpoch) this.replicaBytes -= batch.bytes;
+    });
+    this.replicaTail = operation.catch(() => {});
+  }
+
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
+    const request = parseSyncRequest(remoteStateVector);
     let update: Uint8Array;
     try {
       update = requireBytes(
-        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
+        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(request.stateVector).slice()),
         'encodeStateAsUpdate'
       );
     } catch (cause) {
@@ -718,6 +871,55 @@ export class CollaborationProvider {
       this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
+      return;
+    }
+    if (!request.open || !this.isCurrent(token) || !this.isOpen) return;
+
+    let stateVector: Uint8Array;
+    try {
+      stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('replica', 'Failed to encode replica state vector', cause)
+      );
+      return;
+    }
+    try {
+      this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
+      );
+    }
+  }
+
+  private beginArrival(): PipeArrival {
+    const token = this.epoch;
+    const connection = this.openEpoch;
+    const sync = this.syncArrival;
+    if (sync) sync.deferred = true;
+    let done = false;
+    const finish = (action: () => void) => {
+      if (done) return;
+      done = true;
+      if (this.isCurrentOpen(token, connection)) action();
+    };
+    return {
+      settle: () => finish(() => { if (sync) this.setStatus('connected', true); }),
+      fail: (cause) => finish(() => this.failConnection(token,
+        normalizeError('replica', 'Failed to apply remote update', cause))),
+    };
+  }
+
+  private leaveFrame(): { clock: number; frame: Uint8Array } | null {
+    if (!this.isOpen || this.isDestroyed || !this.wantsConnection || this.awarenessClock >= Number.MAX_SAFE_INTEGER) return null;
+    try {
+      const clock = this.awarenessClock + 1;
+      return { clock, frame: encodeAwarenessUpdate([{ clientId: this.replica.clientId, clock, state: null }], this.maxFrameBytes) };
+    } catch {
+      return null;
     }
   }
 

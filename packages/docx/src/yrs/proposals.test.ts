@@ -211,15 +211,15 @@ describe('proposal registry', () => {
     registry.reset();
     expect(events).toHaveLength(1);
     expect(() => registry.propose({ expectVersion: mirror.version, proposals: inputs })).toThrow(
-      'proposals are held by the resident worker'
+      'proposals are held by the document worker'
     );
     expect(() => registry.setStates({
       expectVersion: mirror.version,
       expectPreviewVersion: 1,
       changes: [],
-    })).toThrow('proposals are held by the resident worker');
+    })).toThrow('proposals are held by the document worker');
     expect(() => registry.withdraw({ expectVersion: mirror.version, ids: [] })).toThrow(
-      'proposals are held by the resident worker'
+      'proposals are held by the document worker'
     );
 
     mirror.proposals.entries[0]!.record.paragraph.paraId = 'external';
@@ -1150,6 +1150,30 @@ describe('YrsSession host proposals', () => {
     expect(state(session)).toEqual(unchanged);
   });
 
+  it('refuses to withdraw while a remote update waits on missing state', async () => {
+    const session = await open();
+    snapshotOf(propose(session, replace('pending', '00000003', 'this', 'that')));
+    const peer = await createYrsSession({ clientId: nextClientId++ });
+    sessions.push(peer);
+    peer.applyUpdate(session.encodeState());
+    peer.insertText({ story: 'body', paraId: '00000006', offset: 0 }, 'one ');
+    const known = peer.encodeStateVector();
+    peer.insertText({ story: 'body', paraId: '00000006', offset: 4 }, 'two ');
+    session.applyUpdate(peer.encodeStateAsUpdate(known));
+    const unchanged = state(session);
+    expect(
+      session.withdrawProposals({ expectVersion: session.version(), ids: ['pending'] })
+    ).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+    expect(state(session)).toEqual(unchanged);
+
+    session.applyUpdate(peer.encodeStateAsUpdate(session.encodeStateVector()));
+    expect(
+      snapshotOf(session.withdrawProposals({ expectVersion: session.version(), ids: ['pending'] }))
+        .proposals
+    ).toEqual([]);
+    expect(texts(session, 'accepted').at(-1)).toBe('one two Tail');
+  });
+
   it('settles a revision two withdrawn proposals share as the preview shows it', async () => {
     const session = await open();
     const settled: (readonly string[])[][] = [];
@@ -1167,7 +1191,10 @@ describe('YrsSession host proposals', () => {
         };
       },
       listRevisions: () => [],
-      settleRevisions: (accept, reject) => settled.push([accept, reject]),
+      settleRevisions: (accept, reject) => {
+        settled.push([accept, reject]);
+        return undefined;
+      },
     });
     for (const [id, paraId] of [
       ['first', '00000003'],

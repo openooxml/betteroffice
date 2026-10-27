@@ -194,10 +194,20 @@ kbd {
   text-overflow: ellipsis;
 }
 .editor-stage {
-  display: flex;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+.editor-layer {
+  grid-area: 1 / 1;
+  display: flex;
+}
+.editor-layer > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 .editor-stage > * {
   flex: 1;

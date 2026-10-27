@@ -3,15 +3,18 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PeerlessSession, PresentationCommandClient, PresentationCommandEnvelope,
-  PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
-import { decodeCommandDisplayList } from '@betteroffice/pptx';
+import type { TextBoxPrimitive } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import * as i18n from '../i18n';
 
@@ -21,7 +24,7 @@ const { act, cleanup, createEvent, fireEvent, render, waitFor } = await import('
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
-let owner: PeerlessSession | undefined;
+let owner: PptxWorkerSession | undefined;
 let paintedThroughSeq = 0;
 
 function bounded<T>(promise: Promise<T>): Promise<T> {
@@ -31,7 +34,7 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-async function deck(small = false): Promise<Uint8Array> {
+async function deck(small = false, table: boolean | 'empty' | 'mixed' | 'stacked' = false): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -40,6 +43,18 @@ async function deck(small = false): Promise<Uint8Array> {
   zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
   zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="2400000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/>${['alpha beta', 'x', 'alpha beta'].map((text) => `<a:p><a:r><a:rPr sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r></a:p>`).join('')}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`);
+  if (table) {
+    const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const rows = [['A1', 'B1'], ['A2', table === 'empty' ? '' : 'B2']].map((row) => `<a:tr h="857250">${row.map((text) =>
+      `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="2400"><a:latin typeface="Liberation Sans"/></a:defRPr></a:pPr><a:r><a:rPr sz="2400"><a:latin typeface="Liberation Sans"/></a:rPr><a:t>${text}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>`).join('')}</a:tr>`).join('');
+    zip.file('ppt/slides/slide1.xml', slide.replace(table === 'mixed' ? /(?=<\/p:spTree>)/ : /<p:sp>.*?<\/p:sp>/,
+      `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="${table === 'mixed' ? 3 : 2}" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="952500" y="952500"/><a:ext cx="5715000" cy="1714500"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="2857500"/><a:gridCol w="2857500"/></a:tblGrid>${rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`));
+  }
+  if (table === 'stacked') {
+    const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    zip.file('ppt/slides/slide1.xml', slide.replace(/<a:bodyPr\/>/g, '<a:bodyPr vert="wordArtVert"/>')
+      .replace('<a:t>B1</a:t></a:r>', '<a:t>B1</a:t></a:r><a:br/>'));
+  }
   if (small) {
     const slide = await zip.file('ppt/slides/slide1.xml')!.async('string');
     zip.file('ppt/slides/slide1.xml', slide.replace('cx="6000000" cy="2400000"', 'cx="40000" cy="40000"'));
@@ -111,13 +126,14 @@ afterEach(async () => {
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
-async function open(small = false) {
+async function open(small = false, table: boolean | 'empty' | 'mixed' | 'stacked' = false) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await bounded(deck(small))} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} />);
+  const view = render(<PptxEditor fonts={[]} file={await bounded(deck(small, table))} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
-  const box = list.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
+  const primitives = list.primitives.flatMap((primitive) => primitive.kind === 'table' ? primitive.primitives : [primitive]);
+  const box = primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
   const bounds = spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0,
     right: list.width, bottom: list.height, width: list.width, height: list.height, toJSON: () => ({}) });
   restorers.push(() => bounds.mockRestore());
@@ -144,6 +160,43 @@ test('shape_border', async () => {
   await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
   expect(client.state.selection?.kind).not.toBe('object');
   await waitFor(() => expect(view.queryByTestId('pptx-resize-nw')).toBeNull());
+});
+
+for (const kind of ['shape', 'text']) test(`empty_slide_space_clears_${kind}_selection`, async () => {
+  const { view, stage, canvas, box, point, select, list } = await open();
+  await select();
+  if (kind === 'text') {
+    const line = box.lines[0]!;
+    const stop = line.caretStops.find((stop) => stop.position === 2)!;
+    const textPoint = point(stop.x, line.y + line.height / 2);
+    act(() => { fireEvent.pointerDown(canvas, textPoint); fireEvent.pointerUp(stage, textPoint); });
+    await waitFor(() => expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 2 }));
+  }
+  const since = commands.length;
+  const blank = point(list.width - 10, list.height - 10);
+  act(() => { fireEvent.pointerDown(canvas, blank); fireEvent.pointerUp(stage, blank); });
+  await waitFor(() => expect(client.state.selection).toBeNull());
+  expect(commands.slice(since)).toMatchObject([{ kind: 'setSelection', payload: { selection: null } }]);
+  await waitFor(() => {
+    expect(view.queryByTestId('pptx-shape-selection')).toBeNull();
+    expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(0);
+    expect(view.queryByTestId('pptx-text-edit-outline')).toBeNull();
+  });
+});
+
+test('outside_slide_and_non_primary_presses_keep_selection', async () => {
+  const { stage, point, select, list } = await open();
+  await select();
+  const selected = client.state.selection;
+  const since = commands.length;
+  const blank = point(list.width - 10, list.height - 10);
+  for (const press of [point(-10, -10), point(list.width + 10, list.height + 10),
+    { ...blank, button: 2 }, { ...blank, isPrimary: false }]) {
+    act(() => { fireEvent.pointerDown(stage, press); fireEvent.pointerUp(stage, press); });
+  }
+  await bounded(client.flush());
+  expect(client.state.selection).toEqual(selected);
+  expect(commands.slice(since)).toEqual([]);
 });
 
 test('drag_release', async () => {
@@ -372,4 +425,207 @@ test('released_shape_drag_precedes_immediate_text_click_and_typing', async () =>
   if (!saved.ok) throw new Error(saved.failure.message);
   expect(saved.stories[0]!.text).toBe('al!pha beta\nx\nalpha beta');
   expect(saved.slides[0]!.shapes[0]!.x).toBe(100000 + Math.round(30 * 9144000 / list.width));
+});
+
+for (const cellIndex of [0, 1, 2, 3]) {
+  test(`table cell ${cellIndex} accepts a click at the caret and saves only its story`, async () => {
+    const { view, stage, canvas, point, list } = await open(false, true);
+    const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+    if (table.kind !== 'table') throw new Error('Expected table');
+    const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+    const cell = cells[cellIndex]!;
+    const line = cell.lines[0]!;
+    const stop = line.caretStops.find((stop) => stop.position === 1)!;
+    const at = point(stop.x, line.y + line.height / 2);
+    act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+    await bounded(client.flush());
+    expect(client.state.selection).toMatchObject({ shapeId: cell.shapeId, storyId: cell.storyId, anchor: 1, focus: 1 });
+    const input = view.getByRole('textbox', { name: 'Slide text' });
+    expect(document.activeElement).toBe(input);
+    act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true })); });
+    await bounded(client.flush());
+    const zip = await JSZip.loadAsync(await client.save());
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const texts = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+      [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''));
+    expect(texts).toEqual(['A1', 'B1', 'A2', 'B2'].map((text, index) =>
+      index === cellIndex ? `${text[0]}!${text[1]}` : text));
+  });
+}
+
+for (const empty of [true, false]) {
+  test(`table ${empty ? 'empty cell' : 'cell padding'} click places the caret and saves only its story`, async () => {
+    const { view, stage, canvas, point, list } = await open(false, empty ? 'empty' : true);
+    const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+    if (table.kind !== 'table') throw new Error('Expected table');
+    const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+    const cell = cells[empty ? 3 : 0]!;
+    const line = cell.lines[0]!;
+    const position = empty ? 0 : 1;
+    const stop = line.caretStops.find((stop) => stop.position === position)!;
+    const y = cell.y + cell.h - 12;
+    expect(y).toBeGreaterThan(line.y + line.height);
+    const at = point(stop.x, y);
+    act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+    await bounded(client.flush());
+    expect(client.state.selection?.kind).not.toBe('object');
+    expect(client.state.selection).toMatchObject({ shapeId: cell.shapeId, storyId: cell.storyId,
+      anchor: position, focus: position });
+    const input = view.getByRole('textbox', { name: 'Slide text' });
+    expect(document.activeElement).toBe(input);
+    act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+      bubbles: true, cancelable: true })); });
+    await bounded(client.flush());
+    const zip = await JSZip.loadAsync(await client.save());
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    const texts = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+      [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''));
+    expect(texts).toEqual(empty ? ['A1', 'B1', 'A2', '!'] : ['A!1', 'B1', 'A2', 'B2']);
+  });
+}
+
+test('table frame border selects the table before a cell click inserts a paragraph', async () => {
+  const { view, stage, canvas, box, point, select } = await open(false, true);
+  await select();
+  const line = box.lines[0]!;
+  const stop = line.caretStops.find((stop) => stop.position === 2)!;
+  const at = point(stop.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ shapeId: box.shapeId, storyId: box.storyId, focus: 2 });
+  expect(view.queryByTestId('pptx-resize-nw')).toBeNull();
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertParagraph',
+    bubbles: true, cancelable: true })); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: box.storyId, focus: 3 });
+  const zip = await JSZip.loadAsync(await client.save());
+  const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  const paragraphs = [...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+    [...match[1]!.matchAll(/<a:p(?:\s[^>]*)?>(.*?)<\/a:p>|<a:p\s*\/>/gs)].map((paragraph) =>
+      [...(paragraph[1] ?? '').matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join('')));
+  expect(paragraphs).toEqual([['A1', ''], ['B1'], ['A2'], ['B2']]);
+});
+
+test('Tab and Shift+Tab move between table cells and stay in the last cell', async () => {
+  const { view, stage, canvas, point, list } = await open(false, true);
+  const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+  if (table.kind !== 'table') throw new Error('Expected table');
+  const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+  const line = cells[0]!.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  const press = async (shiftKey: boolean) => {
+    let handled = false;
+    act(() => { handled = !fireEvent.keyDown(input, { key: 'Tab', shiftKey }); });
+    await bounded(client.flush());
+    return handled;
+  };
+  for (const [shiftKey, cell] of [[false, 1], [false, 2], [true, 1], [false, 2], [false, 3], [false, 3]] as const) {
+    expect(await press(shiftKey)).toBe(true);
+    expect(client.state.selection).toMatchObject({ shapeId: cells[cell]!.shapeId, storyId: cells[cell]!.storyId,
+      anchor: 0, focus: 2 });
+  }
+  act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'x',
+    bubbles: true, cancelable: true })); });
+  await bounded(client.flush());
+  const zip = await JSZip.loadAsync(await client.save());
+  const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+  expect([...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+    [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join(''))).toEqual(['A1', 'B1', 'A2', 'x']);
+});
+
+test('Tab outside a table cell is left to the browser', async () => {
+  const { view, stage, canvas, box, point } = await open();
+  const line = box.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: box.storyId });
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  expect(fireEvent.keyDown(input, { key: 'Tab' })).toBe(true);
+});
+
+for (const shiftKey of [false, true]) {
+  test(`quick ${shiftKey ? 'Shift+Tab' : 'Tab'} follows a pending click from ordinary text into a cell`, async () => {
+    const { view, stage, canvas, box, point, list } = await open(false, 'mixed');
+    const line = box.lines[0]!;
+    const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+    act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+    await bounded(client.flush());
+    expect(client.state.selection).toMatchObject({ storyId: box.storyId });
+    const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+    if (table.kind !== 'table') throw new Error('Expected table');
+    const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+    const target = cells[shiftKey ? 1 : 0]!;
+    const cellLine = target.lines[0]!;
+    const cellPoint = point(cellLine.caretStops[1]!.x, cellLine.y + cellLine.height / 2);
+    const input = view.getByRole('textbox', { name: 'Slide text' });
+    let handled = false;
+    act(() => {
+      fireEvent.pointerDown(canvas, cellPoint);
+      fireEvent.pointerUp(stage, cellPoint);
+      expect(client.state.selection).toMatchObject({ storyId: box.storyId });
+      handled = !fireEvent.keyDown(input, { key: 'Tab', shiftKey });
+      input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: '!',
+        bubbles: true, cancelable: true }));
+    });
+    await bounded(client.flush());
+    expect(handled).toBe(true);
+    expect(document.activeElement).toBe(input);
+    expect(client.state.selection).toMatchObject({ storyId: cells[shiftKey ? 0 : 1]!.storyId, focus: 1 });
+    const zip = await JSZip.loadAsync(await client.save());
+    const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+    expect([...xml.matchAll(/<a:tc>(.*?)<\/a:tc>/gs)].map((match) =>
+      [...match[1]!.matchAll(/<a:t>(.*?)<\/a:t>/gs)].map((text) => text[1]).join('')))
+      .toEqual(shiftKey ? ['!', 'B1', 'A2', 'B2'] : ['A1', '!', 'A2', 'B2']);
+  });
+}
+
+test('Tab replaces a stacked cell including its trailing break', async () => {
+  const { view, stage, canvas, point, list } = await open(false, 'stacked');
+  const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+  if (table.kind !== 'table') throw new Error('Expected table');
+  const cells = table.primitives.filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox');
+  const line = cells[0]!.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, at); fireEvent.pointerUp(stage, at); });
+  await bounded(client.flush());
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  act(() => { fireEvent.keyDown(input, { key: 'Tab' }); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: cells[1]!.storyId, anchor: 0, focus: 3 });
+  act(() => { input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: 'x',
+    bubbles: true, cancelable: true })); });
+  await bounded(client.flush());
+  const saved = (await client.read()).result;
+  if (!saved.ok) throw new Error(saved.failure.message);
+  expect(saved.stories.find((story) => story.storyId === cells[1]!.storyId)?.text).toBe('x');
+});
+
+test('quick Tab after clicking out of a table is left to the browser', async () => {
+  const { view, stage, canvas, box, point, list } = await open(false, 'mixed');
+  const table = list.primitives.find((primitive) => primitive.kind === 'table')!;
+  if (table.kind !== 'table') throw new Error('Expected table');
+  const cell = table.primitives.find((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox')!;
+  const cellLine = cell.lines[0]!;
+  const cellPoint = point(cellLine.caretStops[1]!.x, cellLine.y + cellLine.height / 2);
+  act(() => { fireEvent.pointerDown(canvas, cellPoint); fireEvent.pointerUp(stage, cellPoint); });
+  await bounded(client.flush());
+  expect(client.state.selection).toMatchObject({ storyId: cell.storyId });
+  const line = box.lines[0]!;
+  const at = point(line.caretStops[1]!.x, line.y + line.height / 2);
+  const input = view.getByRole('textbox', { name: 'Slide text' });
+  let handled = true;
+  act(() => {
+    fireEvent.pointerDown(canvas, at);
+    fireEvent.pointerUp(stage, at);
+    handled = !fireEvent.keyDown(input, { key: 'Tab' });
+  });
+  await bounded(client.flush());
+  expect(handled).toBe(false);
+  expect(client.state.selection).toMatchObject({ storyId: box.storyId });
 });

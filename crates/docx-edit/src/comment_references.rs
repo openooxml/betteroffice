@@ -10,6 +10,7 @@ use yrs::{
     Transact, TransactionMut,
 };
 
+use crate::sticky_positions::sticky_offset;
 use crate::{COMMENTS, EditingDoc, STORIES, decode_anchor, map_string, out_len};
 
 /// Records the comments an update reanchors while it integrates: a replaced comment or changed
@@ -86,7 +87,10 @@ fn range_ends<T: ReadTxn>(txn: &T, comment_id: &str) -> BTreeMap<String, u32> {
         return ends;
     };
     for anchor in anchors.iter().filter_map(|value| decode_anchor(value).ok()) {
-        if let Some(end) = anchor.end.get_offset(txn) {
+        if crate::story_ref(txn, &anchor.story).is_err() {
+            continue;
+        }
+        if let Some(end) = sticky_offset(&anchor.end, txn) {
             let entry = ends.entry(anchor.story).or_insert(end.index);
             *entry = (*entry).max(end.index);
         }
@@ -108,10 +112,10 @@ pub(crate) fn reconcile(txn: &mut TransactionMut<'_>, comment_ids: &BTreeSet<Str
     if ends.is_empty() {
         return;
     }
-    let stories: Vec<(String, TextRef)> = txn
+    let root = txn
         .get_map(STORIES)
-        .expect("stories root is declared by EditingDoc::new")
-        .iter(txn)
+        .expect("stories root is declared by EditingDoc::new");
+    let stories: Vec<(String, TextRef)> = crate::live_stories(&root, txn)
         .filter_map(|(id, value)| Some((id.to_owned(), value.cast::<TextRef>().ok()?)))
         .collect();
     let mut found: BTreeMap<&str, Vec<(usize, u32)>> = BTreeMap::new();

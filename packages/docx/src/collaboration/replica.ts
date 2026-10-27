@@ -18,6 +18,8 @@ export function createWorkerCollaborationReplica(
     encodeStateVector: () => session.encodeStateVector(),
     encodeStateAsUpdate: (remoteStateVector) =>
       session.encodeStateAsUpdate(remoteStateVector?.slice()),
+    encodeStateAsUpdateChunks: (remoteStateVector, maxChunkBytes) =>
+      session.encodeStateAsUpdateChunks(remoteStateVector.slice(), maxChunkBytes),
     applyUpdate: (update) => {
       const owned = update.slice();
       session.applyUpdate(owned);

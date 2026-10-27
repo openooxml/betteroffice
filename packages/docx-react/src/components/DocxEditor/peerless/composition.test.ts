@@ -4,7 +4,7 @@ import type {
   SubmitOptions,
   TicketOutcome,
 } from '../../../../../../shared/office-session/commands/types';
-import type { DocxCommandPayload } from '@betteroffice/docx/peerless';
+import type { DocxCommandPayload } from '@betteroffice/docx/worker';
 import { beginComposition, endComposition, updateComposition } from './composition';
 import type { PeerlessEchoIntent } from './echoPainter';
 import type {
@@ -94,6 +94,7 @@ function fakeAdmission() {
         snapshot = { ...snapshot, geometry };
         listeners.forEach((listener) => listener());
       },
+      setProvisionalCaret() {},
       dispose() {},
     },
     echoPainter: {
@@ -109,6 +110,7 @@ function fakeAdmission() {
     getSnapshot: () => ({ readOnly: snapshot.editState?.readOnly ?? false,
       tail,
       originalUnackedIntents: commands.length,
+      pendingInputs: commands.length,
       echoEnabled: true,
       echoDisabledReason: null,
       compositionSlot: slot,

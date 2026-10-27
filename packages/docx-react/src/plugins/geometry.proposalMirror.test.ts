@@ -107,7 +107,7 @@ function mirroredGeometry() {
     _target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>
   ): ProposalGeometryTarget | undefined => undefined);
   const geometry = createPluginGeometry(
-    { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: 1 },
+    { id: 'layout', version: 'v1', previewVersion: 0, reservationsVersion: null, zoom: 1, pageCount: 1 },
     createRenderedDomContext(pages, 1),
     layer,
     () => true,
@@ -281,7 +281,7 @@ test('matches default anchor geometry exactly across lines, pages and table cell
     const defaultGeometry = createPluginGeometry(
       {
         id: 'default-layout', version: main.version(), previewVersion: snapshot.previewVersion,
-        zoom: 1, pageCount: 2,
+        reservationsVersion: null, zoom: 1, pageCount: 2,
       },
       dom, layer, () => true, () => null, queries,
       () => ({
@@ -293,7 +293,7 @@ test('matches default anchor geometry exactly across lines, pages and table cell
     const mirrorGeometry = createPluginGeometry(
       {
         id: 'mirror-layout', version: mirror.version, previewVersion: mirror.previewVersion,
-        zoom: 1, pageCount: 2,
+        reservationsVersion: null, zoom: 1, pageCount: 2,
       },
       dom, layer, () => true, () => null, queries,
       () => ({

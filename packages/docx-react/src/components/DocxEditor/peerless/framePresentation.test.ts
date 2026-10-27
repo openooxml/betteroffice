@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test';
 import docxPackage from '../../../../../docx/package.json';
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { createPresenter } from '../../../../../../shared/office-session/commands/presenter';
-import { discardCommandPresentation } from '@betteroffice/docx/peerless';
-import type { DocxCommandFrame } from '@betteroffice/docx/peerless';
+import { discardCommandPresentation } from '@betteroffice/docx/worker';
+import type { DocxCommandFrame } from '@betteroffice/docx/worker';
 import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter } from './echoPainter';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 import { createFramePresentation, present } from './framePresentation';
@@ -64,7 +64,7 @@ function setup(realPainter = false, makeCanvas?: (item: typeof page) => HTMLCanv
     acceptWorkerState(_identity, state) { snapshot = { ...snapshot, version: state.version,
       throughSeq: state.throughSeq, workerSelection: state.selection }; },
     installFrameGeometry(geometry) { events.push('geometry'); snapshot = { ...snapshot,
-      geometry, presentedThroughSeq: geometry.coversThroughSeq }; }, dispose() {},
+      geometry, presentedThroughSeq: geometry.coversThroughSeq }; }, setProvisionalCaret() {}, dispose() {},
   };
   function createCanvas(item: typeof page): HTMLCanvasElement {
     const canvas = { width: 100, height: 20, getContext: () => ({

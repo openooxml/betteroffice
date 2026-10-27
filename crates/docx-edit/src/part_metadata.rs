@@ -2,7 +2,7 @@ use crate::{EditCtx, EditingDoc, map_string};
 use serde_json::Value;
 use yrs::types::text::YChange;
 use yrs::{Any, Out};
-use yrs::{Map, MapPrelim, ReadTxn, Text, TextPrelim, Transact};
+use yrs::{Map, MapPrelim, ReadTxn, Text, Transact};
 pub(crate) const PART_METADATA: &str = "partMetadata";
 
 impl EditingDoc {
@@ -80,8 +80,7 @@ impl EditingDoc {
         let stories = txn
             .get_map(crate::STORIES)
             .expect("stories root is declared");
-        let all: Vec<_> = stories
-            .iter(&txn)
+        let all: Vec<_> = crate::live_stories(&stories, &txn)
             .filter_map(|(_, value)| match value {
                 Out::YText(story) => Some(story),
                 _ => None,
@@ -114,8 +113,8 @@ impl EditingDoc {
             }
         }
         for id in required {
-            if !stories.contains_key(&txn, &id) {
-                let story = stories.insert(&mut txn, id, TextPrelim::new(""));
+            if !crate::story_id_taken(&stories, &txn, &id) {
+                let story = crate::insert_story(&mut txn, &stories, id);
                 let pilcrow = story.insert_embed_with_attributes(
                     &mut txn,
                     0,
@@ -131,8 +130,8 @@ impl EditingDoc {
                 );
             }
         }
-        let deleted: Vec<_> = stories
-            .keys(&txn)
+        let deleted: Vec<_> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id)
             .filter(|id| {
                 remove
                     .iter()
@@ -141,7 +140,7 @@ impl EditingDoc {
             .map(str::to_owned)
             .collect();
         for id in deleted {
-            stories.remove(&mut txn, &id);
+            crate::mark_story_removed(&mut txn, &id);
         }
         root.insert(&mut txn, "metadata", json);
         Ok(true)

@@ -8,23 +8,30 @@ import type {
   PptxStoryText,
   PptxTextTarget,
   PresentationHandle,
+  ShapeFill,
 } from './index';
 import { initWasm, openPresentation } from './index';
 
 const root = resolve(import.meta.dir, '../../..');
 let fixture: Uint8Array;
+let font: Uint8Array;
 
 beforeAll(async () => {
-  const [wasm, pptx] = await Promise.all([
+  const [wasm, pptx, liberation] = await Promise.all([
     readFile(resolve(import.meta.dir, 'wasm/generated/pptx_wasm_bg.wasm')),
     readFile(resolve(root, 'apps/demo/public/betteroffice-demo.pptx')),
+    readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')),
   ]);
   await initWasm(wasm);
   fixture = pptx;
+  font = liberation;
 });
 
-function withDeck(clientId: number, run: (deck: PresentationHandle) => void): void {
-  const deck = openPresentation(fixture, { clientId });
+function withDeck(clientId: number, run: (deck: PresentationHandle) => void, fonts = false): void {
+  const deck = openPresentation(fixture, {
+    clientId,
+    ...(fonts ? { fonts: [{ family: 'Liberation Sans', bytes: font }] } : {}),
+  });
   try {
     run(deck);
   } finally {
@@ -170,6 +177,37 @@ describe('version-checked edit batches', () => {
       expect(before?.width).toBe(2 * 12_700);
       expect(deck.version()).toBe(version);
     });
+  });
+
+  test('a background step paints before saving and a null background restores the inherited one', () => {
+    withDeck(9306, (deck) => {
+      const slideId = deck.snapshot().slides[0].id;
+      const declared = deck.layoutSlide(0).background;
+      const step = (background: ShapeFill | null): PptxEditRequest => ({
+        expectVersion: deck.version(),
+        steps: [{ op: 'setSlideBackground', target: { slideId }, background }],
+      });
+      const fill: ShapeFill = { type: 'solid', color: { rgb: '0F1720' } };
+      expect(deck.applyEdits(step(fill))).toMatchObject({ ok: true, applied: true, changedSlides: [slideId] });
+      expect(deck.snapshot().slides[0].background).toEqual(fill);
+      expect(deck.layoutSlide(0).background).toEqual({ kind: 'solid', color: '#0F1720' });
+
+      expect(deck.applyEdits(step(null))).toMatchObject({ ok: true, applied: true });
+      expect(deck.snapshot().slides[0].background).toBeUndefined();
+      const inherited = deck.layoutSlide(0).background;
+      expect(inherited).not.toEqual(declared);
+      expect(inherited).toEqual({ kind: 'solid', color: '#FFFFFF' });
+      const reopened = openPresentation(deck.save(), {
+        clientId: 9307,
+        fonts: [{ family: 'Liberation Sans', bytes: font }],
+      });
+      try {
+        expect(reopened.snapshot().slides[0].background).toBeUndefined();
+        expect(reopened.layoutSlide(0).background).toEqual(inherited);
+      } finally {
+        reopened.dispose();
+      }
+    }, true);
   });
 
   test('untracked agent batches save, reopen, and never carry versions across sessions', () => {

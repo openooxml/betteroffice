@@ -1,4 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface PeerlessProposalProbe {
   editor: { getTotalPages(): number; readSelectionInfo(): Promise<unknown> } | null;
@@ -29,7 +30,7 @@ test('editable worker and hybrid hosts produce the same proposal decisions and s
     await page.goto(`/docx-peerless-proposals.html?arm=${arm}`);
     await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
     await expect.poll(() => page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.editor?.getTotalPages())).toBe(3);
-    const proposed = await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.propose());
+    const proposed = await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__peerlessProposalProbe.propose());
     expect(proposed.ok).toBe(true);
     const marks = await overlays(page);
     await expect.poll(() => marks.evaluateAll(elements => elements.every(element => element.getAttribute('data-text-aligned') === 'true'))).toBe(true);
@@ -41,35 +42,35 @@ test('editable worker and hybrid hosts produce the same proposal decisions and s
     const record = async () => {
       await overlays(page);
       states.push(await marks.evaluateAll(elements => elements.map(element => `${element.getAttribute('data-proposal-id')}:${element.getAttribute('data-state')}`)));
-      const text = await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.savedText());
+      const text = await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__peerlessProposalProbe.savedText());
       expect(typeof text).toBe('string');
       expect(text.length).toBeGreaterThan(0);
       saved.push(text);
     };
     await record();
     for (const state of ['accepted', 'proposed'] as const) {
-      expect((await page.evaluate(state => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(['change-1'], state), state)).ok).toBe(true);
+      expect((await pinnedEvaluate(page, state => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(['change-1'], state), state)).ok).toBe(true);
       await record();
     }
     for (const state of ['accepted', 'rejected'] as const) {
-      const result = await page.evaluate(state => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(['change-0'], state), state);
+      const result = await pinnedEvaluate(page, state => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(['change-0'], state), state);
       expect(result.ok).toBe(true);
       await expect(marks.first()).toHaveAttribute('data-state', state);
       await record();
-      expect((await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.undoDecision())).ok).toBe(true);
+      expect((await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__peerlessProposalProbe.undoDecision())).ok).toBe(true);
       await expect(marks.first()).toHaveAttribute('data-state', 'proposed');
       await record();
     }
     for (const state of ['accepted', 'rejected'] as const) {
-      expect((await page.evaluate(({ ids, state }) => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(ids, state), { ids, state })).ok).toBe(true);
+      expect((await pinnedEvaluate(page, ({ ids, state }) => (window as unknown as ProbeWindow).__peerlessProposalProbe.decide(ids, state), { ids, state })).ok).toBe(true);
       await expect.poll(() => marks.evaluateAll(elements => elements.map(element => element.getAttribute('data-state')))).toEqual(ids.map(() => state));
       await record();
     }
-    const beforeSelection = await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.editor!.readSelectionInfo());
+    const beforeSelection = await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__peerlessProposalProbe.editor!.readSelectionInfo());
     for (const index of [2, 3, 0]) {
-      expect(await page.evaluate(index => (window as unknown as ProbeWindow).__peerlessProposalProbe.next(index), index)).toEqual({ ok: true });
+      expect(await pinnedEvaluate(page, index => (window as unknown as ProbeWindow).__peerlessProposalProbe.next(index), index)).toEqual({ ok: true });
       await expect(marks.nth(index)).toBeInViewport();
-      expect(await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.editor!.readSelectionInfo())).toEqual(beforeSelection);
+      expect(await pinnedEvaluate(page, () => (window as unknown as ProbeWindow).__peerlessProposalProbe.editor!.readSelectionInfo())).toEqual(beforeSelection);
     }
     expect(await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.events.every(event => event.generation && event.version && Number.isInteger(event.previewVersion)))).toBe(true);
     expect(await page.evaluate(() => (window as unknown as ProbeWindow).__peerlessProposalProbe.errors)).toEqual([]);

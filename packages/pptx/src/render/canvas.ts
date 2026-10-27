@@ -18,6 +18,10 @@ import type {
 import type { ProposalTextChange } from '../proposals';
 import { imageDecodeScale, setImageDecodeScale } from './browserImage';
 
+type TextChunks = typeof import('./textChunks');
+
+const textChunks = import('./textChunks');
+
 export type CanvasImageResolver = ((
   assetId: string
 ) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
@@ -75,6 +79,7 @@ export async function paintSlide(
   scale = 1,
   options: PaintSlideOptions = {}
 ): Promise<void> {
+  const chunks = await textChunks;
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
@@ -89,7 +94,7 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget);
+      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget, chunks);
   } finally {
     try { ctx.restore(); } finally { images?.release?.(); }
   }
@@ -100,7 +105,8 @@ async function paintPrimitive(
   primitive: SlidePrimitive,
   options: PaintSlideOptions,
   deviceScale: number,
-  shadowBudget: ShadowBudget
+  shadowBudget: ShadowBudget,
+  textChunks: TextChunks
 ): Promise<void> {
   ctx.save();
   try {
@@ -113,14 +119,14 @@ async function paintPrimitive(
         await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
-        paintTextBox(ctx, primitive, options.textChanges);
+        paintTextBox(ctx, primitive, textChunks, options.textChanges);
         break;
       case 'placeholder':
         paintPlaceholder(ctx, primitive);
         break;
       case 'chart':
       case 'table':
-        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget);
+        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget, textChunks);
         break;
     }
   } finally {
@@ -133,13 +139,14 @@ async function paintContainer(
   container: ChartPrimitive | TablePrimitive,
   options: PaintSlideOptions,
   deviceScale: number,
-  shadowBudget: ShadowBudget
+  shadowBudget: ShadowBudget,
+  textChunks: TextChunks
 ): Promise<void> {
   ctx.beginPath();
   ctx.rect(container.x, container.y, container.w, container.h);
   ctx.clip();
   for (const primitive of container.primitives)
-    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget);
+    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget, textChunks);
 }
 
 function applyTransform(
@@ -255,7 +262,8 @@ function paintShadowLayer(
   draw(scratch);
   ctx.save();
   try {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // Device pixels: a host that maps setTransform onto part of the surface keeps this one.
+    ctx.resetTransform();
     if (typeof ctx.filter === 'string') {
       scratch.setTransform(1, 0, 0, 1, 0, 0);
       scratch.globalCompositeOperation = 'source-in';
@@ -415,6 +423,7 @@ function drawCropped(
   }
   const width = sourceWidth(source);
   const height = sourceHeight(source);
+  const destination = image.destination ?? image;
   if (width > 0 && height > 0) {
     ctx.drawImage(
       source,
@@ -422,13 +431,13 @@ function drawCropped(
       top * height,
       keptX * width,
       keptY * height,
-      image.x,
-      image.y,
-      image.w,
-      image.h
+      destination.x,
+      destination.y,
+      destination.w,
+      destination.h
     );
   } else {
-    ctx.drawImage(source, image.x, image.y, image.w, image.h);
+    ctx.drawImage(source, destination.x, destination.y, destination.w, destination.h);
   }
   if (masked) ctx.restore();
 }
@@ -459,12 +468,13 @@ function drawTiled(
   buildImageOutline(ctx, image);
   ctx.clip();
   const tileDecodeScale = imageDecodeScale(tileSource);
+  const destination = image.destination ?? image;
   pattern.setTransform(
-    new DOMMatrix().translateSelf(image.x, image.y)
+    new DOMMatrix().translateSelf(destination.x, destination.y)
       .scaleSelf(tile.scaleX * tileDecodeScale.x, tile.scaleY * tileDecodeScale.y)
   );
   ctx.fillStyle = pattern;
-  ctx.fillRect(image.x, image.y, image.w, image.h);
+  ctx.fillRect(destination.x, destination.y, destination.w, destination.h);
   ctx.restore();
 }
 
@@ -498,7 +508,6 @@ function buildImageOutline(ctx: CanvasRenderingContext2D, image: ImagePrimitive)
   }
 }
 
-/** `a:srcRect` also encodes outsets as negatives, which canvas cannot express. */
 function clampCrop(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 0;
   return Math.min(Math.max(value, 0), 1);
@@ -888,6 +897,7 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
 function paintTextBox(
   ctx: CanvasRenderingContext2D,
   textBox: TextBoxPrimitive,
+  textChunks: TextChunks,
   textChanges: readonly ProposalTextChange[] = []
 ): void {
   if (!textBox.overflow) {
@@ -910,7 +920,7 @@ function paintTextBox(
     ctx.shadowOffsetY = shadow.dy ?? 0;
   }
   for (const line of textBox.lines) {
-    for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
+    for (const run of line.runs) paintTextRun(ctx, run, line.baseline, textChunks);
   }
   if (shadow) ctx.restore();
   paintTextChanges(ctx, textBox, changes, true);
@@ -951,7 +961,8 @@ function paintTextChanges(
 function paintTextRun(
   ctx: CanvasRenderingContext2D,
   run: PositionedTextRun,
-  baseline: number
+  baseline: number,
+  textChunks: TextChunks
 ): void {
   const style = run.italic ? 'italic ' : '';
   const weight = run.bold ? 'bold ' : '';
@@ -959,11 +970,12 @@ function paintTextRun(
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;
   ctx.letterSpacing = spacing === 0 ? '0px' : `${spacing}px`;
+  const textRendering = 'textRendering' in ctx ? ctx.textRendering : undefined;
+  if (textRendering !== undefined) ctx.textRendering = 'geometricPrecision';
   const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
-  for (const chunk of positionedTextChunks(run)) {
-    ctx.fillText(chunk.text, chunk.x, runBaseline);
-  }
+  textChunks.paintTextChunks(ctx, run, runBaseline, spacing);
   ctx.letterSpacing = '0px';
+  if (textRendering !== undefined) ctx.textRendering = textRendering;
   if (run.underline) {
     ctx.fillRect(
       run.x,
@@ -972,57 +984,6 @@ function paintTextRun(
       Math.max(1, run.fontSizePx * 0.05)
     );
   }
-}
-
-function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
-  if (run.glyphs.length === 0) return [{ text: run.text, x: run.x }];
-  // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
-  // piece itself, drawn from that piece's leftmost glyph.
-  if (run.glyphs.length > 1 && run.glyphs[1].x < run.glyphs[0].x) {
-    const texts = run.text.split('\t');
-    const ends: number[] = [];
-    let end = -1;
-    for (const text of texts) {
-      end += text.length + 1;
-      ends.push(end);
-    }
-    const lefts = texts.map(() => Infinity);
-    for (const glyph of run.glyphs) {
-      const offset = glyph.cluster - run.start;
-      let low = 0;
-      let high = ends.length - 1;
-      while (low < high) {
-        const middle = (low + high) >> 1;
-        if (ends[middle] < offset) low = middle + 1;
-        else high = middle;
-      }
-      if (offset >= 0 && offset < ends[low]) lefts[low] = Math.min(lefts[low], glyph.x);
-    }
-    return texts.flatMap((text, index) =>
-      text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
-    );
-  }
-  const chunks: Array<{ text: string; x: number }> = [];
-  let textStart = 0;
-  let x = run.x;
-  // The pen starts at the run's own x, so a leading tab, which paints no glyph,
-  // splits the run where the text after it lands.
-  let expectedX = run.x;
-  for (const glyph of run.glyphs) {
-    const offset = glyph.cluster - run.start;
-    if (
-      offset > textStart &&
-      offset < run.text.length &&
-      Math.abs(glyph.x - expectedX) > 0.0001
-    ) {
-      chunks.push({ text: run.text.slice(textStart, offset), x });
-      textStart = offset;
-      x = glyph.x;
-    }
-    expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
-  }
-  chunks.push({ text: run.text.slice(textStart), x });
-  return chunks;
 }
 
 function quoteFamily(family: string): string {

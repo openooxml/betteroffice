@@ -1,5 +1,6 @@
-import { createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { cellPosition, deleteParagraph, deleteTableRow, hostEdit, insertTableRow, lineText, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -24,7 +25,53 @@ interface Paragraph extends ParagraphRef {
   runs: TextRun[];
   fingerprint: string;
   table?: TableCellPosition;
+  list?: { level: number };
 }
+
+interface OutlinePage<T> {
+  version: number;
+  items: T[];
+  nextOffset: number | null;
+  total: number;
+}
+
+interface CommentSummary {
+  id: string;
+  parentId: string | null;
+  done: boolean;
+  author: string;
+  date: string;
+  text: string;
+  length: number;
+  anchor: string | null;
+}
+
+type ParagraphSummary = ParagraphRef & {
+  style: string | null;
+  headingLevel: number | null;
+  text: string;
+  length: number;
+  table?: TableCellPosition;
+  list?: { level: number };
+};
+
+interface SectionSummary {
+  number: number;
+  firstParagraph: string | null;
+  lastParagraph: string | null;
+  orientation: 'portrait' | 'landscape';
+  pageWidth: number;
+  pageHeight: number;
+  margins: { [name: string]: number };
+}
+
+interface SectionPage {
+  items: SectionSummary[];
+  nextOffset: number | null;
+  total: number;
+}
+
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
 
 type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' | 'op' | 'refs'>; created?: DocxParagraphTarget[] };
 
@@ -46,6 +93,26 @@ function boundary(text: string, offset: number): boolean {
   return offset === 0 || offset === text.length ||
     !(text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff &&
       text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function graphemeCuts(text: string): Set<number> {
+  const cuts = new Set([text.length]);
+  for (const { index } of graphemes.segment(text)) cuts.add(index);
+  return cuts;
+}
+
+function trimChange(change: ProposalChange): ProposalChange {
+  const { oldText, newText } = change;
+  let left = 0;
+  while (left < oldText.length && left < newText.length && oldText[left] === newText[left]) left++;
+  const oldCuts = graphemeCuts(oldText), newCuts = graphemeCuts(newText);
+  while (left > 0 && !(oldCuts.has(left) && newCuts.has(left))) left--;
+  let right = 0;
+  while (right < oldText.length - left && right < newText.length - left && oldText[oldText.length - right - 1] === newText[newText.length - right - 1]) right++;
+  while (right > 0 && !(oldCuts.has(oldText.length - right) && newCuts.has(newText.length - right))) right--;
+  return { ...change, start: change.start + left, oldText: oldText.slice(left, oldText.length - right), newText: newText.slice(left, newText.length - right) };
 }
 
 function visibleFormatting(attributes: Record<string, unknown>): Record<string, unknown> {
@@ -81,6 +148,8 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
+  private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
+  private resolvedComments = new Map<string, boolean>();
 
   constructor(
     readonly session: YrsSession,
@@ -106,22 +175,75 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs and table rows, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows, cell merges, comments and page setup, use docx_edit with the outline version.',
     };
   }
 
-  list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean } = {}) {
+  list(options: { story: 'comments'; offset?: number; limit?: number; headingsOnly?: boolean }): OutlinePage<CommentSummary>;
+  list(options?: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number }): OutlinePage<ParagraphSummary> & { sections: SectionPage };
+  list(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}) {
+    return options.story === 'comments' ? this.commentOutline(options) : this.paragraphOutline(options);
+  }
+
+  private commentOutline(options: { offset?: number; limit?: number }) {
+    this.index();
+    const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
+    const limit = integer(options.limit ?? 30, 1, 100, 'limit');
+    const comments = this.session.listComments();
+    return {
+      version: this.epoch,
+      items: comments.slice(offset, offset + limit).map(comment => {
+        const text = commentText(comment.body).replace(/\n$/, '');
+        let ref: string | undefined;
+        try {
+          const [anchor] = this.session.resolveComment(comment.id);
+          if (anchor) {
+            const paragraph = this.paragraphs.find(p => {
+              if (p.story !== anchor.story) return false;
+              const span = this.session.locateParagraph(p.story, p.paraId);
+              return span.start <= anchor.start && anchor.start <= span.end;
+            });
+            ref = paragraph?.ref;
+          }
+        } catch {}
+        return { id: comment.id, parentId: comment.parentId, done: comment.done,
+          author: comment.author, date: comment.date, text: text.slice(0, 120), length: text.length, anchor: ref ?? null };
+      }),
+      nextOffset: offset + limit < comments.length ? offset + limit : null,
+      total: comments.length,
+    };
+  }
+
+  private paragraphOutline(options: { story?: string; offset?: number; limit?: number; headingsOnly?: boolean; sectionOffset?: number; sectionLimit?: number } = {}): OutlinePage<ParagraphSummary> & { sections: SectionPage } {
     this.index();
     const offset = integer(options.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
     const limit = integer(options.limit ?? 30, 1, 100, 'limit');
     this.checkStory(options.story);
+    const sectionOffset = integer(options.sectionOffset ?? 0, 0, Number.MAX_SAFE_INTEGER, 'sectionOffset');
+    const sectionLimit = integer(options.sectionLimit ?? 20, 1, 100, 'sectionLimit');
+    const body = this.paragraphs.filter(paragraph => paragraph.story === 'body');
+    const sections = this.session.listSections();
+    const marginFields = { top: 'marginTop', bottom: 'marginBottom', left: 'marginLeft', right: 'marginRight', header: 'headerDistance', footer: 'footerDistance', gutter: 'gutter' } as const;
     const entries = this.paragraphs.filter(p => (!options.story || p.story === options.story) &&
       (!options.headingsOnly || p.headingLevel !== null));
     return {
       version: this.epoch,
-      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }) })),
+      items: entries.slice(offset, offset + limit).map(p => ({ ...this.reference(p), style: p.style, headingLevel: p.headingLevel, text: p.text.slice(0, 120), length: p.text.length, ...(p.table && { table: { ...p.table } }), ...(p.list && { list: { ...p.list } }) })),
       nextOffset: offset + limit < entries.length ? offset + limit : null,
       total: entries.length,
+      sections: {
+        items: sections.slice(sectionOffset, sectionOffset + sectionLimit).map((section, index) => ({
+          number: sectionOffset + index + 1,
+          firstParagraph: body[section.firstParagraph - 1]?.ref ?? null,
+          lastParagraph: body[section.lastParagraph - 1]?.ref ?? null,
+          orientation: section.resolved.orientation ?? 'portrait',
+          pageWidth: section.resolved.pageWidth ?? 12240,
+          pageHeight: section.resolved.pageHeight ?? 15840,
+          margins: Object.fromEntries(Object.entries(marginFields).map(([name, field]) => [name, section.resolved[field] ?? (name === 'gutter' ? 0 : name === 'header' || name === 'footer' ? 720 : 1440)])),
+        })),
+        total: sections.length,
+        nextOffset: sectionOffset + sectionLimit < sections.length ? sectionOffset + sectionLimit : null,
+      },
     };
   }
 
@@ -321,6 +443,9 @@ export class DocxAgentDocument {
       if (held) { this.checkPending(held); this.apply(draft, held); }
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
       return (await saveYrsDocx(draft)).bytes;
+    } catch (error) {
+      if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
+      throw error;
     } finally { draft.destroy(); }
   }
 
@@ -385,12 +510,14 @@ export class DocxAgentDocument {
           active.add(key);
           const previous = this.identities.get(key);
           const fingerprint = JSON.stringify(segments);
+          const level = listLevel(segment.properties);
           const p: Paragraph = {
             ref: previous?.ref ?? `p${this.nextRef++}`,
             revision: previous ? previous.revision + Number(previous.fingerprint !== fingerprint) : 1,
             story, paraId: segment.paraId, paragraph: ++ordinal, text, runs, fingerprint,
             style: typeof segment.properties.pStyle === 'string' ? segment.properties.pStyle : null,
             headingLevel: headings.get(segment.paraId) ?? null,
+            ...(level !== undefined && { list: { level } }),
           };
           this.identities.set(key, p);
           paragraphs.push(p);
@@ -463,8 +590,9 @@ export class DocxAgentDocument {
   }
 
   private apply(draft: YrsSession, held: HeldProposal, author?: { name: string; date: string }) {
-    const changes = [...held.value.changes].sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
+    const changes = held.value.changes.map(trimChange).sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
     for (const change of changes) {
+      if (!change.oldText && !change.newText) continue;
       const { story, paraId } = held.targets.get(change.ref)!;
       draft.replaceRange({ story, start: { paraId, offset: change.start }, end: { paraId, offset: change.start + change.oldText.length } }, change.newText, author);
     }
@@ -474,18 +602,41 @@ export class DocxAgentDocument {
     let failed: number | undefined;
     try {
       const steps: EditStep[] = [];
-      for (const [index, edit] of edits.entries()) { failed = index; steps.push(this.plan(edit)); }
+      for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
       const draft = await this.fork();
       try {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
+        let resolved: Map<string, boolean> | undefined;
+        const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
+        failed = undefined;
+        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment');
+          try {
+            const source = await this.checkCommentPart();
+            if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
+            const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
+            const comments = draft.listComments();
+            const batch = new Set(edits.flatMap((edit, index) => edit.op === 'resolve_comment' ? [outcomes[index].result.comment!] : []));
+            resolved = new Map(this.resolvedComments);
+            for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
+            const earlier = this.resolvedComments;
+            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })));
+          } catch (error) {
+            if (error instanceof DocumentToolError) throw error;
+            throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
+          }
+          if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
+        }
         failed = undefined;
         this.session.addUndoBoundary();
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
+        if (resolved) this.resolvedComments = resolved;
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {
@@ -494,23 +645,78 @@ export class DocxAgentDocument {
     }
   }
 
-  private plan(edit: DocxAgentEdit): EditStep {
-    if (edit.op === 'format_text') {
+  private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'set_section') {
+      const section = this.session.listSections()[edit.section - 1];
+      if (!section) throw new DocumentToolError('INVALID_ARGUMENT', 'Section missing. Read office_outline and use its section numbers.');
+      const { orientation, pageWidth, pageHeight, margins } = edit;
+      return draft => {
+        setSection(draft, section.closingParagraphId, { orientation, pageWidth, pageHeight, margins });
+        return { result: {} };
+      };
+    }
+    if (edit.op === 'insert_section_break') {
+      const anchor = this.get((edit.before ?? edit.after)!);
+      if (anchor.story !== 'body' || anchor.table) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Section breaks require a body paragraph outside a table.');
+      const body = this.paragraphs.filter(paragraph => paragraph.story === 'body');
+      const target = edit.before ? body[body.findIndex(paragraph => paragraph.paraId === anchor.paraId) - 1] : anchor;
+      if (!target) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Cannot insert a section break before the first body paragraph.');
+      if (edit.before) {
+        const segments = this.session.storySegments('body');
+        const leading = segments[segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId) + 1];
+        if (leading?.kind === 'embed' && BLOCK_EMBEDS.has(leading.embedKind)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'A table or other block precedes this paragraph, so a break before it would land ahead of that block. Use after with the paragraph that should close the section.');
+      }
+      return draft => {
+        insertSectionBreak(draft, target, edit.kind);
+        return { result: { ref: target.ref } };
+      };
+    }
+    if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
+      const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
+      const date = edit.op === 'reply_comment' ? edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') : undefined;
+      await this.checkCommentPart();
+      return draft => {
+        const root = commentRoot(draft, edit.comment);
+        if (edit.op === 'resolve_comment') {
+          const done = edit.done ?? true;
+          draft.updateComment(root.id, { done });
+          return { result: { comment: root.id, parentId: null, done } };
+        }
+        const { commentId } = draft.addComment(commentRanges(draft, root.id), edit.author, date!, body);
+        draft.updateComment(commentId, { parentId: root.id });
+        return { result: { comment: commentId, parentId: root.id, done: false } };
+      };
+    }
+    if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
       if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
-      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
-      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       const start = held.start ?? 0;
       const end = start + held.oldText.length;
+      const range = { story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } };
+      if (edit.op === 'add_comment') {
+        const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+        let story = stories.get(p.story);
+        while (story?.kind === 'tableCell' && story.parent) story = stories.get(story.parent);
+        if (story?.story !== 'body' || story.kind !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comments anchor in the main body text and its tables, not inside content controls, headers, footers, notes or text boxes.');
+        const body = commentBody(edit.author, edit.text);
+        await this.checkCommentPart();
+        const date = edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+        return draft => {
+          requireParagraph(draft, p);
+          return { result: { ref: p.ref, start, end, comment: draft.addComment([range], edit.author, date, body).commentId } };
+        };
+      }
+      const delta = { bold: edit.bold, italic: edit.italic, underline: edit.underline };
+      if (Object.values(delta).every(value => value === undefined)) throw new DocumentToolError('INVALID_ARGUMENT', 'format_text needs bold, italic or underline.');
       return draft => {
         requireParagraph(draft, p);
-        draft.formatRange({ story: p.story, start: { paraId: p.paraId, offset: start }, end: { paraId: p.paraId, offset: end } }, delta);
+        draft.formatRange(range, delta);
         return { result: { ref: p.ref, start, end } };
       };
     }
-    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.row);
+    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
     const target = { story: p.story, paraId: p.paraId };
     switch (edit.op) {
       case 'set_paragraph_style': {
@@ -523,12 +729,26 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.list && edit.runFormat !== undefined) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'runFormat cannot be combined with list: continue. Omit runFormat.');
+        }
+        if (edit.list && edit.paragraphs.some(({ style }) => style)) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue takes the style of the anchor list item. Omit style.');
+        }
         const paragraphs = edit.paragraphs.map(({ text, style }) => {
           lineText(text);
           return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
         });
+        if (edit.list) {
+          const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
+          for (let story = stories.get(p.story); story; story = story.parent ? stories.get(story.parent) : undefined) {
+            if (story.kind === 'contentControl') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Lists inside content controls cannot be continued yet. Use a list item outside the content control.');
+          }
+        }
         return draft => {
           requireParagraph(draft, target);
+          if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
+          if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
         };
       }
@@ -556,7 +776,27 @@ export class DocxAgentDocument {
           return { result: { ref: p.ref, deletedTable: deleteTableRow(draft, target, table.story) } };
         };
       }
+      case 'merge_cells': {
+        const table = p.table ?? notInTable();
+        const corner = this.get(edit.to);
+        const other = corner.table ?? notInTable();
+        if (other.story !== table.story || other.index !== table.index) throw new DocumentToolError('UNSUPPORTED_TARGET', 'from and to are in different tables. Merge cells of one table.');
+        const end = { story: corner.story, paraId: corner.paraId };
+        return draft => {
+          requireParagraph(draft, target);
+          requireParagraph(draft, end);
+          const { rowSpan, colSpan, paragraphs } = mergeCells(draft, target, end, table.story);
+          return { result: { rowSpan, colSpan }, created: paragraphs };
+        };
+      }
     }
+  }
+
+  private async checkCommentPart(): Promise<CommentSource | undefined> {
+    const source = this.session.materializeDocx()?.originalBuffer;
+    if (!source) return;
+    if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
+    return this.commentPartCheck.check;
   }
 
   private styles(): ParagraphStyle[] {

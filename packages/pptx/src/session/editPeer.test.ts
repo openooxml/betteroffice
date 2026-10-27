@@ -6,7 +6,7 @@ import { isClientMessage, isHostMessage } from '../../../../shared/office-sessio
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument, PptxRenderer } from '../wasm/generated/pptx_wasm.js';
 import { createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
 import type { PptxWorkerEditorOperation } from './replay';
@@ -250,6 +250,20 @@ test('successful_noops_consume_sequence_refusals_do_not', async () => {
   } finally { await context.owner.dispose(); }
 });
 
+test('text_box_marker_survives_worker_replay_and_is_omitted_for_preset_shapes', async () => {
+  const context = await setup();
+  try {
+    const slide = context.access.snapshot().slides[0].id;
+    const rect = { x: 0, y: 0, width: 1000000, height: 500000 };
+    context.access.addTextBox(slide, { name: 'Note', rect, text: 'Hello', style: {} });
+    context.access.addShape(slide, { name: 'Ellipse', rect, geometry: 'ellipse', fill: '#123456' });
+    const shapes = context.access.snapshot().slides[0].shapes;
+    expect(shapes.find((shape) => shape.name === 'Note')!.textBox).toBe(true);
+    expect(shapes.find((shape) => shape.name === 'Ellipse')).not.toHaveProperty('textBox');
+    await equal(context);
+  } finally { await context.owner.dispose(); }
+});
+
 test('arguments_are_owned_before_peer_apply', async () => {
   const context = await setup();
   try {
@@ -318,18 +332,17 @@ test('flush_and_save_wait_for_final_ack', async () => {
 
 test('normal_save_and_export_use_worker_only', async () => {
   const context = await setup();
-  const peerSave = spyOn(context.peerDoc, 'saveBytes');
-  const workerSave = spyOn(context.workerDoc, 'saveBytes');
+  const save = spyOn(PptxRenderer.prototype, 'saveBytes');
   try {
     context.access.setSlideNotes(context.access.snapshot().slides[0].id, 'worker save');
     await context.owner.saveAsync();
-    expect(workerSave).toHaveBeenCalledTimes(1);
-    expect(peerSave).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(save.mock.calls[0]?.[0]).toBe(context.workerDoc);
     expect('exportStructured' in context.access).toBe(false);
     expect('exportMarkdown' in context.access).toBe(false);
     expect('applyUpdate' in context.access).toBe(false);
     expect('setUndoCaptureMode' in context.access).toBe(false);
-  } finally { peerSave.mockRestore(); workerSave.mockRestore(); await context.owner.dispose(); }
+  } finally { save.mockRestore(); await context.owner.dispose(); }
 });
 
 async function recovery(context: Awaited<ReturnType<typeof setup>>, text: string) {
@@ -424,10 +437,11 @@ test('recovery_serialization_failure_is_retryable', async () => {
   const context = await setup();
   context.access.setSlideNotes(context.access.snapshot().slides[0].id, 'retry recovery');
   context.crash();
-  const save = spyOn(context.peerDoc, 'saveBytes').mockImplementationOnce(() => { throw new Error('serialization'); });
+  const save = spyOn(PptxRenderer.prototype, 'saveBytes').mockImplementationOnce(() => { throw new Error('serialization'); });
   const free = spyOn(context.peerDoc, 'free');
   try {
     await expect(context.owner.recoverySave()).rejects.toThrow('serialization');
+    expect(save.mock.calls[0]?.[0]).toBe(context.peerDoc);
     expect(context.owner.state.stage).toBe('failed');
     expect(free).not.toHaveBeenCalled();
     save.mockImplementationOnce(() => { throw new Error('retirement serialization'); });

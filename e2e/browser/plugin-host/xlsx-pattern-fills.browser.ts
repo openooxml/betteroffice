@@ -1,4 +1,5 @@
 import { expect, test } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type {} from './xlsx-worker-editor-probe';
 
 const FILL_CELLS: [number, number][] = [[1, 1], [1, 2], [1, 3]];
@@ -13,15 +14,15 @@ test('worker-only editor paints device-pixel fills and all extended border style
     try {
       await page.goto('/xlsx-worker-editor.html?asyncApi=1&variant=patterns');
       await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
-      await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+      await pinnedEvaluate(page, () => window.__xlsxWorkerEditor.ready);
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
       for (const zoom of [1, 2]) {
-        await page.evaluate((scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
+        await pinnedEvaluate(page, (scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
         await expect(page.locator('[data-paint-source="worker"]')).toHaveAttribute('data-worker-zoom', String(zoom));
         const cells = [...FILL_CELLS, ...BORDER_CELLS];
-        await expect.poll(() => page.evaluate(async (cells) =>
+        await expect.poll(() => pinnedEvaluate(page, async (cells) =>
           (await window.__xlsxWorkerEditor.peerless!.cellRects(cells))?.zoom ?? null, cells)).toBe(zoom);
-        const samples = await page.evaluate(async ({ cells, fillCount, zoom }) => {
+        const samples = await pinnedEvaluate(page, async ({ cells, fillCount, zoom }) => {
           const { rects } = (await window.__xlsxWorkerEditor.peerless!.cellRects(cells))!;
           const canvas = document.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]')!;
           const ctx = canvas.getContext('2d')!;

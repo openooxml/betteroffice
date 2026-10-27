@@ -2,10 +2,7 @@
 
 use std::collections::HashMap;
 
-use docx_parse::{
-    ParseBudget, ParseLimits, TextFormatting, Theme, XmlElement, merge_text_formatting,
-    parse_run_properties,
-};
+use docx_parse::{TextFormatting, Theme, XmlElement, merge_text_formatting, parse_run_properties};
 
 use super::package::parse;
 use super::xml::{Namespaces, run_text};
@@ -80,32 +77,7 @@ impl RunStyles {
                 .find(|(path, _)| path == name)
                 .map(|(_, bytes)| bytes.as_slice())
         };
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-        let failed = |error: docx_parse::ParseError| error.to_string();
-        let settings =
-            docx_parse::parse_settings(part("word/settings.xml"), "word/settings.xml", &mut budget)
-                .map_err(failed)?;
-        let mut theme = docx_parse::parse_theme(
-            part("word/theme/theme1.xml"),
-            "word/theme/theme1.xml",
-            &mut budget,
-        )
-        .map_err(failed)?;
-        docx_parse::apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
-        let definitions = part("word/styles.xml")
-            .filter(|xml| !xml.is_empty())
-            .map(|xml| {
-                docx_parse::parse_style_definitions(
-                    xml,
-                    Some(&theme),
-                    "word/styles.xml",
-                    &mut budget,
-                )
-                .map_err(failed)
-                .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
-            })
-            .transpose()?;
+        let (theme, definitions) = crate::seed::package_styles(parts)?;
         let resolver = crate::seed::StyleResolver::new(definitions.as_ref());
         let mut levels = HashMap::new();
         let mut defaults = None;
@@ -138,7 +110,7 @@ impl RunStyles {
                         };
                         if default_paragraph.is_none()
                             && element.attribute(Some("w"), "type") == Some("paragraph")
-                            && matches!(element.attribute(Some("w"), "default"), Some("1" | "true"))
+                            && element.parse_boolean_attribute(Some("w"), "default") == Some(true)
                         {
                             default_paragraph = Some(id.to_owned());
                         }

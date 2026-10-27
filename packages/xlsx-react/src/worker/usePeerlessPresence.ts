@@ -1,3 +1,4 @@
+import { normalizeRange } from '@betteroffice/xlsx';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import type { Selection, WorkbookSheetSummary } from '@betteroffice/xlsx';
 import type { AwarenessPeer, CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
@@ -20,7 +21,12 @@ export function usePeerlessPresence(run: PeerlessWorkbookSession | null,
     if (!provider) return;
     if (!run?.ready) { provider.setCursor(null); return; }
     const sheet = sheets.find((entry) => entry.index === active)?.id;
-    provider.setCursor(sheet && selection ? { sheet, anchor: { ...selection.anchor }, head: { ...selection.focus } } : null);
+    const range = selection ? normalizeRange(selection) : null;
+    provider.setCursor(sheet && selection && range ? {
+      sheet,
+      anchor: selection.range ? { row: range.top, col: range.left } : { ...selection.anchor },
+      head: selection.range ? { row: range.bottom, col: range.right } : { ...selection.focus },
+    } : null);
   }, [run, run?.ready, provider, active, selection, sheets]);
   return run?.current && !run.retiring && !run.failure && presence.run === run && presence.provider === provider ? presence.peers : [];
 }

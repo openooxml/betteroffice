@@ -1,8 +1,10 @@
 import { createElement } from 'react';
+import { flushSync } from 'react-dom';
 import type { Root } from 'react-dom/client';
 import JSZip from 'jszip';
-import { PptxEditor, type PptxAsyncEditorApi, type PptxAsyncEditorProps, type PptxAsyncCollaborationOptions } from '@betteroffice/pptx-react';
-import type { AsyncCollaborationReplica, PptxFontFace, PresentationCommandClient } from '@betteroffice/pptx';
+import { EditorToolbar, PptxEditor, type PptxAsyncEditorApi, type PptxAsyncEditorProps, type PptxAsyncCollaborationOptions } from '@betteroffice/pptx-react';
+import type { AsyncCollaborationReplica, PptxFontFace } from '@betteroffice/pptx';
+import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
 import { peerlessPainterFactories, peerlessSessionOpener } from '../../../packages/pptx-react/src/worker/usePeerlessPresentation';
 import type { PeerlessConfirmedFrame } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
 import type { PeerlessEditorProbe } from './pptx-peerless-editor-probe';
@@ -65,6 +67,11 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
   const file = await twoSlides(bytes);
   const count = new URLSearchParams(location.search).has('collaboration') ? 2 : 1;
   const errors: string[] = [];
+  const saves: number[][] = [];
+  const documentVersions: string[] = [];
+  const propsQuery = new URLSearchParams(location.search);
+  let readOnly = false;
+  let retainToolbar = false;
   const slots: EditorSlot[] = Array.from({ length: count }, (_, index) => {
     const slot: EditorSlot = { file, ready: deferred<PptxAsyncEditorApi>(), api: null, client: null,
       replica: null, collaboration: undefined, saved: null, generation: 0, gate: { held: false, queued: [] } };
@@ -93,7 +100,11 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
     slots.map((slot, index) => createElement('div', { key: index, 'data-editor': true, 'data-peerless-editor': index,
       style: { width: `${100 / count}%`, height: '100%', minWidth: 0 } },
     createElement<PptxAsyncEditorProps>(PptxEditor, { file: slot.file, fonts, clientId: 4200 + index, collaboration: slot.collaboration,
-      onError: (error: Error) => errors.push(error.message), onSave: (saved: Uint8Array) => { slot.saved = saved; },
+      initialZoom: propsQuery.has('propsZoom') ? Number(propsQuery.get('propsZoom')) : undefined,
+      downloadOnSave: propsQuery.has('propsDownload') ? true : undefined,
+      onDocumentChange: ({ version }) => { documentVersions.push(version); document.documentElement.dataset.documentVersions = JSON.stringify(documentVersions); },
+      readOnly, toolbar: retainToolbar ? createElement(EditorToolbar, { mode: 'commands' }) : undefined,
+      onError: (error: Error) => errors.push(error.message), onSave: (saved: Uint8Array) => { slot.saved = saved; saves.push(Array.from(saved)); },
       onReady: (api: PptxAsyncEditorApi) => { slot.api = api; slot.ready.resolve(api); },
     })))));
   const slot = (index = 0) => slots[index]!;
@@ -119,9 +130,17 @@ export async function mountPeerlessEditor(root: Root, bytes: Uint8Array, fonts: 
   let remoteMerge: Promise<unknown> | undefined;
   const probe: PeerlessEditorProbe = {
     ready: Promise.all(slots.map((value) => value.ready.promise)).then(() => {}), errors,
+    editor: api,
+    takeSaved(index = 0) {
+      const value = slot(index).saved;
+      slot(index).saved = null;
+      return value ? Array.from(value) : null;
+    },
     mainThreadEngines: () => globalThis.__pptxMainEngineProbe!.count(),
     generation: (index) => slot(index).generation,
     hydrated: (index) => api(index).hydrated,
+    saves,
+    setReadOnly(value, toolbar = false) { readOnly = value; retainToolbar = toolbar; flushSync(render); },
     content,
     selection: (index) => client(index).state.selection,
     activeSlide: (index) => client(index).state.slides.findIndex((slide) => slide.id === client(index).state.activeSlideId) + 1,

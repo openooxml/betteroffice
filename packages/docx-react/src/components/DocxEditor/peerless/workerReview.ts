@@ -1,16 +1,25 @@
-import type { ResidentEngineWorkerClient, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { ResidentEngineWorkerClient, DocxReviewSnapshot } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
 
-export function reviewMatches(view: PeerlessViewSnapshot, review: ResidentReviewSnapshot): boolean {
+/** The document and proposal preview versions the worker reports for `view`. */
+export function reviewVersionOf(view: PeerlessViewSnapshot): { version: string | undefined; previewVersion: number } {
+  return { version: view.editState?.review?.version ?? view.editState?.documentVersion ?? view.geometry?.documentVersion,
+    previewVersion: view.editState?.review?.previewVersion ?? 0 };
+}
+
+/** Whether `review` describes the document and proposal preview `view` presents, in any frame of it. */
+export function reviewDescribes(view: PeerlessViewSnapshot, review: DocxReviewSnapshot): boolean {
   const frame = view.geometry;
-  const version = view.editState?.review?.version ?? view.editState?.documentVersion ?? frame?.documentVersion;
-  const previewVersion = view.editState?.review?.previewVersion ?? 0;
+  const { version, previewVersion } = reviewVersionOf(view);
   return !!frame && view.presentedThroughSeq >= view.throughSeq && frame.coversThroughSeq >= view.throughSeq &&
     frame.documentVersion === version && review.version === version && review.previewVersion === previewVersion &&
-    review.frameEpoch === frame.frameEpoch && review.layoutRevision === frame.layoutRevision &&
     review.proposals.version === version && review.proposals.previewVersion === previewVersion &&
     review.proposalGeometry.version === version && review.proposalGeometry.previewVersion === previewVersion;
+}
+
+export function reviewMatches(view: PeerlessViewSnapshot, review: DocxReviewSnapshot): boolean {
+  return reviewDescribes(view, review) && review.frameEpoch === view.geometry!.frameEpoch && review.layoutRevision === view.geometry!.layoutRevision;
 }
 
 export async function readPresentedReview(options: {
@@ -20,7 +29,7 @@ export async function readPresentedReview(options: {
   read: ResidentEngineWorkerClient['documentRead'];
   readAt?: ResidentEngineWorkerClient['documentReadAt'];
   timeoutMs: number;
-}): Promise<ResidentReviewSnapshot> {
+}): Promise<DocxReviewSnapshot> {
   const current = options.binding;
   const identity = current.viewStore.getSnapshot().identity;
   const assertCurrent = () => {

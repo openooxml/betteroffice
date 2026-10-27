@@ -1,5 +1,8 @@
 pub(crate) mod batch;
 #[cfg(test)]
+mod chart_cache_tests;
+pub mod charts;
+#[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
 mod format_calculation_tests;
@@ -7,8 +10,10 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod geometry;
 mod recovery;
+mod rich_text;
 #[cfg(test)]
 mod save_oracle_tests;
+pub mod selection;
 #[path = "snapshot/assembly.rs"]
 pub(crate) mod snapshot_assembly;
 mod staging;
@@ -19,6 +24,7 @@ mod update_tests;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
+use std::ops::{Range, RangeInclusive};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -31,14 +37,16 @@ use xlsx_calc::{
 };
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
-    SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
+    FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
+    Stylesheet, VAlign, Workbook as WorkbookModel,
 };
+#[cfg(test)]
+use xlsx_ops::cell_state_for_input_no_eval;
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
+    insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
 use xlsx_render::chart::chart_regions_with_geometry;
@@ -51,13 +59,16 @@ use xlsx_render::scaled;
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
-    display_text, moved_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
+    display_text, display_viewport_with_geometry, moved_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_collaborative_local_layout_op, is_structural_op, validate_hyperlink_edit_baseline,
 };
+use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
@@ -118,7 +129,7 @@ struct UpdateObservers {
 
 enum WorkbookMode {
     Standalone,
-    Collaborative { structure: WorkbookStructure },
+    Collaborative { structure: Box<WorkbookStructure> },
 }
 
 /// Package identity the model does not carry: per current sheet, the source
@@ -363,6 +374,7 @@ pub struct Workbook {
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
+    invalidated_text_sources: Option<BTreeSet<(usize, u32, u32)>>,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
@@ -398,6 +410,9 @@ pub struct Workbook {
 struct ChartCache {
     plans: HashMap<String, Arc<ChartRefreshPlan>>,
     spaces: HashMap<(String, String), CachedChartSpace>,
+    /// edited charts, which resolve from their own XML, by the epoch they
+    /// were resolved at.
+    edited: HashMap<(String, String), (u64, Arc<ChartSpace>)>,
 }
 
 struct CachedChartSpace {
@@ -587,7 +602,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -655,7 +670,7 @@ impl Workbook {
             build_graph,
             client_id,
             &[],
-            None,
+            (None, &[]),
         )
     }
 
@@ -666,7 +681,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -682,14 +697,22 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
+            xlsx_model::progress::pulse();
         }
         retain_array_formulas(&model, &mut projected);
+        if client_id.is_none() {
+            for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
+                target.hidden_col_widths = source.hidden_col_widths.clone();
+                target.hidden_row_heights = source.hidden_row_heights.clone();
+            }
+        }
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -700,7 +723,9 @@ impl Workbook {
             .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
-            Some(_) => WorkbookMode::Collaborative { structure },
+            Some(_) => WorkbookMode::Collaborative {
+                structure: Box::new(structure),
+            },
             None => WorkbookMode::Standalone,
         };
         let preserved = match &source_package {
@@ -733,6 +758,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
@@ -803,6 +829,11 @@ impl Workbook {
         matches!(self.mode, WorkbookMode::Collaborative { .. })
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_pending_updates_for_test(&self) -> bool {
+        !self.pending_remote_updates.is_empty() || self.authority.has_pending_updates()
+    }
+
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
         self.authority.encode_state_vector_v1()
     }
@@ -846,7 +877,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let staged = self.stage_remote_updates(&[update], None)?;
-        if staged.structure != structure {
+        if !staged.structure.same_except_local_layout(&structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -881,13 +912,24 @@ impl Workbook {
             return Ok(false);
         };
         let frozen = frozen.clone();
-        let candidate = match self.authority.snapshot_replacement(update) {
+        let candidate = match self
+            .authority
+            .snapshot_replacement_with_legacy_styles(update, || {
+                self.source_package
+                    .as_ref()?
+                    .materialize()
+                    .ok()?
+                    .legacy_style_readings()
+                    .ok()
+            }) {
             SnapshotAdoption::NotApplicable => return Ok(false),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
-        if !structure.describes_same_workbook(&frozen) {
+        if !structure.describes_same_workbook(&frozen)
+            && !structure.snapshot_same_except_local_layout(&frozen)
+        {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
@@ -906,7 +948,9 @@ impl Workbook {
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
-        self.mode = WorkbookMode::Collaborative { structure };
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(structure),
+        };
         self.pending_remote_updates.clear();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -996,7 +1040,7 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged) if &staged.structure != structure => {
+                Ok(staged) if !staged.structure.same_except_local_layout(structure) => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -1055,6 +1099,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
 
+        let new_structure = staged.structure;
         let commit_update = staged.commit_update;
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
@@ -1067,6 +1112,9 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(new_structure),
+        };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
@@ -1355,9 +1403,12 @@ impl Workbook {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
-            Some(cell) => match &cell.formula {
+            Some(stored) => match &stored.formula {
                 Some(formula) => (format!("={formula}"), true),
-                None => (value_to_input(&cell.value), false),
+                None => (
+                    value_to_input(&self.model, sheet, cell, &stored.value),
+                    false,
+                ),
             },
             None => (String::new(), false),
         };
@@ -1608,10 +1659,30 @@ impl Workbook {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(sheet_ref, &geometry, viewport)?;
         Ok(visible_merged_ranges_with_geometry(
-            sheet_ref, viewport, &geometry,
+            sheet_ref,
+            viewport,
+            &geometry,
+            Some(MAX_DISPLAY_CELLS),
         ))
+    }
+
+    pub fn set_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        hyperlink: Hyperlink,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::SetHyperlink { sheet, hyperlink }], options)
+    }
+
+    pub fn remove_hyperlink(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.apply_ops(vec![Op::RemoveHyperlink { sheet, range }], options)
     }
 
     pub fn edit_cell(
@@ -1648,19 +1719,22 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let state = edit_cell_state(&self.model, sheet, cell, input);
+        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
         validate_cell_state(&state)?;
-        if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
+        if format.is_none()
+            && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
+        {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
-        let ops = vec![Op::SetCell {
+        let mut ops = vec![Op::SetCell {
             sheet,
             at: cell,
             cell: state,
         }];
+        ops.extend(format);
         let update = self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
@@ -1698,27 +1772,25 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let state = edit_cell_state(&preview, sheet, edit.cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
-            if cell_states_semantically_equal(&old, &state) {
+            if format.is_none() && cell_states_semantically_equal(&old, &state) {
                 continue;
             }
-            preview
-                .sheet_mut(sheet)
-                .expect("sheet validated")
-                .set_cell(edit.cell, state.clone().into());
             touched.push((sheet, edit.cell, state.formula.clone()));
-            per_op.push(vec![Op::SetCell {
-                sheet,
-                at: edit.cell,
-                cell: old,
-            }]);
-            ops.push(Op::SetCell {
+            let op = Op::SetCell {
                 sheet,
                 at: edit.cell,
                 cell: state,
-            });
+            };
+            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+            ops.push(op);
+            if let Some(format) = format {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
+                ops.push(format);
+            }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
@@ -1759,6 +1831,60 @@ impl Workbook {
         Ok(result)
     }
 
+    /// Moves a bounded range within one worksheet in one undoable transaction.
+    /// Formulas that refer to the moved cells follow them; partially moved
+    /// ranges and package features that cannot be rewritten are refused.
+    pub fn move_range(
+        &mut self,
+        sheet: SheetId,
+        source: CellRange,
+        destination: CellRef,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let (rows, cols) = self.validate_bounded_range(sheet, source)?;
+        self.validate_target(sheet, destination)?;
+        let end_row = destination
+            .row
+            .checked_add(rows as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let end_col = destination
+            .col
+            .checked_add(cols as u32 - 1)
+            .ok_or(Error::CellOutOfRange(destination))?;
+        let target = CellRange::new(destination, CellRef::new(end_row, end_col));
+        self.validate_bounded_range(sheet, target)?;
+        if source.start.row == destination.row && source.start.col == destination.col {
+            return Ok(MutationResult::default());
+        }
+        xlsx_ops::ensure_conditional_formats_allow_move(&self.model, sheet, source, target)?;
+        if let Some(package) = self.source_package.as_ref() {
+            let package = package.materialize()?;
+            if let Some(part) = preserved_move_unsupported_part(
+                package,
+                &self.model,
+                &self.preserved,
+                sheet,
+                source,
+                target,
+            ) {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} contains worksheet features a cell move cannot safely preserve"
+                )));
+            }
+            let name = &self.sheet(sheet)?.name;
+            let stranded = package
+                .reference_moved_by_rows(name, source.start.row)
+                .or_else(|| package.reference_moved_by_cols(name, source.start.col));
+            if let Some(part) = stranded {
+                return Err(Error::InvalidOperation(format!(
+                    "{part} references cells this move would relocate, and it cannot be rewritten"
+                )));
+            }
+        }
+        let ops = move_range_ops(&self.model, sheet, source, target)?;
+        self.apply_ops(ops, options)
+    }
+
     pub fn apply_ops(
         &mut self,
         ops: Vec<Op>,
@@ -1786,7 +1912,11 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && ops
+                .iter()
+                .any(|op| is_structural_op(op) && !is_collaborative_local_layout_op(op))
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -1817,6 +1947,11 @@ impl Workbook {
         }
         validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
+        if preview.defined_names != self.model.defined_names
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+        }
         if preview == self.model {
             return Ok(MutationResult::default());
         }
@@ -2077,14 +2212,18 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if &history.structure != structure {
+        if !history.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        let new_structure = history.structure;
         let active_sheet = self.active_sheet;
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         self.install_model(restored)?;
+        self.mode = WorkbookMode::Collaborative {
+            structure: Box::new(new_structure),
+        };
         self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(Some(active_sheet));
@@ -2110,12 +2249,21 @@ impl Workbook {
         let mut preview = self.model.clone();
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
-            let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
+            let (state, format) = edit_cell_state(
+                &preview,
+                edit.sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             preview
                 .sheet_mut(edit.sheet)
                 .ok_or(Error::SheetOutOfRange(edit.sheet))?
                 .set_cell(edit.cell, state.into());
+            if let Some(format) = format {
+                xlsx_ops::apply_in_place(&mut preview, &format)?;
+            }
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
@@ -2198,7 +2346,8 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let state = edit_cell_state(&preview, sheet, cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 touched.push((sheet, cell, state.formula.clone()));
@@ -2209,6 +2358,10 @@ impl Workbook {
                 };
                 per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
                 ops.push(op);
+            }
+            if let Some(format) = format {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
+                ops.push(format);
             }
             if let Some(format) = &edit.number_format {
                 let op = Op::SetRangeNumberFormat {
@@ -2310,14 +2463,6 @@ impl Workbook {
         {
             return Err(Error::InvalidViewport);
         }
-        let cells = (u64::from(range.end.row - range.start.row) + 2)
-            * (u64::from(range.end.col - range.start.col) + 2);
-        if cells > MAX_DISPLAY_CELLS {
-            return Err(Error::DisplayTooLarge {
-                cells,
-                max: MAX_DISPLAY_CELLS,
-            });
-        }
         let sheet_ref = self.sheet(sheet)?;
         let geometry = GridGeometry::for_print(sheet_ref, &self.model.styles, metrics);
         let viewport = Viewport {
@@ -2327,6 +2472,11 @@ impl Workbook {
             height: geometry.row_y(range.end.row + 1) - geometry.row_y(range.start.row),
         };
         validate_viewport(&viewport)?;
+        let (rows, columns) = geometry.viewport_range(&viewport);
+        validate_display_cells(
+            visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
+            visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
+        )?;
         let mut frame = build_print_display_list_with_charts(
             &self.model,
             sheet,
@@ -2353,7 +2503,6 @@ impl Workbook {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(sheet_ref, &geometry, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -2399,6 +2548,7 @@ impl Workbook {
             viewport,
             &ghosts,
             &geometry,
+            Some(MAX_DISPLAY_CELLS),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -2424,7 +2574,11 @@ impl Workbook {
         y: f32,
     ) -> Result<Option<ChartRegion>> {
         let geometry = self.sheet_geometry(sheet)?;
-        let regions = chart_regions_with_geometry(self.sheet(sheet)?, &geometry, viewport)?;
+        let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
+        let viewport =
+            display_viewport_with_geometry(sheet_ref, viewport, &geometry, MAX_DISPLAY_CELLS);
+        let regions = chart_regions_with_geometry(sheet_ref, &geometry, &viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -2489,6 +2643,8 @@ impl Workbook {
         let width = viewport.width.ceil().max(1.0) as u32;
         let height = viewport.height.ceil().max(1.0) as u32;
         validate_render_size(width, height)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
         let display_list = self.display_list_for(sheet, viewport)?;
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
@@ -2532,6 +2688,7 @@ impl Workbook {
             &viewport,
             &[],
             &geometry,
+            None,
             |chart| self.resolve_chart_space(&owner, chart),
         )?;
         let display_list = if options.scale == 1.0 {
@@ -2719,6 +2876,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(ops);
         let update = if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
+            let new_structure = staged.structure.clone();
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
@@ -2726,6 +2884,9 @@ impl Workbook {
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
             self.install_model_with_ops(model, ops)?;
+            self.mode = WorkbookMode::Collaborative {
+                structure: Box::new(new_structure),
+            };
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
@@ -2795,7 +2956,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin, &self.model.styles)
             .map_err(authority_error)?;
-        if &staged.structure != structure {
+        if !staged.structure.same_except_local_layout(structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -2887,9 +3048,15 @@ impl Workbook {
                 | Op::InsertCols { sheet, .. }
                 | Op::DeleteCols { sheet, .. }
                 | Op::SetColWidth { sheet, .. }
+                | Op::SetColVisibility { sheet, .. }
+                | Op::RestoreColDimension { sheet, .. }
                 | Op::SetRowHeight { sheet, .. }
+                | Op::SetRowVisibility { sheet, .. }
+                | Op::RestoreRowDimension { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
+                | Op::SetHyperlink { sheet, .. }
+                | Op::RemoveHyperlink { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
                 | Op::RestoreRowStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
@@ -2922,7 +3089,16 @@ impl Workbook {
                         return;
                     }
                 }
-                Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
+                Op::SetCharts { .. }
+                | Op::SetChartAnchor { .. }
+                | Op::SetDefinedNames { .. }
+                | Op::AddConditionalFormat { .. }
+                | Op::RemoveConditionalFormat { .. }
+                | Op::SetConditionalFormats { .. }
+                | Op::SetAutoFilter { .. }
+                | Op::RestoreAutoFilter { .. }
+                | Op::SetDefinedName { .. }
+                | Op::DeleteDefinedName { .. } => {}
             }
         }
     }
@@ -2983,13 +3159,14 @@ impl Workbook {
             .copied()
             .chain(result.cycle_cells)
             .collect();
-        result.limited_cells = previous
+        let kept: Vec<CellAddress> = previous
             .limited_cells
             .iter()
             .filter(untouched)
             .copied()
-            .chain(result.limited_cells)
             .collect();
+        result.budget_exhausted |= previous.budget_exhausted && !kept.is_empty();
+        result.limited_cells = kept.into_iter().chain(result.limited_cells).collect();
         self.last_calculation = result.clone();
         result
     }
@@ -3004,6 +3181,7 @@ impl Workbook {
         self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
+        xlsx_model::progress::pulse();
         result
     }
 
@@ -3085,6 +3263,7 @@ impl Workbook {
         }
         for op in ops {
             match *op {
+                Op::SetCell { sheet, at, .. } => self.invalidate_text_source(sheet, at),
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
                 Op::RemoveSheet { index } => self.preserved.remove(index),
                 Op::MoveSheet { from, to } => self.preserved.move_sheet(from, to),
@@ -3338,6 +3517,7 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .iter()
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
+        budget_exhausted: result.budget_exhausted,
     }
 }
 
@@ -3422,6 +3602,13 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
+    if xlsx_model::workbook::defined_names_bytes(&model.defined_names)
+        > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES
+    {
+        return Err(Error::InvalidOperation(
+            "defined name table exceeds the size limit".to_owned(),
+        ));
+    }
     validate_model_sheets(model)
 }
 
@@ -3506,6 +3693,7 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
             )));
         }
         for (cell, stored) in sheet.iter_cells() {
+            xlsx_model::progress::tick();
             validate_cell_ref(cell)?;
             if matches!(stored.value, CellValue::Number { value } if !value.is_finite()) {
                 return Err(Error::InvalidOperation(
@@ -3547,6 +3735,30 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
             if row >= MAX_ROWS || !height.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&height) {
                 return Err(Error::InvalidOperation(
                     "workbook contains an invalid row height".to_string(),
+                ));
+            }
+        }
+        for (&column, &width) in &sheet.hidden_col_widths {
+            if column >= MAX_COLS
+                || !width.is_finite()
+                || !(0.0..=MAX_COL_WIDTH).contains(&width)
+                || width == 0.0
+                || sheet.col_widths.get(&column) != Some(&0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid hidden column width".to_string(),
+                ));
+            }
+        }
+        for (&row, &height) in &sheet.hidden_row_heights {
+            if row >= MAX_ROWS
+                || !height.is_finite()
+                || !(0.0..=MAX_ROW_HEIGHT).contains(&height)
+                || height == 0.0
+                || sheet.row_heights.get(&row) != Some(&0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid hidden row height".to_string(),
                 ));
             }
         }
@@ -3603,9 +3815,20 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetHyperlink { sheet, .. }
+        | Op::RemoveHyperlink { sheet, .. }
+        | Op::AddConditionalFormat { sheet, .. }
+        | Op::RemoveConditionalFormat { sheet, .. }
+        | Op::SetConditionalFormats { sheet, .. }
+        | Op::SetAutoFilter { sheet, .. }
+        | Op::RestoreAutoFilter { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -3620,7 +3843,9 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::MoveSheet { .. }
         | Op::RenameSheet { .. }
         | Op::RestoreSheet { .. }
-        | Op::SetDefinedNames { .. } => None,
+        | Op::SetDefinedNames { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. } => None,
     }
 }
 
@@ -3664,6 +3889,36 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 )));
             }
         }
+        Op::SetColVisibility { sheet, col, .. } => {
+            require_sheet(model, *sheet)?;
+            if *col >= MAX_COLS {
+                return Err(Error::InvalidOperation(format!(
+                    "column {} is out of range",
+                    u64::from(*col) + 1
+                )));
+            }
+        }
+        Op::RestoreColDimension {
+            sheet,
+            col,
+            width,
+            hidden_width,
+        } => {
+            require_sheet(model, *sheet)?;
+            if *col >= MAX_COLS
+                || width.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&value)
+                })
+                || hidden_width.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&value) || value == 0.0
+                })
+                || hidden_width.is_some() && *width != Some(0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "invalid column dimension restore".to_string(),
+                ));
+            }
+        }
         Op::SetRowHeight { sheet, row, height } => {
             require_sheet(model, *sheet)?;
             if *row >= MAX_ROWS {
@@ -3678,6 +3933,43 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 return Err(Error::InvalidOperation(format!(
                     "row height must be between 0 and {MAX_ROW_HEIGHT}"
                 )));
+            }
+        }
+        Op::SetRowVisibility { sheet, row, .. } => {
+            require_sheet(model, *sheet)?;
+            if *row >= MAX_ROWS {
+                return Err(Error::InvalidOperation(format!(
+                    "row {} is out of range",
+                    u64::from(*row) + 1
+                )));
+            }
+        }
+        Op::RestoreRowDimension {
+            sheet,
+            row,
+            height,
+            hidden_height,
+        } => {
+            require_sheet(model, *sheet)?;
+            if *row >= MAX_ROWS
+                || height.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&value)
+                })
+                || hidden_height.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&value) || value == 0.0
+                })
+                || hidden_height.is_some() && *height != Some(0.0)
+            {
+                return Err(Error::InvalidOperation(
+                    "invalid row dimension restore".to_string(),
+                ));
+            }
+        }
+        Op::SetAutoFilter { sheet, range } => {
+            require_sheet(model, *sheet)?;
+            if let Some(range) = range {
+                validate_cell_ref(range.start)?;
+                validate_cell_ref(range.end)?;
             }
         }
         Op::SetFreezePane { sheet, pane } => {
@@ -3696,6 +3988,42 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetHyperlinks { sheet, hyperlinks } => {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
+        }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            validate_hyperlink_edit_baseline(&require_sheet(model, *sheet)?.hyperlinks)
+                .map_err(Error::InvalidOperation)?;
+            validate_hyperlinks(std::slice::from_ref(hyperlink))?;
+            if [
+                &hyperlink.external_target,
+                &hyperlink.location,
+                &hyperlink.tooltip,
+                &hyperlink.display,
+            ]
+            .into_iter()
+            .flatten()
+            .any(String::is_empty)
+            {
+                return Err(Error::InvalidOperation(
+                    "hyperlink field must not be empty".to_string(),
+                ));
+            }
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            validate_hyperlink_edit_baseline(&require_sheet(model, *sheet)?.hyperlinks)
+                .map_err(Error::InvalidOperation)?;
+            validate_range(*range)?;
+        }
+        Op::AddConditionalFormat { sheet, range, .. } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*range)?;
+        }
+        Op::RemoveConditionalFormat { sheet, id } => {
+            require_sheet(model, *sheet)?;
+            if id.is_empty() {
+                return Err(Error::InvalidOperation(
+                    "conditional format id must not be empty".to_string(),
+                ));
+            }
         }
         Op::SetChartAnchor {
             sheet,
@@ -3726,6 +4054,14 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
+            if matches!(op, Op::MergeCells { .. })
+                && range.start.row == range.end.row
+                && range.start.col == range.end.col
+            {
+                return Err(Error::InvalidOperation(
+                    "merged range must contain at least two cells".to_string(),
+                ));
+            }
         }
         Op::PatchRangeStyle { sheet, range, .. }
         | Op::SetRangeNumberFormat { sheet, range, .. }
@@ -3755,9 +4091,12 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
+        Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. } => {}
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
+        | Op::SetConditionalFormats { .. }
+        | Op::RestoreAutoFilter { .. }
         | Op::RestoreColStyles { .. }
         | Op::RestoreRowStyles { .. } => {
             return Err(Error::InvalidOperation(
@@ -3931,6 +4270,13 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
         if !identities.insert((&chart.drawing, chart.anchor_index)) {
             return Err(Error::InvalidOperation(
                 "two charts claim the same drawing anchor".to_string(),
+            ));
+        }
+        if let Some(xml) = &chart.raw_xml
+            && xml.len() > xlsx_parse::MAX_TREE_BYTES
+        {
+            return Err(Error::InvalidOperation(
+                "chart XML exceeds the supported size".into(),
             ));
         }
         validate_chart_anchor(chart.anchor)?;
@@ -4162,42 +4508,66 @@ fn validate_cell_state(state: &CellState) -> Result<()> {
     Ok(())
 }
 
+/// The style a write leaves on `cell`: its own, or for a missing cell its row's or column's
+/// default. A clear leaves a missing cell missing and pins an unstyled cell to the default
+/// style where a row or column default would otherwise take over.
+fn written_cell_style(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    clears: bool,
+) -> Option<u32> {
+    let sheet = workbook.sheet(sheet);
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    match sheet.and_then(|sheet| sheet.cell(cell)) {
+        None if clears => None,
+        None => inherited,
+        Some(existing) if clears && existing.style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        Some(existing) => existing.style,
+    }
+}
+
 fn edit_cell_state(
     workbook: &WorkbookModel,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
-) -> CellState {
-    let sheet = workbook.sheet(sheet);
-    let existing = sheet.and_then(|sheet| sheet.cell(cell));
-    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
-    let style = existing.map_or(inherited, |existing| existing.style);
+    now_serial: Option<f64>,
+) -> (CellState, Option<Op>) {
+    let style = workbook
+        .sheet(sheet)
+        .and_then(|sheet| sheet.effective_style(cell));
     let number_format = workbook
         .styles
         .resolved_format(Some(style.unwrap_or(0)))
         .number_format;
-    let mut state = if !input.is_empty()
-        && matches!(
-            number_format,
-            FormatCode::Builtin(49) | FormatCode::Custom("@")
-        ) {
-        CellState {
-            value: CellValue::Text {
-                value: input.strip_prefix('\'').unwrap_or(input).to_string(),
+    let (parsed, inferred) =
+        xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
+    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
+    let format = inferred.map(|id| {
+        let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
+        format.number_format = NumberFormat::Builtin { id };
+        Op::ApplyRangeFormat {
+            sheet,
+            range: CellRange::new(cell, cell),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 1,
+                source_formats: vec![xlsx_ops::PreservedCellFormat {
+                    format: format.clone(),
+                    source_xf: None,
+                    derived_from: Some(style.unwrap_or(0)),
+                }],
+                formats: vec![format],
+                kept: Vec::new(),
+                source_styles: Vec::new(),
             },
-            ..Default::default()
         }
-    } else {
-        cell_state_for_input_no_eval(input)
-    };
-    state.style = match existing {
-        None if input.is_empty() => None,
-        Some(_) if input.is_empty() && style.is_none() => inherited
-            .is_some_and(|inherited| inherited != 0)
-            .then_some(0),
-        _ => style,
-    };
-    state
+    });
+    (state, format)
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
@@ -4230,6 +4600,8 @@ fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> boo
             || left.merges != right.merges
             || left.col_widths != right.col_widths
             || left.row_heights != right.row_heights
+            || left.hidden_col_widths != right.hidden_col_widths
+            || left.hidden_row_heights != right.hidden_row_heights
         {
             return false;
         }
@@ -4405,17 +4777,40 @@ fn proposal_alignment_value(
         .unwrap_or_default()
 }
 
-fn value_to_input(value: &CellValue) -> String {
+const LEAP_YEAR_SERIAL: f64 = 45_292.0;
+
+fn value_to_input(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    value: &CellValue,
+) -> String {
     match value {
         CellValue::Empty => String::new(),
         CellValue::Number { value } => value.to_string(),
         CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
         CellValue::Text { value } => {
-            if !matches!(xlsx_ops::parse_input(value), xlsx_ops::ParsedInput::Text(text) if text == *value)
-            {
-                format!("'{value}")
-            } else {
+            let style = workbook
+                .sheet(sheet)
+                .and_then(|sheet| sheet.effective_style(cell));
+            let format = workbook
+                .styles
+                .resolved_format(Some(style.unwrap_or(0)))
+                .number_format;
+            let stays_text = [format, xlsx_model::FormatCode::Builtin(0)]
+                .into_iter()
+                .all(|format| {
+                    [None, Some(LEAP_YEAR_SERIAL)].into_iter().all(|now| {
+                        matches!(
+                            xlsx_ops::parse_input_with_context(value, format.clone(), workbook.date_system, now).0,
+                            xlsx_ops::ParsedInput::Text(text) if text == *value
+                        )
+                    })
+                });
+            if stays_text {
                 value.clone()
+            } else {
+                format!("'{value}")
             }
         }
         CellValue::Error { value } => value.as_str().to_string(),
@@ -4446,6 +4841,37 @@ impl Workbook {
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
         let epoch = self.model_epoch;
         let key = (chart.part.clone(), owner.to_owned());
+        if chart.raw_xml.is_some() {
+            if let Some((cached, space)) = self
+                .chart_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .edited
+                .get(&key)
+                && *cached == epoch
+            {
+                return Ok(Arc::clone(space));
+            }
+            let bytes = self.chart_bytes(chart, &self.model, owner).map_err(|_| {
+                RenderError::ChartParseFailed {
+                    part: chart.part.clone(),
+                }
+            })?;
+            let space = xlsx_parse::edited_chart_space(
+                &bytes,
+                &self.model,
+                owner,
+                &self.model.styles.theme,
+            )
+            .map(Arc::new)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })?;
+            let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.edited.retain(|_, (cached, _)| *cached == epoch);
+            cache.edited.insert(key, (epoch, Arc::clone(&space)));
+            return Ok(space);
+        }
         let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
         let changed = if let Some(hit) = cache.spaces.get_mut(&key) {
             if hit.epoch == epoch {
@@ -4507,6 +4933,7 @@ impl Workbook {
     }
 }
 
+#[cfg(feature = "raster")]
 fn validate_display_region(
     sheet: &Sheet,
     geometry: &GridGeometry,
@@ -4517,9 +4944,33 @@ fn validate_display_region(
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
-    let row_count = u64::from(rows.end - rows.start).saturating_add(u64::from(frozen_rows));
-    let column_count =
-        u64::from(columns.end - columns.start).saturating_add(u64::from(frozen_cols));
+    let row_count =
+        visible_count(rows, |rows| sheet.hidden_row_spans(rows))
+            .saturating_add(visible_count(0..frozen_rows, |rows| {
+                sheet.hidden_row_spans(rows)
+            }));
+    let column_count = visible_count(columns, |columns| sheet.hidden_col_spans(columns))
+        .saturating_add(visible_count(0..frozen_cols, |columns| {
+            sheet.hidden_col_spans(columns)
+        }));
+    validate_display_cells(row_count, column_count)
+}
+
+fn visible_count<I: Iterator<Item = (u32, u32)>>(
+    range: Range<u32>,
+    hidden: impl FnOnce(RangeInclusive<u32>) -> I,
+) -> u64 {
+    if range.is_empty() {
+        return 0;
+    }
+    let count = u64::from(range.end - range.start);
+    let hidden = hidden(range.start..=range.end - 1)
+        .map(|(first, last)| u64::from(last - first) + 1)
+        .sum::<u64>();
+    count - hidden
+}
+
+fn validate_display_cells(row_count: u64, column_count: u64) -> Result<()> {
     let cells = row_count.saturating_mul(column_count);
     if cells > MAX_DISPLAY_CELLS {
         return Err(Error::DisplayTooLarge {
@@ -4627,6 +5078,13 @@ impl CalculationScope {
             | Op::UnmergeCells { .. }
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
+            | Op::SetHyperlink { .. }
+            | Op::RemoveHyperlink { .. }
+            | Op::AddConditionalFormat { .. }
+            | Op::RemoveConditionalFormat { .. }
+            | Op::SetConditionalFormats { .. }
+            | Op::SetAutoFilter { .. }
+            | Op::RestoreAutoFilter { .. }
             | Op::RestoreColStyles { .. }
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
@@ -4643,8 +5101,15 @@ impl CalculationScope {
             // history may have changed in more than their sheet names
             Op::RestoreSheet { .. } => Self::Full,
             // a zero size hides a row or column, which hidden-aware functions read
-            Op::SetColWidth { .. } | Op::SetRowHeight { .. } => Self::Full,
+            Op::SetColWidth { .. }
+            | Op::SetColVisibility { .. }
+            | Op::RestoreColDimension { .. }
+            | Op::SetRowHeight { .. }
+            | Op::SetRowVisibility { .. }
+            | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
+            | Op::SetDefinedName { .. }
+            | Op::DeleteDefinedName { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::MoveSheet { .. }
@@ -4710,6 +5175,9 @@ struct CalculationInputs<'a> {
     date_system: xlsx_model::DateSystem,
     sheet_names: Vec<Cow<'a, str>>,
     sheets: Vec<(SheetId, Option<Cow<'a, Sheet>>)>,
+    /// currency text coercion follows the workbook's formats, so a batch
+    /// that changes these symbols moves results anywhere
+    currency_symbols: Vec<char>,
 }
 
 impl<'a> CalculationInputs<'a> {
@@ -4727,6 +5195,7 @@ impl<'a> CalculationInputs<'a> {
                 .iter()
                 .map(|&id| (id, model.sheet(id).map(Cow::Borrowed)))
                 .collect(),
+            currency_symbols: xlsx_calc::currency_symbols(model),
         }
     }
 
@@ -4746,6 +5215,7 @@ impl<'a> CalculationInputs<'a> {
                 .into_iter()
                 .map(|(id, sheet)| (id, sheet.map(|sheet| Cow::Owned(sheet.into_owned()))))
                 .collect(),
+            currency_symbols: self.currency_symbols,
         }
     }
 
@@ -4756,6 +5226,7 @@ impl<'a> CalculationInputs<'a> {
         keeps_defined_names(&self.defined_names, &after.defined_names, renamed)
             && self.date_system == after.date_system
             && self.tables[..] == after.tables[..]
+            && self.currency_symbols == xlsx_calc::currency_symbols(after)
             && self.sheet_names.len() == after.sheets.len()
             && (renamed || keeps_sheet_names(&self.sheet_names, &after.sheets))
             && self
@@ -4884,7 +5355,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
+            (parsed.legacy_styles.as_ref(), &[]),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -4897,7 +5368,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
+        legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -4913,7 +5384,8 @@ impl Workbook {
             &model,
             client_id,
             legacy_dimensions,
-            legacy_styles,
+            legacy_styles.0,
+            legacy_styles.1,
         )
         .map_err(authority_error)?;
         if client_id.is_some() {
@@ -4922,6 +5394,12 @@ impl Workbook {
         }
         let mut projected = authority.materialize_oracle().map_err(authority_error)?;
         retain_array_formulas(&model, &mut projected);
+        if client_id.is_none() {
+            for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
+                target.hidden_col_widths = source.hidden_col_widths.clone();
+                target.hidden_row_heights = source.hidden_row_heights.clone();
+            }
+        }
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -4933,7 +5411,7 @@ impl Workbook {
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
-                structure: authority.structure_oracle().map_err(authority_error)?,
+                structure: Box::new(authority.structure_oracle().map_err(authority_error)?),
             },
             None => WorkbookMode::Standalone,
         };
@@ -4967,6 +5445,7 @@ impl Workbook {
             snapshot_package_lineage: None,
             source_container: None,
             preserved,
+            invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
@@ -5138,7 +5617,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert_eq!(
@@ -5154,7 +5633,7 @@ mod tests {
                     true,
                     client_id,
                     &case.legacy_dimensions,
-                    case.legacy_styles.as_ref(),
+                    (case.legacy_styles.as_ref(), &[]),
                 )
                 .unwrap();
                 assert!(assert_open_paths_equal(
@@ -5176,7 +5655,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         Workbook::from_source_oracle(
                             case.model.clone(),
@@ -5185,7 +5664,7 @@ mod tests {
                             false,
                             client_id,
                             &case.legacy_dimensions,
-                            case.legacy_styles.as_ref(),
+                            (case.legacy_styles.as_ref(), &[]),
                         ),
                         &case.label,
                     ));

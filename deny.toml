@@ -28,6 +28,9 @@ ignore = [
   { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser, transitive via rustybuzz; migration tracked to fontations" },
   { id = "RUSTSEC-2026-0206", reason = "rustybuzz declared unmaintained; migration to harfrust tracked with the fontations move" },
   { id = "RUSTSEC-2026-0215", reason = "unmaintained smallstr, transitive via yrs" },
+  { id = "RUSTSEC-2026-0367", reason = "zip extraction keeps SUID/SGID bits; no crate in the tree calls ZipArchive::extract or stream extraction, entries are read in memory" },
+  { id = "RUSTSEC-2026-0368", reason = "zip extraction follows symlinks outside the destination; no crate in the tree extracts archives to disk" },
+  { id = "RUSTSEC-2026-0369", reason = "zip extraction applies permissions through symlinks; no crate in the tree extracts archives to disk" },
 ]
 
 [bans]

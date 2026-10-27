@@ -437,6 +437,9 @@ pub(crate) fn decode(
     }
     let package =
         RetainedPackage::from_bytes(retained_source.clone()).map_err(PeerMetadataError::Package)?;
+    wire.source
+        .recover_table_line_grid(&package)
+        .map_err(PeerMetadataError::Package)?;
     let media = MediaTable::from_descriptors(package, descriptors, wire.media.warnings)
         .map_err(PeerMetadataError::InvalidMetadata)?;
     Ok(PeerMetadata {
@@ -696,6 +699,277 @@ mod tests {
         ooxml_opc::rezip_parts(&fixture::principal_parts())
             .unwrap()
             .into()
+    }
+
+    fn table_grid_source() -> PackageBytes {
+        table_grid_source_with_settings_part("settings.xml")
+    }
+
+    fn table_grid_source_with_settings_part(settings_part: &str) -> PackageBytes {
+        let body = concat!(
+            "<w:tbl><w:tblPr><w:tblW w:w=\"6000\" w:type=\"dxa\"/>",
+            "<w:tblLayout w:type=\"fixed\"/><w:tblCellMar>",
+            "<w:top w:w=\"0\" w:type=\"dxa\"/><w:bottom w:w=\"0\" w:type=\"dxa\"/>",
+            "</w:tblCellMar></w:tblPr>",
+            "<w:tblGrid><w:gridCol w:w=\"6000\"/></w:tblGrid><w:tr>",
+            "<w:trPr><w:trHeight w:val=\"375\" w:hRule=\"atLeast\"/></w:trPr>",
+            "<w:tc><w:tcPr><w:tcW w:w=\"6000\" w:type=\"dxa\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            "<w:sectPr><w:docGrid w:type=\"linesAndChars\" w:linePitch=\"323\"/></w:sectPr>",
+        );
+        let settings = format!(
+            "<w:settings {}><w:compat><w:adjustLineHeightInTable/></w:compat></w:settings>",
+            fixture::namespaces()
+        );
+        let styles = format!(
+            concat!(
+                "<w:styles {}><w:docDefaults><w:rPrDefault><w:rPr>",
+                "<w:rFonts w:ascii=\"Arial\" w:hAnsi=\"Arial\"/><w:sz w:val=\"30\"/>",
+                "</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>",
+                "<w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/>",
+                "</w:pPr></w:pPrDefault></w:docDefaults></w:styles>"
+            ),
+            fixture::namespaces()
+        );
+        fixture::Package::new(body)
+            .styles(&styles)
+            .part(settings_part, "settings", "settings", "settings", &settings)
+            .bytes()
+            .into()
+    }
+
+    #[test]
+    fn legacy_peer_metadata_recovers_table_grid_at_attach_idempotently() {
+        assert_legacy_peer_metadata_recovers_table_grid(table_grid_source());
+    }
+
+    #[test]
+    fn legacy_peer_metadata_recovers_table_grid_from_a_mixed_case_settings_part() {
+        assert_legacy_peer_metadata_recovers_table_grid(table_grid_source_with_settings_part(
+            "Settings.XML",
+        ));
+    }
+
+    fn assert_legacy_peer_metadata_recovers_table_grid(source: PackageBytes) {
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, blobs) = sections(&metadata).unwrap();
+        let mut legacy: Value = serde_json::from_slice(json).unwrap();
+        legacy["source"]["read"]["settings"]["compatibilityFlags"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adjustLineHeightInTable");
+        let metadata = frame(&serde_json::to_vec(&legacy).unwrap(), blobs).unwrap();
+        let font = docx_layout::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let mut attached: Vec<Vec<u8>> = Vec::new();
+        for client in [19, 20] {
+            let metadata = attached.last().unwrap_or(&metadata);
+            let engine = crate::EngineSession::new(client);
+            let prepared = engine
+                .doc()
+                .prepare_peer_bootstrap(&state, metadata, Some(source.clone()))
+                .unwrap();
+            engine.doc().install_peer_bootstrap(prepared, 17).unwrap();
+            engine.doc().apply_update_v1(&state).unwrap();
+            let retained = engine.doc().source_metadata().unwrap();
+            let read = retained.read();
+            assert_eq!(
+                read.settings.as_ref().unwrap()["compatibilityFlags"]["adjustLineHeightInTable"],
+                json!(true)
+            );
+            let output: Value = serde_json::from_str(
+                &engine
+                    .layout_document_with_regions_json(
+                        &json!({
+                            "bodyStory": "body", "renderEnv": {},
+                            "regions": {
+                                "sections": [{"properties": read.final_section}],
+                                "settings": read.settings
+                            },
+                            "measurement": {
+                                "fontChains": {"arial|0|0": [font]},
+                                "defaults": {"fontFamily": "Arial", "fontSize": 15}
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            let height = output["measured"][0]["measure"]["rows"][0]["height"]
+                .as_f64()
+                .unwrap();
+            assert!((height - 646.0 / 15.0).abs() < 0.01, "{height}");
+            attached.push(engine.doc().encode_peer_metadata().unwrap());
+            assert_eq!(engine.doc().encode_state_as_update_v1(), state);
+        }
+        assert_eq!(attached[0], attached[1]);
+        let mut decoded = decode(&attached[0], source.clone(), &digest).unwrap();
+        let before = serde_json::to_value(&decoded.source).unwrap();
+        let package = RetainedPackage::from_bytes(source).unwrap();
+        decoded.source.recover_table_line_grid(&package).unwrap();
+        assert_eq!(serde_json::to_value(&decoded.source).unwrap(), before);
+    }
+
+    #[test]
+    fn peer_metadata_preserves_present_table_grid_values() {
+        let source = table_grid_source();
+        let digest = seed::package_digest(&source);
+        let metadata = worker(&source, &digest, 7)
+            .unwrap()
+            .encode_peer_metadata()
+            .unwrap();
+        let (json, blobs) = sections(&metadata).unwrap();
+        for value in [json!(false), json!(true), Value::Null] {
+            let mut wire: Value = serde_json::from_slice(json).unwrap();
+            let flags = &mut wire["source"]["read"]["settings"]["compatibilityFlags"];
+            flags["adjustLineHeightInTable"] = value.clone();
+            let metadata = frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap();
+            let decoded = decode(&metadata, source.clone(), &digest).unwrap();
+            assert_eq!(
+                decoded.source.read().settings.as_ref().unwrap()["compatibilityFlags"]["adjustLineHeightInTable"],
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_decoder_shape_accepts_table_grid_key() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(default, rename_all = "camelCase")]
+        struct LegacyCompatibilityFlags {
+            compatibility_mode: u8,
+            no_leading: bool,
+            do_not_expand_shift_return: bool,
+            use_word97_line_break_rules: bool,
+            balance_single_byte_double_byte_width: bool,
+            #[serde(rename = "doNotUseHTMLParagraphAutoSpacing")]
+            do_not_use_html_paragraph_auto_spacing: bool,
+            suppress_sp_bf_after_pg_brk: bool,
+            allow_space_of_same_style_in_table: bool,
+        }
+
+        impl Default for LegacyCompatibilityFlags {
+            fn default() -> Self {
+                Self {
+                    compatibility_mode: 12,
+                    no_leading: false,
+                    do_not_expand_shift_return: false,
+                    use_word97_line_break_rules: false,
+                    balance_single_byte_double_byte_width: false,
+                    do_not_use_html_paragraph_auto_spacing: false,
+                    suppress_sp_bf_after_pg_brk: false,
+                    allow_space_of_same_style_in_table: false,
+                }
+            }
+        }
+
+        let source = table_grid_source();
+        let digest = seed::package_digest(&source);
+        let metadata = worker(&source, &digest, 7)
+            .unwrap()
+            .encode_peer_metadata()
+            .unwrap();
+        let (json, _) = sections(&metadata).unwrap();
+        let wire: DecodeWire = serde_json::from_slice(json).unwrap();
+        let settings = wire.source.read().settings.as_ref().unwrap();
+        let flags = settings["compatibilityFlags"].clone();
+        assert_eq!(flags["adjustLineHeightInTable"], json!(true));
+        let decoded: LegacyCompatibilityFlags = serde_json::from_value(flags).unwrap();
+        assert_eq!(decoded, LegacyCompatibilityFlags::default());
+        let read: ReadSource =
+            serde_json::from_value(serde_json::to_value(wire.source.read()).unwrap()).unwrap();
+        assert_eq!(read.settings.as_ref().unwrap(), settings);
+    }
+
+    #[test]
+    fn peer_metadata_defers_patch_table_context_until_a_changed_cell_save() {
+        let body = concat!(
+            "<w:p><w:r><w:t>body</w:t></w:r></w:p>",
+            "<w:tbl><w:tblPr><w:tblStyle w:val=\"Cells\"/></w:tblPr>",
+            "<w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:p><w:r><w:t>abc</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        );
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="table" w:styleId="Cells"><w:pPr><w:jc w:val="right"/></w:pPr><w:rPr><w:i/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let source: PackageBytes = fixture::Package::new(body).styles(&styles).bytes().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let source_metadata = worker.source_metadata().unwrap();
+        let serialized = serde_json::to_value(source_metadata.as_ref()).unwrap();
+        assert_keys(&serialized["structure"], &["blocks", "run_revisions"]);
+        let cell = "body:t0:r0c0";
+        let expected = source_metadata.patch_inheritance(cell, None, None);
+        assert_eq!(expected.0.get("alignment"), Some(&json!("right")));
+        assert_eq!(expected.1.get("italic"), Some(&json!(true)));
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let peer = EditingDoc::new(19);
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        assert!(!peer.source_index().unwrap().seed_states_initialized());
+        let peer_source = peer.source_metadata().unwrap();
+        let table_inheritance = || peer_source.patch_inheritance(cell, None, None);
+        assert!(!table_inheritance().1.contains_key("italic"));
+        peer.paragraph_save_plan();
+        assert!(!table_inheritance().1.contains_key("italic"));
+        let ctx = crate::EditCtx::local("", "");
+        peer.replace_range(&ctx, crate::StoryRange::new("body", 0, 4), "text")
+            .unwrap();
+        peer.paragraph_save_plan();
+        assert!(!table_inheritance().1.contains_key("italic"));
+        peer.replace_range(&ctx, crate::StoryRange::new(cell, 1, 2), "X")
+            .unwrap();
+        let plan = peer.paragraph_save_plan();
+        assert_eq!(table_inheritance(), expected);
+        let patch = plan
+            .spliced_parts
+            .iter()
+            .flat_map(|part| &part.paragraph_patches)
+            .find(|patch| patch.ordinal == 1)
+            .unwrap();
+        assert_eq!(patch.para_inherit.get("alignment"), Some(&json!("right")));
+        assert_eq!(
+            patch.text_edits[0].insert[0].inherit.get("italic"),
+            Some(&json!(true))
+        );
+        let persisted = serde_json::to_value(peer_source.as_ref()).unwrap();
+        assert_eq!(persisted, serialized);
+    }
+
+    #[test]
+    fn peer_table_metadata_decode_does_not_parse_retained_package() {
+        let body = concat!(
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:p><w:r><w:t>abc</w:t></w:r></w:p>",
+            "</w:tc></w:tr></w:tbl>",
+        );
+        let source: PackageBytes = fixture::Package::new(body).bytes().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let unreadable: PackageBytes = fixture::Package::new("<").bytes().into();
+        let digest = seed::package_digest(&unreadable);
+        let (json, blobs) = sections(&metadata).unwrap();
+        let mut wire: Value = serde_json::from_slice(json).unwrap();
+        wire["source_digest"] = json!(digest);
+        wire["source_length"] = json!(unreadable.len());
+        wire["index"]["package_sha256"] = json!(digest);
+        let metadata = frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap();
+        let decoded = decode(&metadata, unreadable, &digest).unwrap();
+        assert!(!decoded.index.seed_states_initialized());
+        assert!(decoded.source.patch_table_styles().is_empty());
     }
 
     #[test]

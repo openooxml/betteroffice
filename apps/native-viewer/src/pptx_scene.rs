@@ -402,6 +402,7 @@ impl Translator<'_> {
                 asset_id,
                 effects,
                 crop,
+                destination,
                 path,
                 stroke,
                 transform,
@@ -413,6 +414,7 @@ impl Translator<'_> {
                         asset_id: asset_id.as_deref(),
                         effects,
                         crop: *crop,
+                        destination: *destination,
                         path: path.as_deref(),
                     },
                     stroke.as_ref(),
@@ -561,7 +563,10 @@ impl Translator<'_> {
             .transpose()?;
         let affine = frame.transform(transform, parent)?;
         let outline = image_outline(frame, source.path)?;
-        let mapping = image_mapping(frame, image.width, image.height, source.crop)?;
+        let bitmap = source
+            .destination
+            .map_or(Ok(frame), |rect| Frame::new(rect.x, rect.y, rect.w, rect.h))?;
+        let mapping = image_mapping(bitmap, image.width, image.height, source.crop)?;
         self.scene.push_clip_layer(Fill::NonZero, affine, &outline);
         self.scene
             .draw_image(&ImageBrush::new(image.clone()), affine * mapping);
@@ -770,6 +775,7 @@ struct PictureSource<'a> {
     asset_id: Option<&'a str>,
     effects: &'a [pptx_render::ImageEffect],
     crop: ImageCrop,
+    destination: Option<pptx_render::ImageDestination>,
     path: Option<&'a [GeometryPathCommand]>,
 }
 
@@ -1477,11 +1483,30 @@ mod tests {
 
     #[test]
     fn a_cropped_masked_picture_translates_through_its_mask() {
+        assert_cropped_masked_picture(None);
+    }
+
+    #[test]
+    fn a_picture_outset_maps_the_bitmap_inside_its_transformed_frame() {
+        assert_cropped_masked_picture(Some(pptx_render::ImageDestination {
+            x: 100.0,
+            y: 90.0,
+            w: 180.0,
+            h: 60.0,
+        }));
+    }
+
+    fn assert_cropped_masked_picture(destination: Option<pptx_render::ImageDestination>) {
         let crop = ImageCrop {
             left: 0.1,
             top: 0.2,
             right: 0.3,
             bottom: 0.1,
+        };
+        let transform = Transform {
+            rotation_deg: 30.0,
+            flip_h: true,
+            flip_v: false,
         };
         let display_list = SurfaceDisplayList {
             contract_version: CONTRACT_VERSION,
@@ -1500,6 +1525,8 @@ mod tests {
                 asset_id: Some("ppt/media/image1.png".to_owned()),
                 effects: Vec::new(),
                 crop,
+                destination,
+                tile: None,
                 path: Some(ELLIPSE.to_vec()),
                 stroke: Some(DisplayStroke {
                     join: None,
@@ -1511,7 +1538,7 @@ mod tests {
                     tail_end: None,
                 }),
                 shadow: None,
-                transform: Transform::default(),
+                transform,
             }],
         };
         let fonts = PptxFonts {
@@ -1534,10 +1561,27 @@ mod tests {
         let structured = summary.structured(&page.skipped);
         assert_eq!(structured["primitives"]["image"]["translated"], 1);
         let encoding = page.scene.encoding();
+        let frame = Frame::new(100.0, 50.0, 200.0, 100.0).unwrap();
+        let affine = frame.transform(transform, Affine::IDENTITY).unwrap();
+        let (near, far) = destination.map_or(((100.0, 50.0), (300.0, 150.0)), |dest| {
+            (
+                (f64::from(dest.x), f64::from(dest.y)),
+                (f64::from(dest.x + dest.w), f64::from(dest.y + dest.h)),
+            )
+        });
+        let near = affine * vello::kurbo::Point::from(near);
+        let far = affine * vello::kurbo::Point::from(far);
         assert!(encoding.transforms.iter().any(|transform| {
-            let affine = transform.to_kurbo();
-            maps(affine, (102.4, 204.8), (100.0, 50.0))
-                && maps(affine, (716.8, 921.6), (300.0, 150.0))
+            let mapping = transform.to_kurbo();
+            maps(mapping, (102.4, 204.8), (near.x, near.y))
+                && maps(mapping, (716.8, 921.6), (far.x, far.y))
+        }));
+        assert!(encoding.transforms.iter().any(|transform| {
+            let mapping = transform.to_kurbo();
+            let near = affine * vello::kurbo::Point::new(100.0, 50.0);
+            let far = affine * vello::kurbo::Point::new(300.0, 150.0);
+            maps(mapping, (100.0, 50.0), (near.x, near.y))
+                && maps(mapping, (300.0, 150.0), (far.x, far.y))
         }));
         let cubics = encoding
             .path_tags

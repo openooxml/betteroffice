@@ -9,6 +9,7 @@ testHarness.open = (bytes) => ({
   setUndoCaptureMode() {},
   readCommandContent: () => ({ ok: true, slides: [], stories: [], sources: [] }),
   encodeStateAsUpdate: () => new Uint8Array(),
+  isProposalsAvailable: () => true,
   listProposals: () => [],
   canUndo: () => false,
   canRedo: () => false,

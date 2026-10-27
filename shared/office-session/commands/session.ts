@@ -101,6 +101,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const maxInFlight = limit(options.maxInFlight, 4);
   const enqueue = options.enqueue ?? queueMicrotask;
   const records = new WeakMap<CommandTicket, TicketRecord>();
+  const echoDrafts = new WeakMap<TicketRecord, { draft: CommandDraft<P, X>; originalIntentCount: number }>();
   const pending = new Set<TicketRecord>();
   const listeners = new Set<(state: EditSessionState<S, E>) => void>();
   const log = new Map<number, LogEntry<P>>();
@@ -112,7 +113,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   const uncoveredPresentations = new Map<number, LogEntry<P>>();
   const futurePresentations = new Map<number, Deferred<PresentationStatus>>();
   const blockedSeqs = createBlockedLedger();
-  const inFlight = new Set<number>();
+  const inFlight = new Map<number, boolean>();
   let ticketId = 0;
   let highSeq = initial.throughSeq;
   let incarnation = initial.incarnation;
@@ -345,6 +346,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   function settlePresentation(record: TicketRecord, status: PresentationStatus): void {
     if (record.presentationSettled) return;
     record.presentationSettled = true;
+    echoDrafts.delete(record);
     record.presentation.resolve(status);
     if (record.seq !== undefined) {
       presentations.delete(record.seq);
@@ -565,6 +567,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         }
         if (maxAttempts === 0 && cancellations.size === 0) pruneLog(state.throughSeq, true);
         publish();
+        options.onAck?.(ack);
       });
     } catch (error) {
       if (!frameHandled) discardFrame(ack.frame);
@@ -748,7 +751,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         return;
       }
       try {
-        void record.connection.client.call.edit(cloneData(envelope)).then(
+        void record.connection.client.call.edit(options.copyCommandForDispatch?.(envelope) ?? cloneData(envelope)).then(
           (ack) => {
             if (settled) discardFrame(ack?.frame);
             else finish(() => resolve(ack));
@@ -1007,6 +1010,14 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     if (maxAttempts === 0 && cancellations.size === 0) pruneLog(state.throughSeq, true);
   }
 
+  function held(entry: OutboxEntry<P, X>): boolean {
+    if (options.holdForCoalescing?.(entry.draft) !== true) return false;
+    const after = entry.draft.options.after;
+    if (after) return after.seq !== undefined && inFlight.get(after.seq) === true;
+    for (const coalescing of inFlight.values()) if (coalescing) return true;
+    return false;
+  }
+
   function eligible(entry: OutboxEntry<P, X>): boolean {
     const after = entry.draft.options.after;
     if (!after) return true;
@@ -1052,13 +1063,14 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       presenter.drop([oldest.ticket], 'presentation-overflow');
     }
     if (!live(record)) return;
-    inFlight.add(seq);
+    inFlight.set(seq, options.holdForCoalescing?.(draft) === true);
     try {
       logged.envelope = cloneData(envelope);
       const bytes = options.commandBytes?.(logged.envelope) ?? 0;
       logged.bytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : 0;
       retainedBytes += logged.bytes;
-      void record.connection.client.call.edit(cloneData(logged.envelope)).then((ack) => {
+      const outgoing = options.copyCommandForDispatch?.(envelope) ?? cloneData(logged.envelope);
+      void record.connection.client.call.edit(outgoing).then((ack) => {
         try {
           acceptAck(record, ack);
         } finally { settleRpc(logged); }
@@ -1085,7 +1097,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
       return;
     }
     while (live(record) && !recovering && inFlight.size < maxInFlight) {
-      const entry = outbox.takeNext(eligible);
+      const entry = outbox.takeNext(eligible, options.holdForCoalescing ? held : undefined);
       if (!entry) break;
       send(entry, record);
     }
@@ -1129,6 +1141,9 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           records.set(record.ticket, records.get(entry.tickets[0]!)!);
           pending.delete(record);
         }
+        echoDrafts.set(records.get(entry.tickets[0]!)!, {
+          draft: entry.draft, originalIntentCount: entry.tickets.length,
+        });
         const echo = entry.draft.options.echo;
         const painted = echo === undefined ? undefined : { ticket: entry.tickets[0]!, value: echo };
         if (entry.tickets.length > 1) presenter.replace([entry.tickets[0]!], painted);
@@ -1139,8 +1154,40 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
     return record.ticket;
   }
 
+  function attachEcho(
+    tickets: readonly CommandTicket[],
+    preview: (draft: CommandDraft<P, X>, originalIntentCount: number) => X | undefined
+  ): boolean {
+    if (disposed || terminal || recovering) return false;
+    const groups = new Set<TicketRecord>();
+    const attachments: Array<{ record: TicketRecord; entry: NonNullable<ReturnType<typeof echoDrafts.get>>; value: X }> = [];
+    for (const ticket of tickets) {
+      const record = records.get(ticket);
+      if (!record || record.presentationSettled || blocked(record.outcome) ||
+        (record.seq !== undefined && record.seq <= presenter.presentedThroughSeq)) return false;
+      groups.add(record);
+    }
+    for (const record of [...groups].sort((a, b) => a.ticket.id - b.ticket.id)) {
+      const entry = echoDrafts.get(record);
+      if (!entry || entry.draft.options.echo !== undefined) return false;
+      const value = preview(entry.draft, entry.originalIntentCount);
+      if (value === undefined) return false;
+      attachments.push({ record, entry, value });
+    }
+    return presenter.event(() => {
+      if (disposed || terminal || recovering || attachments.some(({ record, entry }) =>
+        record.presentationSettled || blocked(record.outcome) ||
+        (record.seq !== undefined && record.seq <= presenter.presentedThroughSeq) ||
+        echoDrafts.get(record) !== entry || entry.draft.options.echo !== undefined)) return false;
+      for (const { entry, value } of attachments) entry.draft.options.echo = value;
+      const attached = presenter.attach(attachments.map(({ record, value }) => ({ ticket: record.ticket, value })));
+      if (!attached) for (const { entry } of attachments) entry.draft.options.echo = undefined;
+      return attached;
+    });
+  }
+
   const session: WorkerEditSession<P, S, E, X, Q> = {
-    backend: 'worker', get state() { return state; }, submit, read, hold,
+    backend: 'worker', get state() { return state; }, submit, attachEcho, read, hold,
     get stage() { return disposed ? 'disposed' : terminal ? 'failed' : recovering ? 'recovering' : 'ready'; },
     whenPresented(seq) {
       if (disposed || terminal) return Promise.resolve('dropped');

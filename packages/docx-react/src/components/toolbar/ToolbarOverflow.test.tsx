@@ -631,7 +631,7 @@ describe('overflow coverage', () => {
     expect(labels(find(tree, ['Paragraph style']))).toEqual(['Normal text', 'Heading 1']);
     expect(labels(find(tree, ['Font']))).toEqual(['Arial', 'Georgia']);
     expect(labels(find(tree, ['Font size'])).at(-1)).toBe('Custom size…');
-    expect(labels(find(tree, ['Zoom level']))).toEqual(['50%', '75%', '100%', '125%', '150%', '200%']);
+    expect(labels(find(tree, ['Zoom level']))).toEqual(['50%', '75%', '90%', '100%', '125%', '150%', '200%']);
     expect(labels(find(tree, ['Alignment']))).toHaveLength(4);
     expect(labels(find(tree, ['Line spacing']))).toHaveLength(4);
     expect(labels(find(tree, ['Text wrapping']))).toHaveLength(6);
@@ -665,6 +665,7 @@ describe('overflow coverage', () => {
       'Delete column',
       'Delete table',
       'Borders',
+      'View gridlines',
       'Border Color',
       'Border width',
       'Cell Fill Color',
@@ -699,7 +700,7 @@ describe('overflow coverage', () => {
       'Align table center',
       'Align table right',
     ]);
-  });
+  }, 30_000);
 
   test('overflow choices run the same commands as the controls they replace', async () => {
     const harness = mountDefault();

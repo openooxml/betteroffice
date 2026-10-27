@@ -182,10 +182,9 @@ pub fn office_document_path(
         });
     };
     if !parts.iter().any(|(path, _)| path == &target) {
-        return Err(ParseError::Relationship {
-            part: path.clone(),
-            message: format!("officeDocument target is missing: {target}"),
-        });
+        return Err(ParseError::Container(format!(
+            "not a Word document: main document part is missing: {target}"
+        )));
     }
     Ok(target)
 }

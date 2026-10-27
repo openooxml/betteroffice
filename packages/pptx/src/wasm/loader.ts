@@ -11,6 +11,7 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
@@ -69,6 +70,7 @@ import type {
   TextStyle,
   TextStylePatch,
   TransformReceipt,
+  TableReceipt,
 } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
@@ -117,7 +119,10 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   fork(): PresentationHandle;
-  layouts(): Array<{ id: string; name: string | null; type: string | null }>;
+  /** Joins a shared session: table row and column insert/delete are refused from now on. Call it before the first edit on a handle that joins a shared session. */
+  setCollaborative(): void;
+  isCollaborative(): boolean;
+  layouts(): Array<{ id: string; name: string | null; type: string | null; masterId: string | null; placeholders: Array<{ id: string; name: string; type: string | null; idx: number | null }> }>;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
   /** Anchors the UTF-16 caret `index` of a story so later edits move it along. */
@@ -183,6 +188,12 @@ export interface PresentationHandle extends CollaborationReplica {
     end: number,
     alignment: ParagraphAlignment | null
   ): TextReceipt;
+  insertTableRow(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[]): TableReceipt;
+  deleteTableRow(slideId: string, shapeId: string, index: number): TableReceipt;
+  insertTableColumn(slideId: string, shapeId: string, index: number, position: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): TableReceipt;
+  deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
+  /** Throws the refusal the matching table edit would throw, without changing the deck. */
+  checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): void;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -190,6 +201,7 @@ export interface PresentationHandle extends CollaborationReplica {
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
   /** Sets a slide's speaker notes; empty text clears them. */
   setSlideNotes(slideId: string, text: string): void;
+  setSlideLayout(slideId: string, layoutId: string, mapping?: Array<[string, string]>): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
   addTextBoxProfiled(slideId: string, draft: ShapeDraft): Profiled<ShapeReceipt>;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
@@ -226,7 +238,7 @@ export interface PresentationHandle extends CollaborationReplica {
       yEmu?: number;
     }
   ): CommentReceipt;
-  /** Modern decks only; legacy `p:cm` has no reply list. */
+  /** Replies to a root comment in either flavor. */
   replyToComment(
     commentId: string,
     reply: { author: string; initials?: string; text: string; created: string }
@@ -279,7 +291,8 @@ export class PresentationPeerError extends Error {
 
 const replayMethods = [
   'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
-  'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+  'insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn',
+  'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'setSlideLayout', 'addTextBox', 'addShape', 'addPicture',
   'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
   'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
   'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',
@@ -409,6 +422,7 @@ type PresentationMetadata = {
 };
 const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
 const storyFormattingReaders = new WeakMap<PresentationHandle, (target: PptxStoryFormattingTarget) => StorySnapshot>();
+const paragraphJoiners = new WeakMap<PresentationHandle, (storyId: string, start: number, end: number) => TextReceipt>();
 type PptxStoryFormattingTarget = { slideId: string; shapeId: string; storyId: string };
 type StoryFormattingDocument = PptxDocument & { storyFormattingJson(args: string): string };
 
@@ -416,6 +430,14 @@ export function presentationStoryFormatting(handle: PresentationHandle, target: 
   const read = storyFormattingReaders.get(handle);
   if (!read) throw new Error('Presentation story formatting is unavailable');
   return read(target);
+}
+
+export function presentationDeleteTextJoiningParagraphs(
+  handle: PresentationHandle, storyId: string, start: number, end: number
+): TextReceipt {
+  const join = paragraphJoiners.get(handle);
+  if (!join) throw new Error('Presentation paragraph joining is unavailable');
+  return join(storyId, start, end);
 }
 
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
@@ -534,6 +556,10 @@ function openPresentationInternal(
   bytes: Uint8Array, options: OpenPresentationOptions, peer?: PeerMode
 ): PresentationHandle {
   requireInitialized();
+  if (options.clientId !== undefined && options.clientId >= OPEN_SYNC_CLIENT) {
+    const message = 'client id must be a positive safe integer below Number.MAX_SAFE_INTEGER - 1';
+    throw peer ? new PresentationPeerError('clientId', message) : new Error(message);
+  }
   const faces = peer ? [
     ...(options.fonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: false })),
     ...(options.fallbackFonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: true })),
@@ -670,17 +696,33 @@ function openPresentationInternal(
   };
 
   const sourceBytes = new Uint8Array(bytes);
+  let collaborative = false;
   const handle: PresentationHandle = {
     fork() {
       assertAlive();
-      return openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      const forked = openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+      if (collaborative) forked.setCollaborative();
+      return forked;
+    },
+    setCollaborative() {
+      collaborative = true;
+      wasmCall(() => doc.setCollaborative());
+    },
+    isCollaborative() {
+      return collaborative;
     },
     layouts() {
       assertAlive();
+      type LayoutShape = { id: number; name: string; placeholder?: { placeholderType: string | null; index: number | null } | null; children?: LayoutShape[] };
+      const placeholders = (shapes: LayoutShape[]): ReturnType<PresentationHandle['layouts']>[number]['placeholders'] => shapes.flatMap(shape => [
+        ...(shape.placeholder ? [{ id: String(shape.id), name: shape.name, type: shape.placeholder.placeholderType, idx: shape.placeholder.index }] : []),
+        ...placeholders(shape.children ?? []),
+      ]);
       const parsed = inspectPresentation(sourceBytes, { includeMedia: false }) as {
-        layouts: Array<{ partPath: string; name: string | null; layoutType: string | null }>;
+        layouts: Array<{ partPath: string; name: string | null; layoutType: string | null; masterPartPath: string | null; shapes: LayoutShape[] }>;
+        masters: Array<{ partPath: string; layoutPartPaths: string[] }>;
       };
-      return parsed.layouts.map(layout => ({ id: layout.partPath, name: layout.name, type: layout.layoutType }));
+      return parsed.layouts.map(layout => ({ id: layout.partPath, name: layout.name, type: layout.layoutType, masterId: layout.masterPartPath ?? parsed.masters.find(master => master.layoutPartPaths.includes(layout.partPath))?.partPath ?? null, placeholders: placeholders(layout.shapes) }));
     },
     isProposalsAvailable,
     propose(agentId, note, edits) {
@@ -790,7 +832,7 @@ function openPresentationInternal(
       return wasmCall(() => doc.mediaBytes(partPath));
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      return wasmCall(() => renderer.saveBytes(doc));
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(
@@ -835,6 +877,22 @@ function openPresentationInternal(
         true
       );
     },
+    insertTableRow(slideId, shapeId, index, position, cells): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableRowJson(JSON.stringify({ slideId, shapeId, index, position, cells })), true);
+    },
+    checkTableEdit(method, slideId, shapeId, index, position, cells, width): void {
+      const edit = { insertTableRow: 'insertRow', deleteTableRow: 'deleteRow', insertTableColumn: 'insertColumn', deleteTableColumn: 'deleteColumn' }[method];
+      wasmCall(() => doc.checkTableEditJson(JSON.stringify({ edit, slideId, shapeId, index, position, cells, width })));
+    },
+    deleteTableRow(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableRowJson(JSON.stringify({ slideId, shapeId, index })), true);
+    },
+    insertTableColumn(slideId, shapeId, index, position, cells, width): TableReceipt {
+      return jsonWasmCall(() => doc.insertTableColumnJson(JSON.stringify({ slideId, shapeId, index, position, cells, width })), true);
+    },
+    deleteTableColumn(slideId, shapeId, index): TableReceipt {
+      return jsonWasmCall(() => doc.deleteTableColumnJson(JSON.stringify({ slideId, shapeId, index })), true);
+    },
     insertSlide(index, layoutPartPath): SlideReceipt {
       return jsonWasmCall(
         () =>
@@ -865,6 +923,13 @@ function openPresentationInternal(
         () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
         true
       );
+    },
+    setSlideLayout(slideId, layoutId, mapping = []): void {
+      const targets = mapping.map(([shape, target]) => {
+        if (!/^\d+$/u.test(target) || !Number.isSafeInteger(Number(target)) || Number(target) > 0xffffffff) throw new Error('Invalid layout placeholder ID');
+        return [shape, Number(target)];
+      });
+      jsonWasmCall(() => doc.setSlideLayoutJson(JSON.stringify({ slideId, layoutPartPath: layoutId, mapping: targets })), true);
     },
     setSlideNotes(slideId, text): void {
       jsonWasmCall(() => doc.setSlideNotesJson(JSON.stringify({ slideId, text })), true);
@@ -1109,6 +1174,9 @@ function openPresentationInternal(
       slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
     })))
   );
+  if (!peer) paragraphJoiners.set(handle, (storyId, start, end) =>
+    jsonWasmCall(() => doc.deleteTextJson(JSON.stringify({ storyId, start, end, allowParagraphJoin: true })), true)
+  );
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {
       snapshot: (): { snapshot: DeckSnapshot; keys: Record<string, string> } =>
@@ -1279,7 +1347,7 @@ function clientId(): number {
   do {
     random.getRandomValues(values);
     value = (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1];
-  } while (value === 0);
+  } while (value === 0 || value >= OPEN_SYNC_CLIENT);
   return value;
 }
 
@@ -1320,5 +1388,5 @@ function toError(error: unknown): Error {
       }
     } catch {}
   }
-  return new Error(typeof error === 'string' ? error : String(error));
+  return Object.assign(new Error(typeof error === 'string' ? error : String(error)), { cause: error });
 }

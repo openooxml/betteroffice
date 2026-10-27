@@ -13,4 +13,7 @@ export default defineConfig({
   minify: true,
   external: ['react', 'react-dom', '@betteroffice/pptx'],
   esbuildPlugins: [packageBoundary(fileURLToPath(new URL('.', import.meta.url)))],
+  esbuildOptions(options) {
+    options.chunkNames = 'chunk-[hash]';
+  },
 });

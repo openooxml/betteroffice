@@ -7,8 +7,9 @@ use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::workbook::ColumnRuns;
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table, Workbook,
+    Cell, CellRange, CellRef, CellValue, ColStyle, ConditionalFormatRule, ConditionalFormatting,
+    DateSystem, DefinedName, DifferentialFormat, ErrorValue, FreezePane, Hyperlink, Sheet,
+    SheetFormat, SheetId, Stylesheet, Table, Workbook,
 };
 
 use crate::formula::SharedFormulas;
@@ -18,7 +19,7 @@ use crate::xml::{
     resolve_part_path, xml_err,
 };
 use crate::{
-    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_ROW_STYLES,
+    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
     MAX_SHARED_STRINGS, MAX_TABLE_COLUMNS, MAX_TABLES, ParseError,
 };
 
@@ -91,6 +92,7 @@ pub(crate) fn parse_workbook_indexed(
     let mut declined_parts = Vec::new();
     let mut tables = Vec::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
+        xlsx_model::progress::pulse();
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             let mut sheet = Sheet::new(&entry.name);
@@ -123,6 +125,7 @@ pub(crate) fn parse_workbook_indexed(
             &mut indices,
             &mut legacy,
             &mut facts,
+            &styles.dxfs,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
         collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
@@ -132,13 +135,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
-    if styles.cell_xfs.is_empty()
-        && sheets.iter().any(|sheet| {
-            sheet.row_styles.values().any(|&style| style == 0)
-                || sheet.col_styles.iter().any(|run| run.xf == 0)
-                || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
-        })
-    {
+    if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
     Ok(IndexedWorkbook {
@@ -157,6 +154,29 @@ pub(crate) fn parse_workbook_indexed(
         legacy_styles,
         declined_parts,
         rich_shared_strings,
+    })
+}
+
+pub(crate) fn legacy_style_readings(
+    parts: &[(String, Vec<u8>)],
+    model: &Workbook,
+    legacy: Option<&Stylesheet>,
+) -> Result<Vec<Stylesheet>, ParseError> {
+    let rels = find_part(parts, "xl/_rels/workbook.xml.rels");
+    let styles = typed_part(parts, rels, "styles", "xl/styles.xml")?;
+    crate::styles::legacy_style_readings(
+        styles,
+        &model.styles,
+        legacy,
+        references_zero_style(&model.sheets),
+    )
+}
+
+fn references_zero_style(sheets: &[Sheet]) -> bool {
+    sheets.iter().any(|sheet| {
+        sheet.row_styles.values().any(|&style| style == 0)
+            || sheet.col_styles.iter().any(|run| run.xf == 0)
+            || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
     })
 }
 
@@ -206,6 +226,37 @@ struct SheetEntry {
     rid: Option<String>,
 }
 
+/// refuse a main part whose root is not a spreadsheetml `workbook`. a root
+/// without a namespace declaration is still read, as hand-written packages omit it.
+fn check_workbook_root(e: &quick_xml::events::BytesStart) -> Result<(), ParseError> {
+    let name = e.name();
+    if name.local_name().as_ref() != b"workbook" {
+        return Err(ParseError::Malformed(format!(
+            "unexpected root element in xl/workbook.xml: {}",
+            String::from_utf8_lossy(name.as_ref())
+        )));
+    }
+    let declaration = match name.prefix() {
+        Some(prefix) => [&b"xmlns:"[..], prefix.as_ref()].concat(),
+        None => b"xmlns".to_vec(),
+    };
+    for a in e.attributes() {
+        let a = a.map_err(xml_err)?;
+        if a.key.as_ref() != declaration.as_slice() {
+            continue;
+        }
+        let namespace = a
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .map_err(xml_err)?;
+        if namespace != crate::write::NS_MAIN && namespace != crate::write::NS_STRICT_MAIN {
+            return Err(ParseError::Malformed(format!(
+                "unsupported main namespace in xl/workbook.xml: {namespace}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 struct WorkbookMeta {
     date_system: DateSystem,
     active_sheet: SheetId,
@@ -224,9 +275,11 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut sheets_depth = None;
     let mut sheets = Vec::new();
     let mut defined_names = Vec::new();
+    let mut defined_name_bytes = 0usize;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if depth == 1 => check_workbook_root(&e)?,
             Event::Start(e) => match local_name(&e).as_slice() {
                 // the save rewrites the root's `sheets` child, so only it lists sheets
                 b"sheets" if depth == 2 => sheets_depth = Some(depth),
@@ -251,21 +304,24 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     sheets.push(SheetEntry { name, rid });
                 }
                 b"definedName" => {
-                    if defined_names.len() >= MAX_DEFINED_NAMES {
-                        return Err(ParseError::TooManyDefinedNames);
-                    }
                     let name = attr(&e, b"name")?.unwrap_or_default();
                     let local_sheet = attr(&e, b"localSheetId")?
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
                     let hidden = attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value));
                     let formula = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    defined_names.push(DefinedName {
+                    let defined = DefinedName {
                         name,
                         formula,
                         local_sheet,
                         hidden,
-                    });
+                    };
+                    defined_name_bytes =
+                        defined_name_bytes.saturating_add(defined.retained_bytes());
+                    if defined_name_bytes > MAX_DEFINED_NAME_BYTES {
+                        return Err(ParseError::TooManyDefinedNames);
+                    }
+                    defined_names.push(defined);
                 }
                 _ => {}
             },
@@ -539,6 +595,9 @@ pub struct SourceCellFacts {
     pub uncached_formulas: BTreeSet<(u32, u32)>,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
+    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
+    /// branch's cell can stand in for it in the model.
+    pub alternate_formulas: bool,
 }
 
 /// in-progress cell state accumulated between a `<c>` start and its end.
@@ -555,6 +614,7 @@ struct CellBuild {
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
 /// merges, and column/row sizing. `shared` resolves `t="s"` indices.
+#[allow(clippy::too_many_arguments)]
 fn parse_worksheet(
     name: &str,
     data: &[u8],
@@ -563,6 +623,7 @@ fn parse_worksheet(
     shared_string_cells: &mut SharedStringCells,
     legacy: &mut LegacySheetDimensions,
     facts: &mut SourceCellFacts,
+    dxfs: &[DifferentialFormat],
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -576,6 +637,7 @@ fn parse_worksheet(
     let mut row_style_count: usize = 0;
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
+    let mut alternate_depth: usize = 0;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -605,12 +667,16 @@ fn parse_worksheet(
                     }
                     if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
                         sheet.row_heights.insert(row, 0.0);
+                        if let Some(height) = height.filter(|height| *height > 0.0) {
+                            sheet.hidden_row_heights.insert(row, height);
+                        }
                     } else if let Some(height) = height {
                         sheet.row_heights.insert(row, height);
                     }
                 }
                 b"c" => {
                     cell_count += 1;
+                    xlsx_model::progress::tick();
                     if cell_count > MAX_CELLS {
                         return Err(ParseError::TooManyCells);
                     }
@@ -645,8 +711,10 @@ fn parse_worksheet(
                             }
                         }
                         c.formula = Some(text);
+                        facts.alternate_formulas |= alternate_depth > 0;
                     }
                 }
+                b"AlternateContent" => alternate_depth += 1,
                 b"is" => {
                     let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
                     if let Some(c) = cur.as_mut() {
@@ -706,6 +774,7 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
+                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
                     _ => {}
                 }
             }
@@ -715,7 +784,164 @@ fn parse_worksheet(
     }
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
+    sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
+    sheet.auto_filter = parse_auto_filter(data)?;
     Ok(sheet)
+}
+
+fn parse_auto_filter(data: &[u8]) -> Result<Option<xlsx_model::AutoFilter>, ParseError> {
+    if !data
+        .windows(b"autoFilter".len())
+        .any(|window| window == b"autoFilter")
+    {
+        return Ok(None);
+    }
+    let template = crate::package::XmlTemplate::capture(data)?;
+    let sources = template.children_named("autoFilter").collect::<Vec<_>>();
+    let Some(source) = sources.first() else {
+        return Ok(None);
+    };
+    let mut reader = reader(&source.bytes);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut range = None;
+    let mut filter_columns = Vec::new();
+    let mut has_sort_state = false;
+    loop {
+        match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) | Event::Empty(e) => match local_name(&e).as_slice() {
+                b"autoFilter" if range.is_none() => {
+                    range = attr(&e, b"ref")?.and_then(|value| CellRange::parse_a1(&value).ok());
+                }
+                b"filterColumn" => {
+                    filter_columns.push(
+                        attr(&e, b"colId")?
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(u32::MAX),
+                    );
+                }
+                b"sortState" => has_sort_state = true,
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    Ok(Some(xlsx_model::AutoFilter {
+        range,
+        raw_xml: Some(
+            String::from_utf8(source.bytes.clone())
+                .map_err(|e| ParseError::Malformed(e.to_string()))?,
+        ),
+        source_count: sources.len() as u32,
+        filter_columns,
+        has_sort_state,
+    }))
+}
+
+fn parse_conditional_formats(
+    data: &[u8],
+    dxfs: &[DifferentialFormat],
+) -> Result<Vec<ConditionalFormatting>, ParseError> {
+    let bom = crate::xml::utf8_bom_len(data);
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    let mut groups: Vec<ConditionalFormatting> = Vec::new();
+    let mut group: Option<ConditionalFormatting> = None;
+    let mut rule: Option<ConditionalFormatRule> = None;
+    let mut rule_start = 0usize;
+    let mut formula: Option<String> = None;
+    let mut next_id = 1u64;
+    loop {
+        let before = bom + reader.buffer_position() as usize;
+        let event = next_event(&mut reader, &mut buf, &mut depth)?;
+        let after = bom + reader.buffer_position() as usize;
+        match event {
+            Event::Start(e) if local_name(&e) == b"conditionalFormatting" && depth == 2 => {
+                group = Some(ConditionalFormatting {
+                    sqref: attr(&e, b"sqref")?.unwrap_or_default(),
+                    rules: Vec::new(),
+                });
+            }
+            Event::Start(e) if local_name(&e) == b"cfRule" && depth == 3 && group.is_some() => {
+                if next_id > 65_536 {
+                    return Err(ParseError::Malformed("too many conditional formats".into()));
+                }
+                rule_start = before;
+                let dxf_id = attr(&e, b"dxfId")?.and_then(|value| value.parse::<u32>().ok());
+                rule = Some(ConditionalFormatRule {
+                    id: format!("cf{next_id}"),
+                    rule_type: attr(&e, b"type")?.unwrap_or_default(),
+                    operator: attr(&e, b"operator")?,
+                    formulas: Vec::new(),
+                    priority: attr(&e, b"priority")?
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0),
+                    dxf_id,
+                    format: dxf_id
+                        .and_then(|index| dxfs.get(index as usize))
+                        .cloned()
+                        .unwrap_or_default(),
+                    raw_xml: None,
+                });
+                next_id += 1;
+            }
+            Event::Start(e) if local_name(&e) == b"formula" && rule.is_some() => {
+                formula = Some(String::new());
+                let _ = e;
+            }
+            Event::Start(e) | Event::Empty(e) if local_name(&e) == b"cfvo" && rule.is_some() => {
+                if attr(&e, b"type")?.as_deref() == Some("formula")
+                    && let Some(value) = attr(&e, b"val")?
+                {
+                    rule.as_mut().unwrap().formulas.push(value);
+                }
+            }
+            Event::Text(t) if formula.is_some() => {
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
+            }
+            Event::CData(t) if formula.is_some() => {
+                formula
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&t.decode().map_err(xml_err)?);
+            }
+            Event::GeneralRef(r) if formula.is_some() => {
+                let name = r.decode().map_err(xml_err)?;
+                formula.as_mut().unwrap().push_str(&resolve_entity(&name)?);
+            }
+            Event::End(e) if e.name().local_name().as_ref() == b"formula" && formula.is_some() => {
+                if let (Some(rule), Some(formula)) = (&mut rule, formula.take()) {
+                    rule.formulas.push(formula);
+                }
+            }
+            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+                let mut rule = rule.take().unwrap();
+                rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
+                    .ok()
+                    .map(str::to_owned);
+                if let Some(group) = &mut group {
+                    group.rules.push(rule);
+                }
+            }
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && group.is_some() =>
+            {
+                groups.push(group.take().unwrap());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(groups)
 }
 
 /// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
@@ -746,6 +972,10 @@ fn parse_hyperlink(
     };
     let range = CellRange::parse_a1(&reference)
         .map_err(|_| ParseError::Malformed(format!("bad hyperlink ref {reference:?}")))?;
+    let range = CellRange {
+        start: CellRef::new(range.start.row, range.start.col),
+        end: CellRef::new(range.end.row, range.end.col),
+    };
     let external_target = attr(element, b"id")?
         .and_then(|id| relationships.get(&id))
         .filter(|relationship| {
@@ -868,6 +1098,13 @@ fn parse_col(
     };
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
+        if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
+            sheet
+                .hidden_col_widths
+                .insert(col - 1, authored.min(MAX_COL_WIDTH_CHARS));
+        } else {
+            sheet.hidden_col_widths.remove(&(col - 1));
+        }
         if let Some(authored) = authored {
             legacy.col_widths.insert(col - 1, authored);
         }
@@ -979,7 +1216,7 @@ pub(crate) fn is_truthy(v: &str) -> bool {
 }
 
 /// parse a 1-based xml index (row number) into a 0-based id, bounds-checked.
-fn parse_index(v: &str, max: u32) -> Result<u32, ParseError> {
+pub(crate) fn parse_index(v: &str, max: u32) -> Result<u32, ParseError> {
     let n: u32 = v
         .parse()
         .map_err(|_| ParseError::Malformed(format!("bad index {v:?}")))?;

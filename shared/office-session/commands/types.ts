@@ -159,6 +159,10 @@ export interface EditSession<P, S, E, X> {
   readonly backend: 'worker' | 'legacy-sync' | 'legacy-in-thread';
   readonly state: EditSessionState<S, E>;
   submit(kind: string, payload: P, options?: SubmitOptions<X>): CommandTicket;
+  attachEcho?(
+    tickets: readonly CommandTicket[],
+    preview: (draft: CommandDraft<P, X>, originalIntentCount: number) => X | undefined
+  ): boolean;
   whenPresented(seq: number): Promise<PresentationStatus>;
   subscribe(listener: (state: EditSessionState<S, E>) => void): () => void;
   flush(): Promise<void>;
@@ -226,6 +230,7 @@ export type CommandHostOptions<P, S, E, F> = {
   apply(
     envelope: CommandEnvelope<P>, context: ApplyContext
   ): ApplyResult<S, E> | Promise<ApplyResult<S, E>>;
+  deferFrame?(envelope: CommandEnvelope<P>, result: ApplyResult<S, E>): boolean;
   frame(input: { coversThroughSeq: number; version: number }):
     | FrameEnvelope<F>
     | TransferResult<FrameEnvelope<F>>
@@ -273,7 +278,9 @@ export interface Outbox<P, X> {
   readonly size: number;
   readonly entries: readonly OutboxEntry<P, X>[];
   enqueue(draft: CommandDraft<P, X>, ticket: CommandTicket): OutboxEntry<P, X>;
-  takeNext(eligible: (entry: OutboxEntry<P, X>) => boolean): OutboxEntry<P, X> | undefined;
+  takeNext(
+    eligible: (entry: OutboxEntry<P, X>) => boolean, hold?: (entry: OutboxEntry<P, X>) => boolean
+  ): OutboxEntry<P, X> | undefined;
   remove(predicate: (entry: OutboxEntry<P, X>) => boolean): readonly OutboxEntry<P, X>[];
   clear(): readonly OutboxEntry<P, X>[];
 }
@@ -307,6 +314,7 @@ export interface Presenter<X, F> {
   readonly pending: readonly EchoEntry<X>[];
   event<T>(callback: () => T): T;
   add(entry: EchoEntry<X>): boolean;
+  attach(entries: readonly EchoEntry<X>[]): boolean;
   replace(tickets: readonly CommandTicket[], entry?: EchoEntry<X>): void;
   drop(tickets: readonly CommandTicket[], reason: string): void;
   present(frame: FrameEnvelope<F>): FrameDisposition;
@@ -360,6 +368,8 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   /** @internal Handles echo capacity overflow; defaults to declining new entries. */
   echoOverflow?: 'decline' | 'evict-oldest';
   coalesce?(prev: CommandDraft<P, X>, next: CommandDraft<P, X>): CommandDraft<P, X> | undefined;
+  /** @internal Keeps a matching draft queued while the matching command it follows is in flight, so a burst coalesces into one send. */
+  holdForCoalescing?(draft: CommandDraft<P, X>): boolean;
   requestFullFrame(connection: CommandConnection<P, S, E, F>): Promise<CommandAck<S, E, F>>;
   maxInFlight?: number;
   inputBurstCap?: number;
@@ -367,9 +377,12 @@ export type WorkerEditSessionOptions<O, P, S, E, F, X, Q extends QueryTable = {}
   maxRecoveryAttempts?: number;
   checkpointPolicy?(stats: { applied: number; bytes: number }): boolean;
   commandBytes?(envelope: CommandEnvelope<P>): number;
+  /** @internal May share caller data only with a transport that copies before returning. */
+  copyCommandForDispatch?(envelope: CommandEnvelope<P>): CommandEnvelope<P>;
   now?(): number;
   enqueue?(callback: () => void): void;
   onEchoOverrun?(sample: EchoOverrunSample): void;
+  onAck?(ack: CommandAck<S, E, F>): void;
 };
 
 /** @internal Factory contract implemented by session.ts. */

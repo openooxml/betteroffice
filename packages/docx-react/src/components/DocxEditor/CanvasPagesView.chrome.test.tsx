@@ -4,7 +4,8 @@ import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
-import { createRef } from 'react';
+import { createRef, useRef } from 'react';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   applyFrameDeltaOwned,
@@ -20,7 +21,7 @@ import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
 import { checkIdleContinuation, fakeIdleScheduler } from './__fixtures__/fakeIdleScheduler';
-import { createPageChromeHold, type PageChromeHandle } from './usePageChrome';
+import { createPageChromeHold, usePageChrome, type PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -172,23 +173,117 @@ test('changing when chrome builds keeps what it already built', async () => {
 });
 
 test('a page in the window rebuilds its chrome at once, and one outside it at idle', async () => {
-  const page = (): DisplayPage => ({ pageIndex: 0, width: 100, height: 100, primitives: [] });
+  const page = (text: string): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100,
+    primitives: [{ kind: 'text', text, x: 10, baselineY: 20, width: 30, font: '12px Arial', color: '#000' }],
+  });
   for (const [Chrome, visible, atOnce] of [
     [CanvasInteractiveOverlay, false, true],
     [CanvasPageMirror, true, true],
     [CanvasPageMirror, false, false],
   ] as const) {
     const { container, rerender, unmount } = render(
-      <Chrome page={page()} defer visible={visible} />
+      <Chrome page={page('one')} defer visible={visible} />
     );
     await idle();
     const built = container.firstElementChild!.firstElementChild;
     expect(built).not.toBeNull();
-    rerender(<Chrome page={page()} defer visible={visible} />);
+    const builtHtml = built!.outerHTML;
+    rerender(<Chrome page={page('two')} defer visible={visible} />);
     await act(async () => {});
-    expect(container.firstElementChild!.firstElementChild === built).toBe(!atOnce);
+    const now = container.firstElementChild!.firstElementChild!;
+    expect(now !== built || now.outerHTML !== builtHtml).toBe(atOnce);
+    if (Chrome === CanvasPageMirror) {
+      expect(now.textContent!.includes('two')).toBe(atOnce);
+      expect(now.textContent!.includes('one')).toBe(!atOnce);
+    }
     unmount();
   }
+});
+
+test('an edit on a page in the window rebuilds only the edited paragraph of its mirror', async () => {
+  const page = (edited: boolean): DisplayPage => ({
+    pageIndex: 0, width: 600, height: 800,
+    primitives: Array.from({ length: 30 }, (_, block) =>
+      Array.from({ length: 5 }, (_, r): DisplayPrimitive => {
+        const text = edited && block === 15 && r === 0 ? 'wordsx' : 'words';
+        const start = 1000 + block * 100 + r * 6 + (edited && (block > 15 || (block === 15 && r > 0)) ? 1 : 0);
+        return {
+          kind: 'text', text, x: 10 + r * 40, baselineY: 20 + block * 14, width: 6 * text.length,
+          font: '12px Arial', color: '#000', blockKey: `b${block}`, docStart: start, docEnd: start + text.length,
+        };
+      })
+    ).flat(),
+  });
+  const { container, rerender } = render(<CanvasPageMirror page={page(false)} />);
+  await act(async () => {});
+  const before = new Set(container.querySelectorAll('*'));
+  expect(before.size).toBeGreaterThan(150);
+  rerender(<CanvasPageMirror page={page(true)} />);
+  await act(async () => {});
+  const created = Array.from(container.querySelectorAll('*')).filter((el) => !before.has(el));
+  expect(created.length).toBeLessThanOrEqual(6);
+  expect(container.querySelector('[data-block-id="b15"]')!.textContent).toContain('wordsx');
+  expect(container.querySelector('[data-block-id="b16"] > span')!.getAttribute('data-doc-start')).toBe('2601');
+});
+
+test('an update that reorders blocks keeps focus on the link it kept', async () => {
+  const link = (block: string): DisplayPrimitive => ({
+    kind: 'text', text: `link ${block}`, x: 10, baselineY: 20, width: 40, font: '12px Arial', color: '#000',
+    href: `#${block}`, blockKey: block, docStart: block === 'a' ? 1 : 20, docEnd: block === 'a' ? 7 : 26,
+  });
+  const page = (...blocks: string[]): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100, primitives: blocks.map(link),
+  });
+  const { container, rerender } = render(<CanvasPageMirror page={page('a', 'b')} />);
+  await act(async () => {});
+  const focused = container.querySelector<HTMLElement>('a[href="#b"]')!;
+  focused.focus();
+  rerender(<CanvasPageMirror page={page('b', 'a')} />);
+  await act(async () => {});
+  expect(container.querySelector('[data-block-id]')!.getAttribute('data-block-id')).toBe('b');
+  expect(document.activeElement).toBe(focused);
+});
+
+test('an update that moves the focused link puts focus back on it', async () => {
+  const t = ((key: string) => key) as unknown as TFunction;
+  const hrefs = (page: DisplayPage): string[] =>
+    page.primitives.map((p) => `#${(p as { text: string }).text}`);
+  const make = (page: DisplayPage): HTMLElement => {
+    const root = document.createElement('div');
+    for (const href of hrefs(page)) {
+      const link = document.createElement('a');
+      link.setAttribute('href', href);
+      link.textContent = href;
+      root.append(link);
+    }
+    return root;
+  };
+  const update = (chrome: HTMLElement, page: DisplayPage): boolean => {
+    for (const href of hrefs(page)) chrome.append(chrome.querySelector(`a[href="${href}"]`)!);
+    return true;
+  };
+  function Chrome({ page }: { page: DisplayPage }) {
+    const hostRef = useRef<HTMLDivElement>(null);
+    usePageChrome(hostRef, {
+      page, t, active: true, defer: false, rebuildAtOnce: true, urgentRevision: 0, make, update,
+    });
+    return <div ref={hostRef} />;
+  }
+  const page = (...texts: string[]): DisplayPage => ({
+    pageIndex: 0, width: 100, height: 100,
+    primitives: texts.map((text) => ({
+      kind: 'text', text, x: 0, baselineY: 10, width: 10, font: '12px Arial', color: '#000',
+    })),
+  });
+  const { container, rerender } = render(<Chrome page={page('a', 'b')} />);
+  await act(async () => {});
+  const focused = container.querySelector<HTMLElement>('a[href="#a"]')!;
+  focused.focus();
+  rerender(<Chrome page={page('b', 'a')} />);
+  await act(async () => {});
+  expect(container.querySelector('a')!.getAttribute('href')).toBe('#b');
+  expect(document.activeElement).toBe(focused);
 });
 
 const widget = (groupId: string): DisplayPrimitive =>
@@ -776,7 +871,7 @@ test('unmounting an inactive page cancels its queued first fallback', async () =
   expect(idleWork.size).toBe(0);
 });
 
-test('held pages keep what they show and catch up in the shared idle slices after the hold', async () => {
+test('held pages keep what they show and catch up within one frame without idle callbacks', async () => {
   const pages = blankPages(4, (index) => [{
     kind: 'text', x: 10, baselineY: 20, width: 30, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
   }]);
@@ -807,20 +902,99 @@ test('held pages keep what they show and catch up in the shared idle slices afte
 
   act(() => hold.set(false));
   expect(mirroredPages(container)).toEqual([0, 2]);
-  expect(idleWork.size).toBe(1);
+  expect(idleWork.size).toBe(0);
   hold.set(true);
-  await act(async () => flushIdle({ didTimeout: false, timeRemaining: () => 50 }));
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   expect(mirroredPages(container)).toEqual([0, 2]);
   expect(idleWork.size).toBe(0);
 
   act(() => hold.set(false));
-  rerender(view(4, [0, 1]));
-  rerender(view(4, [0, 1, 3]));
-  await idle();
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
   expect(mirroredPages(container)).toEqual([0, 1, 3]);
   expect(shown()[2]!.textContent).toBe('Page 2');
   expect(idleWork.size).toBe(0);
 });
+
+for (const scenario of ['release', 'rehold', 'cancel held', 'cancel released', 'unrelated idle']) {
+  test(`held chrome frame: ${scenario}`, () => {
+    scheduler.restore();
+    scheduler = fakeIdleScheduler({ timers: true });
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      return id;
+    });
+    const cancelFrame = spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const flushFrame = () => {
+      scheduler.now += 16;
+      act(() => {
+        for (const [id, callback] of [...frames]) {
+          if (frames.delete(id)) callback(performance.now());
+        }
+        scheduler.flushDueTimers();
+      });
+    };
+    try {
+      const hold = createPageChromeHold();
+      hold.set(true);
+      const pages = blankPages(1);
+      const { container, unmount } = render(
+        <CanvasPageMirror page={pages[0]!} hold={hold} defer />
+      );
+      const built = () => container.querySelector('.layout-page-mirror');
+      expect(built()).toBeNull();
+      expect(scheduler.idleWork.size).toBe(0);
+      flushFrame();
+      expect(built()).toBeNull();
+      const unrelated = scenario === 'unrelated idle' ? render(
+        <>
+          <CanvasPageMirror page={pages[0]!} defer />
+          <CanvasPageMirror page={pages[0]!} active={false} />
+        </>
+      ) : null;
+
+      if (scenario === 'cancel held') unmount();
+      act(() => hold.set(false));
+      if (scenario === 'cancel released') unmount();
+      if (scenario === 'rehold') hold.set(true);
+      flushFrame();
+      if (scenario === 'rehold') {
+        expect(built()).toBeNull();
+        act(() => hold.set(false));
+        flushFrame();
+      }
+      if (scenario.startsWith('cancel')) {
+        expect(built()).toBeNull();
+        expect(frames.size).toBe(0);
+      } else {
+        expect(built()).not.toBeNull();
+      }
+      if (unrelated) {
+        expect(scheduler.idleWork.size).toBeGreaterThan(0);
+        expect(unrelated.container.querySelector('.layout-page-mirror')).toBeNull();
+        act(() => {
+          while (scheduler.idleWork.size > 0) scheduler.flushIdle({ didTimeout: false, timeRemaining: () => 50 });
+        });
+        expect(unrelated.container.querySelector('.layout-page-mirror')).not.toBeNull();
+      } else {
+        expect(scheduler.idleWork.size).toBe(0);
+        expect(scheduler.timers.size).toBe(0);
+      }
+    } finally {
+      cleanup();
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  });
+}
 
 test('deferred full chrome keeps its own idle schedule alongside queued fallbacks', async () => {
   const pages = blankPages(2);

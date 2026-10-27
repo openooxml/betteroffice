@@ -1,7 +1,7 @@
 //! Pagination look-ahead planning.
 
 use crate::LayoutError;
-use crate::hooks::{self, KeepWithNextScan};
+use crate::hooks::KeepWithNextScan;
 use crate::types::{
     ColumnLayout, LayoutBlock, MeasuredBlock, PageMargins, SectionBreakType, SectionPageRestart,
     Size,
@@ -70,6 +70,7 @@ pub struct LayoutPlan {
     pub section_page_restarts: Vec<Option<SectionPageRestart>>,
     /// Keep-with-next groups keyed by head, plus their interior-member set.
     pub keep_with_next: KeepWithNextScan,
+    pub(crate) section_marks: Vec<bool>,
 }
 
 /// Gathers pagination look-ahead into one plan.
@@ -79,6 +80,11 @@ pub fn prescan(
     final_config: SectionLayoutConfig,
     body_break_type: Option<SectionBreakType>,
 ) -> Result<LayoutPlan, LayoutError> {
+    let section_marks = crate::measure_blocks::measured_section_break_marks(
+        measured,
+        body_break_type,
+        final_config.columns.as_ref(),
+    );
     let (section_configs, break_indices) =
         collect_section_configs(measured, body_config, final_config);
     let mut section_break_types: Vec<Option<SectionBreakType>> = break_indices
@@ -89,12 +95,14 @@ pub fn prescan(
         })
         .collect();
     section_break_types.push(body_break_type);
-    let keep_with_next = hooks::analyze_keep_with_next(measured)?;
+    let keep_with_next =
+        crate::keep_together::analyze_keep_with_next_with_marks(measured, &section_marks);
     Ok(LayoutPlan {
         section_configs,
         break_indices,
         section_break_types,
         section_page_restarts: Vec::new(),
         keep_with_next,
+        section_marks,
     })
 }

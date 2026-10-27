@@ -6,27 +6,28 @@ import { decodeDocxHostJson } from '../yrsSessionFacade';
 import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '../residentEngineWorkerProtocol';
 
 /** The real resident worker module running in-process on a real resident session. */
 export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
   /** Request types posted to the worker, in order. */
-  readonly requests: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)['type'][];
+  readonly requests: (DocxEngineWorkerRequest | DocxEngineWorkerHostModule)['type'][];
   readonly sessions: ResidentEngineSession[];
   readonly imageBlobs: Blob[];
   readonly fontFaces: Set<FontFace>;
   /** Holds the worker's replies until `release`. */
   hold(): void;
-  release(): void;
+  /** Delivers the held replies `only` accepts and keeps holding, or delivers all and stops holding. */
+  release(only?: (reply: DocxEngineWorkerResponse) => boolean): void;
 }
 
 const STUBS: Record<string, string> = {
   '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
-    'export const createResidentEngineSession = (heapLimitBytes) => testHarness.createSession(heapLimitBytes);',
+    'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
@@ -66,7 +67,7 @@ class Canvas {
  * `terminate` stops the worker like a real one: no more messages either way, its timers and
  * channels close and its sessions are freed.
  */
-export async function residentWorkerFactory(): Promise<(clientId?: number) => InProcessResidentWorker> {
+export async function residentWorkerFactory(options: { transferBuffers?: boolean } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
     target: 'bun',
@@ -96,7 +97,7 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       },
     ],
   });
-  if (!result.success) throw new AggregateError(result.logs, 'Resident worker bundle failed');
+  if (!result.success) throw new AggregateError(result.logs, 'Document worker bundle failed');
   const start = new Function(
     'self',
     'OffscreenCanvas',
@@ -118,7 +119,7 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
     fontFace: unknown
   ) => void;
   return (clientId) => {
-    let held: ResidentEngineWorkerResponse[] | null = null;
+    let held: DocxEngineWorkerResponse[] | null = null;
     let terminated = false;
     const channels: MessageChannel[] = [];
     const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -126,15 +127,15 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
     const scope = {
       fonts: { add: (face: FontFace) => fontFaces.add(face), delete: (face: FontFace) => fontFaces.delete(face) },
       onmessage: null as ((event: {
-        data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule;
+        data: DocxEngineWorkerRequest | DocxEngineWorkerHostModule;
       }) => void) | null,
-      postMessage(reply: ResidentEngineWorkerResponse) {
+      postMessage(reply: DocxEngineWorkerResponse) {
         if (terminated) return;
         if (held) held.push(reply);
         else deliver(reply);
       },
     };
-    const deliver = (reply: ResidentEngineWorkerResponse) => {
+    const deliver = (reply: DocxEngineWorkerResponse) => {
       const data = structuredClone(reply);
       if (data.ok) {
         for (const frame of [data.commandInitial?.frame, data.commandAck?.frame, data.commandFrame?.frame]) {
@@ -146,7 +147,7 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
         }
       }
       queueMicrotask(() => {
-        if (!terminated) worker.onmessage?.({ data } as MessageEvent<ResidentEngineWorkerResponse>);
+        if (!terminated) worker.onmessage?.({ data } as MessageEvent<DocxEngineWorkerResponse>);
       });
     };
     const worker: InProcessResidentWorker = {
@@ -157,10 +158,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       sessions: [],
       imageBlobs: [],
       fontFaces,
-      postMessage(message) {
+      postMessage(message, transfer = []) {
         worker.requests.push(message.type);
         if (terminated) return;
-        const data = structuredClone(message);
+        const data = structuredClone(message, { transfer: options.transferBuffers ? transfer.filter(value => value instanceof ArrayBuffer) : [] });
         if (data.type === 'attachCanvases') {
           for (const page of data.pages) Object.setPrototypeOf(page.canvas, Canvas.prototype);
         }
@@ -185,10 +186,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       hold() {
         held ??= [];
       },
-      release() {
+      release(only) {
         const replies = held ?? [];
-        held = null;
-        for (const reply of replies) deliver(reply);
+        held = only ? replies.filter((reply) => !only(reply)) : null;
+        for (const reply of replies) if (!only || only(reply)) deliver(reply);
       },
     };
     start(
@@ -215,8 +216,8 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       },
       {
         encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
-        createSession: async (heapLimitBytes?: number) => {
-          const session = await createResidentEngineSession(heapLimitBytes, clientId);
+        createSession: async (heapLimitBytes?: number, requested?: number) => {
+          const session = await createResidentEngineSession(heapLimitBytes, clientId ?? requested);
           worker.sessions.push(session);
           if (terminated) session.destroy();
           return session;

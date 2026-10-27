@@ -2,6 +2,170 @@ use serde::{Deserialize, Serialize};
 
 use crate::Theme;
 
+/// DrawingML transforms; hue and hue offsets use turns, other values use fractions.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum ColorTransform {
+    Tint(f64),
+    Shade(f64),
+    Hue(f64),
+    HueMod(f64),
+    HueOff(f64),
+    Sat(f64),
+    SatMod(f64),
+    SatOff(f64),
+    Lum(f64),
+    LumMod(f64),
+    LumOff(f64),
+    Red(f64),
+    RedMod(f64),
+    RedOff(f64),
+    Green(f64),
+    GreenMod(f64),
+    GreenOff(f64),
+    Blue(f64),
+    BlueMod(f64),
+    BlueOff(f64),
+    Alpha(f64),
+    AlphaMod(f64),
+    AlphaOff(f64),
+    Comp,
+    Inv,
+    Gray,
+    Gamma,
+    InvGamma,
+}
+
+impl ColorTransform {
+    pub fn from_xml(name: &str, value: Option<&str>) -> Option<Self> {
+        match name {
+            "comp" => return Some(Self::Comp),
+            "inv" => return Some(Self::Inv),
+            "gray" => return Some(Self::Gray),
+            "gamma" => return Some(Self::Gamma),
+            "invGamma" => return Some(Self::InvGamma),
+            _ => {}
+        }
+        let raw = value?.trim();
+        let value = if matches!(name, "hue" | "hueOff") {
+            raw.parse::<f64>().ok()? / 21_600_000.0
+        } else if let Some(percent) = raw.strip_suffix('%') {
+            percent.parse::<f64>().ok()? / 100.0
+        } else {
+            raw.parse::<f64>().ok()? / 100_000.0
+        };
+        if !value.is_finite() {
+            return None;
+        }
+        let in_range = match name {
+            "tint" | "shade" => (0.0..=1.0).contains(&value),
+            "lumMod" | "lumOff" | "satMod" | "alpha" => (0.0..=10.0).contains(&value),
+            _ => true,
+        };
+        if !in_range {
+            return None;
+        }
+        Some(match name {
+            "tint" => Self::Tint(value),
+            "shade" => Self::Shade(value),
+            "hue" => Self::Hue(value),
+            "hueMod" => Self::HueMod(value),
+            "hueOff" => Self::HueOff(value),
+            "sat" => Self::Sat(value),
+            "satMod" => Self::SatMod(value),
+            "satOff" => Self::SatOff(value),
+            "lum" => Self::Lum(value),
+            "lumMod" => Self::LumMod(value),
+            "lumOff" => Self::LumOff(value),
+            "red" => Self::Red(value),
+            "redMod" => Self::RedMod(value),
+            "redOff" => Self::RedOff(value),
+            "green" => Self::Green(value),
+            "greenMod" => Self::GreenMod(value),
+            "greenOff" => Self::GreenOff(value),
+            "blue" => Self::Blue(value),
+            "blueMod" => Self::BlueMod(value),
+            "blueOff" => Self::BlueOff(value),
+            "alpha" => Self::Alpha(value),
+            "alphaMod" => Self::AlphaMod(value),
+            "alphaOff" => Self::AlphaOff(value),
+            _ => return None,
+        })
+    }
+
+    pub fn xml_name(&self) -> &'static str {
+        match self {
+            Self::Tint(_) => "tint",
+            Self::Shade(_) => "shade",
+            Self::Hue(_) => "hue",
+            Self::HueMod(_) => "hueMod",
+            Self::HueOff(_) => "hueOff",
+            Self::Sat(_) => "sat",
+            Self::SatMod(_) => "satMod",
+            Self::SatOff(_) => "satOff",
+            Self::Lum(_) => "lum",
+            Self::LumMod(_) => "lumMod",
+            Self::LumOff(_) => "lumOff",
+            Self::Red(_) => "red",
+            Self::RedMod(_) => "redMod",
+            Self::RedOff(_) => "redOff",
+            Self::Green(_) => "green",
+            Self::GreenMod(_) => "greenMod",
+            Self::GreenOff(_) => "greenOff",
+            Self::Blue(_) => "blue",
+            Self::BlueMod(_) => "blueMod",
+            Self::BlueOff(_) => "blueOff",
+            Self::Alpha(_) => "alpha",
+            Self::AlphaMod(_) => "alphaMod",
+            Self::AlphaOff(_) => "alphaOff",
+            Self::Comp => "comp",
+            Self::Inv => "inv",
+            Self::Gray => "gray",
+            Self::Gamma => "gamma",
+            Self::InvGamma => "invGamma",
+        }
+    }
+
+    pub fn xml_value(&self) -> Option<String> {
+        let value = match *self {
+            Self::Hue(value)
+            | Self::HueOff(value)
+            | Self::Tint(value)
+            | Self::Shade(value)
+            | Self::HueMod(value)
+            | Self::Sat(value)
+            | Self::SatMod(value)
+            | Self::SatOff(value)
+            | Self::Lum(value)
+            | Self::LumMod(value)
+            | Self::LumOff(value)
+            | Self::Red(value)
+            | Self::RedMod(value)
+            | Self::RedOff(value)
+            | Self::Green(value)
+            | Self::GreenMod(value)
+            | Self::GreenOff(value)
+            | Self::Blue(value)
+            | Self::BlueMod(value)
+            | Self::BlueOff(value)
+            | Self::Alpha(value)
+            | Self::AlphaMod(value)
+            | Self::AlphaOff(value) => value,
+            _ => return None,
+        };
+        let angle = matches!(self, Self::Hue(_) | Self::HueOff(_));
+        let scaled = value * if angle { 21_600_000.0 } else { 100_000.0 };
+        if !scaled.is_finite() {
+            return None;
+        }
+        if angle || (scaled - scaled.round()).abs() < 1e-8 {
+            Some(scaled.round().to_string())
+        } else {
+            Some(format!("{}%", value * 100.0))
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColorValue {
@@ -15,6 +179,9 @@ pub struct ColorValue {
     pub theme_shade: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto: Option<bool>,
+    /// Overrides legacy colour modifiers; legacy alpha applies without an alpha step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<ColorTransform>,
     /// `a:lumMod`, as a fraction of the colour's own luminance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub luminance_modulation: Option<f64>,
@@ -31,6 +198,24 @@ pub struct ColorValue {
 }
 
 impl ColorValue {
+    /// Ordered transforms with legacy alpha as a fallback.
+    pub fn drawingml_transforms(&self) -> impl Iterator<Item = ColorTransform> + '_ {
+        let alpha = (!self.transforms.is_empty()
+            && !self.transforms.iter().any(|transform| {
+                matches!(
+                    transform,
+                    ColorTransform::Alpha(_)
+                        | ColorTransform::AlphaMod(_)
+                        | ColorTransform::AlphaOff(_)
+                )
+            }))
+        .then_some(self.alpha)
+        .flatten()
+        .filter(|alpha| alpha.is_finite())
+        .map(|alpha| ColorTransform::Alpha(alpha.clamp(0.0, 1.0)));
+        self.transforms.iter().copied().chain(alpha)
+    }
+
     /// A plain `w:val`/`w:fill` attribute, where `auto` defers to the consumer.
     pub fn from_attribute(value: &str) -> Self {
         parse_color_value(Some(value), None, None, None)
@@ -78,6 +263,17 @@ pub fn resolve_color_value_to_hex_with_theme(
         })
     })?;
     let mut channels = parse_rgb(rgb)?;
+    if !color.transforms.is_empty() {
+        let channels = apply_transforms(
+            channels.map(|channel| f64::from(channel) / 255.0),
+            &color.transforms,
+        )
+        .map(|channel| (channel * 255.0).round() as u8);
+        return Some(format!(
+            "#{:02X}{:02X}{:02X}",
+            channels[0], channels[1], channels[2]
+        ));
+    }
     if let Some(shade) = color.theme_shade.as_deref().and_then(parse_modifier) {
         channels = channels.map(|channel| (f64::from(channel) * shade).round() as u8);
     }
@@ -99,12 +295,119 @@ pub fn resolve_color_value_to_rgba_hex(
     theme: Option<&Theme>,
 ) -> Option<String> {
     let hex = resolve_color_value_to_hex_with_theme(color, theme)?;
-    let alpha = color
-        .and_then(|color| color.alpha)
-        .filter(|alpha| alpha.is_finite() && *alpha < 1.0)
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0);
+    let alpha = color.map_or(1.0, resolve_color_value_alpha);
     Some(format!("{hex}{:02X}", (alpha * 255.0).round() as u8))
+}
+
+pub fn resolve_color_value_alpha(color: &ColorValue) -> f64 {
+    if color.transforms.is_empty() {
+        return color
+            .alpha
+            .filter(|alpha| alpha.is_finite() && *alpha < 1.0)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+    }
+    let mut alpha = 1.0;
+    for transform in color.drawingml_transforms() {
+        alpha = match transform {
+            ColorTransform::Alpha(value) if value.is_finite() => value,
+            ColorTransform::AlphaMod(value) if value.is_finite() => alpha * value,
+            ColorTransform::AlphaOff(value) if value.is_finite() => alpha + value,
+            _ => alpha,
+        }
+        .clamp(0.0, 1.0);
+    }
+    alpha
+}
+
+fn srgb_to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f64) -> f64 {
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn apply_transforms(mut channels: [f64; 3], transforms: &[ColorTransform]) -> [f64; 3] {
+    use ColorTransform::*;
+
+    for transform in transforms {
+        match *transform {
+            Tint(value) | Shade(value) if value.is_finite() => {
+                channels = channels.map(|channel| {
+                    let linear = srgb_to_linear(channel) * value;
+                    let linear = if matches!(transform, Tint(_)) {
+                        linear + (1.0 - value)
+                    } else {
+                        linear
+                    };
+                    linear_to_srgb(linear.clamp(0.0, 1.0))
+                });
+            }
+            Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatMod(value)
+            | SatOff(value) | Lum(value) | LumMod(value) | LumOff(value)
+                if value.is_finite() =>
+            {
+                let (mut hue, mut sat, mut lum) = rgb_to_hsl_f64(channels);
+                match *transform {
+                    Hue(_) => hue = value * 360.0,
+                    HueMod(_) => hue *= value,
+                    HueOff(_) => hue += value * 360.0,
+                    Sat(_) => sat = value,
+                    SatMod(_) => sat *= value,
+                    SatOff(_) => sat += value,
+                    Lum(_) => lum = value,
+                    LumMod(_) => lum *= value,
+                    LumOff(_) => lum += value,
+                    _ => unreachable!(),
+                }
+                channels = hsl_to_rgb_f64(
+                    hue.rem_euclid(360.0),
+                    sat.clamp(0.0, 1.0),
+                    lum.clamp(0.0, 1.0),
+                );
+            }
+            Comp => {
+                let (hue, sat, lum) = rgb_to_hsl_f64(channels);
+                channels = hsl_to_rgb_f64(hue + 180.0, sat, lum);
+            }
+            Red(value) | RedMod(value) | RedOff(value) | Green(value) | GreenMod(value)
+            | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
+                if value.is_finite() =>
+            {
+                let index = match transform {
+                    Red(_) | RedMod(_) | RedOff(_) => 0,
+                    Green(_) | GreenMod(_) | GreenOff(_) => 1,
+                    _ => 2,
+                };
+                let linear = srgb_to_linear(channels[index]);
+                let linear = match transform {
+                    RedMod(_) | GreenMod(_) | BlueMod(_) => linear * value,
+                    RedOff(_) | GreenOff(_) | BlueOff(_) => linear + value,
+                    _ => value,
+                };
+                channels[index] = linear_to_srgb(linear.clamp(0.0, 1.0));
+            }
+            Inv => channels = channels.map(|channel| linear_to_srgb(1.0 - srgb_to_linear(channel))),
+            Gray => {
+                let [red, green, blue] = channels.map(srgb_to_linear);
+                channels = [linear_to_srgb(0.2126 * red + 0.7152 * green + 0.0722 * blue); 3];
+            }
+            Gamma => channels = channels.map(linear_to_srgb),
+            InvGamma => channels = channels.map(srgb_to_linear),
+            _ => {}
+        }
+        channels = channels.map(|channel| channel.clamp(0.0, 1.0));
+    }
+    channels
 }
 
 /// `a:satMod`, `a:lumMod` and `a:lumOff`, which scale and shift the colour in
@@ -133,7 +436,10 @@ fn apply_hsl_modifiers(channels: [u8; 3], color: &ColorValue) -> [u8; 3] {
 }
 
 fn rgb_to_hsl(channels: [u8; 3]) -> (f64, f64, f64) {
-    let [red, green, blue] = channels.map(|channel| f64::from(channel) / 255.0);
+    rgb_to_hsl_f64(channels.map(|channel| f64::from(channel) / 255.0))
+}
+
+fn rgb_to_hsl_f64([red, green, blue]: [f64; 3]) -> (f64, f64, f64) {
     let max = red.max(green).max(blue);
     let min = red.min(green).min(blue);
     let lum = (max + min) / 2.0;
@@ -153,6 +459,10 @@ fn rgb_to_hsl(channels: [u8; 3]) -> (f64, f64, f64) {
 }
 
 fn hsl_to_rgb(hue: f64, sat: f64, lum: f64) -> [u8; 3] {
+    hsl_to_rgb_f64(hue, sat, lum).map(|channel| (channel * 255.0).round() as u8)
+}
+
+fn hsl_to_rgb_f64(hue: f64, sat: f64, lum: f64) -> [f64; 3] {
     let chroma = (1.0 - (2.0 * lum - 1.0).abs()) * sat;
     let sector = hue.rem_euclid(360.0) / 60.0;
     let second = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
@@ -165,7 +475,7 @@ fn hsl_to_rgb(hue: f64, sat: f64, lum: f64) -> [u8; 3] {
         _ => (chroma, 0.0, second),
     };
     let base = lum - chroma / 2.0;
-    [red, green, blue].map(|channel| ((channel + base).clamp(0.0, 1.0) * 255.0).round() as u8)
+    [red, green, blue].map(|channel| (channel + base).clamp(0.0, 1.0))
 }
 
 fn parse_rgb(value: &str) -> Option<[u8; 3]> {
@@ -207,6 +517,165 @@ pub fn default_theme_color(slot: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transform_xml_values_reject_non_finite_numbers() {
+        use ColorTransform::*;
+
+        let constructors: [fn(f64) -> ColorTransform; 23] = [
+            Tint, Shade, Hue, HueMod, HueOff, Sat, SatMod, SatOff, Lum, LumMod, LumOff, Red,
+            RedMod, RedOff, Green, GreenMod, GreenOff, Blue, BlueMod, BlueOff, Alpha, AlphaMod,
+            AlphaOff,
+        ];
+        for constructor in constructors {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+                assert_eq!(constructor(value).xml_value(), None);
+            }
+            assert!(constructor(0.5).xml_value().is_some());
+        }
+    }
+
+    #[test]
+    fn transform_parsing_retains_legacy_ranges() {
+        for (name, maximum) in [
+            ("tint", 1.0),
+            ("shade", 1.0),
+            ("lumMod", 10.0),
+            ("lumOff", 10.0),
+            ("satMod", 10.0),
+            ("alpha", 10.0),
+        ] {
+            for value in [-0.00001, maximum + 0.00001] {
+                let raw = (value * 100_000.0).to_string();
+                assert_eq!(ColorTransform::from_xml(name, Some(&raw)), None, "{name}");
+            }
+            for value in [0.0, maximum] {
+                for raw in [
+                    (value * 100_000.0).to_string(),
+                    format!("{}%", value * 100.0),
+                ] {
+                    assert!(
+                        ColorTransform::from_xml(name, Some(&raw)).is_some(),
+                        "{name}"
+                    );
+                }
+            }
+            for raw in ["NaN", "inf", "-inf"] {
+                assert_eq!(ColorTransform::from_xml(name, Some(raw)), None);
+            }
+        }
+        assert_eq!(
+            ColorTransform::from_xml("satOff", Some("-50%")),
+            Some(ColorTransform::SatOff(-0.5))
+        );
+        assert_eq!(
+            ColorTransform::from_xml("hueOff", Some("-5400000")),
+            Some(ColorTransform::HueOff(-0.25))
+        );
+        assert_eq!(
+            ColorTransform::from_xml("alphaMod", Some("200000")),
+            Some(ColorTransform::AlphaMod(2.0))
+        );
+    }
+
+    #[test]
+    fn mixed_color_keeps_legacy_alpha_without_an_alpha_step() {
+        let mut color = ColorValue {
+            rgb: Some("112233".to_owned()),
+            theme_tint: Some("00".to_owned()),
+            luminance_modulation: Some(0.0),
+            alpha: Some(0.25),
+            transforms: vec![ColorTransform::Tint(1.0)],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+            Some("#11223340")
+        );
+        for (step, expected) in [
+            (ColorTransform::Alpha(0.5), 0.5),
+            (ColorTransform::AlphaMod(0.5), 0.5),
+            (ColorTransform::AlphaOff(-0.25), 0.75),
+        ] {
+            color.transforms = vec![step];
+            assert_eq!(resolve_color_value_alpha(&color), expected);
+        }
+    }
+
+    #[test]
+    fn transforms_use_their_own_color_spaces() {
+        use ColorTransform::*;
+
+        for (rgb, transforms, expected) in [
+            ("000000", vec![Red(0.5)], "#BC0000"),
+            ("000000", vec![Green(0.5)], "#00BC00"),
+            ("000000", vec![Blue(0.5)], "#0000BC"),
+            ("FFFFFF", vec![RedMod(0.5)], "#BCFFFF"),
+            ("FFFFFF", vec![GreenMod(0.5)], "#FFBCFF"),
+            ("FFFFFF", vec![BlueMod(0.5)], "#FFFFBC"),
+            ("000000", vec![RedOff(0.5)], "#BC0000"),
+            ("000000", vec![GreenOff(0.5)], "#00BC00"),
+            ("000000", vec![BlueOff(0.5)], "#0000BC"),
+            ("808080", vec![Inv], "#E5E5E5"),
+            ("FF0000", vec![Gray], "#7F7F7F"),
+            ("808080", vec![Gamma], "#BCBCBC"),
+            ("808080", vec![InvGamma], "#373737"),
+            ("808080", vec![Gamma, InvGamma], "#808080"),
+            ("FF0000", vec![Hue(1.0 / 3.0)], "#00FF00"),
+            ("00FF00", vec![HueMod(2.0)], "#0000FF"),
+            ("FF0000", vec![HueOff(-1.0 / 3.0)], "#0000FF"),
+            ("FF0000", vec![Comp], "#00FFFF"),
+            ("FF0000", vec![Sat(0.0)], "#808080"),
+            ("FF0000", vec![SatMod(0.5)], "#BF4040"),
+            ("FF0000", vec![SatOff(-0.5)], "#BF4040"),
+            ("FF0000", vec![Lum(0.25)], "#800000"),
+            ("FF0000", vec![LumOff(0.25)], "#FF8080"),
+            ("FF0000", vec![LumOff(1.0), LumMod(0.5)], "#808080"),
+            ("000000", vec![RedOff(-0.5), RedOff(0.5)], "#BC0000"),
+        ] {
+            let color = ColorValue {
+                rgb: Some(rgb.to_owned()),
+                transforms,
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_color_value_to_hex(Some(&color)).as_deref(),
+                Some(expected),
+                "{color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_alpha_is_separate_and_overrides_legacy_fields() {
+        let mut color = ColorValue {
+            rgb: Some("112233".to_owned()),
+            theme_tint: Some("00".to_owned()),
+            luminance_modulation: Some(0.0),
+            alpha: Some(0.0),
+            transforms: vec![
+                ColorTransform::Alpha(0.5),
+                ColorTransform::AlphaMod(0.5),
+                ColorTransform::AlphaOff(0.25),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_color_value_to_rgba_hex(Some(&color), None).as_deref(),
+            Some("#11223380")
+        );
+        assert_eq!(
+            resolve_color_value_to_hex(Some(&color)).as_deref(),
+            Some("#112233")
+        );
+        color.transforms = vec![
+            ColorTransform::AlphaOff(-2.0),
+            ColorTransform::AlphaOff(0.5),
+        ];
+        assert_eq!(resolve_color_value_alpha(&color), 0.5);
+        color.transforms = vec![ColorTransform::Alpha(0.25), ColorTransform::Alpha(1.0)];
+        assert_eq!(resolve_color_value_alpha(&color), 1.0);
+    }
 
     #[test]
     fn luminance_and_saturation_modifiers_resolve_in_hsl() {
@@ -267,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn tint_and_shade_are_the_proportion_of_the_colour_that_survives() {
+    fn legacy_tint_and_shade_keep_their_byte_math() {
         let modified = |tint: Option<&str>, shade: Option<&str>| {
             resolve_color_value_to_hex(Some(&ColorValue {
                 rgb: Some("204060".to_owned()),
@@ -289,7 +758,7 @@ mod tests {
         assert_eq!(modified(None, Some("33")), "#060D13");
         assert_eq!(modified(None, Some("00")), "#000000");
 
-        const OFFICE_ACCENT1_LIGHTER_60: &str = "#B4C7E7";
+        const LEGACY_ACCENT1_TINT_66: &str = "#B4C7E7";
         assert_eq!(
             resolve_color_value_to_hex(Some(&ColorValue {
                 theme_color: Some("accent1".to_owned()),
@@ -297,7 +766,7 @@ mod tests {
                 ..ColorValue::default()
             }))
             .as_deref(),
-            Some(OFFICE_ACCENT1_LIGHTER_60)
+            Some(LEGACY_ACCENT1_TINT_66)
         );
     }
 

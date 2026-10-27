@@ -4,6 +4,7 @@ use std::fmt;
 #[non_exhaustive]
 pub enum Error {
     Parse(docx_parse::ParseError),
+    NotAWordDocument(String),
     Edit(docx_edit::EditError),
     Operation(docx_edit::OpError),
     Layout(docx_layout::LayoutError),
@@ -34,6 +35,7 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(error) => error.fmt(formatter),
+            Self::NotAWordDocument(message) => formatter.write_str(message),
             Self::Edit(error) => error.fmt(formatter),
             Self::Operation(error) => error.fmt(formatter),
             Self::Layout(error) => error.fmt(formatter),
@@ -77,7 +79,8 @@ impl std::error::Error for Error {
             Self::Operation(error) => Some(error),
             Self::Layout(error) => Some(error),
             Self::Export(failure) => Some(failure),
-            Self::DisplayList(_)
+            Self::NotAWordDocument(_)
+            | Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
             | Self::AmbiguousParagraph(_)
             | Self::UnsupportedParagraphEdit(_)
@@ -93,7 +96,14 @@ impl std::error::Error for Error {
 
 impl From<docx_parse::ParseError> for Error {
     fn from(error: docx_parse::ParseError) -> Self {
-        Self::Parse(error)
+        match error {
+            docx_parse::ParseError::Container(message)
+                if message.starts_with("not a Word document") =>
+            {
+                Self::NotAWordDocument(message)
+            }
+            error => Self::Parse(error),
+        }
     }
 }
 

@@ -15,13 +15,15 @@ use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
+    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact,
+    TransactionMut,
 };
 
 use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
 use crate::ops::paragraph_content_before;
 use crate::seed::border_side_sources;
+use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{
     DEL, EditCtx, EditingDoc, HYPERLINK, INS, KIND_KEY, PARA_ID, PILCROW_KIND, ParagraphIdOrigin,
     Position, STORIES, check_position, insertion_attrs, is_identity_key, is_pilcrow, map_string,
@@ -378,6 +380,20 @@ fn merge_cell_borders<'a>(
     }
 }
 
+/// An authored border; a `none` or `nil` side keeps only its style, since
+/// line size, spacing and color mean nothing on a side that draws no line.
+fn authored_border(value: &Any) -> Any {
+    match value {
+        Any::Map(map) => match map.get("style") {
+            Some(Any::String(style)) if matches!(style.as_ref(), "none" | "nil") => to_any_map(
+                HashMap::from([("style".to_owned(), Any::from(style.as_ref()))]),
+            ),
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
 /// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
 /// single 0.5pt (`w:sz="4"`) black line on every edge.
 fn default_cell_borders() -> Any {
@@ -538,6 +554,9 @@ fn sanitize_fragment_hyperlink(value: &Value, detail: &str) -> OpResult<Any> {
             let mut link = HashMap::from([("href".to_owned(), Any::from(href))]);
             if let Some(Value::String(tooltip)) = map.get("tooltip") {
                 link.insert("tooltip".to_owned(), Any::from(tooltip.as_str()));
+            }
+            if let Some(Value::Bool(history)) = map.get("history") {
+                link.insert("history".to_owned(), Any::Bool(*history));
             }
             Ok(Any::Map(Arc::new(link)))
         }
@@ -933,13 +952,30 @@ fn caret_after_insert(
     })
 }
 
+fn omitted_columns(row: &RowData, key: &str) -> OpResult<usize> {
+    let value = row.tr_pr.get(key).or_else(|| {
+        let Any::Map(original) = row.tr_pr.get("_originalFormatting")? else {
+            return None;
+        };
+        original.get(key)
+    });
+    if matches!(value, None | Some(Any::Null | Any::Undefined)) {
+        return Ok(0);
+    }
+    let count = any_number(value).ok_or_else(|| invalid(format!("invalid {key}")))?;
+    if count < 0.0 || count.fract() != 0.0 || count > MAX_FRAGMENT_COLUMNS as f64 {
+        return Err(invalid(format!("invalid {key}")));
+    }
+    Ok(count as usize)
+}
+
 fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
     let mut occupied: Vec<Vec<bool>> = vec![Vec::new(); data.rows.len()];
     let mut result = Vec::new();
     let mut total_columns = data.grid.len();
     let mut seen_stories = HashSet::new();
     for (row_index, row) in data.rows.iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = omitted_columns(row, "gridBefore")?;
         for (cell_index, cell) in row.cells.iter().enumerate() {
             while occupied[row_index].get(column).copied().unwrap_or(false) {
                 column += 1;
@@ -998,6 +1034,11 @@ fn anchors(data: &TableData) -> OpResult<(Vec<CellAnchor>, usize)> {
             column += colspan;
             total_columns = total_columns.max(column);
         }
+        let row_end = column.max(occupied[row_index].len()) + omitted_columns(row, "gridAfter")?;
+        if row_end > MAX_FRAGMENT_COLUMNS {
+            return Err(invalid("row exceeds the column limit"));
+        }
+        total_columns = total_columns.max(row_end);
     }
     if total_columns == 0 {
         return Err(invalid("table must contain at least one column"));
@@ -1116,6 +1157,13 @@ fn reset_cell_spans(mut cell: CellData) -> CellData {
     cell
 }
 
+/// `tr_pr` for a row synthesized from it, without the source row's own
+/// `w:tr` attributes (`w14:paraId`, `w:rsid*`).
+pub(crate) fn fresh_row_properties(mut tr_pr: HashMap<String, Any>) -> HashMap<String, Any> {
+    tr_pr.remove("_extraAttributes");
+    tr_pr
+}
+
 fn reconstruct_rows(
     rows: Vec<RowData>,
     mut cell_anchors: Vec<CellAnchor>,
@@ -1143,11 +1191,24 @@ fn table_base(locator: &TableLocator) -> String {
     format!("{}:t{}", locator.story, locator.table_index)
 }
 
+/// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
+/// no replica's cell holds it.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let Some(stories) = txn.get_map(STORIES) else {
         return HashSet::new();
     };
-    stories.iter(txn).map(|(id, _)| id.to_string()).collect()
+    stories
+        .iter(txn)
+        .map(|(id, _)| bare_story_id(id).to_owned())
+        .collect()
+}
+
+fn bare_story_id(id: &str) -> &str {
+    let Some((bare, client)) = id.rsplit_once('~') else {
+        return id;
+    };
+    let digits = !client.is_empty() && client.bytes().all(|byte| byte.is_ascii_digit());
+    if digits { bare } else { id }
 }
 
 fn fresh_row_slot(used: &HashSet<String>, base: &str, start: usize, columns: usize) -> usize {
@@ -1171,16 +1232,19 @@ fn fresh_column_slot(used: &HashSet<String>, base: &str, rows: usize, start: usi
         .expect("usize address space cannot be exhausted by story ids")
 }
 
+/// A cell story id minted by an edit. The `~{client}` suffix keeps it apart from the cell a
+/// concurrent replica mints for the same slot; ids read from a document carry none.
 fn fresh_cell_story(
     used: &mut HashSet<String>,
     base: &str,
     row: usize,
     mut column: usize,
+    client: u64,
 ) -> String {
     loop {
         let candidate = format!("{base}:r{row}c{column}");
         if used.insert(candidate.clone()) {
-            return candidate;
+            return format!("{candidate}~{client}");
         }
         column += 1;
     }
@@ -1213,10 +1277,8 @@ fn create_cell_story(
 }
 
 fn remove_story_exact(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut Vec<String>) {
-    let stories = txn
-        .get_map(STORIES)
-        .expect("stories root is declared by EditingDoc::new");
-    if stories.remove(txn, story_id).is_some() {
+    if story_ref(txn, story_id).is_ok() {
+        crate::mark_story_removed(txn, story_id);
         deleted.push(story_id.to_owned());
     }
 }
@@ -1226,8 +1288,7 @@ fn remove_story_tree(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut
         .get_map(STORIES)
         .expect("stories root is declared by EditingDoc::new");
     let prefix = format!("{story_id}:");
-    let mut ids: Vec<String> = stories
-        .iter(txn)
+    let mut ids: Vec<String> = crate::live_stories(&stories, txn)
         .map(|(id, _)| id.to_string())
         .filter(|id| id == story_id || id.starts_with(&prefix))
         .collect();
@@ -1235,9 +1296,7 @@ fn remove_story_tree(txn: &mut TransactionMut<'_>, story_id: &str, deleted: &mut
     // leaving a descendant whose parent has already vanished.
     ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
     for id in ids {
-        if stories.remove(txn, &id).is_some() {
-            deleted.push(id);
-        }
+        remove_story_exact(txn, &id, deleted);
     }
 }
 
@@ -1264,6 +1323,94 @@ fn snapshot_story<T: ReadTxn>(story: &TextRef, txn: &T) -> OpResult<Vec<StoryChu
             Ok(StoryChunk { insert, attrs })
         })
         .collect()
+}
+
+struct MergedCommentRange {
+    index: usize,
+    start: u32,
+    end: u32,
+    start_assoc: Assoc,
+    end_assoc: Assoc,
+}
+
+struct MergedComment {
+    comment: MapRef,
+    anchors: Vec<Any>,
+    ranges: Vec<MergedCommentRange>,
+}
+
+fn merged_comments<T: ReadTxn>(
+    txn: &T,
+    offsets: &HashMap<String, u32>,
+) -> OpResult<Vec<MergedComment>> {
+    let mut moved = Vec::new();
+    let Some(comments) = txn.get_map(crate::COMMENTS) else {
+        return Ok(moved);
+    };
+    for (_, value) in comments.iter(txn) {
+        let Out::YMap(comment) = value else {
+            continue;
+        };
+        let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
+            continue;
+        };
+        let mut ranges = Vec::new();
+        for (index, encoded) in anchors.iter().enumerate() {
+            let Any::Map(fields) = encoded else {
+                continue;
+            };
+            let Some(Any::String(story)) = fields.get("story") else {
+                continue;
+            };
+            let Some(offset) = offsets.get(story.as_ref()) else {
+                continue;
+            };
+            let anchor = crate::decode_anchor(encoded).map_err(OpError::from)?;
+            let source = story_ref(txn, &anchor.story).map_err(OpError::from)?;
+            let start = sticky_offset(&anchor.start, txn)
+                .ok_or_else(|| OpError::InvalidComment("start anchor no longer resolves".into()))?;
+            let end = sticky_offset(&anchor.end, txn)
+                .ok_or_else(|| OpError::InvalidComment("end anchor no longer resolves".into()))?;
+            if start.index > source.len(txn) || end.index > source.len(txn) {
+                return Err(OpError::InvalidComment("anchor exceeds its story".into()));
+            }
+            ranges.push(MergedCommentRange {
+                index,
+                start: offset + start.index,
+                end: offset + end.index,
+                start_assoc: anchor.start.assoc,
+                end_assoc: anchor.end.assoc,
+            });
+        }
+        if !ranges.is_empty() {
+            moved.push(MergedComment {
+                comment,
+                anchors: anchors.to_vec(),
+                ranges,
+            });
+        }
+    }
+    Ok(moved)
+}
+
+fn move_merged_comments(
+    txn: &mut TransactionMut<'_>,
+    destination: &TextRef,
+    story_id: &str,
+    comments: Vec<MergedComment>,
+) {
+    for mut comment in comments {
+        for range in comment.ranges {
+            let start = sticky_index(destination, txn, range.start, range.start_assoc)
+                .expect("merged comment start lies in appended content");
+            let end = sticky_index(destination, txn, range.end, range.end_assoc)
+                .expect("merged comment end lies in appended content");
+            comment.anchors[range.index] = crate::anchor_value(story_id, &start, &end);
+        }
+        comment
+            .comment
+            .insert(txn, "anchors", to_any_array(comment.anchors));
+    }
 }
 
 fn append_story(txn: &mut TransactionMut<'_>, destination: &TextRef, chunks: &[StoryChunk]) {
@@ -1411,63 +1558,76 @@ pub(crate) fn table_row_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Tab
     let mut offset = 0u32;
     for diff in story.diff(txn, YChange::identity) {
         let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && map_string(&map, txn, KIND_KEY).as_deref() == Some("table")
-            && let Ok(data) = read_table(&map, txn)
-        {
-            for (key, row_kind, table_kind) in [
-                (
-                    TR_INS,
-                    TableRowChangeKind::Insertion,
-                    TableRowChangeKind::TableInsertion,
-                ),
-                (
-                    TR_DEL,
-                    TableRowChangeKind::Deletion,
-                    TableRowChangeKind::TableDeletion,
-                ),
-            ] {
-                let revisions: Vec<(String, String, String)> = data
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.tr_pr.get(key).and_then(row_revision_parts))
-                    .collect();
-                let whole_table = revisions.len() == data.rows.len()
-                    && revisions
-                        .first()
-                        .is_some_and(|first| revisions.iter().all(|revision| revision == first));
-                if whole_table {
-                    let (revision_id, author, date) = revisions[0].clone();
-                    changes.push(TableRowChange {
-                        revision_id,
-                        kind: table_kind,
-                        author,
-                        date,
-                        start: offset,
-                    });
-                    continue;
-                }
-                for (revision_id, author, date) in revisions {
-                    if changes.iter().any(|change: &TableRowChange| {
-                        change.start == offset
-                            && change.kind == row_kind
-                            && change.revision_id == revision_id
-                    }) {
-                        continue;
-                    }
-                    changes.push(TableRowChange {
-                        revision_id,
-                        kind: row_kind,
-                        author,
-                        date,
-                        start: offset,
-                    });
-                }
-            }
+        if let Out::YMap(map) = diff.insert {
+            push_table_row_changes(&map, txn, offset, &mut changes);
         }
         offset += len;
     }
     changes
+}
+
+/// [`table_row_changes`] of the one embed `map` at story index `offset`, if it is a table.
+pub(crate) fn push_table_row_changes<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    offset: u32,
+    changes: &mut Vec<TableRowChange>,
+) {
+    if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
+        return;
+    }
+    let Ok(data) = read_table(map, txn) else {
+        return;
+    };
+    for (key, row_kind, table_kind) in [
+        (
+            TR_INS,
+            TableRowChangeKind::Insertion,
+            TableRowChangeKind::TableInsertion,
+        ),
+        (
+            TR_DEL,
+            TableRowChangeKind::Deletion,
+            TableRowChangeKind::TableDeletion,
+        ),
+    ] {
+        let revisions: Vec<(String, String, String)> = data
+            .rows
+            .iter()
+            .filter_map(|row| row.tr_pr.get(key).and_then(row_revision_parts))
+            .collect();
+        let whole_table = revisions.len() == data.rows.len()
+            && revisions
+                .first()
+                .is_some_and(|first| revisions.iter().all(|revision| revision == first));
+        if whole_table {
+            let (revision_id, author, date) = revisions[0].clone();
+            changes.push(TableRowChange {
+                revision_id,
+                kind: table_kind,
+                author,
+                date,
+                start: offset,
+            });
+            continue;
+        }
+        for (revision_id, author, date) in revisions {
+            if changes.iter().any(|change: &TableRowChange| {
+                change.start == offset
+                    && change.kind == row_kind
+                    && change.revision_id == revision_id
+            }) {
+                continue;
+            }
+            changes.push(TableRowChange {
+                revision_id,
+                kind: row_kind,
+                author,
+                date,
+                start: offset,
+            });
+        }
+    }
 }
 
 /// Resolves every matching `trIns`/`trDel` in one story. Row removals also
@@ -1734,7 +1894,7 @@ impl EditingDoc {
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
@@ -1889,7 +2049,8 @@ impl EditingDoc {
         for (row_index, row) in valid.rows.iter().enumerate() {
             let mut cells = Vec::with_capacity(row.cells.len());
             for (cell_index, cell) in row.cells.iter().enumerate() {
-                let story_id = fresh_cell_story(used, &base, row_index, cell_index);
+                let story_id =
+                    fresh_cell_story(used, &base, row_index, cell_index, self.client_id());
                 let stories = txn
                     .get_map(STORIES)
                     .expect("stories root is declared by EditingDoc::new");
@@ -1923,7 +2084,7 @@ impl EditingDoc {
                 }
                 cells.push(data);
             }
-            let mut tr_pr = row.tr_pr.clone();
+            let mut tr_pr = fresh_row_properties(row.tr_pr.clone());
             tr_pr.remove(TR_INS);
             tr_pr.remove(TR_DEL);
             if let Some(stamp) = revision {
@@ -2047,7 +2208,7 @@ impl EditingDoc {
             target.row
         };
         let template_row = target.row.min(data.rows.len() - 1);
-        let mut tr_pr = data.rows[template_row].tr_pr.clone();
+        let mut tr_pr = fresh_row_properties(data.rows[template_row].tr_pr.clone());
         tr_pr.remove(TR_INS);
         tr_pr.remove(TR_DEL);
         if let Some(revision_id) = revision_id.as_ref() {
@@ -2089,7 +2250,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
+            let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2180,7 +2341,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
+            let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -2324,7 +2485,7 @@ impl EditingDoc {
 
     /// Merges a rectangular range into its top-left cell. Source cell stories
     /// are appended (paragraph-for-paragraph, preserving attrs and embeds) to
-    /// the survivor before their root entries are removed.
+    /// the survivor before being marked removed.
     pub fn merge_cells(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
         let locator = range.anchor.table();
         let mut txn = self.transact_for(ctx);
@@ -2353,6 +2514,13 @@ impl EditingDoc {
         if target.row != rect.top || target.column != rect.left {
             return Err(invalid("merge range does not have a top-left anchor cell"));
         }
+        for row in rect.top..rect.bottom {
+            for column in rect.left..rect.right {
+                if covering(&cell_anchors, row, column).is_none() {
+                    return Err(invalid("merge range contains an unoccupied grid slot"));
+                }
+            }
+        }
         let destination = story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
         let mut deleted = Vec::new();
         let source_ids: HashSet<String> = selected
@@ -2360,12 +2528,23 @@ impl EditingDoc {
             .skip(1)
             .map(|anchor| anchor.cell.story.clone())
             .collect();
+        let mut sources = Vec::new();
+        let mut offsets = HashMap::new();
+        let mut offset = destination.len(&txn);
         for source in selected.iter().skip(1) {
             let source_story = story_ref(&txn, &source.cell.story).map_err(OpError::from)?;
-            let chunks = snapshot_story(&source_story, &txn)?;
+            sources.push(snapshot_story(&source_story, &txn)?);
+            offsets.insert(source.cell.story.clone(), offset);
+            offset = offset
+                .checked_add(source_story.len(&txn))
+                .ok_or_else(|| invalid("merged story exceeds the length limit"))?;
+        }
+        let comments = merged_comments(&txn, &offsets)?;
+        for chunks in sources {
             append_story(&mut txn, &destination, &chunks);
-            // Nested table stories remain reachable through the moved embed;
-            // only the source cell-story root itself becomes unreachable.
+        }
+        move_merged_comments(&mut txn, &destination, &target.cell.story, comments);
+        for source in selected.iter().skip(1) {
             remove_story_exact(&mut txn, &source.cell.story, &mut deleted);
         }
         let mut kept: Vec<CellAnchor> = cell_anchors
@@ -2480,7 +2659,7 @@ impl EditingDoc {
                     });
                     continue;
                 }
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
@@ -2500,15 +2679,15 @@ impl EditingDoc {
         let original_rows = data.rows.clone();
         data.rows = (0..original_rows.len() + delta_rows)
             .map(|row| {
-                let source = if row < target_row_end {
-                    row
+                let tr_pr = if row < target_row_end {
+                    original_rows[row].tr_pr.clone()
                 } else if row < target.row + requested_rows {
-                    target_row_end - 1
+                    fresh_row_properties(original_rows[target_row_end - 1].tr_pr.clone())
                 } else {
-                    row - delta_rows
+                    original_rows[row - delta_rows].tr_pr.clone()
                 };
                 RowData {
-                    tr_pr: original_rows[source].tr_pr.clone(),
+                    tr_pr,
                     cells: Vec::new(),
                 }
             })
@@ -2616,7 +2795,7 @@ impl EditingDoc {
                 .filter_map(|(edge, source)| {
                     let value = borders.get(source)?;
                     let keep = !matches!(value, Any::Null | Any::Undefined);
-                    Some((edge, keep.then(|| value.clone())))
+                    Some((edge, keep.then(|| authored_border(value))))
                 })
                 .collect();
                 (anchor, edges)
@@ -2752,6 +2931,58 @@ impl EditingDoc {
             Vec::new(),
         )
     }
+
+    pub fn set_table_properties(
+        &self,
+        ctx: &EditCtx,
+        locator: &TableLocator,
+        patch: &HashMap<String, Any>,
+    ) -> OpResult<TableReceipt> {
+        for (key, value) in patch {
+            let valid = match key.as_str() {
+                "width" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || any_number(Some(value))
+                            .is_some_and(|width| width >= 0.0 && width.fract() == 0.0)
+                }
+                "widthType" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["auto", "dxa", "pct", "nil"].contains(&&**kind))
+                }
+                "justification" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind))
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(OpError::InvalidFormatValue(format!(
+                    "invalid table property {key}"
+                )));
+            }
+        }
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        for (key, value) in patch {
+            if matches!(value, Any::Null | Any::Undefined) {
+                data.tbl_pr.remove(key);
+            } else {
+                data.tbl_pr.insert(key.clone(), value.clone());
+            }
+        }
+        if matches!(data.tbl_pr.get("widthType"), Some(Any::String(kind)) if &**kind == "auto") {
+            data.tbl_pr.remove("width");
+        }
+        table.insert(&mut txn, "tblPr", to_any_map(data.tbl_pr.clone()));
+        receipt(
+            locator.clone(),
+            Some(&data),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2837,6 +3068,111 @@ mod tests {
     }
 
     #[test]
+    fn merge_moves_comment_anchors_with_cell_text() {
+        let doc = seed_table();
+        let moved = doc
+            .add_comment(
+                &[
+                    crate::StoryRange::new("body:t0:r0c1", 0, 1),
+                    crate::StoryRange::new("body:t0:r1c1", 0, 1),
+                ],
+                "Ada",
+                "2026-10-21",
+                Any::from("note"),
+            )
+            .unwrap();
+        let retained = doc
+            .add_comment(
+                &[crate::StoryRange::new("body:t0:r0c0", 0, 1)],
+                "Ada",
+                "2026-10-21",
+                Any::from("keep"),
+            )
+            .unwrap();
+        let before = doc.resolve_comment(&retained).unwrap();
+        doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(1, 1)))
+            .unwrap();
+        let expected = vec![
+            crate::ResolvedCommentAnchor {
+                story: "body:t0:r0c0".to_owned(),
+                start: 2,
+                end: 3,
+            },
+            crate::ResolvedCommentAnchor {
+                story: "body:t0:r0c0".to_owned(),
+                start: 6,
+                end: 7,
+            },
+        ];
+        assert_eq!(doc.resolve_comment(&moved).unwrap(), expected);
+        assert_eq!(doc.resolve_comment(&retained).unwrap(), before);
+        assert_eq!(
+            doc.paragraphs("body:t0:r0c0")
+                .unwrap()
+                .iter()
+                .map(|paragraph| paragraph.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+        let replica = EditingDoc::new(72);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(replica.resolve_comment(&moved).unwrap(), expected);
+    }
+
+    #[test]
+    fn merge_uses_grid_before_and_preserves_unselected_cells() {
+        let cell_xml =
+            |text: &str| format!("<w:tc><w:tcPr/><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>");
+        let body = format!(
+            concat!(
+                "<w:tbl><w:tblPr/><w:tblGrid>",
+                "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+                "<w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/>",
+                "</w:tblGrid><w:tr>{}{}{}{}</w:tr>",
+                "<w:tr><w:trPr><w:gridBefore w:val=\"1\"/>",
+                "<w:gridAfter w:val=\"1\"/></w:trPr>{}{}</w:tr>",
+                "<w:tr>{}{}{}{}</w:tr></w:tbl>"
+            ),
+            cell_xml("Left"),
+            cell_xml("A"),
+            cell_xml("B"),
+            cell_xml("Right"),
+            cell_xml("C"),
+            cell_xml("D"),
+            cell_xml("Keep1"),
+            cell_xml("Keep2"),
+            cell_xml("Keep3"),
+            cell_xml("Keep4"),
+        );
+        let bytes = crate::seed::fixture::Package::new(&body).bytes();
+        let doc = EditingDoc::new(73);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        let (_, _, before) = table_value(&doc);
+        let receipt = doc
+            .merge_cells(&direct(), &TableRange::new(cell(0, 1), cell(1, 2)))
+            .unwrap();
+        assert_eq!(receipt.columns, 4);
+        let (_, _, after) = table_value(&doc);
+        assert_eq!(after[0]["cells"][0], before[0]["cells"][0]);
+        assert_eq!(after[0]["cells"][2], before[0]["cells"][3]);
+        assert_eq!(after[2], before[2]);
+        assert_eq!(after[1]["trPr"], before[1]["trPr"]);
+        assert!(after[1]["cells"].as_array().unwrap().is_empty());
+        assert_eq!(after[0]["cells"][1]["tcPr"]["rowspan"], 2);
+        assert_eq!(after[0]["cells"][1]["tcPr"]["colspan"], 2);
+        assert_eq!(
+            doc.paragraphs("body:t0:r0c1")
+                .unwrap()
+                .iter()
+                .map(|paragraph| paragraph.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "D"]
+        );
+    }
+
+    #[test]
     fn a_table_payload_is_the_one_its_story_segment_carries() {
         let doc = seed_table();
         doc.insert_table(&direct(), Position::new("body", 1), 1, 2)
@@ -2879,12 +3215,12 @@ mod tests {
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c0".to_owned())
+                .contains(&"body:t0:r2c0~71".to_owned())
         );
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c1".to_owned())
+                .contains(&"body:t0:r2c1~71".to_owned())
         );
         for story in &receipt.created_story_ids {
             assert_eq!(doc.paragraphs(story).unwrap().len(), 1);
@@ -3251,12 +3587,12 @@ mod tests {
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r0c2".to_owned())
+                .contains(&"body:t0:r0c2~71".to_owned())
         );
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r1c2".to_owned())
+                .contains(&"body:t0:r1c2~71".to_owned())
         );
         let (_, grid, rows) = table_value(&doc);
         assert_eq!(grid.as_array().unwrap().len(), 3);
@@ -3302,6 +3638,132 @@ mod tests {
     }
 
     #[test]
+    fn set_table_properties_patches_width_type_and_justification() {
+        let doc = seed_table();
+        let at = TableLocator::new("body", 0);
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Number(2500.0)),
+                ("widthType".to_owned(), Any::from("pct")),
+                ("justification".to_owned(), Any::from("center")),
+            ]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], 2500);
+        assert_eq!(tbl_pr["widthType"], "pct");
+        assert_eq!(tbl_pr["justification"], "center");
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Null),
+                ("widthType".to_owned(), Any::from("auto")),
+                ("justification".to_owned(), Any::Null),
+            ]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
+        assert_eq!(tbl_pr["justification"], Value::Null);
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("widthType".to_owned(), Any::from("wide")),])
+            )
+            .is_err()
+        );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("width".to_owned(), Any::Number(-1.0)),])
+            )
+            .is_err()
+        );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("width".to_owned(), Any::Number(2500.5)),])
+            )
+            .is_err()
+        );
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([
+                ("width".to_owned(), Any::Number(3000.0)),
+                ("widthType".to_owned(), Any::from("dxa")),
+            ]),
+        )
+        .unwrap();
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([("widthType".to_owned(), Any::from("auto"))]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["width"], Value::Null);
+        assert_eq!(tbl_pr["widthType"], "auto");
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("tableLayout".to_owned(), Any::from("fixed")),])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_table_properties_does_not_rewrite_rows_or_grid() {
+        let baseline = seed_table();
+        let state = baseline.encode_state_as_update_v1();
+        let rows_peer = EditingDoc::new(72);
+        rows_peer.apply_update_v1(&state).unwrap();
+        let props_peer = EditingDoc::new(99);
+        props_peer.apply_update_v1(&state).unwrap();
+        rows_peer
+            .set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(0, 0)),
+                &HashMap::from([("top".to_owned(), line("FF0000"))]),
+            )
+            .unwrap();
+        rows_peer
+            .set_column_width(&direct(), &cell(0, 0), 2400.0)
+            .unwrap();
+        props_peer
+            .set_table_properties(
+                &direct(),
+                &TableLocator::new("body", 0),
+                &HashMap::from([("justification".to_owned(), Any::from("center"))]),
+            )
+            .unwrap();
+        let from_rows = rows_peer.encode_state_as_update_v1();
+        let from_props = props_peer.encode_state_as_update_v1();
+        rows_peer.apply_update_v1(&from_props).unwrap();
+        props_peer.apply_update_v1(&from_rows).unwrap();
+        for doc in [&rows_peer, &props_peer] {
+            let (tbl_pr, grid, rows) = table_value(doc);
+            assert_eq!(tbl_pr["justification"], "center");
+            assert_eq!(grid[0], 2400);
+            assert_eq!(
+                rows[0]["cells"][0]["tcPr"]["borders"]["top"]["color"]["rgb"],
+                "FF0000"
+            );
+        }
+    }
+
+    #[test]
     fn split_cell_grid_subdivides_an_ordinary_cell_and_adjusts_neighbors() {
         let doc = seed_table();
         let split = doc
@@ -3319,6 +3781,46 @@ mod tests {
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 2);
         assert_eq!(rows[1]["cells"][0]["tcPr"]["colspan"], 2);
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+    }
+
+    fn row_source_attributes(doc: &EditingDoc) -> Vec<Option<Value>> {
+        let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+        let rows = serde_json::to_value(&payload["rows"]).unwrap();
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["trPr"].get("_extraAttributes").cloned())
+            .collect()
+    }
+
+    #[test]
+    fn synthesized_rows_do_not_repeat_source_row_attributes() {
+        let body = concat!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
+            r#"<w:tr w14:paraId="11111111" w14:textId="77777777" w:rsidR="00AA00BB">"#,
+            "<w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        );
+        let bytes = crate::seed::fixture::Package::new(body).bytes();
+        let doc = EditingDoc::new(74);
+        crate::seed_from_docx(&doc, &bytes).unwrap();
+        let source = row_source_attributes(&doc).remove(0).unwrap();
+        assert!(source.to_string().contains("w14:paraId"));
+
+        doc.split_cell_grid(&direct(), &cell(0, 0), Some(3), Some(1))
+            .unwrap();
+        doc.insert_row(&direct(), &cell(0, 0), true).unwrap();
+
+        let rows = row_source_attributes(&doc);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].as_ref(), Some(&source));
+        assert!(rows[1..].iter().all(Option::is_none), "{rows:?}");
+        let para_ids = rows
+            .iter()
+            .flatten()
+            .flat_map(|attributes| attributes.as_array().unwrap())
+            .filter(|attribute| attribute["name"] == "w14:paraId")
+            .count();
+        assert_eq!(para_ids, 1);
     }
 
     #[test]
@@ -3615,6 +4117,17 @@ mod tests {
             .unwrap();
         assert_eq!(edges(&doc, 0, 0), [const { None }; 4]);
         assert_eq!(rule_counts(&doc), (0, 0));
+        let (_, _, rows) = table_value(&doc);
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                for side in ["top", "bottom", "left", "right"] {
+                    assert_eq!(
+                        cell["tcPr"]["borders"][side],
+                        serde_json::json!({"style": "none"})
+                    );
+                }
+            }
+        }
 
         let corner = grid_table();
         corner
@@ -3903,14 +4416,15 @@ mod tests {
         let doc = fragment_doc();
         let fragment = serde_json::json!({
             "tblPr": {}, "grid": [],
-            "rows": [{"trPr": {"trIns": {"id": "r1"}, "height": 100}, "cells": [{
+            "rows": [{"trPr": {"trIns": {"id": "r1"}, "height": 100,
+                "_extraAttributes": [{"name": "w:rsidR", "value": "00112233"}]}, "cells": [{
                 "tcPr": {"gridSpan": 2, "vMerge": "rest", "rowspan": 1, "colspan": 1, "backgroundColor": "old"},
                 "shading": "FF0000",
                 "content": [
                     {"kind": "text", "text": "gone", "attributes": {"del": {"id": "r2"}}},
                     {"kind": "text", "text": "kept", "attributes": {
                         "ins": {"id": "r3"}, "bold": true,
-                        "hyperlink": {"href": "https://example.com", "tooltip": "t", "rId": "rId9", "extra": 1}
+                        "hyperlink": {"href": "https://example.com", "tooltip": "t", "history": false, "rId": "rId9", "extra": 1}
                     }},
                     {"kind": "pilcrow", "properties": {
                         "paraId": "p", "_kind": "pilcrow", "ooxmlParaId": "1",
@@ -3928,9 +4442,12 @@ mod tests {
         let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
         assert_eq!(segments[0].attributes.get("bold"), Some(&Any::Bool(true)));
         assert!(!segments[0].attributes.contains_key("ins"));
+        let expected_link =
+            Any::from_json(r#"{"href":"https://example.com","tooltip":"t","history":false}"#)
+                .unwrap();
         assert_eq!(
             segments[0].attributes.get("hyperlink"),
-            Some(&Any::from_json(r#"{"href":"https://example.com","tooltip":"t"}"#).unwrap())
+            Some(&expected_link)
         );
         let payload = doc.table_payload(&receipt.table).unwrap();
         let rows = match payload.get("rows") {
@@ -3945,6 +4462,7 @@ mod tests {
             other => panic!("expected trPr map, got {other:?}"),
         };
         assert!(!tr_pr.contains_key("trIns"));
+        assert!(!tr_pr.contains_key("_extraAttributes"));
         let cells = match row.get("cells") {
             Some(Any::Array(cells)) => cells.clone(),
             other => panic!("expected cells array, got {other:?}"),
@@ -4194,7 +4712,9 @@ mod tests {
         fn story_ids_for_test(&self) -> Vec<String> {
             let txn = self.yrs_doc().transact();
             let stories = txn.get_map(STORIES).unwrap();
-            let mut ids: Vec<String> = stories.iter(&txn).map(|(id, _)| id.to_string()).collect();
+            let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_string())
+                .collect();
             ids.sort();
             ids
         }

@@ -17,7 +17,7 @@ globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
   }
   return realSetTimeout(...args);
 }) as typeof setTimeout;
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 globalThis.setTimeout = realSetTimeout;
 const originalLoad = xlsxPeerlessEditorLoader.load;
 const props = { backend: 'peerless' as const, file: new Uint8Array([1]) };
@@ -106,7 +106,8 @@ for (const failure of ['rejected', 'thrown'] as const) {
     const failed = render(<StrictMode><XlsxWorkerEditor {...props} onError={onError} /></StrictMode>);
     await waitFor(() => expect(failed.queryByTestId('xlsx-error') !== null).toBe(true));
     expect(failed.getByTestId('xlsx-error').getAttribute('role')).toBe('alert');
-    expect(failed.getByTestId('xlsx-error').textContent).toContain('Remount the editor to retry');
+    expect(failed.getByRole('alert').textContent).toContain("The editor couldn't load");
+    expect(failed.getByTestId('xlsx-error').querySelector('details pre')?.textContent).toContain('Reload the page to retry');
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
     expect(onError.mock.calls[0][0]).toMatchObject({ code: 'chunk-load-failed', cause });
@@ -118,6 +119,40 @@ for (const failure of ['rejected', 'thrown'] as const) {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 }
+
+test('a failed chunk load offers a page reload, since the browser keeps failing the same chunk URL', async () => {
+  const specifier = './XlsxPeerlessWorkerEditor.js';
+  const failedFetches = new Set<string>();
+  const imported: string[] = [];
+  let online = false;
+  const importModule = (url: string): Promise<EditorModule> => {
+    imported.push(url);
+    if (!online || failedFetches.has(url)) {
+      failedFetches.add(url);
+      return Promise.reject(new TypeError(`Failed to fetch dynamically imported module: ${url}`));
+    }
+    return Promise.resolve(editor('Loaded editor'));
+  };
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockImplementation(() => importModule(specifier));
+  const reload = spyOn(window.location, 'reload').mockImplementation(() => {});
+  spyOn(console, 'error').mockImplementation(() => {});
+  const onError = mock((_error: Error) => {});
+  const view = render(<XlsxWorkerEditor {...props} onError={onError} />);
+  await waitFor(() => expect(view.queryByTestId('xlsx-error') !== null).toBe(true));
+  const alert = view.getByTestId('xlsx-error');
+  expect(alert.getAttribute('data-failure')).toBe('load');
+  expect(alert.textContent).toContain('Check your connection, then reload the page.');
+  expect(alert.querySelector('details pre')?.textContent).toBe('Failed to load the editor code. Reload the page to retry.');
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  online = true;
+  await expect(importModule(specifier)).rejects.toThrow(specifier);
+  imported.length = 0;
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Reload page' })); });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(imported).toEqual([]);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0][0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
+});
 
 for (const outcome of ['resolve', 'reject'] as const) {
   test(`unmount during a chunk load ignores its ${outcome}`, async () => {
@@ -210,3 +245,20 @@ for (const outcome of ['resolve', 'reject'] as const) {
     expect(replacement).toHaveBeenCalledTimes(1);
   });
 }
+
+test('renders the supplied indicator while a file chunk loads', async () => {
+  const pending = chunk();
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockReturnValue(pending.promise);
+  const view = render(<XlsxWorkerEditor {...props} loadingIndicator={<span>Opening workbook</span>} />);
+  expect(view.queryByText('Opening workbook')).not.toBeNull();
+  await act(async () => { pending.resolve(editor('Opened')); });
+  expect(view.queryByText('Opening workbook')).toBeNull();
+});
+
+test('merges style on a chunk error', async () => {
+  spyOn(xlsxPeerlessEditorLoader, 'load').mockRejectedValue(new Error('Unavailable chunk'));
+  spyOn(console, 'error').mockImplementation(() => {});
+  const view = render(<XlsxWorkerEditor {...props} style={{ height: 123 }} />);
+  await waitFor(() => expect(view.queryByTestId('xlsx-error')).not.toBeNull());
+  expect(view.getByTestId('xlsx-error').style.height).toBe('123px');
+});

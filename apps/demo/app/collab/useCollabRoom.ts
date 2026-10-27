@@ -111,6 +111,7 @@ export function useLeaveRoom(): () => void {
 
 export interface CollabRoomState<
   Provider extends CollaborationProvider = CollaborationProvider,
+  Replica = CollaborationReplica,
 > {
   clientId: number | null;
   status: CollaborationStatus;
@@ -118,14 +119,17 @@ export interface CollabRoomState<
   peerCount: number | null;
   error: string | null;
   provider: Provider | null;
-  onReplica(replica: CollaborationReplica | null): void;
+  onReplica(replica: Replica | null): void;
 }
 
-export function useCollabRoom<Provider extends CollaborationProvider>(
+export function useCollabRoom<
+  Provider extends CollaborationProvider,
+  Replica = CollaborationReplica,
+>(
   relayOrigin: string,
   roomId: string | null,
-  createProvider: CollaborationProviderFactory<Provider>,
-): CollabRoomState<Provider> {
+  createProvider: CollaborationProviderFactory<Provider, Replica>,
+): CollabRoomState<Provider, Replica> {
   const [clientId, setClientId] = useState<number | null>(null);
   const [status, setStatus] =
     useState<CollaborationStatus>("disconnected");
@@ -162,7 +166,7 @@ export function useCollabRoom<Provider extends CollaborationProvider>(
   );
 
   const onReplica = useCallback(
-    (replica: CollaborationReplica | null) => {
+    (replica: Replica | null) => {
       teardown();
       if (!replica || !roomId) return;
 

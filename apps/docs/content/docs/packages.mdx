@@ -20,9 +20,10 @@ Python. Choose a runtime below, then select the packages for your file format.
 | XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
 | PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
 
-All three registries carry DOCX, XLSX, and PPTX. The core, React, and locale
-packages for each format are released together. Version numbers differ between
-formats and registries; use the registry links for current releases.
+All three registries carry DOCX, XLSX, and PPTX. On npm, the core, React, and
+locale packages of all three formats are released together under one version.
+The font packages, the agent tools, the Rust crates, and the Python packages
+have their own versions; use the registry links for current releases.
 
 [VSDX](./vsdx) is available from source with a browser demo. Its npm packages and
 Rust crates are not yet published.
@@ -58,7 +59,8 @@ See the language guides for font setup in other formats and runtimes.
 ## Choose an API
 
 - **React editor:** use a `-react` package for the toolbar, canvas, selection,
-  keyboard controls, and review UI.
+  and keyboard controls. The DOCX worker editor displays comment threads; host
+  proposal review in its sidebar is opt-in.
 - **Custom JavaScript UI:** use a framework-free core for editing, display lists,
   and hit-testing.
 - **Native Rust:** use a `betteroffice-docx`, `betteroffice-xlsx`, or

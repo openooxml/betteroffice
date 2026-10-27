@@ -2,6 +2,7 @@
 
 mod authority;
 mod error;
+mod move_range;
 mod sheet_json;
 #[cfg_attr(not(test), allow(dead_code))]
 mod snapshot;
@@ -43,6 +44,7 @@ pub use workbook::batch::{
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES, StepGuard, ValidationOutcome, outcome_json,
 };
+pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,
     RangeAddress, RangeRead, RangeTarget, ReadCalculation, ReadOutcome, ReadRequest, SheetEntry,
@@ -54,18 +56,25 @@ pub use workbook::{
     UpdateSubscription, Workbook,
 };
 
+pub use workbook::charts::{ChartInfo, ChartMutation};
+pub use xlsx_model::{ChartEdit, ChartSeriesName};
+pub use xlsx_parse::{ChartMetadata, ChartSeriesInfo};
+
+pub use xlsx_calc::set_progress_hook;
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
-    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, DateSystem, DefinedName, ErrorValue,
-    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetFormat, SheetId,
-    Stylesheet, Workbook as WorkbookModel,
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Cell, CellRange, CellRef,
+    CellValue, ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, Color, ConditionalFormatRule,
+    ConditionalFormatting, DateSystem, DefinedName, DifferentialFormat, ErrorValue, FreezePane,
+    Hyperlink, MAX_COLS, MAX_ROWS, RichRun, RowId, RunBaseline, RunStyle, RunUnderline, Sheet,
+    SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     KeptFacets, NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch,
     StyleProperty, TextWrapping, Transaction, VerticalAlignment,
 };
+pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
     HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,

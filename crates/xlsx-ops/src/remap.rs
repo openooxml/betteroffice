@@ -8,6 +8,7 @@ use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
+use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
     Workbook,
@@ -266,6 +267,9 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
     }
     if rewritten == previous {
         return Ok(None);
+    }
+    if defined_names_bytes(&rewritten) > MAX_DEFINED_NAME_BYTES {
+        return Err(OpError::TooManyDefinedNames);
     }
     wb.defined_names = rewritten;
     Ok(Some(Op::SetDefinedNames {
@@ -1612,6 +1616,21 @@ fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
     out
 }
 
+pub(crate) fn formula_names_sheet(source: &str, name: &str) -> bool {
+    sheet_qualifiers(source).iter().any(|qualifier| {
+        qualifier.bound
+            && !qualifier.external
+            && (sheet_names_equal(&qualifier.first, name)
+                || sheet_names_equal(&qualifier.last, name))
+    })
+}
+
+pub(crate) fn formula_has_sheet_span(source: &str) -> bool {
+    sheet_qualifiers(source)
+        .iter()
+        .any(|qualifier| qualifier.bound && source[qualifier.span.clone()].contains(':'))
+}
+
 /// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
 /// contain a colon, so the split is unambiguous.
 fn quoted_endpoints(name: &str) -> (String, String) {
@@ -1669,6 +1688,158 @@ fn mentions_sheet(source: &str, index: &SheetIndex<'_>) -> bool {
     sheet_qualifiers(source).iter().any(|qualifier| {
         qualifier.bound && !qualifier.external && index.covers(&qualifier.first, &qualifier.last)
     })
+}
+
+pub(crate) fn remap_auto_filter(sheet: &mut xlsx_model::Sheet, id: SheetId, op: &Op) -> Option<Op> {
+    let previous = sheet.auto_filter.clone();
+    sheet.auto_filter = sheet.auto_filter.take().and_then(|mut filter| {
+        let old_range = filter.range;
+        filter.range = remap_hyperlink_range(old_range, op)?;
+        filter.filter_columns = filter
+            .filter_columns
+            .iter()
+            .filter_map(|&column| remap_filter_column(column, old_range, filter.range, op))
+            .collect();
+        if let Some(raw) = &filter.raw_xml
+            && let Some((xml, has_sort_state)) =
+                remap_auto_filter_xml(raw, old_range, filter.range, op)
+        {
+            filter.raw_xml = Some(xml);
+            filter.has_sort_state = has_sort_state;
+        }
+        Some(filter)
+    });
+    (previous != sheet.auto_filter).then_some(Op::RestoreAutoFilter {
+        sheet: id,
+        filter: previous,
+    })
+}
+
+fn remap_filter_column(column: u32, old: CellRange, new: CellRange, op: &Op) -> Option<u32> {
+    if !matches!(op, Op::InsertCols { .. } | Op::DeleteCols { .. }) {
+        return Some(column);
+    }
+    let absolute = old.start.col.checked_add(column)?;
+    let moved = remap_ref(CellRef::new(0, absolute), op)?;
+    moved.col.checked_sub(new.start.col)
+}
+
+fn remap_auto_filter_xml(
+    raw: &str,
+    old: CellRange,
+    new: CellRange,
+    op: &Op,
+) -> Option<(String, bool)> {
+    use quick_xml::{Reader, events::Event};
+
+    let mut reader = Reader::from_str(raw);
+    let mut edits = Vec::new();
+    let mut depth = 0;
+    let mut sort_state = None;
+    let mut has_sort_state = false;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader.read_event().ok()?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let empty = matches!(event, Event::Empty(_));
+                let name = element.local_name();
+                let filter_column = depth == 1 && name.as_ref() == b"filterColumn";
+                let sort = depth == 1 && name.as_ref() == b"sortState";
+                let condition =
+                    depth == 2 && sort_state.is_some() && name.as_ref() == b"sortCondition";
+                if sort {
+                    sort_state = Some((start, edits.len(), false));
+                    has_sort_state = true;
+                }
+                let mut remove_column = false;
+                for attribute in element.attributes() {
+                    let attribute = attribute.ok()?;
+                    let value = attribute
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .ok()?;
+                    let value = value.as_ref();
+                    let replacement = if filter_column && attribute.key.as_ref() == b"colId" {
+                        let column = value.parse().ok()?;
+                        match remap_filter_column(column, old, new, op) {
+                            Some(moved) if moved == column => None,
+                            Some(column) => Some(column.to_string()),
+                            None => {
+                                remove_column = true;
+                                None
+                            }
+                        }
+                    } else if depth == 0 && attribute.key.as_ref() == b"ref" {
+                        (old != new).then(|| new.to_a1())
+                    } else if attribute.key.as_ref() == b"ref" && (sort || condition) {
+                        let range = CellRange::parse_a1(value).ok()?;
+                        let deleted_column = condition
+                            && matches!(op, Op::DeleteCols { .. })
+                            && remap_ref(range.start, op).is_none();
+                        if deleted_column {
+                            sort_state.as_mut()?.2 = true;
+                        }
+                        match remap_hyperlink_range(range, op) {
+                            Some(moved) if moved == range => None,
+                            Some(range) => Some(range.to_a1()),
+                            None => {
+                                if sort || condition {
+                                    sort_state.as_mut()?.2 = true;
+                                }
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(replacement) = replacement
+                        && replacement != value
+                    {
+                        let offset = start + 1 + attribute.value.as_ptr() as usize
+                            - element.as_ref().as_ptr() as usize;
+                        edits.push((offset..offset + attribute.value.len(), replacement));
+                    }
+                }
+                if remove_column {
+                    if !empty {
+                        reader.read_to_end(element.name()).ok()?;
+                    }
+                    edits.push((start..reader.buffer_position() as usize, String::new()));
+                    continue;
+                }
+                if empty {
+                    if sort {
+                        let (start, first, remove) = sort_state.take()?;
+                        if remove {
+                            edits.truncate(first);
+                            edits.push((start..reader.buffer_position() as usize, String::new()));
+                            has_sort_state = false;
+                        }
+                    }
+                } else {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 1
+                    && let Some((start, first, remove)) = sort_state.take()
+                    && remove
+                {
+                    edits.truncate(first);
+                    edits.push((start..reader.buffer_position() as usize, String::new()));
+                    has_sort_state = false;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let mut xml = raw.to_owned();
+    for (span, replacement) in edits.into_iter().rev() {
+        xml.replace_range(span, &replacement);
+    }
+    Some((xml, has_sort_state))
 }
 
 pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
@@ -1807,18 +1978,18 @@ fn is_function_call(source: &str, token: &ParsedSheetToken) -> bool {
 
 /// Rewrites defined names through a sheet rename, dropping any whose formula
 /// names the old sheet as a bare token, where the intent cannot be resolved.
-/// Returns the inverse op when the list changed.
+/// Returns the rewritten list when it changed, leaving the workbook as is.
 pub(crate) fn rename_defined_names(
-    wb: &mut Workbook,
+    wb: &Workbook,
     old_name: &str,
     new_name: &str,
-) -> Option<Op> {
+) -> Result<Option<Vec<DefinedName>>, OpError> {
     if old_name == new_name || wb.defined_names.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let previous = wb.defined_names.clone();
+    let previous = &wb.defined_names;
     let mut rewritten: Vec<DefinedName> = Vec::with_capacity(previous.len());
-    for defined in &previous {
+    for defined in previous {
         let renamed = scan_sheet_rename(&defined.formula, old_name, new_name);
         if renamed.ambiguous {
             continue;
@@ -1827,13 +1998,13 @@ pub(crate) fn rename_defined_names(
         defined.formula = renamed.formula;
         rewritten.push(defined);
     }
-    if rewritten == previous {
-        return None;
+    if rewritten == *previous {
+        return Ok(None);
     }
-    wb.defined_names = rewritten;
-    Some(Op::SetDefinedNames {
-        defined_names: previous,
-    })
+    if defined_names_bytes(&rewritten) > MAX_DEFINED_NAME_BYTES {
+        return Err(OpError::TooManyDefinedNames);
+    }
+    Ok(Some(rewritten))
 }
 
 fn next_char_len(source: &str, index: usize) -> usize {
@@ -2443,6 +2614,7 @@ mod tests {
 
     fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
         wb.sheet_mut(sheet).unwrap().charts = vec![xlsx_model::SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
@@ -3615,9 +3787,8 @@ mod tests {
             let formula = format!("{function}(A1:A10)");
             let mut workbook = wb(&[function, "Other"]);
             workbook.defined_names = vec![defined("Total", &formula)];
-            let inverse = rename_defined_names(&mut workbook, function, "Renamed");
-            assert!(inverse.is_none(), "{formula} must not change");
-            assert_eq!(workbook.defined_names, vec![defined("Total", &formula)]);
+            let renamed = rename_defined_names(&workbook, function, "Renamed").unwrap();
+            assert!(renamed.is_none(), "{formula} must not change");
         }
     }
 
@@ -3632,10 +3803,9 @@ mod tests {
             defined("Quoted", "\"Data\""),
             defined("External", "[Book.xlsx]Data!$A$1"),
         ];
-        let inverse = rename_defined_names(&mut workbook, "Data", "New Data");
-        assert!(inverse.is_some());
+        let renamed = rename_defined_names(&workbook, "Data", "New Data").unwrap();
         assert_eq!(
-            workbook.defined_names,
+            renamed.unwrap(),
             vec![
                 defined("Qualified", "'New Data'!$A$1"),
                 defined("ThreeD", "'New Data:Other'!$A$1"),
@@ -3655,9 +3825,9 @@ mod tests {
             defined("Spaced", "SUM (A1:A10)"),
             defined("Quoted", "'SUM'"),
         ];
-        rename_defined_names(&mut workbook, "SUM", "Renamed");
+        let renamed = rename_defined_names(&workbook, "SUM", "Renamed").unwrap();
         assert_eq!(
-            workbook.defined_names,
+            renamed.unwrap(),
             vec![
                 defined("Callable", "SUM(Renamed!A1:A10)"),
                 defined("Spaced", "SUM (A1:A10)"),

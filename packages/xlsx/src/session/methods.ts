@@ -1,6 +1,9 @@
+import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
+import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { Direction, SelectionData } from '../selection/types';
 import type { DisplayList, Rect } from '../display-list/types';
-import type { CollaborationUpdateOrigin } from '../collaboration/types';
+import type { AwarenessPeer, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { XlsxExportOptions, XlsxExportResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxStructuredContent } from '../exports';
 import type {
   WorkbookCommand, WorkbookCommandContext, WorkbookCommandFrame, WorkbookCommandSelection,
@@ -20,6 +23,11 @@ import type {
 import type {
   CalculationStatus, CapturedFormat, CellEdit, CellPosition, MergedRange, OpenWorkbookOptions, PrintMetrics, SheetInfo, Viewport,
 } from '../wasm/loader';
+
+/** @internal */
+export interface WorkbookCollaborationPipeReply {
+  collabPipe?: PipeOutputBatch<AwarenessPeer>[];
+}
 
 /** @experimental */
 export class WorkbookPngUnavailableError extends Error {
@@ -156,6 +164,7 @@ export type WorkbookSessionMethods = {
   version(): string;
   collaborationStateVector(): Uint8Array;
   collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   readCells(request: XlsxReadRequest): XlsxReadResult;
   findText(request: XlsxFindRequest): XlsxFindResult;
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;
@@ -168,6 +177,7 @@ export type WorkbookSessionMethods = {
   sheetView(sheet: number): WorkbookSheetView;
   cellGeometry(sheet: number, row: number, col: number): WorkbookCellGeometry;
   cellInputs(sheet: number, range: string): WorkbookCellInputs;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
   captureFormat(sheet: number, range: string): CapturedFormat;
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
@@ -186,6 +196,7 @@ export const WORKBOOK_SESSION_METHODS = {
   version: true,
   collaborationStateVector: true,
   collaborationStateAsUpdate: true,
+  listDefinedNames: true,
   readCells: true,
   findText: true,
   validateEdits: true,
@@ -198,6 +209,7 @@ export const WORKBOOK_SESSION_METHODS = {
   sheetView: true,
   cellGeometry: true,
   cellInputs: true,
+  selectionData: true,
   captureFormat: true,
   sheets: true,
   calculationStatus: true,
@@ -216,6 +228,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   version: { lane: 'interactive' },
   collaborationStateVector: { lane: 'collab', reorderable: false },
   collaborationStateAsUpdate: { lane: 'collab', reorderable: false },
+  listDefinedNames: { lane: 'interactive' },
   readCells: { lane: 'interactive' },
   findText: { lane: 'interactive' },
   validateEdits: { lane: 'interactive' },
@@ -228,6 +241,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   sheetView: { lane: 'interactive' },
   cellGeometry: { lane: 'interactive' },
   cellInputs: { lane: 'interactive' },
+  selectionData: { lane: 'interactive', reorderable: false },
   captureFormat: { lane: 'interactive', reorderable: false },
   sheets: { lane: 'interactive' },
   calculationStatus: { lane: 'interactive' },

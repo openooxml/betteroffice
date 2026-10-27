@@ -584,7 +584,14 @@
     "replaced": "Zamieniono",
     "with": "na",
     "added": "Dodano",
-    "deleted": "Usunięto"
+    "deleted": "Usunięto",
+    "agent": "agent",
+    "previousChange": "Poprzednia zmiana",
+    "nextChange": "Następna zmiana",
+    "changeBy": "Zmiana autorstwa {author}",
+    "changeCount": "{count, plural, one {# zmiana} few {# zmiany} many {# zmian} other {# zmiany}}",
+    "acceptAll": "Zaakceptuj wszystkie",
+    "acceptAllChanges": "Zaakceptuj wszystkie zmiany"
   },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",
@@ -633,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "Ładowanie dokumentu...",
+    "stillOpening": null,
     "noDocumentLoaded": "Nie załadowano dokumentu",
     "failedToLoad": "Nie udało się załadować dokumentu",
     "unableToParse": "Nie można przetworzyć dokumentu",
@@ -661,6 +669,7 @@
     "borderColor": "Kolor obramowania",
     "borderWidth": "Szerokość obramowania",
     "unknownAction": "Nieznana akcja",
+    "viewGridlines": "Wyświetl linie siatki",
     "borders": {
       "all": "Wszystkie obramowania",
       "outside": "Obramowanie zewnętrzne",
@@ -892,8 +901,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Zaakceptuj zmianę",
+    "reviewReject": "Odrzuć zmianę",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

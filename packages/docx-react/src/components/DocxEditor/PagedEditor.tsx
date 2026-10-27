@@ -53,7 +53,7 @@ import {
   type DisplayList,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
-import type { DocxFindDisplayMatch } from '@betteroffice/docx/yrs';
+import type { DocxFindDisplayMatch, DocxReservationsPayload, DocxResolvedReservations } from '@betteroffice/docx/yrs';
 import type { FindOptions } from '@betteroffice/docx/utils/findReplace';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 
@@ -74,6 +74,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
+  breakRefusedWhileSuggesting,
   yrsLocToProjectedDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
@@ -208,6 +209,9 @@ export interface PagedEditorProps {
   /** The parent-owned authoritative editing session. */
   yrsCore: YrsCoreSession;
   pluginHostOpen?: boolean;
+  /** Plugin layout reservations, laid out without reaching the document. */
+  reservations?: DocxResolvedReservations | null;
+  reservationSets?: DocxReservationsPayload | null;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -540,6 +544,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       document,
       yrsCore,
       pluginHostOpen,
+      reservations,
+      reservationSets,
       collaboration,
       styles,
       theme: _theme,
@@ -654,12 +660,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ...(proposalPreview.revisionPreview
           ? { revisionPreview: proposalPreview.revisionPreview }
           : {}),
+        ...(reservations ? { reservations } : {}),
+        ...(reservationSets ? { reservationSets } : {}),
       };
     }, [
       _theme?.colorScheme,
       document?.package.settings?.defaultTabStop,
       showHiddenText,
       proposalPreview,
+      reservations,
+      reservationSets,
     ]);
     const activeYrsRootStory = partEditStory(partEdit, yrsCore.session);
     const yrsInputPositionMap = useCallback(
@@ -1326,7 +1336,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             session.setHyperlink(range, null);
           } else if (command.type === 'insertPageBreak' || command.type === 'insertSectionBreak') {
             const at = session.selection()?.head;
-            if (!at) return false;
+            if (!at || breakRefusedWhileSuggesting(command.type, isSuggesting)) return false;
             if (command.type === 'insertPageBreak') {
               // The native renderer consumes page breaks at block boundaries.
               // Split a non-empty prefix first so the facade insert lands

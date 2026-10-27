@@ -227,7 +227,7 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["폴라리스새바탕-함초롬바탕호환"], ARIAL_UNICODE_2048),
 ];
 
-/// The Segoe UI family — UI, Symbol and Emoji ship the same vertical design.
+/// Segoe UI's Light, Semilight, Semibold, Symbol and Emoji families share its vertical design.
 const SEGOE_UI_2048: RequestedLineMetrics = latin(2048, 2210, -514, 0);
 
 /// Requested Latin family (lowercased) -> the vertical metrics Word measures
@@ -238,8 +238,27 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["source sans pro"], latin(1000, 984, -273, 0)),
     (&["playfair display"], latin(1000, 1082, -251, 0)),
     (
-        &["segoe ui", "segoe ui symbol", "segoe ui emoji"],
+        &[
+            "segoe ui",
+            "segoe ui semibold",
+            "segoe ui symbol",
+            "segoe ui emoji",
+        ],
         SEGOE_UI_2048,
+    ),
+    // Light and Semilight fall back to regular Liberation Sans whatever the
+    // run's weight, and run 0.949x and 0.976x its advances: a-z weighted by
+    // English letter frequency plus one space per 5.1 letters, off the
+    // subsets Word embeds in its exports of the visual-fidelity corpus. With
+    // the substitute's own advances their lines wrap early and documents set
+    // in them paginate past Word.
+    (
+        &["segoe ui light"],
+        latin_scaled(2048, 2210, -514, 0, 0.949),
+    ),
+    (
+        &["segoe ui semilight"],
+        latin_scaled(2048, 2210, -514, 0, 0.976),
     ),
     (&["aptos", "aptos display"], latin(2048, 1923, -577, 0)),
     (&["tahoma"], latin(2048, 2049, -423, 0)),
@@ -379,19 +398,26 @@ mod tests {
         }
     }
 
-    /// Lucida Bright is the one family whose advances are corrected, and the
-    /// correction is measured against the Liberation Sans the last-resort
-    /// chain supplies: per-glyph the two faces run 0.813x (`S`) to 1.558x
-    /// (`j`) apart, and 1.113x is where that lands over a-z weighted by
-    /// English letter frequency plus one space per 5.1 letters.
+    /// Lucida Bright, Segoe UI Light and Segoe UI Semilight are the families
+    /// whose advances are corrected, each measured against the Liberation Sans
+    /// the last-resort chain supplies: per-glyph Lucida Bright and Liberation
+    /// Sans run 0.813x (`S`) to 1.558x (`j`) apart, and 1.113x is where that
+    /// lands over a-z weighted by English letter frequency plus one space per
+    /// 5.1 letters.
     #[test]
-    fn lucida_bright_carries_the_advance_ratio_word_embeds() {
-        let bright = requested_line_metrics("Lucida Bright").expect("Lucida Bright");
-        assert!(
-            (bright.advance_scale - 1.113).abs() < 1e-6,
-            "{}",
-            bright.advance_scale
-        );
+    fn measured_families_carry_the_advance_ratio_word_embeds() {
+        for (family, ratio) in [
+            ("Lucida Bright", 1.113),
+            ("Segoe UI Light", 0.949),
+            ("Segoe UI Semilight", 0.976),
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert!(
+                (metrics.advance_scale - ratio).abs() < 1e-6,
+                "{family}: {}",
+                metrics.advance_scale
+            );
+        }
         let scaled: Vec<&str> = EAST_ASIAN_FACES
             .iter()
             .chain(LATIN_FACES)
@@ -400,7 +426,7 @@ mod tests {
             .collect();
         assert_eq!(
             scaled,
-            ["lucida bright"],
+            ["segoe ui light", "segoe ui semilight", "lucida bright"],
             "an unmeasured family must keep its substitute's advances"
         );
     }
@@ -495,6 +521,9 @@ mod tests {
             ("Source Sans Pro", 1257.0 / 1000.0),
             ("Playfair Display", 1333.0 / 1000.0),
             ("Segoe UI", 2724.0 / 2048.0),
+            ("Segoe UI Light", 2724.0 / 2048.0),
+            ("Segoe UI Semilight", 2724.0 / 2048.0),
+            ("Segoe UI Semibold", 2724.0 / 2048.0),
             ("Segoe UI Symbol", 2724.0 / 2048.0),
             ("Aptos", 2500.0 / 2048.0),
             ("Tahoma", 2472.0 / 2048.0),

@@ -16,6 +16,7 @@ pub(super) struct ModelValidation {
     phase: u8,
     sheet: usize,
     index: usize,
+    name_bytes: usize,
     other: usize,
     after: Option<(u32, u32)>,
     dimension: Option<u32>,
@@ -52,6 +53,12 @@ impl ModelValidation {
             if self.phase == 0 {
                 if let Some(name) = model.defined_names.get(self.index) {
                     let bytes = admit(128, budget)?;
+                    self.name_bytes = self.name_bytes.saturating_add(name.retained_bytes());
+                    if self.name_bytes > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES {
+                        return Err(SnapshotError::new(
+                            "snapshot defined name table exceeds the size limit",
+                        ));
+                    }
                     if name
                         .local_sheet
                         .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
@@ -65,20 +72,20 @@ impl ModelValidation {
                 self.phase = 1;
                 self.index = 0;
             }
-            if self.phase == 10 {
+            if self.phase == 11 {
                 if let Some(name) = self.names.first() {
                     let bytes = admit(name.len().saturating_add(24), budget)?;
                     self.names.pop_first();
                     return Ok((false, 1, bytes));
                 }
-                self.phase = 11;
+                self.phase = 12;
                 return Ok((true, 0, 0));
             }
-            if self.phase == 11 {
+            if self.phase == 12 {
                 return Ok((true, 0, 0));
             }
             let Some(sheet) = model.sheets.get(self.sheet) else {
-                self.phase = 10;
+                self.phase = 11;
                 continue;
             };
             match self.phase {
@@ -227,7 +234,11 @@ impl ModelValidation {
                             )?;
                             #[cfg(test)]
                             crate::snapshot::step::allocate(bytes);
-                            if chart.refs.len() > MAX_CHART_REFS_PER_CHART
+                            if chart
+                                .raw_xml
+                                .as_ref()
+                                .is_some_and(|xml| xml.len() > xlsx_parse::MAX_TREE_BYTES)
+                                || chart.refs.len() > MAX_CHART_REFS_PER_CHART
                                 || !self
                                     .charts
                                     .insert((chart.drawing.clone(), chart.anchor_index))
@@ -235,6 +246,7 @@ impl ModelValidation {
                                 return Err(SnapshotError::new("snapshot chart is invalid"));
                             }
                             let header = SheetChart {
+                                raw_xml: None,
                                 part: chart.part.clone(),
                                 drawing: chart.drawing.clone(),
                                 anchor_index: chart.anchor_index,
@@ -270,9 +282,50 @@ impl ModelValidation {
                         self.charts.pop_first();
                         return Ok((false, 1, bytes));
                     }
-                    self.sheet += 1;
-                    self.phase = 1;
-                    self.index = 0;
+                    self.phase = 9;
+                    self.dimension = None;
+                }
+                9 | 10 => {
+                    let (values, visible, limit, maximum) = if self.phase == 9 {
+                        (
+                            &sheet.hidden_col_widths,
+                            &sheet.col_widths,
+                            MAX_COLS,
+                            MAX_COL_WIDTH,
+                        )
+                    } else {
+                        (
+                            &sheet.hidden_row_heights,
+                            &sheet.row_heights,
+                            MAX_ROWS,
+                            MAX_ROW_HEIGHT,
+                        )
+                    };
+                    let next = match self.dimension {
+                        Some(after) => values.range((Excluded(after), Unbounded)).next(),
+                        None => values.first_key_value(),
+                    };
+                    if let Some((&index, &value)) = next {
+                        let bytes = admit(16, budget)?;
+                        if index >= limit
+                            || !value.is_finite()
+                            || value <= 0.0
+                            || value > maximum
+                            || visible.get(&index) != Some(&0.0)
+                        {
+                            return Err(SnapshotError::new("snapshot hidden dimension is invalid"));
+                        }
+                        self.dimension = Some(index);
+                        return Ok((false, 1, bytes));
+                    }
+                    self.dimension = None;
+                    if self.phase == 9 {
+                        self.phase = 10;
+                    } else {
+                        self.sheet += 1;
+                        self.phase = 1;
+                        self.index = 0;
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -289,6 +342,7 @@ mod tests {
 
     fn chart(index: usize) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: index,
@@ -321,6 +375,85 @@ mod tests {
             assert_eq!(work.bytes, *bytes);
         }
         result
+    }
+
+    #[test]
+    fn edited_chart_xml_is_validated_with_bounded_work() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for (raw_xml, valid) in [
+            (Some("<c:chartSpace/>".to_owned()), true),
+            (Some("x".repeat(xlsx_parse::MAX_TREE_BYTES + 1)), false),
+        ] {
+            let mut sheet = Sheet::new("Data");
+            sheet.charts.push(SheetChart {
+                raw_xml,
+                ..chart(0)
+            });
+            let model = Workbook {
+                sheets: vec![sheet],
+                ..Workbook::default()
+            };
+            let mut validation = ModelValidation::default();
+            let mut outcome = None;
+            for _ in 0..1000 {
+                crate::snapshot::step::reset();
+                match validation.advance(&model, true, budget) {
+                    Ok((true, _, _)) => {
+                        outcome = Some(true);
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        outcome = Some(false);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(outcome, Some(valid));
+        }
+    }
+
+    #[test]
+    fn hidden_dimensions_validate_every_sheet_with_bounded_work() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for invalid in [false, true] {
+            let mut model = Workbook {
+                sheets: (0..3)
+                    .map(|index| Sheet::new(format!("S{index}")))
+                    .collect(),
+                ..Workbook::default()
+            };
+            for sheet in &mut model.sheets {
+                sheet.col_widths.insert(1, 0.0);
+                sheet.hidden_col_widths.insert(1, 20.0);
+                sheet.row_heights.insert(2, 0.0);
+                sheet.hidden_row_heights.insert(2, 30.0);
+            }
+            if invalid {
+                model.sheets[2]
+                    .hidden_row_heights
+                    .insert(2, MAX_ROW_HEIGHT + 1.0);
+            }
+            let mut validation = ModelValidation::default();
+            let mut refused = false;
+            let mut ready = false;
+            for _ in 0..100 {
+                match step(&mut validation, &model, budget) {
+                    Ok((done, _, _)) if done => {
+                        ready = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(refused, invalid);
+            assert_eq!(ready, !invalid);
+            assert!(validation.names.is_empty() || invalid);
+        }
     }
 
     #[test]

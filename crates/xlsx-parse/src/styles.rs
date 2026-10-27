@@ -3,12 +3,23 @@
 
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
-    SavedPlain, Stylesheet, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, DifferentialFormat, Fill, Font, HAlign,
+    PatternType, Protection, SavedPlain, Stylesheet, Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader, xml_err};
 use crate::{MAX_STYLE_ENTRIES, ParseError};
+
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static LEGACY_STYLE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn legacy_style_reads() -> u64 {
+    LEGACY_STYLE_READS.get()
+}
 
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
@@ -21,7 +32,7 @@ pub(crate) fn parse_stylesheet(
         None => Theme::default(),
     };
     let (mut sheet, legacy_xfs) = match styles {
-        Some(bytes) => parse_styles(bytes)?,
+        Some(bytes) => parse_styles(bytes, &theme)?,
         None => (Stylesheet::default(), Vec::new()),
     };
     sheet.theme = theme;
@@ -33,26 +44,73 @@ pub(crate) fn parse_stylesheet(
     Ok((sheet, legacy))
 }
 
-/// which top-level pool the cursor is inside; disambiguates elements that recur
-/// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<color>` everywhere).
+pub(crate) fn legacy_style_readings(
+    styles: Option<&[u8]>,
+    sheet: &Stylesheet,
+    legacy: Option<&Stylesheet>,
+    references_zero_style: bool,
+) -> Result<Vec<Stylesheet>, ParseError> {
+    let mut readings = Vec::new();
+    if let Some(bytes) = styles {
+        let (mut unfiltered, xfs) = parse_style_pools(bytes, true, &sheet.theme)?;
+        unfiltered.theme = sheet.theme.clone();
+        let mut held = unfiltered.clone();
+        held.cell_xfs = xfs;
+        for mut reading in [unfiltered, held] {
+            if reading.cell_xfs.is_empty() && references_zero_style {
+                reading.cell_xfs.push(Xf::default());
+            }
+            if &reading != sheet && legacy != Some(&reading) && !readings.contains(&reading) {
+                readings.push(reading);
+            }
+        }
+    }
+    Ok(readings)
+}
+
+/// A stylesheet pool selected by logical parentage.
 #[derive(PartialEq)]
 enum Section {
     None,
+    NumFmts,
     Fonts,
     Fills,
     Borders,
     CellStyleXfs,
     CellXfs,
+    Dxfs,
 }
 
 /// parse the style pools (numFmts, fonts, fills, borders, cellXfs). the theme is
 /// filled in by the caller.
-fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+fn parse_styles(data: &[u8], theme: &Theme) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    parse_style_pools(data, false, theme)
+}
+
+struct Scope {
+    depth: usize,
+    read: bool,
+    transparent: bool,
+    alternate: bool,
+    taken: bool,
+}
+
+fn parse_style_pools(
+    data: &[u8],
+    unfiltered: bool,
+    theme: &Theme,
+) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    #[cfg(feature = "test-counters")]
+    if unfiltered {
+        LEGACY_STYLE_READS.set(LEGACY_STYLE_READS.get() + 1);
+    }
     let mut reader = reader(data);
     let mut buf = Vec::new();
-    let mut depth = 0;
+    let mut physical_depth = 0;
+    let mut scopes: Vec<Scope> = Vec::new();
 
     let mut ss = Stylesheet::default();
+    ss.theme = theme.clone();
     let mut section = Section::None;
     let mut font: Option<Font> = None;
     let mut fill: Option<Fill> = None;
@@ -65,13 +123,60 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut colors_depth = None;
     let mut indexed_colors_depth = None;
     let mut markup: Option<Markup> = None;
+    let mut dxf: Option<DifferentialFormat> = None;
+    let mut dxf_colors = Vec::new();
+    let mut dxf_font_color = None;
+    let mut dxf_fill_color = None;
+    let mut dxf_font = false;
+    let mut dxf_fill = false;
+    let mut dxf_solid = false;
     let mut default_fonts = Vec::new();
     let mut default_fills = Vec::new();
     let mut default_borders = Vec::new();
     let mut plain_xfs = Vec::new();
 
     loop {
-        let event = next_event(&mut reader, &mut buf, &mut depth)?;
+        let event = next_event(&mut reader, &mut buf, &mut physical_depth)?;
+        let depth = if unfiltered {
+            physical_depth
+        } else {
+            match &event {
+                Event::Start(e) => {
+                    let name = local_name(e);
+                    let parent = scopes.last_mut();
+                    let mut read = parent.as_ref().is_none_or(|parent| parent.read);
+                    let parent_depth = parent.as_ref().map_or(0, |parent| parent.depth);
+                    let alternate = name == b"AlternateContent";
+                    let branch = matches!(name.as_slice(), b"Choice" | b"Fallback")
+                        && parent.as_ref().is_some_and(|parent| parent.alternate);
+                    if branch && let Some(parent) = parent {
+                        read &= !parent.taken;
+                        parent.taken = true;
+                    }
+                    let transparent = alternate || branch;
+                    let depth = parent_depth + usize::from(!transparent);
+                    scopes.push(Scope {
+                        depth,
+                        read,
+                        transparent,
+                        alternate,
+                        taken: false,
+                    });
+                    if !read || transparent {
+                        continue;
+                    }
+                    depth
+                }
+                Event::End(_) => {
+                    let scope = scopes.pop();
+                    if scope.is_some_and(|scope| !scope.read || scope.transparent) {
+                        continue;
+                    }
+                    scopes.last().map_or(0, |scope| scope.depth)
+                }
+                _ => scopes.last().map_or(0, |scope| scope.depth),
+            }
+        };
         if let (Event::Start(e), Some(open)) = (&event, markup.as_mut()) {
             open.child(e, depth)?;
         }
@@ -91,13 +196,54 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     };
                     ss.indexed_colors.push(rgb);
                 }
-                b"numFmts" => section = Section::None,
-                b"fonts" => section = Section::Fonts,
-                b"fills" => section = Section::Fills,
-                b"borders" => section = Section::Borders,
-                b"cellStyleXfs" => section = Section::CellStyleXfs,
-                b"cellXfs" => section = Section::CellXfs,
-                b"numFmt" => {
+                b"numFmts" if unfiltered || depth == 2 => {
+                    section = if unfiltered {
+                        Section::None
+                    } else {
+                        Section::NumFmts
+                    }
+                }
+                b"fonts" if unfiltered || depth == 2 => section = Section::Fonts,
+                b"fills" if unfiltered || depth == 2 => section = Section::Fills,
+                b"borders" if unfiltered || depth == 2 => section = Section::Borders,
+                b"cellStyleXfs" if unfiltered || depth == 2 => section = Section::CellStyleXfs,
+                b"cellXfs" if unfiltered || depth == 2 => section = Section::CellXfs,
+                b"dxfs" if !unfiltered && depth == 2 => section = Section::Dxfs,
+                b"dxf" if section == Section::Dxfs && depth == 3 => {
+                    dxf = (ss.dxfs.len() < MAX_STYLE_ENTRIES).then(DifferentialFormat::default);
+                    dxf_font_color = None;
+                    dxf_fill_color = None;
+                    dxf_font = false;
+                    dxf_fill = false;
+                    dxf_solid = false;
+                }
+                b"font" if dxf.is_some() && section == Section::Dxfs => dxf_font = true,
+                b"fill" if dxf.is_some() && section == Section::Dxfs => dxf_fill = true,
+                b"b" if dxf_font && dxf.is_some() => {
+                    let bold = attr(&e, b"val")?.is_none_or(|value| is_truthy(&value));
+                    dxf.as_mut().unwrap().bold = Some(bold);
+                }
+                b"i" if dxf_font && dxf.is_some() => {
+                    let italic = attr(&e, b"val")?.is_none_or(|value| is_truthy(&value));
+                    dxf.as_mut().unwrap().italic = Some(italic);
+                }
+                b"color" if dxf_font && dxf.is_some() => {
+                    dxf_font_color = parse_color(&e)?;
+                }
+                b"patternFill" if dxf_fill && dxf.is_some() => {
+                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                }
+                b"fgColor" if dxf_fill && dxf.is_some() => {
+                    if dxf_solid {
+                        dxf_fill_color = parse_color(&e)?;
+                    }
+                }
+                b"bgColor" if dxf_fill && dxf.is_some() => {
+                    if dxf_solid && dxf_fill_color.is_none() {
+                        dxf_fill_color = parse_color(&e)?;
+                    }
+                }
+                b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
                     if let (Some(id), Some(code)) = (
                         attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
                         attr(&e, b"formatCode")?,
@@ -106,15 +252,15 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ss.num_fmts.push((id, code));
                     }
                 }
-                b"font" if section == Section::Fonts => {
+                b"font" if section == Section::Fonts && (unfiltered || depth == 3) => {
                     font = Some(Font::default());
                     markup = Some(Markup::open(Entry::Font, &e, depth)?);
                 }
-                b"fill" if section == Section::Fills => {
+                b"fill" if section == Section::Fills && (unfiltered || depth == 3) => {
                     fill = Some(Fill::None);
                     markup = Some(Markup::open(Entry::Fill, &e, depth)?);
                 }
-                b"border" if section == Section::Borders => {
+                b"border" if section == Section::Borders && (unfiltered || depth == 3) => {
                     border = Some(Border::default());
                     markup = Some(Markup::open(Entry::Border, &e, depth)?);
                 }
@@ -174,7 +320,7 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                         ed.color = parse_color(&e)?;
                     }
                 }
-                b"xf" if section == Section::CellXfs => {
+                b"xf" if section == Section::CellXfs && (unfiltered || depth == 3) => {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
                     explicit = flags;
@@ -197,12 +343,17 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                 }
                 _ => {}
             },
+            Event::End(_) if !unfiltered && depth == 1 => {
+                section = Section::None;
+                colors_depth = None;
+            }
             Event::End(e) => match e.name().local_name().as_ref() {
                 b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
                 b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
                     indexed_colors_depth = None;
                 }
                 b"font" => {
+                    dxf_font = false;
                     if let Some(f) = font.take() {
                         cap(ss.fonts.len())?;
                         ss.fonts.push(f);
@@ -210,10 +361,17 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
                     }
                 }
                 b"fill" => {
+                    dxf_fill = false;
                     if let Some(f) = fill.take() {
                         cap(ss.fills.len())?;
                         ss.fills.push(f);
                         default_fills.push(markup.take().is_some_and(|open| open.plain));
+                    }
+                }
+                b"dxf" if section == Section::Dxfs => {
+                    if let Some(dxf) = dxf.take() {
+                        ss.dxfs.push(dxf);
+                        dxf_colors.push((dxf_font_color.take(), dxf_fill_color.take()));
                     }
                 }
                 b"border" => {
@@ -248,6 +406,10 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
             Event::Eof => break,
             _ => {}
         }
+    }
+    for (index, (font, fill)) in dxf_colors.into_iter().enumerate() {
+        ss.dxfs[index].font_color = font.as_ref().and_then(|color| ss.resolve_color(color));
+        ss.dxfs[index].fill = fill.as_ref().and_then(|color| ss.resolve_color(color));
     }
     let xf = plain_xfs
         .into_iter()
@@ -515,7 +677,7 @@ fn parse_alignment(e: &BytesStart) -> Result<Alignment, ParseError> {
 
 /// parse a `CT_Color` element (`rgb`/`theme`+`tint`/`indexed`/`auto`) into a
 /// `Color`; `None` for an empty color element.
-fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
+pub(crate) fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
     if let Some(rgb) = attr(e, b"rgb")? {
         return Ok(normalize_rgb(&rgb).map(Color::Rgb));
     }
@@ -644,7 +806,7 @@ mod tests {
 <alignment horizontal="center" textRotation="0" indent="0" relativeIndent="0" justifyLastLine="0" readingOrder="0"/>
 <protection hidden="1"/></xf></cellXfs></styleSheet>"#
             );
-            let (styles, _) = parse_styles(xml.as_bytes()).unwrap();
+            let (styles, _) = parse_styles(xml.as_bytes(), &Theme::default()).unwrap();
             let xf = &styles.cell_xfs[0];
             assert_eq!(xf.xf_id, Some(1));
             assert!(xf.quote_prefix);

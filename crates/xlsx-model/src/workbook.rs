@@ -46,6 +46,25 @@ pub fn reset_col_style_scans() {
 /// `ref` must not be able to ask for a sheet's worth of cells.
 pub const MAX_SPILL_CELLS: usize = 262_144;
 
+/// no longer enforced: a name table is bounded by [`MAX_DEFINED_NAME_BYTES`].
+pub const MAX_DEFINED_NAMES: usize = 65_536;
+
+/// upper bound on the memory one defined-name table holds, as counted by
+/// [`defined_names_bytes`]. sized to the 32 MiB of text a parsed part may
+/// retain, since every name and formula is text of `xl/workbook.xml`.
+pub const MAX_DEFINED_NAME_BYTES: usize = 32 * 1024 * 1024;
+
+/// what each entry costs on top of its text: about one `DefinedName` on a
+/// 64-bit target, fixed so the bound reads the same on every target.
+pub const DEFINED_NAME_ENTRY_BYTES: usize = 64;
+
+/// the bytes a name table charges against [`MAX_DEFINED_NAME_BYTES`].
+pub fn defined_names_bytes(names: &[DefinedName]) -> usize {
+    names
+        .iter()
+        .fold(0, |total, name| total.saturating_add(name.retained_bytes()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezePane {
     pub rows: RowId,
@@ -69,6 +88,15 @@ pub struct DefinedName {
     pub formula: String,
     pub local_sheet: Option<SheetId>,
     pub hidden: bool,
+}
+
+impl DefinedName {
+    /// the bytes this entry charges against [`MAX_DEFINED_NAME_BYTES`].
+    pub fn retained_bytes(&self) -> usize {
+        DEFINED_NAME_ENTRY_BYTES
+            .saturating_add(self.name.len())
+            .saturating_add(self.formula.len())
+    }
 }
 
 /// One `xl/tables/tableN.xml` definition: the rectangle a structured reference
@@ -122,6 +150,47 @@ impl Table {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionalFormatRule {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub rule_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(default)]
+    pub formulas: Vec<String>,
+    pub priority: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxf_id: Option<u32>,
+    #[serde(default)]
+    pub format: crate::styles::DifferentialFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_xml: Option<String>,
+}
+
+impl ConditionalFormatRule {
+    pub fn editable(&self) -> bool {
+        matches!(self.rule_type.as_str(), "cellIs" | "expression")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoFilter {
+    pub range: CellRange,
+    pub raw_xml: Option<String>,
+    pub source_count: u32,
+    pub filter_columns: Vec<u32>,
+    pub has_sort_state: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ConditionalFormatting {
+    pub sqref: String,
+    #[serde(default)]
+    pub rules: Vec<ConditionalFormatRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hyperlink {
     pub range: CellRange,
     pub external_target: Option<String>,
@@ -150,7 +219,7 @@ type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 pub struct SheetFormat {
     pub default_row_height_pt: Option<f64>,
     pub custom_height: bool,
-    /// `zeroHeight`: every row without its own `ht` is hidden.
+    /// `zeroHeight`: rows without height, cells or row style are hidden.
     pub zero_height: bool,
 }
 
@@ -162,15 +231,34 @@ pub struct ColStyle {
     pub xf: u32,
 }
 
+#[cfg(test)]
+thread_local! {
+    static CELL_STYLE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Debug, Clone, Default)]
+struct CellStyles(std::sync::OnceLock<Vec<u32>>);
+
+impl PartialEq for CellStyles {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
     cells: BTreeMap<(RowId, ColId), Cell>,
+    cell_styles: CellStyles,
     pub freeze_pane: Option<FreezePane>,
     pub hyperlinks: Vec<Hyperlink>,
+    pub conditional_formats: Vec<ConditionalFormatting>,
+    pub auto_filter: Option<AutoFilter>,
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    pub hidden_col_widths: BTreeMap<ColId, f64>,
+    pub hidden_row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
     /// Column defaults in source order.
@@ -182,7 +270,9 @@ pub struct Sheet {
     array_formulas: BTreeMap<(RowId, ColId), CellRange>,
 }
 
-pub const MAX_ROW_STYLES: usize = 65_536;
+/// every sheet row may carry its own style, as a column-wide fill or border
+/// formatted down to the last row does.
+pub const MAX_ROW_STYLES: usize = crate::addr::MAX_ROWS as usize;
 
 /// [`Sheet::effective_style`] for many cells of one sheet, scanning the column
 /// runs once per column.
@@ -398,16 +488,51 @@ impl Sheet {
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {
+        self.cell_styles.0.take();
         self.cells.get_mut(&(at.row, at.col))
     }
 
     #[doc(hidden)]
     pub fn adopt_cells(&mut self, mut cells: BTreeMap<(RowId, ColId), Cell>) {
         cells.retain(|_, cell| *cell != Cell::default());
+        self.cell_styles.0.take();
         self.cells = cells;
     }
 
+    #[doc(hidden)]
+    pub fn used_cell_styles(&self) -> &[u32] {
+        self.cell_styles.0.get_or_init(|| {
+            // at most one pass over authored cells between mutable cell accesses
+            #[cfg(test)]
+            CELL_STYLE_VISITS.set(CELL_STYLE_VISITS.get() + self.cells.len());
+            let styles: std::collections::BTreeSet<u32> =
+                self.cells.values().filter_map(|cell| cell.style).collect();
+            styles.into_iter().collect()
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn set_calculated_value(&mut self, at: CellRef, value: CellValue) {
+        if let Some(cell) = self.cells.get_mut(&(at.row, at.col)) {
+            cell.value = value;
+            if *cell == Cell::default() {
+                self.cells.remove(&(at.row, at.col));
+            }
+        } else {
+            self.set_cell(
+                at,
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
+        if self.cell(at).and_then(|cell| cell.style) != cell.style {
+            self.cell_styles.0.take();
+        }
         if cell == Cell::default() {
             self.cells.remove(&(at.row, at.col));
         } else {
@@ -423,6 +548,7 @@ impl Sheet {
         &mut self,
         remap: impl Fn(CellRef) -> Option<CellRef>,
     ) -> Vec<(CellRef, Cell)> {
+        self.cell_styles.0.take();
         self.remap_array_formulas(&remap);
         let mut dropped = Vec::new();
         self.cells.retain(|_, cell| *cell != Cell::default());
@@ -528,12 +654,19 @@ impl Sheet {
         }
     }
 
-    /// whether `row` has no height: hidden, authored at zero, or unsized under
-    /// `zeroHeight`. rendering and export share this reading.
+    /// Whether `row` has no visible extent.
     pub fn row_hidden(&self, row: RowId) -> bool {
         match self.row_heights.get(&row) {
             Some(&height) => no_extent(height),
-            None => self.format.zero_height,
+            None => {
+                self.format.zero_height
+                    && !self.row_styles.contains_key(&row)
+                    && self
+                        .cells
+                        .range((row, 0)..=(row, ColId::MAX))
+                        .next()
+                        .is_none()
+            }
         }
     }
 
@@ -545,18 +678,52 @@ impl Sheet {
     }
 
     /// maximal runs of rows inside `rows` that [`Sheet::row_hidden`] hides, as
-    /// inclusive pairs in order; costs one step per sized row, not per row.
+    /// inclusive pairs in order; skips empty rows in bulk.
     pub fn hidden_row_spans(
         &self,
         rows: RangeInclusive<RowId>,
     ) -> impl Iterator<Item = (RowId, RowId)> + '_ {
-        HiddenSpans::new(
-            self.row_heights
-                .range(rows.clone())
-                .map(|(&row, &height)| (row, no_extent(height))),
-            rows,
-            self.format.zero_height,
-        )
+        let mut heights = self.row_heights.range(rows.clone()).peekable();
+        let mut styles = self
+            .row_styles
+            .range(rows.clone())
+            .take(if self.format.zero_height {
+                usize::MAX
+            } else {
+                0
+            })
+            .peekable();
+        let (first, last) = (*rows.start(), *rows.end());
+        let mut next = (self.format.zero_height && first <= last).then_some(first);
+        let mut cells = std::iter::from_fn(move || {
+            let start = next?;
+            let (&(row, _), _) = self.cells.range((start, 0)..=(last, ColId::MAX)).next()?;
+            next = row.checked_add(1).filter(|&row| row <= last);
+            Some(row)
+        })
+        .peekable();
+        let entries = std::iter::from_fn(move || {
+            let height_row = heights.peek().map(|entry| *entry.0);
+            let style_row = styles.peek().map(|entry| *entry.0);
+            let cell_row = cells.peek().copied();
+            let row = [height_row, style_row, cell_row]
+                .into_iter()
+                .flatten()
+                .min()?;
+            let hidden = if height_row == Some(row) {
+                no_extent(*heights.next()?.1)
+            } else {
+                false
+            };
+            if style_row == Some(row) {
+                styles.next();
+            }
+            if cell_row == Some(row) {
+                cells.next();
+            }
+            Some((row, hidden))
+        });
+        HiddenSpans::new(entries, rows, self.format.zero_height)
     }
 
     /// maximal runs of columns inside `cols` that [`Sheet::col_hidden`] hides.
@@ -584,7 +751,8 @@ impl Sheet {
             .cells
             .keys()
             .map(|&(row, col)| CellRange::new(CellRef::new(row, col), CellRef::new(row, col)))
-            .chain(self.hyperlinks.iter().map(|link| link.range));
+            .chain(self.hyperlinks.iter().map(|link| link.range))
+            .chain(self.merges.iter().copied());
         let first = bounds.next()?;
         let (mut min_r, mut max_r, mut min_c, mut max_c) = (
             first.start.row,
@@ -780,6 +948,10 @@ impl Workbook {
 
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
+    fn workbook(&self) -> Option<&Workbook> {
+        None
+    }
+
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
     /// Borrowing variant of `value`; absent cells read as `CellValue::Empty`.
     fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
@@ -815,6 +987,10 @@ pub trait CellProvider {
 }
 
 impl CellProvider for Workbook {
+    fn workbook(&self) -> Option<&Workbook> {
+        Some(self)
+    }
+
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
         self.value_cow(sheet, at).into_owned()
     }
@@ -862,6 +1038,30 @@ impl CellProvider for Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn used_cell_styles_are_cached_until_cells_can_change() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style: Some(1),
+                ..Cell::default()
+            },
+        );
+        CELL_STYLE_VISITS.set(0);
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 1);
+        sheet.set_calculated_value(CellRef::new(0, 0), CellValue::Number { value: 12.0 });
+        assert_eq!(sheet.used_cell_styles(), &[1]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 1);
+        sheet.cell_mut(CellRef::new(0, 0)).unwrap().style = Some(2);
+        assert_eq!(sheet.used_cell_styles(), &[2]);
+        assert_eq!(CELL_STYLE_VISITS.get(), 2);
+        sheet.adopt_cells(BTreeMap::new());
+        assert!(sheet.used_cell_styles().is_empty());
+    }
 
     #[test]
     fn bulk_cell_adoption_matches_set_cell() {
@@ -1027,6 +1227,18 @@ mod tests {
         for (col, width) in [(0, 0.0), (1, 8.0), (2, 0.0), (3, 0.0), (7, 0.0)] {
             sheet.col_widths.insert(col, width);
         }
+        for row in [0, 3, 4] {
+            for col in [0, 3] {
+                sheet.set_cell(
+                    CellRef::new(row, col),
+                    Cell {
+                        style: Some(0),
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        sheet.row_styles.extend([(7, 0), (9, 0)]);
         let brute = |hidden: &dyn Fn(u32) -> bool, first: u32, last: u32| {
             let mut spans: Vec<(u32, u32)> = Vec::new();
             for index in first..=last {
@@ -1060,6 +1272,36 @@ mod tests {
         assert_eq!(
             sheet.hidden_row_spans(0..=crate::addr::MAX_ROWS - 1).last(),
             Some((10, crate::addr::MAX_ROWS - 1))
+        );
+    }
+
+    #[test]
+    fn zero_height_hidden_spans_skip_long_empty_ranges() {
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.row_styles.insert(0, 0);
+        sheet.row_heights.insert(500_000, 0.0);
+        let last = crate::addr::MAX_ROWS - 1;
+        sheet.set_cell(
+            CellRef::new(last, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(1, last - 1)]
+        );
+        sheet.set_cell(CellRef::new(last, 0), Cell::default());
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(1, last)]
+        );
+        sheet.row_styles.clear();
+        assert_eq!(
+            sheet.hidden_row_spans(0..=last).collect::<Vec<_>>(),
+            [(0, last)]
         );
     }
 

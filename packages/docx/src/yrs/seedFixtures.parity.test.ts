@@ -360,7 +360,7 @@ describe('DOCX seeding across document features', () => {
         expect(images).toHaveLength(1);
         expect(images[0].borderColorValue).toEqual({
           themeColor: 'background1',
-          luminanceModulation: 0.75,
+          transforms: [{ kind: 'lumMod', value: 0.75 }],
         });
         expect(images[0]).not.toHaveProperty('borderWidth');
       }

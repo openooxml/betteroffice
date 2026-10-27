@@ -172,8 +172,9 @@ impl Encoder for CountingEncoderV1 {
 }
 
 /// Returns None for pending data, unstable JSON values, root sequence content, or deleted content
-/// a fork would collect.
-pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
+/// a fork would collect; a fork that `keeps_deleted`, as one of a replica with an undo history
+/// does, collects none.
+pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T, keeps_deleted: bool) -> Option<usize> {
     let store = txn.store();
     if store.pending_update().is_some() || store.pending_ds().is_some() {
         return None;
@@ -182,7 +183,7 @@ pub(crate) fn fork_state_len_v1<T: ReadTxn>(txn: &T) -> Option<usize> {
     txn.encode_state_as_update(&StateVector::default(), &mut encoder);
     (!encoder.unstable_json
         && !encoder.root_sequence
-        && encoder.tombstone_len == encoder.deleted_len)
+        && (keeps_deleted || encoder.tombstone_len == encoder.deleted_len))
         .then_some(encoder.len)
 }
 
@@ -357,7 +358,7 @@ mod tests {
     fn assert_len(doc: &EditingDoc) {
         let txn = doc.yrs_doc().transact();
         assert_eq!(
-            fork_state_len_v1(&txn),
+            fork_state_len_v1(&txn, false),
             Some(encode_state_as_update_v1(&txn, &StateVector::default()).len()),
         );
     }
@@ -516,7 +517,7 @@ mod tests {
                         std::collections::HashMap::from([("opaque".into(), value.clone())]),
                     );
                 }
-                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact(), false), None);
             }
         }
     }
@@ -538,7 +539,7 @@ mod tests {
                     .unwrap()
                     .insert_embed(&mut txn, 0, value);
             }
-            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact(), false), None);
         }
     }
 
@@ -576,11 +577,11 @@ mod tests {
             } else {
                 text.insert(&mut doc.yrs_doc().transact_mut(), 0, "root text");
             }
-            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+            assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact(), false), None);
             text.remove_range(&mut doc.yrs_doc().transact_mut(), 0, 9);
             let txn = doc.yrs_doc().transact();
             assert_eq!(text.len(&txn), 0);
-            assert_eq!(fork_state_len_v1(&txn), None);
+            assert_eq!(fork_state_len_v1(&txn, false), None);
         }
     }
 
@@ -595,7 +596,7 @@ mod tests {
                 .unwrap();
             if tracked {
                 assert_eq!(history.unwrap().undo_depth(), 1);
-                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact()), None);
+                assert_eq!(fork_state_len_v1(&doc.yrs_doc().transact(), false), None);
             } else {
                 assert_len(&doc);
             }
@@ -684,7 +685,10 @@ mod tests {
                 .pending_update()
                 .is_some()
         );
-        assert_eq!(fork_state_len_v1(&pending.yrs_doc().transact()), None);
+        assert_eq!(
+            fork_state_len_v1(&pending.yrs_doc().transact(), false),
+            None
+        );
 
         let known = peer.encode_state_vector_v1();
         peer.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 2))
@@ -694,7 +698,10 @@ mod tests {
             .apply_update_v1(&peer.encode_diff_v1(&known).unwrap())
             .unwrap();
         assert!(pending.yrs_doc().transact().store().pending_ds().is_some());
-        assert_eq!(fork_state_len_v1(&pending.yrs_doc().transact()), None);
+        assert_eq!(
+            fork_state_len_v1(&pending.yrs_doc().transact(), false),
+            None
+        );
     }
 
     #[test]

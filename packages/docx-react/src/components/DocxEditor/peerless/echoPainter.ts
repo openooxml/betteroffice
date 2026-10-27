@@ -1,8 +1,8 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
-  indexEchoGlyphSet, leadingWordWidth, placeEchoGlyphs, type EchoGlyphIndex,
-} from '@betteroffice/docx/peerless';
+  indexEchoGlyphSet, leadingWordWidth, placeEchoLine, type EchoGlyphIndex,
+} from '@betteroffice/docx/worker';
 import type {
   DocxCommandEchoContext,
   DocxCommandFrame,
@@ -15,7 +15,7 @@ import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessTextIntent } from './inputEvents';
 
 type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
-type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoGlyphs>>; cache: GlyphCache };
+type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoLine>>; cache: GlyphCache };
 
 /** @internal Display-only drafts retain counts of original admissions after merging. */
 export interface PeerlessEchoIntent {
@@ -27,13 +27,16 @@ export interface PeerlessEchoIntent {
 /** @internal */
 export interface PeerlessEchoPainterOptions {
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
+  onPaint?(): void;
   /** Asks the worker to send everything again, here the glyph sets a context names but never arrived. */
   requestFullFrame?(): void;
 }
 
 /** @internal Painter state never updates selection or command targets. */
 export interface PeerlessEchoPainter {
+  readonly contextThroughSeq?: number;
   installContext(context: DocxCommandEchoContext | undefined): void;
+  installAckContext?(context: DocxCommandEchoContext, throughSeq: number): boolean;
   restoreBackground(page: DocxCommandPageIdentity, backgroundId: string, rect: DocxEchoRect): boolean;
   preview(intent: PeerlessTextIntent): PeerlessEchoIntent | undefined;
   paint(pending: readonly EchoEntry<PeerlessEchoIntent>[]): void;
@@ -90,7 +93,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   function currentEnd(next: DocxCommandEchoContext, set: GlyphSetEntry): number | undefined {
     if (baseline?.context === next && baseline.set === set) return baseline.end;
     const line = next.glyphs;
-    const placement = line && placeEchoGlyphs(set.glyphs, next.text, line.next, line.x);
+    const placement = line && placeEchoLine(set.glyphs, next.text, line.next, line.x, line.center);
     if (!placement) return undefined;
     baseline = { context: next, set, end: placement.end };
     return placement.end;
@@ -102,13 +105,19 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     const set = context && contextGlyphSet(context);
     if (!context || !line || !set) return undefined;
     if (!text && line.canEmpty === false) return undefined;
+    if (line.center !== undefined && text.endsWith(' ')) return undefined;
+    // the first glyph of a continuation line shapes and kerns with the end of the line above
+    if (line.previousSlack !== undefined && text[0] !== context.text[0]) return undefined;
     if (line.next && (text.match(/ *$/)?.[0] !== context.text.match(/ *$/)?.[0] ||
       !text.endsWith(' ') && !line.next.startsWith(' '))) return undefined;
     if (prepared?.context === context && prepared.set === set && prepared.text === text) return prepared.value;
-    const placement = placeEchoGlyphs(set.glyphs, text, line.next, line.x);
+    const placement = placeEchoLine(set.glyphs, text, line.next, line.x, line.center);
     const current = currentEnd(context, set);
     if (!placement || current === undefined) return undefined;
     if (placement.end > current && placement.end > line.right - 1) return undefined;
+    let ink = line.x;
+    [...text].forEach((char, index) => { if (char !== ' ') ink = placement.xs[index]! + placement.advances[index]!; });
+    if (ink > line.right - 1) return undefined;
     if (placement.end < current && line.nextWord !== undefined && line.nextWord <= line.right - placement.end + 1) return undefined;
     if (line.previousSlack !== undefined && leadingWordWidth(text, placement.advances) <= line.previousSlack + 1) return undefined;
     try { for (const id of placement.glyphIds) set.cache.get(line.fontId, id); } catch { return undefined; }
@@ -221,7 +230,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     if (disposed || disabled || !context || staged?.pages.find((item) =>
       item.page.pageId === context!.page.pageId && item.page.pageIndex === context!.page.pageIndex
     )?.frameEpoch !== context.frameEpoch) return undefined;
-    if (intent.kind === 'paragraphBreak' ||
+    if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' ||
       (('text' in intent.payload) && !simpleText(intent.payload.text))) {
       disable('unsupported');
       return undefined;
@@ -255,7 +264,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     if (!draft) { disable('missing-boundary'); return; }
     for (const entry of pending) {
       const intent = entry.value.intent;
-      if (intent.kind === 'paragraphBreak' || entry.value.contextFrameEpoch > context.frameEpoch) {
+      if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' || entry.value.contextFrameEpoch > context.frameEpoch) {
         disable('unsupported'); return;
       }
       const next = applyIntent(draft, intent);
@@ -287,10 +296,20 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
         drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.cache });
       }
     } finally { ctx.restore(); }
+    options.onPaint?.();
   }
 
   return {
+    get contextThroughSeq() { return context && !disabled ? coverage : undefined; },
     installContext, restoreBackground, preview, paint, disable,
+    installAckContext(next, throughSeq) {
+      if (disposed || staged?.pages.find((item) => item.page.pageId === next.page.pageId &&
+        item.page.pageIndex === next.page.pageIndex)?.frameEpoch !== next.frameEpoch) return false;
+      installContext(next);
+      if (disabled) return false;
+      coverage = throughSeq;
+      return true;
+    },
     drop(_entries, _reason) { disable('dropped'); },
     reconcile(frame, _retired, remaining) {
       if (disposed) return;
@@ -353,7 +372,7 @@ function contextDraft(context: DocxCommandEchoContext): EchoDraft | undefined {
 }
 
 function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent): EchoDraft | undefined {
-  if (intent.kind === 'paragraphBreak') return undefined;
+  if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak') return undefined;
   let start = Math.min(draft.anchor, draft.focus);
   let end = Math.max(draft.anchor, draft.focus);
   let replacement = '';

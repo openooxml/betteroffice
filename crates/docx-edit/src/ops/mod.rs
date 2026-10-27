@@ -1,5 +1,6 @@
 //! Mutating editing operations.
 
+pub(crate) mod bookmarks;
 pub(crate) mod content_control;
 pub mod embed;
 pub mod paragraph;
@@ -7,7 +8,11 @@ pub mod resolve;
 pub mod table;
 pub mod text;
 
-use std::collections::BTreeMap;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -17,6 +22,101 @@ use crate::{
     DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, StoryRange, is_pilcrow, map_string,
     out_len,
 };
+
+pub(crate) struct IndexedStory {
+    segments: Arc<crate::segments::SegmentIndex>,
+    paragraphs: Arc<crate::segments::ParagraphIndex>,
+}
+
+impl IndexedStory {
+    pub(crate) fn new(
+        segments: Arc<crate::segments::SegmentIndex>,
+        paragraphs: Arc<crate::segments::ParagraphIndex>,
+    ) -> Self {
+        Self {
+            segments,
+            paragraphs,
+        }
+    }
+
+    pub(crate) fn in_txn(
+        doc: &crate::EditingDoc,
+        story_id: &str,
+        txn: &TransactionMut<'_>,
+    ) -> Option<Self> {
+        if !txn.insert_set().is_empty() || !txn.delete_set().is_empty() {
+            return None;
+        }
+        let epoch = doc.committed_epoch();
+        let segments = doc.segment_indexes.lock().unwrap().get(story_id, epoch)?;
+        segments.formatted_segment_units()?;
+        let paragraphs = doc.paragraph_indexes.lock().unwrap().get(story_id, epoch)?;
+        Some(Self {
+            segments,
+            paragraphs,
+        })
+    }
+
+    /// `snapshot_range` from the indexed paragraph units, or `None` when their
+    /// formatting may be stale.
+    pub(crate) fn snapshot_window<T: ReadTxn>(
+        &self,
+        txn: &T,
+        lo: u32,
+        hi: u32,
+        through_embeds: bool,
+    ) -> Option<Vec<Chunk>> {
+        let units = self.segments.formatted_segment_units()?;
+        let (first, mut offset) = self.paragraphs.unit_at(lo);
+        let mut chunks: Vec<Chunk> = Vec::new();
+        for unit in units.iter().skip(first) {
+            for (insert, attributes) in unit.iter() {
+                if offset >= hi
+                    && !(through_embeds && chunks.last().is_some_and(Chunk::is_map_embed))
+                {
+                    return Some(chunks);
+                }
+                let len = out_len(insert);
+                if offset + len > lo {
+                    chunks.push(chunk_at(insert, attributes.as_deref(), offset, txn));
+                }
+                offset += len;
+            }
+        }
+        Some(chunks)
+    }
+
+    pub(crate) fn bounds_at<T: ReadTxn>(
+        &self,
+        txn: &T,
+        index: u32,
+    ) -> Option<crate::op::ParaBounds> {
+        self.pilcrow_at(txn, index).map(|(bounds, _)| bounds)
+    }
+
+    /// [`IndexedStory::bounds_at`] with the paragraph's mark.
+    pub(crate) fn pilcrow_at<T: ReadTxn>(
+        &self,
+        txn: &T,
+        index: u32,
+    ) -> Option<(crate::op::ParaBounds, MapRef)> {
+        let para = self.paragraphs.para_at_clamped(index)?;
+        let (slot, _) = self.paragraphs.unit_at(para.pilcrow);
+        let (Out::YMap(map), _) = self.segments.formatted_segment_units()?.get(slot)?.last()?
+        else {
+            return None;
+        };
+        if !is_pilcrow(map, txn) {
+            return None;
+        }
+        let bounds = crate::op::ParaBounds {
+            para_id: map_string(map, txn, PARA_ID).unwrap_or_default(),
+            start: para.start,
+            pilcrow: para.pilcrow,
+        };
+        Some((bounds, map.clone()))
+    }
+}
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
 pub(crate) struct Chunk {
@@ -35,6 +135,10 @@ pub(crate) enum ChunkKind {
 impl Chunk {
     pub fn end(&self) -> u32 {
         self.start + self.len
+    }
+
+    pub fn is_map_embed(&self) -> bool {
+        matches!(self.kind, ChunkKind::Pilcrow(_) | ChunkKind::Embed(Some(_)))
     }
 
     pub fn attr_active(&self, key: &str) -> bool {
@@ -211,11 +315,67 @@ pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
 
 /// `snapshot` over the chunks overlapping `[lo, hi)`.
 pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: u32) -> Vec<Chunk> {
+    snapshot_window(story, txn, lo, hi, false)
+}
+
+/// `snapshot` over the chunks overlapping any of `ranges` (`[lo, hi)` pairs), from one story read.
+pub(crate) fn snapshot_ranges<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    ranges: &mut [(u32, u32)],
+) -> Vec<Chunk> {
+    #[cfg(test)]
+    crate::SNAPSHOT_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
+    ranges.sort_unstable();
+    let mut next = 0;
     let mut offset = 0;
     let mut chunks = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
         let len = out_len(&diff.insert);
-        if offset >= hi {
+        while next < ranges.len() && ranges[next].1 <= offset {
+            next += 1;
+        }
+        let Some(&(lo, _)) = ranges.get(next) else {
+            break;
+        };
+        if offset + len > lo {
+            chunks.push(chunk_at(
+                &diff.insert,
+                diff.attributes.as_deref(),
+                offset,
+                txn,
+            ));
+        }
+        offset += len;
+    }
+    chunks
+}
+
+/// `snapshot_range`, continued past `hi` through any map embeds and the unit after them: what
+/// [`remove_units`] needs to keep their formatting without reading the story again.
+pub(crate) fn snapshot_range_through_embeds<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+) -> Vec<Chunk> {
+    snapshot_window(story, txn, lo, hi, true)
+}
+
+fn snapshot_window<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+    through_embeds: bool,
+) -> Vec<Chunk> {
+    #[cfg(test)]
+    crate::SNAPSHOT_DIFFS_BUILT.with(|built| built.set(built.get() + 1));
+    let mut offset = 0;
+    let mut chunks: Vec<Chunk> = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if offset >= hi && !(through_embeds && chunks.last().is_some_and(Chunk::is_map_embed)) {
             break;
         }
         if offset + len > lo {
@@ -231,10 +391,177 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
     chunks
 }
 
+fn snapshot_window_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    lo: u32,
+    hi: u32,
+    through_embeds: bool,
+    indexed: Option<&IndexedStory>,
+) -> Vec<Chunk> {
+    if let Some(chunks) =
+        indexed.and_then(|index| index.snapshot_window(txn, lo, hi, through_embeds))
+    {
+        return chunks;
+    }
+    if through_embeds {
+        snapshot_range_through_embeds(story, txn, lo, hi)
+    } else {
+        snapshot_range(story, txn, lo, hi)
+    }
+}
+
+/// Whether the chunks a removal gets still hold the units after it.
+#[derive(Clone, Copy)]
+pub(crate) enum After {
+    /// Unchanged since the chunks were taken.
+    Known,
+    /// Possibly changed since, so they are read from the story.
+    Changed,
+}
+
+/// The formatting a removal of `[index, end)` can disturb: the keys set on the unit before it,
+/// on its units and on the unit after the map embeds that follow it, and those embeds' formatting.
+#[derive(Default)]
+struct Surroundings {
+    keys: HashSet<Arc<str>>,
+    embeds: Vec<Attrs>,
+}
+
+impl Surroundings {
+    /// Takes the chunk ending at `chunk_end`; false once it is the unit after the embeds.
+    fn take(&mut self, chunk_end: u32, end: u32, map_embed: bool, attrs: Attrs) -> bool {
+        if chunk_end > end && map_embed {
+            self.embeds.push(attrs);
+            return true;
+        }
+        self.keys.extend(attrs.into_keys());
+        chunk_end <= end
+    }
+
+    /// Reads them from the story.
+    fn read<T: ReadTxn>(story: &TextRef, txn: &T, index: u32, end: u32) -> Self {
+        let mut around = Self::default();
+        let mut offset = 0;
+        for diff in story.diff(txn, YChange::identity) {
+            offset += out_len(&diff.insert);
+            if offset < index {
+                continue;
+            }
+            let map_embed = !matches!(diff.insert, Out::Any(_));
+            let attrs = diff.attributes.map(|attrs| *attrs).unwrap_or_default();
+            if !around.take(offset, end, map_embed, attrs) {
+                break;
+            }
+        }
+        around
+    }
+
+    /// `read` from `chunks`, when they cover every unit it reads.
+    fn known(chunks: &[Chunk], index: u32, end: u32, story_len: u32) -> Option<Self> {
+        let mut around = Self::default();
+        let before = index.checked_sub(1)?;
+        let mut next = before;
+        for chunk in chunks.iter().skip_while(|chunk| chunk.end() <= before) {
+            let unknown_embed = matches!(chunk.kind, ChunkKind::Embed(None));
+            if chunk.start > next || (chunk.end() > end && unknown_embed) {
+                return None;
+            }
+            next = chunk.end();
+            let attrs = chunk
+                .attrs
+                .iter()
+                .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+                .collect();
+            if !around.take(next, end, chunk.is_map_embed(), attrs) {
+                return Some(around);
+            }
+        }
+        (next == story_len).then_some(around)
+    }
+}
+
+/// Removes `len` units at `index`, keeping the formatting of the paragraph marks and other map
+/// embeds after them. yrs tidies the format markers a removal leaves behind up to the next text,
+/// past any map embed, so formatting that closed before them could merge with the same formatting
+/// reopening after them. Each such embed gets back its own value for every key set around the
+/// removal, which inserts nothing where the value held. `chunks` hold the units on either side of
+/// the range when known; with [`After::Known`] the embeds after it come from them too where they
+/// reach (see `snapshot_range_through_embeds`).
+pub(crate) fn remove_units(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    index: u32,
+    len: u32,
+    chunks: &[Chunk],
+    after: After,
+) {
+    let unit = |at: u32| {
+        chunks
+            .iter()
+            .find(|chunk| chunk.start <= at && at < chunk.end())
+    };
+    let formatted_before = index.checked_sub(1).is_some_and(|before| {
+        unit(before).is_none_or(|chunk| chunk.attrs.values().any(|value| *value != Any::Null))
+    });
+    let text_after =
+        unit(index + len).is_some_and(|chunk| matches!(chunk.kind, ChunkKind::Text(_)));
+    if !formatted_before || text_after {
+        story.remove_range(txn, index, len);
+        return;
+    }
+    let end = index + len;
+    let Surroundings { mut keys, embeds } = match after {
+        After::Known => Surroundings::known(chunks, index, end, story.len(txn)),
+        After::Changed => None,
+    }
+    .unwrap_or_else(|| Surroundings::read(story, txn, index, end));
+    story.remove_range(txn, index, len);
+    keys.extend(embeds.iter().flat_map(|attrs| attrs.keys().cloned()));
+    let mut restores: Vec<(u32, u32, Attrs)> = Vec::new();
+    for (at, was) in (index..).zip(&embeds) {
+        let restore: Attrs = keys
+            .iter()
+            .map(|key| (key.clone(), was.get(key).cloned().unwrap_or(Any::Null)))
+            .collect();
+        match restores.last_mut() {
+            Some((_, len, attrs)) if *attrs == restore => *len += 1,
+            _ => restores.push((at, 1, restore)),
+        }
+    }
+    for (start, len, attrs) in restores {
+        story.format(txn, start, len, attrs);
+    }
+}
+
 pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
     snapshot_range(story, txn, index, index.saturating_add(1))
         .first()
         .is_some_and(|chunk| chunk.is_block_embed(txn))
+}
+
+/// Moves `index` past the block embeds that start there: inline content may follow a
+/// paragraph's leading blocks but never precede them.
+pub(crate) fn past_leading_blocks<T: ReadTxn>(story: &TextRef, txn: &T, mut index: u32) -> u32 {
+    while block_embed_at(story, txn, index) {
+        index += 1;
+    }
+    index
+}
+
+pub(crate) fn past_leading_blocks_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    mut index: u32,
+    indexed: Option<&IndexedStory>,
+) -> u32 {
+    while snapshot_window_indexed(story, txn, index, index.saturating_add(1), false, indexed)
+        .first()
+        .is_some_and(|chunk| chunk.is_block_embed(txn))
+    {
+        index += 1;
+    }
+    index
 }
 
 pub(crate) fn inherit_block_revisions(
@@ -376,8 +703,25 @@ fn code_point_boundary(chunks: &[Chunk], index: u32, forward: bool) -> (u32, u32
 /// Chunks covering the units on both sides of `index`, after moving `index` off the middle of
 /// a surrogate pair to the pair's start.
 pub(crate) fn position_chunks<T: ReadTxn>(story: &TextRef, txn: &T, index: &mut u32) -> Vec<Chunk> {
-    let take =
-        |index: u32| snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1));
+    position_chunks_indexed(story, txn, index, None)
+}
+
+pub(crate) fn position_chunks_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    index: &mut u32,
+    indexed: Option<&IndexedStory>,
+) -> Vec<Chunk> {
+    let take = |index: u32| {
+        snapshot_window_indexed(
+            story,
+            txn,
+            index.saturating_sub(1),
+            index.saturating_add(1),
+            false,
+            indexed,
+        )
+    };
     let chunks = take(*index);
     let snapped = code_point_index(&chunks, *index, false);
     if snapped == *index {
@@ -402,12 +746,23 @@ pub(crate) fn range_chunks_observed<T: ReadTxn>(
     txn: &T,
     range: &mut StoryRange,
 ) -> (Vec<Chunk>, bool) {
+    range_chunks_observed_indexed(story, txn, range, None)
+}
+
+pub(crate) fn range_chunks_observed_indexed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: &mut StoryRange,
+    indexed: Option<&IndexedStory>,
+) -> (Vec<Chunk>, bool) {
     let take = |range: &StoryRange| {
-        snapshot_range(
+        snapshot_window_indexed(
             story,
             txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
+            true,
+            indexed,
         )
     };
     let chunks = take(range);

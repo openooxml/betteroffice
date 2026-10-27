@@ -1,12 +1,15 @@
 //! Read queries over transaction snapshots.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use unicode_segmentation::UnicodeSegmentation;
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
-use crate::ops::table::{TableRowChangeKind, table_revision_stamps, table_row_changes};
+use crate::ops::table::{
+    TableRowChangeKind, push_table_row_changes, table_revision_stamps, table_row_changes,
+};
 use crate::ops::{Chunk, ChunkKind};
 use crate::{
     BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
@@ -367,6 +370,59 @@ fn visit_chunk_revisions<T: ReadTxn>(
     }
 }
 
+/// The tracked changes of `chunks` and `tables` (one story's, in story order) as
+/// [`EditingDoc::story_changes`] finds them, ordered by position. A run merges only
+/// with the run of its kind ending where it starts, and paragraph marks start their own.
+fn raw_changes<'a, T: ReadTxn>(
+    chunks: impl IntoIterator<Item = &'a Chunk>,
+    tables: Vec<crate::ops::table::TableRowChange>,
+    txn: &T,
+) -> Vec<RawChange> {
+    let mut raw: Vec<RawChange> = Vec::new();
+    for chunk in chunks {
+        visit_chunk_revisions(chunk, txn, |kind, (id, author, date)| {
+            let pilcrow = matches!(&chunk.kind, ChunkKind::Pilcrow(_));
+            if !pilcrow
+                && let Some(last) = raw
+                    .iter_mut()
+                    .rev()
+                    .find(|change| change.kind == kind)
+                    .filter(|change| change.id == id && change.end == chunk.start)
+            {
+                last.end = chunk.end();
+            } else {
+                raw.push(RawChange {
+                    id,
+                    kind,
+                    author,
+                    date,
+                    start: chunk.start,
+                    end: if pilcrow {
+                        chunk.start + 1
+                    } else {
+                        chunk.end()
+                    },
+                });
+            }
+        });
+    }
+    raw.extend(tables.into_iter().map(|change| RawChange {
+        id: change.revision_id,
+        kind: match change.kind {
+            TableRowChangeKind::Insertion => ChangeKind::TableRowInsertion,
+            TableRowChangeKind::Deletion => ChangeKind::TableRowDeletion,
+            TableRowChangeKind::TableInsertion => ChangeKind::TableInsertion,
+            TableRowChangeKind::TableDeletion => ChangeKind::TableDeletion,
+        },
+        author: change.author,
+        date: change.date,
+        start: change.start,
+        end: change.start + 1,
+    }));
+    raw.sort_by_key(|change| change.start);
+    raw
+}
+
 impl EditingDoc {
     fn views_for_story(&self, story_id: &str, view: TextView) -> OpResult<Vec<ParaView>> {
         let txn = self.yrs_doc().transact();
@@ -380,10 +436,9 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Vec::new();
         };
-        let mut story_ids: Vec<String> = {
-            use yrs::Map;
-            stories.keys(&txn).map(|key| key.to_string()).collect()
-        };
+        let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .collect();
         story_ids.sort();
         story_ids
             .into_iter()
@@ -679,7 +734,7 @@ impl EditingDoc {
                 result.entry(id).or_default().insert((author, date));
             }
         };
-        for (story_id, value) in stories.iter(&txn) {
+        for (story_id, value) in crate::live_stories(&stories, &txn) {
             let Out::YText(story) = value else {
                 continue;
             };
@@ -733,53 +788,87 @@ impl EditingDoc {
         txn: &T,
     ) -> Vec<RawChange> {
         let chunks = self.chunk_snapshot(story_id, story, txn);
-        let mut raw: Vec<RawChange> = Vec::new();
-        for chunk in chunks.iter() {
-            visit_chunk_revisions(chunk, txn, |kind, (id, author, date)| {
-                let pilcrow = matches!(&chunk.kind, ChunkKind::Pilcrow(_));
-                if !pilcrow
-                    && let Some(last) = raw
-                        .iter_mut()
-                        .rev()
-                        .find(|change| change.kind == kind)
-                        .filter(|change| change.id == id && change.end == chunk.start)
-                {
-                    last.end = chunk.end();
-                } else {
-                    raw.push(RawChange {
-                        id,
-                        kind,
-                        author,
-                        date,
-                        start: chunk.start,
-                        end: if pilcrow {
-                            chunk.start + 1
-                        } else {
-                            chunk.end()
-                        },
-                    });
+        raw_changes(chunks.iter(), table_row_changes(story, txn), txn)
+    }
+
+    /// Ids of the tracked changes of `story_id` whose range holds the caret at
+    /// `para_id`/`offset`, in [`Self::list_changes`] order, both range ends
+    /// resolved through the first paragraph carrying their paragraph's id. Reads
+    /// the caret paragraph and the mark before it, or the whole story when an
+    /// offset past the paragraph or a repeated paragraph id needs it.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn revision_ids_at(
+        &self,
+        story_id: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> OpResult<Vec<String>> {
+        let segments = self.segment_index(story_id)?;
+        let index = self.paragraph_index(story_id)?;
+        let slot = index
+            .para_slot(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))? as usize;
+        let (start, pilcrow) = index.para_span(para_id).expect("slot has a span");
+        let position = u64::from(start) + u64::from(offset);
+        let at = |index_at: u32| {
+            let para = index.para_at_clamped(index_at)?;
+            let offset = index_at
+                .min(para.pilcrow)
+                .saturating_sub(para.start)
+                .min(para.pilcrow - para.start);
+            index
+                .para_span(&para.para_id)
+                .map(|(start, _)| u64::from(start) + u64::from(offset))
+        };
+        // No change crosses a pilcrow: with unique paragraph ids only the previous mark,
+        // the caret paragraph and any units past the last mark can hold the caret.
+        let raw = if index.has_repeated() || offset > pilcrow - start {
+            let txn = self.yrs_doc().transact();
+            let story = story_ref(&txn, story_id)?;
+            self.story_raw_changes(story_id, &story, &txn)
+        } else {
+            let lo = slot
+                .checked_sub(1)
+                .and_then(|previous| index.pilcrow_at(previous))
+                .unwrap_or(0);
+            let hi = if slot + 1 == index.para_count() {
+                u32::MAX
+            } else {
+                pilcrow + 1
+            };
+            let txn = self.yrs_doc().transact();
+            let story = story_ref(&txn, story_id)?;
+            let indexed = crate::ops::IndexedStory::new(segments, Arc::clone(&index));
+            let snapshot;
+            let read;
+            let chunks: &[Chunk] = match indexed.snapshot_window(&txn, lo, hi, false) {
+                Some(window) => {
+                    read = window;
+                    &read
                 }
-            });
-        }
-        raw.extend(
-            table_row_changes(story, txn)
-                .into_iter()
-                .map(|change| RawChange {
-                    id: change.revision_id,
-                    kind: match change.kind {
-                        TableRowChangeKind::Insertion => ChangeKind::TableRowInsertion,
-                        TableRowChangeKind::Deletion => ChangeKind::TableRowDeletion,
-                        TableRowChangeKind::TableInsertion => ChangeKind::TableInsertion,
-                        TableRowChangeKind::TableDeletion => ChangeKind::TableDeletion,
-                    },
-                    author: change.author,
-                    date: change.date,
-                    start: change.start,
-                    end: change.start + 1,
-                }),
-        );
-        raw.sort_by_key(|change| change.start);
-        raw
+                None => {
+                    snapshot = self.chunk_snapshot(story_id, &story, &txn);
+                    let first = snapshot.partition_point(|chunk| chunk.end() <= lo);
+                    let last = snapshot.partition_point(|chunk| chunk.start < hi);
+                    &snapshot[first..last]
+                }
+            };
+            let mut tables = Vec::new();
+            for chunk in chunks {
+                if let ChunkKind::Embed(Some(map)) = &chunk.kind {
+                    push_table_row_changes(map, &txn, chunk.start, &mut tables);
+                }
+            }
+            raw_changes(chunks.iter(), tables, &txn)
+        };
+        Ok(raw
+            .into_iter()
+            .filter(|change| {
+                at(change.start).is_some_and(|start| start <= position)
+                    && at(change.end).is_some_and(|end| position <= end)
+            })
+            .map(|change| change.id)
+            .collect())
     }
 
     /// The Loc range covering every unit stamped with the revision ID (any story).
@@ -788,10 +877,9 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Err(OpError::UnknownChange(revision_id.to_owned()));
         };
-        let mut story_ids: Vec<String> = {
-            use yrs::Map;
-            stories.keys(&txn).map(|key| key.to_string()).collect()
-        };
+        let mut story_ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .collect();
         story_ids.sort();
         for story_id in story_ids {
             use yrs::Map;
@@ -957,5 +1045,149 @@ impl EditingDoc {
             text,
             paragraphs,
         }))
+    }
+}
+
+#[cfg(test)]
+mod caret_revision_tests {
+    use super::*;
+    use crate::format::FormatPolicy;
+    use crate::{EditCtx, Position};
+
+    const DATE: &str = "2026-01-01T00:00:00Z";
+
+    fn stamp(id: u32) -> String {
+        format!(r#"w:id="{id}" w:author="A" w:date="{DATE}""#)
+    }
+
+    fn body() -> String {
+        let mark = |kind: &str, id: u32| {
+            format!("<w:pPr><w:rPr><w:{kind} {}/></w:rPr></w:pPr>", stamp(id))
+        };
+        let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+        let bold = |text: &str| {
+            format!(r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+        };
+        let ins = |id: u32, runs: String| format!("<w:ins {}>{runs}</w:ins>", stamp(id));
+        let del = format!(
+            r#"<w:del {}><w:r><w:delText>gone</w:delText></w:r></w:del>"#,
+            stamp(23)
+        );
+        format!(
+            concat!(
+                r#"<w:p w14:paraId="0000000A">{}{}{}</w:p>"#,
+                r#"<w:p w14:paraId="0000000B">{}{}{}</w:p>"#,
+                r#"<w:p w14:paraId="0000000C">{}{}</w:p>"#,
+                r#"<w:p w14:paraId="0000000D">{}</w:p>"#,
+                r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
+                r#"<w:tr><w:trPr><w:ins {}/></w:trPr>"#,
+                r#"<w:tc><w:p w14:paraId="0000000E">{}</w:p></w:tc></w:tr></w:tbl>"#,
+                r#"<w:p w14:paraId="0000000F">{}</w:p>"#,
+            ),
+            mark("ins", 21),
+            run("Lead "),
+            ins(21, run("inserted")),
+            ins(21, format!("{}{}", bold("still "), run("inserted"))),
+            run(" plain"),
+            del,
+            mark("del", 24),
+            run("Mark deleted"),
+            run("After"),
+            stamp(25),
+            run("Cell"),
+            run("Tail"),
+        )
+    }
+
+    const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    const PACKAGE_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    const DOCUMENT_OPEN: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>"#;
+
+    fn seeded(body: &str) -> EditingDoc {
+        let document = format!("{DOCUMENT_OPEN}{body}</w:body></w:document>");
+        let parts = [
+            ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
+            ("_rels/.rels", PACKAGE_RELS.to_owned()),
+            ("word/document.xml", document),
+        ];
+        let bytes = ooxml_opc::rezip_parts(
+            &parts
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+        doc
+    }
+
+    fn scanned(doc: &EditingDoc, para_id: &str, offset: u32) -> Vec<String> {
+        let index = doc.paragraph_index("body").unwrap();
+        let at = |loc: &Loc| {
+            index
+                .para_span(&loc.para)
+                .map(|(start, _)| u64::from(start) + u64::from(loc.offset))
+        };
+        let position = u64::from(index.para_span(para_id).unwrap().0) + u64::from(offset);
+        doc.story_changes("body")
+            .unwrap()
+            .into_iter()
+            .filter(|(change, _)| {
+                at(&change.range.start).is_some_and(|start| start <= position)
+                    && at(&change.range.end).is_some_and(|end| position <= end)
+            })
+            .map(|(change, _)| change.revision_id)
+            .collect()
+    }
+
+    fn expect_every_caret_matches(doc: &EditingDoc) -> usize {
+        let index = doc.paragraph_index("body").unwrap();
+        let mut held = 0;
+        for slot in 0..index.para_count() {
+            let pilcrow = index.pilcrow_at(slot).unwrap();
+            let start = index.unit_start(slot).unwrap();
+            let para_id = index.para_at(pilcrow).unwrap().para_id.to_string();
+            if index.para_slot(&para_id) != Some(slot as u32) {
+                continue;
+            }
+            for offset in 0..=pilcrow - start + 2 {
+                let ids = doc.revision_ids_at("body", &para_id, offset).unwrap();
+                assert_eq!(ids, scanned(doc, &para_id, offset), "{para_id}@{offset}");
+                held += usize::from(!ids.is_empty());
+            }
+        }
+        held
+    }
+
+    #[test]
+    fn caret_revision_reads_match_whole_story_scans() {
+        for repeat_last in [false, true] {
+            let doc = seeded(&body());
+            // Opening a package renames repeated ids, so share one after seeding.
+            if repeat_last {
+                crate::seed::fixture::share_key(&doc, "body", "0000000F", "0000000B");
+            }
+            assert_eq!(
+                doc.paragraph_index("body").unwrap().has_repeated(),
+                repeat_last
+            );
+            assert!(expect_every_caret_matches(&doc) > 20);
+            let held = |para_id: &str, offset: u32| {
+                doc.revision_ids_at("body", para_id, offset).unwrap().len()
+            };
+            let caret_paragraph = [held("0000000B", 0), held("0000000B", 3)];
+            let after_deleted_mark = [held("0000000D", 0), held("0000000D", 1)];
+            // A shared id resolves the row insertion before the tail through the first paragraph.
+            assert_eq!(caret_paragraph, [2 + usize::from(repeat_last), 1]);
+            assert_eq!(after_deleted_mark, [1, 0]);
+            let suggesting = EditCtx::local("B", DATE).suggesting();
+            for index in [9, 20, 40] {
+                let at = Position::new("body", index);
+                doc.insert_text(&suggesting, at, "zz", FormatPolicy::Plain)
+                    .unwrap();
+                expect_every_caret_matches(&doc);
+            }
+        }
     }
 }

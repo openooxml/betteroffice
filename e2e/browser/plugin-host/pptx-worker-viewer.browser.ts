@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { PixelComparison } from './pptx-worker-viewer-probe';
 
 interface MainWasmProbe {
@@ -47,7 +48,7 @@ for (const dpr of [1, 2]) {
         const initialSlide = fixture === 'demo' ? 2 : 1;
         await page.goto(`/pptx-worker-viewer.html?fixture=${fixture}&initialSlide=${initialSlide}`);
         await page.waitForFunction(() => '__pptxWorkerViewer' in window);
-        expect(await page.evaluate(() => window.__pptxWorkerViewer.ready))
+        expect(await pinnedEvaluate(page, () => window.__pptxWorkerViewer.ready))
           .toEqual({ slideCount: count, initialSlide });
         await expect(page.locator('[data-arm="worker"] aside [aria-current="page"]'))
           .toHaveAttribute('data-slide-index', String(initialSlide - 1));
@@ -56,22 +57,22 @@ for (const dpr of [1, 2]) {
 
         for (const zoom of [1, 1.5]) {
           for (let slide = 1; slide <= count; slide += 1) {
-            const result = await page.evaluate(({ slide, zoom }) =>
+            const result = await pinnedEvaluate(page, ({ slide, zoom }) =>
               window.__pptxWorkerViewer.show(slide, zoom), { slide, zoom });
             expect(result.dpr).toBe(dpr);
             assertParity(result, slide === 1);
           }
-          const thumbnails = await page.evaluate(() => window.__pptxWorkerViewer.thumbnails());
+          const thumbnails = await pinnedEvaluate(page, () => window.__pptxWorkerViewer.thumbnails());
           expect(thumbnails).toHaveLength(Math.min(3, count));
           for (const result of thumbnails) assertParity(result, result.slide === 1);
         }
 
         if (count > 1) {
           await page.locator('[data-arm="worker"] aside button').nth(1).click();
-          assertParity(await page.evaluate(() => window.__pptxWorkerViewer.compareCurrent(2)));
+          assertParity(await pinnedEvaluate(page, () => window.__pptxWorkerViewer.compareCurrent(2)));
           await page.locator('[data-arm="worker"] [tabindex="0"]').focus();
           await page.keyboard.press('PageDown');
-          assertParity(await page.evaluate(() => window.__pptxWorkerViewer.compareCurrent(3)));
+          assertParity(await pinnedEvaluate(page, () => window.__pptxWorkerViewer.compareCurrent(3)));
         }
         expect(await page.evaluate(() => window.__pptxWorkerViewer.errors)).toEqual([]);
       });
@@ -106,8 +107,8 @@ for (const fixture of ['demo', 'tiff']) {
     });
     await page.goto(`/pptx-worker-viewer.html?arm=worker&fixture=${fixture}`);
     await page.waitForFunction(() => '__pptxWorkerViewer' in window);
-    await page.evaluate(() => window.__pptxWorkerViewer.ready);
-    const result = await page.evaluate(async () => ({
+    await pinnedEvaluate(page, () => window.__pptxWorkerViewer.ready);
+    const result = await pinnedEvaluate(page, async () => ({
       wasm: window.__mainWasmProbe,
       resources: performance.getEntriesByType('resource').map((entry) => entry.name),
       image: await window.__pptxWorkerViewer.workerImage(),

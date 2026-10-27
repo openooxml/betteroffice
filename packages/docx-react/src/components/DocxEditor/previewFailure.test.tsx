@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -11,7 +12,7 @@ import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from 
 import * as replicaHelpers from './internals/workerOpenReplica';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
-import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { DocxEngineWorkerRequest, DocxEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -226,7 +227,7 @@ const load = (
   ref = createRef<Editor>(),
   experimentalWorkerOpen = false
 ) => (
-  <DocxEditor
+  <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref}
     previewFirstPage
     experimentalWorkerOpen={experimentalWorkerOpen}
@@ -349,7 +350,7 @@ test.each([false, true])('a terminal worker open reports one typed error and an 
   const errors: Error[] = [];
   const buffer = documentBuffer();
   const element = () => (
-    <DocxEditor
+    <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
       experimentalWorkerOpen
       previewFirstPage={false}
       readOnly={viewer}
@@ -974,14 +975,14 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
     session ??= pending;
     return pending;
   });
-  const posted: ResidentEngineWorkerRequest[] = [];
+  const posted: DocxEngineWorkerRequest[] = [];
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
       const send = worker.postMessage.bind(worker);
       let listener: typeof worker.onmessage = null;
       Object.defineProperty(worker, 'onmessage', {
-        get: () => (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        get: () => (event: MessageEvent<DocxEngineWorkerResponse>) => {
           const request = posted.find((request) => request.id === event.data.id);
           if (request?.type === 'bootstrap') release = () => listener?.(event);
           else listener?.(event);
@@ -997,7 +998,7 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
   } as unknown as typeof Worker;
   const ref = createRef<Editor>();
   const errors: Error[] = [];
-  const view = render(<DocxEditor ref={ref} experimentalWorkerOpen
+  const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen
     readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
     documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
   try {

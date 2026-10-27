@@ -30,10 +30,11 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionM
 use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
+use crate::ops::bookmarks::{Carry, Change};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
-    capture_pilcrow, paragraph_content_before, position_chunks, revision_id_in_range,
-    snapshot_range,
+    Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
+    block_embed_at, capture_pilcrow, paragraph_content_before, position_chunks,
+    revision_id_in_range, snapshot_range, snapshot_ranges,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -82,7 +83,8 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
-/// style and vertical rhythm but nothing else.
+/// style and vertical rhythm but nothing else, with run defaults rebuilt from
+/// the formatting at the caret.
 const INHERITED_PARA_ATTRS: [&str; 11] = [
     "defaultTextFormatting",
     "pStyle",
@@ -96,10 +98,6 @@ const INHERITED_PARA_ATTRS: [&str; 11] = [
     "afterAutospacing",
     "contextualSpacing",
 ];
-
-/// The `defaultTextFormatting` keys that cross a split: font, size and color
-/// only. Bold, italic, underline and the rest deliberately do not carry.
-const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
 const TABS: &str = "tabs";
@@ -201,7 +199,9 @@ fn all_targets<T: ReadTxn>(txn: &T) -> Vec<TargetPara> {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return Vec::new();
     };
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
+    let mut story_ids: Vec<String> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     story_ids.sort();
     let mut result = Vec::new();
     for story_id in story_ids {
@@ -323,23 +323,52 @@ fn apply_paragraph_attr_projection(
         }
         map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
     }
+    sync_original_formatting(
+        txn,
+        map,
+        &[],
+        &[
+            "lineSpacing",
+            "lineSpacingRule",
+            "indentLeft",
+            "indentLeftChars",
+            "indentRight",
+            "indentRightChars",
+            "indentFirstLine",
+            "indentFirstLineChars",
+            "hangingIndent",
+            "hangingIndentChars",
+        ],
+    );
     Ok(())
 }
 
-/// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
-fn style_carry_dtf(value: &Any) -> Option<Any> {
-    let Any::Map(map) = value else {
-        return None;
-    };
-    let subset: HashMap<String, Any> = map
+/// The run defaults a paragraph started at `at` carries, as Word carries the insertion point's
+/// formatting: the unit before the caret's, or the mark's own when the paragraph is empty.
+fn caret_run_formatting<T: ReadTxn>(
+    chunks: &[Chunk],
+    at: u32,
+    txn: &T,
+    props: &[(String, Any)],
+) -> Option<Any> {
+    let before = chunks
         .iter()
-        .filter(|(key, _)| STYLE_CARRY_DTF_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if subset.is_empty() {
-        None
-    } else {
-        Some(Any::Map(Arc::new(subset)))
+        .find(|chunk| chunk.start < at && at <= chunk.end())
+        .filter(|chunk| match &chunk.kind {
+            ChunkKind::Pilcrow(_) => false,
+            ChunkKind::Embed(Some(map)) => !crate::map_string(map, txn, KIND_KEY)
+                .is_some_and(|kind| crate::segments::is_block_embed(&kind)),
+            _ => true,
+        });
+    match before {
+        Some(chunk) => crate::seed::mark_run_formatting(&chunk.attrs),
+        None => {
+            let defaults = props
+                .iter()
+                .find(|(key, _)| key == DEFAULT_TEXT_FORMATTING)
+                .map(|(_, defaults)| crate::seed::mark_run_attrs(defaults))?;
+            crate::seed::mark_run_formatting(defaults.iter().map(|(key, value)| (key, value)))
+        }
     }
 }
 
@@ -354,8 +383,8 @@ impl EditingDoc {
     ///
     /// - mid-paragraph: it keeps its own properties;
     /// - at the paragraph end, so the second half is empty: only
-    ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys;
+    ///   the `INHERITED_PARA_ATTRS` subset survives, with `defaultTextFormatting`
+    ///   rebuilt from the run formatting at the caret, so typing continues in it;
     /// - at the end WITH a `next_style`: it switches to that style's
     ///   projection outright instead.
     ///
@@ -425,6 +454,7 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let carry = Carry::capture(&story, txn, at.index, at.index, None);
         let new_pilcrow = story.insert_embed_with_attributes(
             txn,
             at.index,
@@ -454,20 +484,14 @@ impl EditingDoc {
                 apply_paragraph_attr_projection(txn, &orig_map, &next.paragraph_attrs)?;
                 orig_map.remove(txn, BORDERS);
             } else {
-                // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep.
-                for (key, value) in &props {
+                // Blank-attr inheritance: keep only the inherited subset; borders fall out of it.
+                for (key, _) in &props {
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
                         orig_map.remove(txn, key);
-                    } else if key == DEFAULT_TEXT_FORMATTING {
-                        set_or_remove(
-                            txn,
-                            &orig_map,
-                            DEFAULT_TEXT_FORMATTING,
-                            style_carry_dtf(value),
-                        );
                     }
                 }
+                let carried = caret_run_formatting(&chunks, at.index, &*txn, &props);
+                set_or_remove(txn, &orig_map, DEFAULT_TEXT_FORMATTING, carried);
             }
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
@@ -476,6 +500,13 @@ impl EditingDoc {
         orig_map.remove(txn, SOURCE_PARA_ID);
         orig_map.remove(txn, PARA_ORIGIN);
         ids.bind(txn, &orig_map, &second_para_id, ParagraphIdOrigin::Authored);
+        if let Some(carry) = carry {
+            carry.apply(
+                txn,
+                &[Change::Split { at: at.index }],
+                &[(at.index, new_pilcrow)],
+            );
+        }
         Ok(SplitReceipt {
             first_para_id,
             second_para_id,
@@ -551,6 +582,9 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
 
+        let carry = (revision_id.is_none() && !needs_boundary)
+            .then(|| Carry::capture(&story, &txn, pilcrow_index, pilcrow_index + 1, None))
+            .flatten();
         if own_insert.is_some() {
             // Backspacing over this author's still-pending split retracts the
             // suggestion itself; it must not author a second pPrDel revision.
@@ -584,6 +618,9 @@ impl EditingDoc {
                 donor_props.retain(|(key, _)| !matches!(key.as_str(), PPR_INS | PPR_DEL));
                 story.remove_range(&mut txn, pilcrow_index, 1);
                 adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+                if let Some(carry) = carry {
+                    carry.removed(&mut txn, pilcrow_index, pilcrow_index + 1);
+                }
             }
         } else if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
@@ -598,6 +635,9 @@ impl EditingDoc {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            if let Some(carry) = carry {
+                carry.removed(&mut txn, pilcrow_index, pilcrow_index + 1);
+            }
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,
@@ -625,6 +665,31 @@ impl EditingDoc {
         selector: &ParaSelector,
         delta: &ParaAttrDelta,
     ) -> OpResult<Receipt> {
+        self.set_paragraph_attrs_with_restyle(ctx, selector, delta, None)
+    }
+
+    /// Applies a paragraph style while preserving direct character formatting.
+    pub fn restyle_paragraphs(
+        &self,
+        ctx: &EditCtx,
+        selector: &ParaSelector,
+        style_id: &str,
+        styles: &crate::seed::StyleResolver,
+    ) -> OpResult<Receipt> {
+        let mut delta = ParaAttrDelta::default();
+        delta
+            .other
+            .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+        self.set_paragraph_attrs_with_restyle(ctx, selector, &delta, Some((style_id, styles)))
+    }
+
+    fn set_paragraph_attrs_with_restyle(
+        &self,
+        ctx: &EditCtx,
+        selector: &ParaSelector,
+        delta: &ParaAttrDelta,
+        restyle: Option<(&str, &crate::seed::StyleResolver)>,
+    ) -> OpResult<Receipt> {
         for key in delta.other.keys() {
             if crate::is_identity_key(key) {
                 return Err(OpError::ReservedKey(key.clone()));
@@ -632,17 +697,26 @@ impl EditingDoc {
         }
         let mut txn = self.transact_for(ctx);
         let targets = resolve_selector(&txn, selector)?;
+        let mut snapshots = HashMap::new();
+        if restyle.is_some() || ctx.is_suggesting() {
+            let mut ranges: HashMap<&str, (&TextRef, Vec<(u32, u32)>)> = HashMap::new();
+            for target in &targets {
+                ranges
+                    .entry(target.story_id.as_str())
+                    .or_insert_with(|| (&target.story, Vec::new()))
+                    .1
+                    .push((target.bounds.start, target.bounds.pilcrow + 1));
+            }
+            for (story_id, (story, mut ranges)) in ranges {
+                snapshots.insert(story_id, snapshot_ranges(story, &txn, &mut ranges));
+            }
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             targets
                 .iter()
                 .find_map(|target| {
                     revision_id_in_range(
-                        &snapshot_range(
-                            &target.story,
-                            &txn,
-                            target.bounds.start,
-                            target.bounds.pilcrow + 1,
-                        ),
+                        paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
                         target.bounds.start,
                         target.bounds.pilcrow + 1,
                         crate::INS,
@@ -652,8 +726,21 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
         let mut changed = false;
+        let mut inherited = RestyleInheritanceCache::new();
         for target in &targets {
             let previous = paragraph_formatting(&target.map, &txn);
+            if !ctx.is_suggesting()
+                && let Some((style_id, styles)) = restyle
+            {
+                rebase_paragraph_runs(
+                    &mut txn,
+                    target,
+                    paragraph_chunks(&snapshots[target.story_id.as_str()], &target.bounds),
+                    style_id,
+                    styles,
+                    &mut inherited,
+                );
+            }
             apply_para_delta(&mut txn, &target.map, delta);
             let current = paragraph_formatting(&target.map, &txn);
             if previous != current {
@@ -745,13 +832,15 @@ impl EditingDoc {
             target
                 .map
                 .insert(&mut txn, INDENT_LEFT, Any::Number(current + step));
+            sync_original_formatting(&mut txn, &target.map, &[INDENT_LEFT], &["indentLeftChars"]);
         }
         Ok(Receipt::default())
     }
 
     /// Decreases `indentLeft` by `step` twips, defaulting to
     /// [`INDENT_STEP_TWIPS`] and clamping at zero. Reaching zero removes the
-    /// attribute rather than storing it.
+    /// attribute, except on a paragraph with direct formatting, which keeps an
+    /// explicit zero so a style or list indent does not return on save.
     pub fn decrease_indent(
         &self,
         ctx: &EditCtx,
@@ -764,11 +853,18 @@ impl EditingDoc {
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             let next = (current - step).max(0.0);
-            if next > 0.0 {
+            let direct = matches!(
+                target.map.get(&txn, "_originalFormatting"),
+                Some(Out::Any(Any::Map(_)))
+            );
+            if next > 0.0 || (direct && current != 0.0) {
                 target.map.insert(&mut txn, INDENT_LEFT, Any::Number(next));
+            } else if direct {
+                continue;
             } else {
                 target.map.remove(&mut txn, INDENT_LEFT);
             }
+            sync_original_formatting(&mut txn, &target.map, &[INDENT_LEFT], &["indentLeftChars"]);
         }
         Ok(Receipt::default())
     }
@@ -894,6 +990,158 @@ fn formatting_key(key: &str) -> &str {
 
 fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
+}
+
+fn rebase_attrs(
+    current: &BTreeMap<String, Any>,
+    old: &BTreeMap<String, Any>,
+    new: &BTreeMap<String, Any>,
+) -> BTreeMap<String, Any> {
+    old.keys()
+        .chain(new.keys())
+        .filter(|key| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .filter_map(|key| {
+            let value = present(current.get(key));
+            let next = present(new.get(key));
+            (value == present(old.get(key)) && value != next)
+                .then(|| (key.clone(), next.cloned().unwrap_or(Any::Null)))
+        })
+        .collect()
+}
+
+fn paragraph_chunks<'a>(chunks: &'a [Chunk], bounds: &ParaBounds) -> &'a [Chunk] {
+    let start = chunks.partition_point(|chunk| chunk.end() <= bounds.start);
+    let end = chunks.partition_point(|chunk| chunk.start <= bounds.pilcrow);
+    &chunks[start..end]
+}
+
+struct RestyleInheritance {
+    previous: BTreeMap<String, Any>,
+    current: BTreeMap<String, Any>,
+    previous_defaults: BTreeMap<String, Any>,
+    current_defaults: BTreeMap<String, Any>,
+}
+
+type RestyleInheritanceCache =
+    HashMap<(Option<String>, String, Option<String>), RestyleInheritance>;
+
+fn restyle_inheritance<'a>(
+    cache: &'a mut RestyleInheritanceCache,
+    styles: &crate::seed::StyleResolver,
+    previous_style: Option<&str>,
+    current_style: &str,
+    run_style: Option<&str>,
+) -> &'a RestyleInheritance {
+    cache
+        .entry((
+            previous_style.map(str::to_owned),
+            current_style.to_owned(),
+            run_style.map(str::to_owned),
+        ))
+        .or_insert_with(|| {
+            let inherited = |paragraph_style| {
+                crate::seed::payload(styles.run_attrs(paragraph_style, run_style))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect()
+            };
+            RestyleInheritance {
+                previous: inherited(previous_style),
+                current: inherited(Some(current_style)),
+                previous_defaults: styles.default_run_attrs(previous_style, run_style),
+                current_defaults: styles.default_run_attrs(Some(current_style), run_style),
+            }
+        })
+}
+
+/// Text, and the inline atoms seeded with their run's resolved marks.
+fn carries_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
+    match &chunk.kind {
+        ChunkKind::Text(_) => true,
+        ChunkKind::Embed(Some(map)) => matches!(
+            crate::map_string(map, txn, KIND_KEY).as_deref(),
+            Some("noteRef" | "field" | "break")
+        ),
+        _ => false,
+    }
+}
+
+fn rebase_paragraph_runs(
+    txn: &mut TransactionMut<'_>,
+    target: &TargetPara,
+    chunks: &[Chunk],
+    style_id: &str,
+    styles: &crate::seed::StyleResolver,
+    cache: &mut RestyleInheritanceCache,
+) {
+    let old_style = crate::map_string(&target.map, txn, "pStyle");
+    for chunk in chunks {
+        if !carries_run_formatting(chunk, &*txn) {
+            continue;
+        }
+        let run_style = match chunk.attrs.get("runStyle") {
+            Some(Any::Map(value)) => match value.get("styleId") {
+                Some(Any::String(value)) => Some(value.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let inherited =
+            restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
+        let changes = rebase_attrs(&chunk.attrs, &inherited.previous, &inherited.current);
+        if !changes.is_empty() {
+            let start = chunk.start.max(target.bounds.start);
+            let end = chunk.end().min(target.bounds.pilcrow);
+            target.story.format(
+                txn,
+                start,
+                end - start,
+                changes
+                    .into_iter()
+                    .map(|(key, value)| (Arc::from(key), value))
+                    .collect(),
+            );
+        }
+    }
+    let mut defaults: BTreeMap<String, Any> = match target.map.get(txn, DEFAULT_TEXT_FORMATTING) {
+        Some(Out::Any(Any::Map(value))) => value
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        _ => BTreeMap::new(),
+    };
+    let run_style = match defaults.get("styleId") {
+        Some(Any::String(value)) => Some(value.as_ref()),
+        _ => None,
+    };
+    let inherited = restyle_inheritance(cache, styles, old_style.as_deref(), style_id, run_style);
+    let changes = rebase_attrs(
+        &defaults,
+        &inherited.previous_defaults,
+        &inherited.current_defaults,
+    );
+    if changes.is_empty() {
+        if defaults.is_empty() {
+            target.map.remove(txn, DEFAULT_TEXT_FORMATTING);
+        }
+        return;
+    }
+    for (key, value) in changes {
+        if value == Any::Null {
+            defaults.remove(&key);
+        } else {
+            defaults.insert(key, value);
+        }
+    }
+    if defaults.is_empty() {
+        target.map.remove(txn, DEFAULT_TEXT_FORMATTING);
+    } else {
+        target.map.insert(
+            txn,
+            DEFAULT_TEXT_FORMATTING,
+            Any::Map(Arc::new(defaults.into_iter().collect())),
+        );
+    }
 }
 
 /// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's
@@ -1171,20 +1419,7 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
                 map.insert(txn, auto_key, Any::Bool(false));
             }
         }
-        if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
-            let mut original = (*original).clone();
-            for key in [key, lines_key, auto_key] {
-                match map.get(txn, key) {
-                    Some(Out::Any(value)) => {
-                        original.insert(key.to_owned(), value);
-                    }
-                    _ => {
-                        original.remove(key);
-                    }
-                }
-            }
-            map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
-        }
+        sync_original_formatting(txn, map, &[key, lines_key, auto_key], &[]);
     }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {
         Any::Number(*v)
@@ -1198,6 +1433,28 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     apply(txn, map, "hangingIndent", &delta.hanging_indent, |v| {
         Any::Number(*v)
     });
+    if delta.line_spacing != Patch::Keep || delta.line_spacing_rule != Patch::Keep {
+        sync_original_formatting(txn, map, &["lineSpacing", "lineSpacingRule"], &[]);
+    }
+    if delta.indent_left != Patch::Keep {
+        sync_original_formatting(txn, map, &[INDENT_LEFT], &["indentLeftChars"]);
+    }
+    if delta.indent_right != Patch::Keep {
+        sync_original_formatting(txn, map, &["indentRight"], &["indentRightChars"]);
+    }
+    if delta.indent_first_line == Patch::Clear {
+        sync_original_formatting(
+            txn,
+            map,
+            &[],
+            &[
+                "indentFirstLine",
+                "indentFirstLineChars",
+                "hangingIndent",
+                "hangingIndentChars",
+            ],
+        );
+    }
     apply(txn, map, "bidi", &delta.bidi, |v| Any::Bool(*v));
     apply(txn, map, TABS, &delta.tabs, |stops| {
         Any::Array(Arc::from(
@@ -1218,6 +1475,34 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     for (key, value) in &delta.other {
         set_or_remove(txn, map, key, value.clone());
     }
+}
+
+/// Mirrors the current values of `keys` into the pilcrow's `_originalFormatting`, the direct
+/// formatting a save writes, and drops `dropped` from it.
+fn sync_original_formatting(
+    txn: &mut TransactionMut<'_>,
+    map: &MapRef,
+    keys: &[&str],
+    dropped: &[&str],
+) {
+    let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") else {
+        return;
+    };
+    let mut original = (*original).clone();
+    for key in keys {
+        match map.get(txn, key) {
+            Some(Out::Any(value)) if value != Any::Null => {
+                original.insert((*key).to_owned(), value);
+            }
+            _ => {
+                original.remove(*key);
+            }
+        }
+    }
+    for key in dropped {
+        original.remove(*key);
+    }
+    map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
 }
 
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {

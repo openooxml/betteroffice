@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test';
 import { createElement, memo } from 'react';
 import type { ComponentProps } from 'react';
-import type { AsyncCollaborationReplica, CollaborationReplica } from '@betteroffice/pptx';
+import type { AsyncCollaborationReplica, CollaborationReplica, PresentationHandle } from '@betteroffice/pptx';
 import { PptxEditor } from './PptxEditor';
 import { definePptxPlugin } from './plugins/definePptxPlugin';
 import type { PptxAsyncEditorProps, PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
-import type { PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import type { PptxAsyncEditorAccess, PptxAsyncEditorApi } from './worker/createPeerlessEditorApi';
+import type { PptxCommandAdmissionCode } from './index';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
@@ -18,13 +19,14 @@ test('default and in-thread async props preserve async contextual APIs', () => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
       assertType<Equal<ReturnType<typeof api.goToSlide>, Promise<boolean>>>();
       assertType<Equal<ReturnType<typeof api.clearSelection>, Promise<void>>>();
+      assertType<Equal<ReturnType<typeof api.save>, Promise<Uint8Array>>>();
+      assertType<Equal<ReturnType<typeof api.saveAsync>, Promise<Uint8Array>>>();
       // @ts-expect-error
       api.handle;
-      // @ts-expect-error
-      api.save();
     }} />,
     <PptxEditor fonts={[]} experimentalWorkerOpen={false} onReady={(api) => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
+      assertType<Equal<ReturnType<typeof api.save>, Promise<Uint8Array>>>();
     }} />,
     <PptxEditor fonts={[]} readOnly onChange={() => {}} onReady={(api) => {
       assertType<Equal<typeof api, PptxAsyncEditorApi>>();
@@ -46,6 +48,8 @@ test('plugin props preserve async and legacy contextual APIs', () => {
     { fonts: [], plugins, pluginGrants: {}, onPluginError: () => {} } satisfies PptxAsyncEditorProps,
     { fonts: [], plugins } satisfies PptxEditorProps,
     <PptxEditor legacySyncApi fonts={[]} plugins={plugins}
+      onReady={(api) => { assertType<Equal<typeof api, PptxEditorApi>>(); }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} plugins={plugins}
       onReady={(api) => { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); }} />,
     <PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} plugins={plugins}
       onReady={(api) => { assertType<Equal<typeof api, PptxEditorApi>>(); }} />,
@@ -56,6 +60,10 @@ test('plugin props preserve async and legacy contextual APIs', () => {
 test('only legacy sync props expose sync contextual APIs', () => {
   const check = () => [
     <PptxEditor legacySyncApi fonts={[]} onReady={(api) => {
+      assertType<Equal<typeof api, PptxEditorApi>>();
+      assertType<Equal<ReturnType<typeof api.save>, Uint8Array>>();
+    }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} onReady={(api) => {
       assertType<Equal<typeof api, PptxWorkerEditorApi>>();
       assertType<Equal<ReturnType<typeof api.goToSlide>, boolean>>();
     }} />,
@@ -65,6 +73,9 @@ test('only legacy sync props expose sync contextual APIs', () => {
       api.save();
     }} />,
     <PptxEditor legacySyncApi fonts={[]} readOnly onReady={(api) => {
+      assertType<Equal<typeof api, PptxEditorApi>>();
+    }} />,
+    <PptxEditor legacySyncApi experimentalWorkerOpen fonts={[]} readOnly onReady={(api) => {
       assertType<Equal<typeof api, PptxWorkerViewerApi>>();
     }} />,
     <PptxEditor legacySyncApi fonts={[]} collaboration={{ clientId: 1, onReplica: (replica) => {
@@ -107,5 +118,24 @@ test('rejects sync callbacks without a literal legacy opt-in', () => {
     // @ts-expect-error
     { fonts: [], onReady: sync } satisfies PptxEditorProps,
   ];
+  expect(check).toBeFunction();
+});
+
+test('async editor parity types', () => {
+  const check = () => [
+    <PptxEditor fonts={[]} collaboration={{ onReplica: (replica) => {
+      assertType<Equal<typeof replica, AsyncCollaborationReplica | null>>();
+    } }} />,
+    <PptxEditor fonts={[]} collaboration={{ clientId: 7 }} />,
+  ];
+  assertType<Equal<AsyncCollaborationReplica['encodeStateAsUpdateChunks'],
+    ((remoteStateVector: Uint8Array, maxChunkBytes: number) => Promise<Uint8Array[]>) | undefined>>();
+  assertType<Equal<AsyncCollaborationReplica['applyUpdateChunks'],
+    ((updates: readonly Uint8Array[]) => Promise<unknown>) | undefined>>();
+  assertType<Equal<Awaited<ReturnType<PptxAsyncEditorApi['exportStructured']>>, ReturnType<PresentationHandle['exportStructured']>>>();
+  assertType<Equal<Awaited<ReturnType<PptxAsyncEditorApi['exportMarkdown']>>, ReturnType<PresentationHandle['exportMarkdown']>>>();
+  assertType<Equal<PptxAsyncEditorApi['exportStructured'], PptxAsyncEditorAccess['exportStructured']>>();
+  assertType<Equal<PptxCommandAdmissionCode, 'input-failed' | 'document-replaced' | 'target-changed' | 'gesture-active'
+    | 'editor-unavailable' | 'read-only' | 'invalid-arguments'>>();
   expect(check).toBeFunction();
 });

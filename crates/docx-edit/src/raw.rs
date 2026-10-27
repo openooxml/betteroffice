@@ -6,8 +6,8 @@ use std::sync::Arc;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, ClientID, ID, In, IndexScope, IndexedSequence, Map, MapPrelim, MapRef, Out,
-    ReadTxn, StickyIndex, Text, TextRef, TransactionMut,
+    Any, Assoc, ClientID, ID, In, IndexScope, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex,
+    Text, TextRef, TransactionMut,
 };
 
 use docx_parse::paragraph_identity::parse_paragraph_id;
@@ -15,6 +15,7 @@ use docx_parse::paragraph_identity::parse_paragraph_id;
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC};
 use crate::op::{OpError, OpResult};
+use crate::sticky_positions::sticky_index;
 use crate::{
     COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, anchor_value, is_pilcrow,
     map_string, out_len, story_ref,
@@ -483,6 +484,7 @@ fn apply_raw_ops_to_story(
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
     for mut op in ops {
+        ooxml_opc::progress::tick();
         if let RawOp::InsertEmbed { kind, payload, .. } = &mut op
             && kind == PILCROW_KIND
         {
@@ -662,20 +664,18 @@ fn apply_raw_op_absolute(
                     debug_assert_eq!(
                         (Some(&anchors.0), Some(&anchors.1)),
                         (
-                            story.sticky_index(txn, start, Assoc::After).as_ref(),
-                            story.sticky_index(txn, end, Assoc::Before).as_ref()
+                            sticky_index(story, txn, start, Assoc::After).as_ref(),
+                            sticky_index(story, txn, end, Assoc::Before).as_ref()
                         )
                     );
                     anchors
                 } else {
                     let start_anchor =
-                        story
-                            .sticky_index(txn, start, Assoc::After)
-                            .ok_or_else(|| {
-                                OpError::InvalidComment("start anchor could not be made".into())
-                            })?;
+                        sticky_index(story, txn, start, Assoc::After).ok_or_else(|| {
+                            OpError::InvalidComment("start anchor could not be made".into())
+                        })?;
                     let end_anchor =
-                        story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
+                        sticky_index(story, txn, end, Assoc::Before).ok_or_else(|| {
                             OpError::InvalidComment("end anchor could not be made".into())
                         })?;
                     (start_anchor, end_anchor)
@@ -743,8 +743,8 @@ fn guard_range<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32, len: u32) 
 mod tests {
     use std::sync::Arc;
 
-    use yrs::Transact;
     use yrs::updates::encoder::Encode;
+    use yrs::{IndexedSequence, Transact};
 
     use super::*;
     use crate::canonical::project_story;
@@ -848,13 +848,12 @@ mod tests {
                             .filter(|len| *len > 0)
                             .ok_or(OpError::InvalidRange { start, end })?;
                         guard_range(txn, start, len)?;
-                        let start_anchor = story
-                            .sticky_index(txn, start, Assoc::After)
+                        let start_anchor = sticky_index(&story, txn, start, Assoc::After)
                             .ok_or_else(|| {
                                 OpError::InvalidComment("start anchor could not be made".into())
                             })?;
                         let end_anchor =
-                            story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
+                            sticky_index(&story, txn, end, Assoc::Before).ok_or_else(|| {
                                 OpError::InvalidComment("end anchor could not be made".into())
                             })?;
                         anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));

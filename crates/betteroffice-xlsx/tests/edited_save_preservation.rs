@@ -1378,3 +1378,120 @@ fn captured_format_preserves_protection_after_peer_style_reordering() {
         assert_eq!(c_xf, a_xf);
     }
 }
+
+fn saved_dimension(workbook: &Workbook) -> String {
+    let xml = text(
+        &parts(&workbook.save().unwrap()),
+        "xl/worksheets/sheet2.xml",
+    );
+    let start = xml.find("<dimension").expect("saved dimension");
+    let end = start + xml[start..].find("/>").unwrap() + 2;
+    xml[start..end].to_owned()
+}
+
+fn dimension_source(dimension: &str, sheet_data: &str) -> Vec<u8> {
+    package_with_second_sheet(VARIANTS[0].1, &format!("{dimension}{sheet_data}"))
+}
+
+fn edit(workbook: &mut Workbook, row: u32, col: u32, input: &str) {
+    workbook
+        .edit_cell(
+            SheetId(1),
+            CellRef::new(row, col),
+            input,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+fn apply(workbook: &mut Workbook, op: Op) {
+    workbook
+        .apply_ops(vec![op], CalculationOptions::default())
+        .unwrap();
+}
+
+#[test]
+fn dimension_kept_byte_for_byte_when_the_used_range_is_unchanged() {
+    let authored = "<dimension  ref='A1:B3' />";
+    let mut workbook = Workbook::open(&dimension_source(authored, SHEET2)).unwrap();
+    edit(&mut workbook, 0, 0, "7");
+    assert_eq!(saved_dimension(&workbook), authored);
+}
+
+#[test]
+fn dimension_grows_with_cells_written_outside_it() {
+    let mut workbook =
+        Workbook::open(&dimension_source(r#"<dimension ref="A1:B3"/>"#, SHEET2)).unwrap();
+    edit(&mut workbook, 5, 4, "8");
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="A1:E6"/>"#);
+}
+
+#[test]
+fn dimension_keeps_preserved_empty_source_cells() {
+    let sheet_data = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row>"#,
+        r#"<row r="100"><c r="Z100"/></row></sheetData>"#,
+    );
+    let mut workbook = Workbook::open(&dimension_source(
+        r#"<dimension ref="A1:Z100"/>"#,
+        sheet_data,
+    ))
+    .unwrap();
+    edit(&mut workbook, 1, 1, "2");
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="A1:Z100"/>"#);
+}
+
+#[test]
+fn dimension_moves_preserved_empty_source_cells_with_inserted_rows() {
+    let sheet_data = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row>"#,
+        r#"<row r="100" ht="20" customHeight="1"><c r="Z100"/></row></sheetData>"#,
+    );
+    let mut workbook = Workbook::open(&dimension_source(
+        r#"<dimension ref="A1:Z100"/>"#,
+        sheet_data,
+    ))
+    .unwrap();
+    apply(
+        &mut workbook,
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 1,
+            count: 1,
+        },
+    );
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="A1:Z101"/>"#);
+}
+
+#[test]
+fn dimension_follows_inserted_columns_and_deleted_rows() {
+    let mut workbook =
+        Workbook::open(&dimension_source(r#"<dimension ref="A1:B3"/>"#, SHEET2)).unwrap();
+    apply(
+        &mut workbook,
+        Op::InsertCols {
+            sheet: SheetId(1),
+            at: 0,
+            count: 2,
+        },
+    );
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="C1:D3"/>"#);
+    apply(
+        &mut workbook,
+        Op::DeleteRows {
+            sheet: SheetId(1),
+            at: 2,
+            count: 1,
+        },
+    );
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="C1:D2"/>"#);
+    apply(
+        &mut workbook,
+        Op::DeleteRows {
+            sheet: SheetId(1),
+            at: 0,
+            count: 2,
+        },
+    );
+    assert_eq!(saved_dimension(&workbook), r#"<dimension ref="A1"/>"#);
+}

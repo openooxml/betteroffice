@@ -1,9 +1,14 @@
 import { CRATES, DOCS, NPM, PYPI, REPO } from "../../../shared/sites";
-export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
+export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, EVALS_SITE, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
 
 export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
 export const SITE_DESCRIPTION =
   "Open-source DOCX, XLSX and PPTX editors for React, with Rust and WebAssembly cores, collaboration, and headless APIs. Apache-2.0.";
+
+export const BLOG = {
+  heading: "Blog",
+  description: "Posts from the BetterOffice project.",
+};
 
 export const HERO = {
   title: "BetterOffice",
@@ -136,7 +141,7 @@ export const BENCHMARKS_SECTION = {
 
 export const AGENT_EVALS = {
   heading: "Agent edits",
-  lead: (tasks: number) => `Same model, same ${tasks} editing tasks, two toolsets. An edit counts only if the requested change is there and nothing else in the file moved.`,
+  lead: (runs: number) => `Same model, ${runs} graded runs, two toolsets. An edit counts only if the requested change is there and nothing else in the file moved.`,
   method: `${REPO}#evals`,
   more: "Method, tasks and fixtures",
 };

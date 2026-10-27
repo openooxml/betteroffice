@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { resolveReservations, validReservationsPayload } from './reservations';
 import * as queryModule from '../layout/render/displayListQueries';
 import * as rustQueries from '../layout/render/rustDisplayList';
 import type { DisplayPage, TextRunPrimitive } from '../layout/render/displayList';
@@ -9,16 +10,20 @@ import { DisplayPositionIndex } from './displayPositionIndex';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { YrsPositionProjection } from './yrsPositionProjection';
 import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
-import type { YrsLoc, YrsStoryRange, YrsStorySegment } from './index';
+import type { YrsLoc, YrsStoryRange, YrsStorySegment, YrsTableRange } from './index';
 import { mintCommandSelection } from './residentCommandAnchors';
+import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
 import { createProposalRegistry, proposalRevisionPreview } from './proposals';
-import { applyDocxCommand, preflightDocxCommand } from './residentCommandActions';
+import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand } from './residentCommandActions';
+import { createResidentCommandHost } from './residentCommandHost';
+import { isTransferResult } from '../../../../shared/office-session/protocol';
+import * as selectionModule from './residentCommandSelection';
 import { releaseResidentSelectionReads, resolveDocxSelectionIntent, type DocxSelectionCommandIntent } from './residentCommandSelection';
-import type { DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest, ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandSelection, DocxNavigationIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { TIMEOUT, closeCommandEngines, command, context, execute, openCommandEngine as openEngine, selection, texts, type CommandArm } from './residentCommandTestSupport';
 
-const selectionEngines = new Set<ResidentDocxCommandEngine>();
+const selectionEngines = new Set<DocxWorkerCommandEngine>();
 const releasesAfterTest: (() => void)[] = [];
 
 afterEach(() => {
@@ -95,6 +100,80 @@ function ordered(arm: CommandArm, intent: DocxCommandEnvelope, predecessor: Docx
   return result;
 }
 
+test('real point selections defer frames with End queued and acknowledge cross-paragraph edit state', async () => {
+  await loadRustDisplayListQueryEngine();
+  const arm = await openCommandEngine(['Alpha beta', 'Second']);
+  const current = layout(arm);
+  const paragraphs = arm.engine.paragraphs('body');
+  const init: DocxCommandInitRequest = {
+    session: 'd1-worker', incarnation: 1, epoch: 1, readOnly: false,
+    fonts: [], layoutInput: '{}', layoutWithRegions: true, layoutRevision: 0, extras: '{}',
+  };
+  const hooks = createResidentDocxCommandHooks(arm.engine, init, { readSelectionLayout: () => current });
+  const deferredAcks: DocxCommandAck[] = [];
+  const rendered: number[] = [];
+  let revision = 0;
+  const host = createResidentCommandHost({
+    init, registry: { handlers: {}, policies: {} },
+    selectionAck: { echoContext: () => undefined, deferFrame: ack => { deferredAcks.push(ack); } },
+    hooks: {
+      ...hooks,
+      frame({ coversThroughSeq }) {
+        rendered.push(coversThroughSeq);
+        return { coversThroughSeq, revision: ++revision, payload: {
+          frame: new ArrayBuffer(0), caret: { frameEpoch: revision, caretRect: null }, layoutRevision: 0,
+        } };
+      },
+      snapshot: () => arm.engine.encodeState(),
+    },
+  });
+  const initial = await host.initial();
+  const initialState = (isTransferResult(initial) ? initial.value : initial).editState;
+  const click = (paraId: string) => {
+    const page = current.frame.pages.find(({ page }) => page.primitives.some(primitive =>
+      primitive.kind === 'text' && primitive.paraId === paraId));
+    const run = page?.page.primitives.find((primitive): primitive is TextRunPrimitive =>
+      primitive.kind === 'text' && primitive.paraId === paraId);
+    if (!page || !run) throw new Error('Paragraph has no rendered text');
+    return command(arm, 'selectPoint', {
+      page: { pageId: page.pageId.toString(), pageIndex: page.pageIndex },
+      x: run.x + run.width / 2, y: run.baselineY - 2,
+      layoutRevision: current.layoutRevision, frameEpoch: current.frame.frameEpoch, clickCount: 1,
+      modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+    });
+  };
+  const point = click(paragraphs[0]!.paraId);
+  const clicked = host.handler(undefined, point);
+  const end = host.handler(undefined, command(arm, 'navigate', {
+    unit: 'line', direction: 'forward', extend: false,
+  }, { afterSeq: point.seq }));
+  const result = await clicked;
+  const ack = isTransferResult(result) ? result.value : result;
+  expect(ack.outcomes).toEqual([{ seq: point.seq, status: 'noop' }]);
+  expect(ack.frame).toBeUndefined();
+  expect(ack.selection?.focus.paraId).toBe(paragraphs[0]!.paraId);
+  expect(ack.selection?.focus.offset).toBeGreaterThan(0);
+  expect(hooks.editState()).toEqual(initialState);
+  const ended = await end;
+  expect((isTransferResult(ended) ? ended.value : ended).frame).toBeUndefined();
+  expect(hooks.selection()?.focus.offset).toBe(paragraphs[0]!.text.length);
+  expect(deferredAcks.map(ack => ack.throughSeq)).toEqual([1, 2]);
+  expect(rendered).toEqual([0]);
+  const changed = await host.handler(undefined, click(paragraphs[1]!.paraId));
+  const changedAck = isTransferResult(changed) ? changed.value : changed;
+  expect(changedAck.outcomes).toEqual([{ seq: 3, status: 'noop' }]);
+  expect(changedAck.selection?.focus.paraId).toBe(paragraphs[1]!.paraId);
+  expect(changedAck.editState?.toolbar?.paraId).toBe(paragraphs[1]!.paraId);
+  expect(changedAck.editState).toEqual(hooks.editState());
+  expect(changedAck.version).toBe(0);
+  expect(changedAck.frame).toBeUndefined();
+  expect(deferredAcks.map(ack => ack.throughSeq)).toEqual([1, 2, 3]);
+  expect(rendered).toEqual([0]);
+  const deferredFrame = await host.frame();
+  expect((isTransferResult(deferredFrame) ? deferredFrame.value : deferredFrame).coversThroughSeq).toBe(3);
+  expect(rendered).toEqual([0, 3]);
+}, TIMEOUT);
+
 function fakeArm(stories: Record<string, string[]>): CommandArm {
   const id = (story: string, index: number) => `${story}-${index}`;
   const ordinal = (story: string, paraId: string) => stories[story]!.findIndex((_, index) => id(story, index) === paraId);
@@ -135,7 +214,7 @@ function fakeArm(stories: Record<string, string[]>): CommandArm {
       return { story: at.story, encoded: Uint8Array.of(key) };
     },
     resolveStickyPosition: (at: { encoded: Uint8Array }) => sticky.get(at.encoded[0]!) ?? null,
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   selectionEngines.add(engine);
   return {
     engine, native: {} as CommandArm['native'], version: 0, seq: 0,
@@ -177,6 +256,202 @@ function fakeQueries(overrides: Partial<queryModule.DisplayListQueries>): queryM
     ...overrides,
   };
 }
+
+test('page_navigation_moves_by_viewport_height_and_preserves_the_selection_anchor', () => {
+  const arm = fakeArm({ body: Array<string>(7).fill('abcdef') });
+  const frame = fakeFrame([0, 1].map(pageIndex => ({ pageIndex, width: 600, height: 300, primitives: [] })));
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const lines = Array.from({ length: 7 }, (_, ordinal) => ({
+    ...fakeLine(index.positionOf({ story: 'body', paraId: `body-${ordinal}`, offset: 0 }, 'body')!,
+      index.positionOf({ story: 'body', paraId: `body-${ordinal}`, offset: 6 }, 'body')!, ordinal < 3 ? 0 : 1),
+    x: 20, y: ordinal < 3 ? 20 + ordinal * 80 : 20 + (ordinal - 3) * 80,
+  }));
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    displayList: frame.displayList,
+    caretRect: position => {
+      const line = lines.find(line => line.from <= position && position <= line.to)!;
+      return { ...line, x: 20 + (position - line.from) * 10, width: 1 };
+    },
+    visualLinesOnPage: pageIndex => lines.filter(line => line.pageIndex === pageIndex),
+    hitTestRegions: (pageIndex, x, y) => {
+      const line = lines.find(line => line.pageIndex === pageIndex && line.y <= y && y <= line.y + line.height)!;
+      return { region: 'body', pos: line.from + Math.max(0, Math.min(6, Math.round((x - 20) / 10))), target: 'text' };
+    },
+  }));
+  try {
+    arm.state.selection = selection('body-0', 3);
+    const down = runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 50, distance: 160 });
+    expect(down.selection).toEqual(selection('body-2', 3));
+    arm.state.selection = down.selection;
+    const up = runNavigation(arm, frame, { unit: 'page', direction: 'up', extend: false, goalX: 50, distance: 160 });
+    expect(up.selection).toEqual(selection('body-0', 3));
+    arm.state.selection = up.selection;
+    const extended = runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: true, goalX: 50, distance: 316 });
+    expect(extended.selection.anchor).toEqual(up.selection.anchor);
+    expect(extended.selection.focus).toEqual({ story: 'body', paraId: 'body-3', offset: 3 });
+    expect(selectionModule.readDocxSelectionFocus(arm.engine, extended.selection, { frame, layoutRevision: 0 }))
+      .toMatchObject({ pageIndex: 1, x: 50, y: 20, height: 10 });
+    arm.state.selection = extended.selection;
+    const end = runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: true, goalX: 50, distance: 2000 });
+    expect(end.selection.anchor).toEqual(up.selection.anchor);
+    expect(end.selection.focus).toEqual({ story: 'body', paraId: 'body-6', offset: 6 });
+    arm.state.selection = end.selection;
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 50, distance: 160 }).selection)
+      .toEqual(selection('body-6', 6));
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'up', extend: false, goalX: 50, distance: 2000 }).selection)
+      .toEqual(selection('body-0', 0));
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('shift_page_navigation_extends_to_the_landing_cell_from_above_and_within_a_table', () => {
+  const stories = ['body:t0:r0c0', 'body:t0:r1c0', 'body:t0:r2c0'];
+  const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
+  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const segments = arm.engine.geometryReader.storySegments;
+  arm.engine.geometryReader.storySegments = story => story === 'body' ? [
+    ...segments(story).slice(0, 2),
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload },
+    ...segments(story).slice(2),
+  ] : segments(story);
+  Object.assign(arm.engine, { tablePayload: () => payload, cellSelection: () => null });
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const locations = [{ story: 'body', paraId: 'body-0', offset: 0 },
+    ...stories.map(story => ({ story, paraId: `${story}-0`, offset: 0 }))];
+  const lines = locations.map((at, ordinal) => ({ ...fakeLine(index.positionOf(at, 'body')!, index.positionOf(at, 'body')! + 4), y: 20 + ordinal * 60 }));
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    displayList: frame.displayList,
+    caretRect: position => ({ ...lines.find(line => line.from <= position && position <= line.to)!, width: 0 }),
+    visualLinesOnPage: () => lines,
+    hitTestRegions: (_page, _x, y) => ({ region: 'body', pos: lines.find(line => line.y <= y && y <= line.y + line.height)!.from, target: 'text' }),
+  }));
+  try {
+    for (const [start, direction, distance, anchorRow, headRow] of [
+      [locations[0]!, 'down', 180, 0, 2],
+      [locations[1]!, 'down', 120, 0, 2],
+      [locations[3]!, 'up', 120, 2, 0],
+    ] as const) {
+      arm.state.selection = { anchor: start, focus: start };
+      const result = runNavigation(arm, frame, { unit: 'page', direction, extend: true, goalX: 20, distance });
+      expect(result.status).toBe('resolved');
+      expect(result.cells).toEqual({
+        anchor: { story: 'body', tableIndex: 0, row: anchorRow, column: 0 },
+        head: { story: 'body', tableIndex: 0, row: headRow, column: 0 },
+      });
+      expect(result.selection.anchor.story).toBe(stories[anchorRow]!);
+      expect(result.selection.focus).toEqual(result.selection.anchor);
+    }
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('repeated_shift_page_down_grows_the_cell_selection_and_shift_page_up_shrinks_it', () => {
+  const stories = Array.from({ length: 7 }, (_, row) => `body:t0:r${row}c0`);
+  const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
+  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const segments = arm.engine.geometryReader.storySegments;
+  arm.engine.geometryReader.storySegments = story => story === 'body' ? [
+    ...segments(story).slice(0, 2),
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload },
+    ...segments(story).slice(2),
+  ] : segments(story);
+  let cells: YrsTableRange | null = null;
+  Object.assign(arm.engine, { tablePayload: () => payload, cellSelection: () => cells });
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const lines = stories.map((story, row) => {
+    const from = index.positionOf({ story, paraId: `${story}-0`, offset: 0 }, 'body')!;
+    return { ...fakeLine(from, from + 4), y: 20 + row * 60 };
+  });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    displayList: frame.displayList,
+    caretRect: position => ({ ...lines.find(line => line.from <= position && position <= line.to)!, width: 0 }),
+    visualLinesOnPage: () => lines,
+    hitTestRegions: (_page, _x, y) => ({ region: 'body', pos: lines.find(line => line.y <= y && y <= line.y + line.height)!.from, target: 'text' }),
+  }));
+  try {
+    const anchor = { story: stories[0]!, paraId: `${stories[0]}-0`, offset: 2 };
+    arm.state.selection = { anchor, focus: anchor };
+    for (const [direction, row] of [['down', 2], ['down', 4], ['up', 2]] as const) {
+      const result = runNavigation(arm, frame, { unit: 'page', direction, extend: true, goalX: 20, distance: 120 });
+      expect(result.status).toBe('resolved');
+      expect(result.cells).toEqual({
+        anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 },
+        head: { story: 'body', tableIndex: 0, row, column: 0 },
+      });
+      expect(result.selection).toEqual({ anchor, focus: anchor });
+      arm.state.selection = result.selection;
+      cells = result.cells ?? null;
+    }
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('page_navigation_lands_on_image_and_empty_paragraph_pages_and_clamps_to_root_bounds', () => {
+  const arm = fakeArm({ body: ['\uFFFC', 'Text', '', '\uFFFC', '\uFFFC'] });
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const position = (ordinal: number, offset = 0) => index.positionOf({ story: 'body', paraId: `body-${ordinal}`, offset }, 'body')!;
+  const lines = [0, 1, 2, 3, 4].map(ordinal => ({
+    ...fakeLine(position(ordinal), position(ordinal, ordinal === 1 ? 4 : ordinal === 2 ? 0 : 1), ordinal), x: 20, y: 30,
+  }));
+  const frame = fakeFrame(lines.map<DisplayPage>((line, pageIndex) => ({
+    pageIndex, width: 600, height: 300,
+    primitives: [1, 2].includes(pageIndex) ? [] : [{
+      kind: 'image', relId: 'image', x: line.x, y: line.y, w: 60, h: 10, docStart: line.from, docEnd: line.to,
+    }],
+  })));
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    displayList: frame.displayList,
+    caretRect: at => ({ ...lines.find(line => line.from <= at && at <= line.to)!, width: 0 }),
+    visualLinesOnPage: pageIndex => [1, 2].includes(pageIndex) ? [lines[pageIndex]!] : [],
+    hitTestRegions: pageIndex => ({ region: 'body', pos: lines[pageIndex]!.from, target: pageIndex === 2 ? 'text' : 'image' }),
+  }));
+  try {
+    arm.state.selection = selection('body-1', 0);
+    for (const ordinal of [2, 3, 4]) {
+      const moved = runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 20, distance: 316 });
+      expect(moved.selection).toEqual(selection(`body-${ordinal}`, 0));
+      arm.state.selection = moved.selection;
+    }
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 20, distance: 2000 }).selection)
+      .toEqual(selection('body-4', 1));
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'up', extend: false, goalX: 20, distance: 2000 }).selection)
+      .toEqual(selection('body-0', 0));
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('page_navigation_clamps_past_unpainted_empty_root_paragraphs', () => {
+  const arm = fakeArm({ body: ['', 'Text', ''] });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    displayList: frame.displayList,
+    caretRect: () => ({ pageIndex: 0, x: 20, y: 40, width: 0, height: 10 }),
+    visualLinesOnPage: () => [{ ...fakeLine(3, 7), y: 40 }],
+  }));
+  try {
+    arm.state.selection = selection('body-1', 2);
+    for (const [direction, ordinal] of [['up', 0], ['down', 2]] as const) {
+      expect(runNavigation(arm, frame, { unit: 'page', direction, extend: false, goalX: 20, distance: 1000 }).selection)
+        .toEqual(selection(`body-${ordinal}`, 0));
+    }
+  } finally {
+    queries.mockRestore();
+  }
+});
 
 test('d2a_query_fakes_reject_unconfigured_geometry_reads', async () => {
   const queries: queryModule.DisplayListQueries = fakeQueries({
@@ -222,7 +497,7 @@ test('d2a_worker_read_only_initial_frame_does_not_load_query_wasm', async () => 
   const client = new ResidentEngineWorkerClient(worker);
   try {
     await client.open(new Uint8Array(rezipPartsToArrayBuffer(parts)));
-    const init: ResidentCommandInitRequest = {
+    const init: DocxCommandInitRequest = {
       session: 'd2a-viewer', incarnation: 1, epoch: 1, readOnly: true,
       fonts: [new Uint8Array(readFileSync(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)))],
       layoutInput: JSON.stringify({
@@ -249,27 +524,31 @@ test('d2a_worker_read_only_initial_frame_does_not_load_query_wasm', async () => 
 
 function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?: (pages: number[], frameEpoch: number) => RetainedFrame) {
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });
-  const factory: ResidentCommandHooksFactory = (_engine, _init, environment) => ({
+  const factory: DocxCommandHooksFactory = (_engine, _init, environment) => ({
     preflight: (intent, ctx) => preflightDocxCommand(arm.engine, arm.state, intent, ctx, environment),
     apply: (prepared, ctx) => applyDocxCommand(arm.engine, arm.state, prepared, ctx),
     selection: () => arm.state.selection,
     editState: () => { throw new Error('Unused edit-state projection'); },
   });
   const source = readFileSync(new URL('./residentEngineWorker.ts', import.meta.url), 'utf8');
+  const reservationStart = source.indexOf('const appliedLayoutReservations =');
+  const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
     session: {
       ...arm.engine, proposalEngine: { version: () => arm.engine.geometryReader.version() },
       selection: () => ({ anchor: arm.state.selection!.anchor, head: arm.state.selection!.focus }),
       buildDisplayPagesFrame: buildPages ?? (() => { throw new Error('Unexpected page build'); }),
     },
     commandHooksFactory: factory,
-    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    collaboration: null,
+    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
     readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine: async () => {}, loadedRustDisplayListQueryEngine: () => undefined,
     applyFrameDelta: (_frame: RetainedFrame, next: RetainedFrame) => next,
@@ -277,9 +556,9 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
   const worker = new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, install: (frame, revision) => { retainedFrame = frame; layoutRevision = revision; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
+  )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void; install: (frame: RetainedFrame, revision: number) => void };
   releasesAfterTest.push(worker.release);
   return worker;
 }
@@ -627,31 +906,34 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const windowed = applyFrameDelta(complete, decodeFrameDelta(released));
   expect(windowed.pages[1]!.page.unbuilt).toBe(true);
   const builds = spyOn(arm.engine, 'buildDisplayPagesFrame');
-  const factory: ResidentCommandHooksFactory = (_engine, _init, environment) => ({
+  const factory: DocxCommandHooksFactory = (_engine, _init, environment) => ({
     preflight: (intent, ctx) => preflightDocxCommand(arm.engine, arm.state, intent, ctx, environment),
     apply: (prepared, ctx) => applyDocxCommand(arm.engine, arm.state, prepared, ctx),
     selection: () => arm.state.selection,
     editState: () => { throw new Error('Unused edit-state projection'); },
   });
   const source = readFileSync(new URL('./residentEngineWorker.ts', import.meta.url), 'utf8');
+  const reservationStart = source.indexOf('const appliedLayoutReservations =');
+  const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    session: arm.engine, commandHooksFactory: factory,
-    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    session: arm.engine, commandHooksFactory: factory, collaboration: null,
+    init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
     readResidentFrameGeometry, resetResidentObjectHandles, proposals: null, createProposalRegistry, proposalRevisionPreview,
     sessionFonts: null, ResidentSessionFonts, scope: { fonts: undefined },
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => index, createDisplayListQueries: queryModule.createDisplayListQueries,
     loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine, applyFrameDelta, decodeFrameDelta,
     retainedPageByKey: (frame: RetainedFrame, pageId: string) => retainedFramePageById(frame, BigInt(pageId)),
   };
   const bind = () => {
     const worker = new Function(...Object.keys(dependencies),
-      new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
+      new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
       '\nreturn { hooks: bindResidentCommands(init), release: () => { releaseCommandHost?.(); releaseCommandHost = null; } };'
-    )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; release(): void };
+    )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; release(): void };
     releasesAfterTest.push(worker.release);
     return worker.hooks;
   };
@@ -805,10 +1087,39 @@ test('d2a_repeated_multiline_headers_navigate_within_the_active_rendering', asyn
   try {
     expect(runNavigation(arm, frame, { unit: 'line', direction: 'down', extend: false, goalX: 20 }).selection).toEqual(arm.state.selection);
     expect(runNavigation(arm, frame, { unit: 'line', direction: 'up', extend: false, goalX: 20 }).selection.focus.paraId).toBe('hf:head-0');
+    expect(runNavigation(arm, frame, { unit: 'page', direction: 'up', extend: false, goalX: 20, distance: 20 }).selection.focus.paraId).toBe('hf:head-0');
     expect(scoped.mock.calls[0]![0].pages.map((page) => page.pageIndex)).toEqual([2]);
   } finally {
     scoped.mockRestore();
   }
+});
+
+test('repeated header selection focus reports the clicked or opened page', async () => {
+  await loadRustDisplayListQueryEngine();
+  const arm = fakeArm({ body: ['Body'], 'hf:head': ['Header'] });
+  const primitives: TextRunPrimitive[] = [{
+    kind: 'text', text: 'Header', paraId: 'hf:head-0', docStart: 1, docEnd: 7,
+    x: 20, baselineY: 40, width: 60, font: '11px sans-serif', color: '#000000',
+  }];
+  const frame = fakeFrame([0, 1, 2].map((pageIndex) => ({
+    pageIndex, width: 600, height: 800, primitives: [],
+    header: { kind: 'header', rId: 'head', y: 0, height: 80, primitives },
+  })));
+  const point = command(arm, 'selectPoint', {
+    page: { pageId: '2', pageIndex: 1 }, x: 40, y: 37, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+    modifiers: { shift: false, alt: false, ctrl: false, meta: false },
+  }) as DocxSelectionCommandIntent;
+  arm.state.selection = resolveDocxSelectionIntent({
+    engine: arm.engine, state: arm.state, command: point, context: context(arm, point), readLayout: () => ({ frame, layoutRevision: 0 }),
+  }).selection;
+  expect(arm.state.selection.focus).toMatchObject({ story: 'hf:head', paraId: 'hf:head-0' });
+  expect(selectionModule.readDocxSelectionFocus(arm.engine, arm.state.selection, { frame, layoutRevision: 0 }))
+    .toMatchObject({ pageIndex: 1 });
+  selectionModule.selectResidentPartPage(arm.engine, 'hf:head', 2);
+  expect(selectionModule.readDocxSelectionFocus(arm.engine, arm.state.selection, { frame, layoutRevision: 0 }))
+    .toMatchObject({ pageIndex: 2 });
+  expect(runNavigation(arm, frame, { unit: 'page', direction: 'down', extend: false, goalX: 20, distance: 160 }).selection.focus)
+    .toMatchObject({ story: 'hf:head', paraId: 'hf:head-0', offset: 6 });
 });
 
 test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions', () => {

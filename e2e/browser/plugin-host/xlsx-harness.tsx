@@ -5,6 +5,7 @@ import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 import {
   XlsxEditor,
   defineXlsxPlugin,
+  type XlsxAsyncEditorApi,
   type XlsxEditorApi,
   type XlsxPluginContext,
   type XlsxPluginNavigationResult,
@@ -12,17 +13,30 @@ import {
 } from '@betteroffice/xlsx-react';
 import workbookUrl from '../../../packages/xlsx/test-fixtures/sample.xlsx?url';
 
+type ProbeContext = XlsxPluginContext<null>;
+
 interface ProbeWindow {
-  editor: XlsxEditorApi | null;
+  editor: XlsxEditorApi | XlsxAsyncEditorApi | null;
+  /** Runs `action` in the probe plugin's context, the same on either engine. */
+  act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
   navigation: XlsxPluginNavigationResult | null;
   selection: XlsxPluginSelection;
   marks: number;
+  mainThreadEngines: number;
 }
 
-const probe: ProbeWindow = { editor: null, navigation: null, selection: null, marks: 0 };
+const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
+let pluginContext: ProbeContext | null = null;
+const probe: ProbeWindow = {
+  editor: null,
+  act: (action) =>
+    new Promise((resolve, reject) => void pluginContext!.run((context) => action(context).then(resolve, reject))),
+  navigation: null,
+  selection: null,
+  marks: 0,
+  mainThreadEngines: 0,
+};
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
-
-type ProbeContext = XlsxPluginContext<null>;
 
 function ProbePanel({ context }: { context: ProbeContext }) {
   return (
@@ -60,6 +74,9 @@ function ProbePanel({ context }: { context: ProbeContext }) {
 const alignment = defineXlsxPlugin<null>({
   id: 'probe.alignment',
   createState: () => null,
+  initialize(context) {
+    pluginContext = context;
+  },
   onEvent(_context, event) {
     if (event.type === 'selection-change') probe.selection = event.selection;
   },
@@ -177,16 +194,23 @@ async function frozenWorkbook(): Promise<Uint8Array> {
 function Harness() {
   const [file, setFile] = useState<Uint8Array | null>(null);
   useEffect(() => {
-    void frozenWorkbook().then(setFile);
+    void frozenWorkbook().then((bytes) => {
+      (globalThis as unknown as { __xlsxMainEngineProbe: { capture(): void } }).__xlsxMainEngineProbe = {
+        capture() {
+          probe.mainThreadEngines += 1;
+        },
+      };
+      setFile(bytes);
+    });
   }, []);
   if (!file) return null;
   return (
     <div style={{ height: '100%' }}>
       <XlsxEditor
-        legacySyncApi
-        experimentalWorkerOpen={false}
+        {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
         file={file}
         plugins={PLUGINS}
+        pluginGrants={{ 'probe.alignment': { document: 'write', editBatches: true } }}
         onReady={(api) => {
           probe.editor = api;
         }}

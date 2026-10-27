@@ -30,6 +30,7 @@ interface ProbeWindow {
 
 const fonts = createFontProvider();
 const repeatedHeader = new URLSearchParams(location.search).get('doc') === 'repeated-header';
+const fileProp = new URLSearchParams(location.search).get('prop') === 'file';
 
 const probe: ProbeWindow = {
   editor: null,
@@ -266,7 +267,7 @@ function Harness() {
   if (!buffer) return null;
   return (
     <div style={{ height: '100%' }}>
-      <DocxEditor ref={setEditor} documentBuffer={buffer} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} experimentalPeerless={new URLSearchParams(location.search).get('peerless') === '1'} />
+      <DocxEditor ref={setEditor} {...(fileProp ? { file: new File([buffer], 'upload.docx'), fileName: 'Aliased report.docx' } : { documentBuffer: buffer })} plugins={PLUGINS} pluginGrants={GRANTS} measurementFontProvider={new URLSearchParams(location.search).get('peerless') === '1' ? fonts : undefined} {...(new URLSearchParams(location.search).get('peerless') === '1' ? {} : { legacySyncApi: true as const })} />
     </div>
   );
 }

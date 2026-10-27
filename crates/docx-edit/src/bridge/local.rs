@@ -483,7 +483,7 @@ impl LocalLowering {
             if paragraph.id != BlockId::Str(id.clone())
                 || paragraph.attrs.is_none()
                 || !shiftable(&blocks[slot])
-                || page_break_changes_marker(paragraph, blocks.get(slot + 1).map(Rc::as_ref))
+                || page_break_depends_on_paragraph(paragraph, blocks.get(slot + 1).map(Rc::as_ref))
             {
                 return false;
             }
@@ -664,7 +664,7 @@ impl LocalLowering {
             paragraph.pm_start == Some(seed.pm_start as f64)
                 && paragraph.attrs.is_some()
                 && shiftable(&blocks[seed.slot])
-                && !page_break_changes_marker(paragraph, blocks.get(seed.slot + 1))
+                && !page_break_depends_on_paragraph(paragraph, blocks.get(seed.slot + 1))
         });
     }
 
@@ -1296,13 +1296,9 @@ fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {
     }
 }
 
-fn page_break_changes_marker(paragraph: &ParagraphBlock, next: Option<&LayoutBlock>) -> bool {
-    paragraph
-        .attrs
-        .as_ref()
-        .is_some_and(|attrs| attrs.list_marker.is_some())
-        && matches!(next, Some(LayoutBlock::PageBreak(page_break))
-            if page_break.pm_start == paragraph.pm_end)
+fn page_break_depends_on_paragraph(paragraph: &ParagraphBlock, next: Option<&LayoutBlock>) -> bool {
+    matches!(next, Some(LayoutBlock::PageBreak(page_break))
+        if page_break.pm_start == paragraph.pm_end)
 }
 
 fn shiftable(block: &LayoutBlock) -> bool {
@@ -1312,10 +1308,12 @@ fn shiftable(block: &LayoutBlock) -> bool {
                 .attrs
                 .as_ref()
                 .is_none_or(|attrs| attrs.horizontal_rules.is_empty())
-                && paragraph
-                    .runs
-                    .iter()
-                    .all(|run| matches!(run, Run::Text(_) | Run::Tab(_) | Run::LineBreak(_)))
+                && paragraph.runs.iter().all(|run| {
+                    matches!(
+                        run,
+                        Run::Text(_) | Run::Tab(_) | Run::LineBreak(_) | Run::Reserved(_)
+                    )
+                })
         }
         LayoutBlock::Table(table) => table
             .rows
@@ -1323,7 +1321,7 @@ fn shiftable(block: &LayoutBlock) -> bool {
             .flat_map(|row| &row.cells)
             .flat_map(|cell| &cell.blocks)
             .all(shiftable),
-        LayoutBlock::SectionBreak(_) => true,
+        LayoutBlock::SectionBreak(_) | LayoutBlock::Reserved(_) => true,
         LayoutBlock::Image(_)
         | LayoutBlock::Shape(_)
         | LayoutBlock::Chart(_)
@@ -1375,7 +1373,7 @@ pub(crate) fn shift_block(block: &mut LayoutBlock, delta: i64) {
             shift_pair(&mut column_break.pm_start, &mut column_break.pm_end, delta);
             shift_groups(&mut column_break.sdt_groups, delta);
         }
-        LayoutBlock::Unsupported => {}
+        LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => {}
     }
 }
 
@@ -1417,8 +1415,15 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
                 if let Some(shape) = &mut run.inline_shape {
                     shift_shape(shape, delta);
                 }
+                if let Some(chart) = &mut run.inline_chart {
+                    shift_pair(&mut chart.pm_start, &mut chart.pm_end, delta);
+                    shift_pair(&mut chart.doc_start, &mut chart.doc_end, delta);
+                    shift_drawing_id(&mut chart.id, delta);
+                    shift_groups(&mut chart.sdt_groups, delta);
+                }
             }
             Run::Field(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::Reserved(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
             Run::Unsupported => {}
         }
     }

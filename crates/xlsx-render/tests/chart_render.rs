@@ -45,6 +45,7 @@ fn chart_space() -> ChartSpace {
 
 fn sheet_chart(anchor: ChartAnchor) -> SheetChart {
     SheetChart {
+        raw_xml: None,
         part: "xl/charts/chart1.xml".into(),
         drawing: "xl/drawings/drawing1.xml".into(),
         anchor_index: 0,
@@ -374,7 +375,7 @@ fn an_unsupported_family_degrades_to_a_placeholder() {
 }
 
 #[test]
-fn an_unsupported_feature_degrades_to_a_placeholder() {
+fn a_dangling_axis_reference_on_a_stacked_chart_degrades_to_a_placeholder() {
     let display_list = frame_with_one_chart(|_| {
         Ok(Arc::new(ChartSpace {
             title: Some("Spend".into()),
@@ -382,6 +383,7 @@ fn an_unsupported_feature_degrades_to_a_placeholder() {
             plot_groups: vec![ChartPlotGroup {
                 chart_type: Some("column".into()),
                 grouping: Some("percentStacked".into()),
+                axis_ids: vec!["missing".into()],
                 series: vec![ChartSeries {
                     name: Some("Total".into()),
                     categories: vec!["All".into()],

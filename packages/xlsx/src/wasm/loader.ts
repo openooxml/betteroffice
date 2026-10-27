@@ -1,3 +1,4 @@
+import type { ChartInfo, ChartMutation } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -6,15 +7,18 @@
  * precompiled module. Callers never see the JSON-string boundary.
  */
 
+import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import initWasmModule, {
   XlsxDocument,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
+import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
@@ -57,11 +61,14 @@ export interface PrintMetrics {
   fontDescent: number;
 }
 
+export type XlsxAutoFilterOp = { type: 'setAutoFilter'; sheet: number; range: string | null };
+
 /**
  * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
  * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
  */
 export interface SheetInfo {
+  autoFilter?: string | null;
   sheetIds: string[];
   sheetNames: string[];
   activeSheet: number;
@@ -118,6 +125,8 @@ export interface ProfiledDisplayList {
 
 export interface CalculationStatus {
   limitedCells: string[];
+  /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
+  budgetExhausted?: boolean;
 }
 
 export type NumberFormat =
@@ -264,6 +273,43 @@ export interface MergedRange {
   end: CellPoint;
 }
 
+export interface WorkbookHyperlink {
+  range: MergedRange;
+  externalTarget?: string;
+  location?: string;
+  tooltip?: string;
+  display?: string;
+}
+
+export interface DifferentialFormatInput {
+  fontColor?: string;
+  bold?: boolean;
+  italic?: boolean;
+  fill?: string;
+}
+
+export interface ConditionalFormatRuleInput {
+  type: 'cellIs' | 'expression';
+  operator?: string;
+  formulas: string[];
+}
+
+export interface ConditionalFormatInfo {
+  id: string;
+  range: string;
+  type: string;
+  operator?: string;
+  formulas: string[];
+  priority: number;
+  dxfId?: number;
+  format: DifferentialFormatInput;
+  editable: boolean;
+}
+
+export type ConditionalFormatOp =
+  | { type: 'addConditionalFormat'; sheet: number; range: MergedRange; kind: 'cellIs' | 'expression'; operator?: string; formulas: string[]; format: DifferentialFormatInput }
+  | { type: 'removeConditionalFormat'; sheet: number; id: string };
+
 export interface HistoryState {
   canUndo: boolean;
   canRedo: boolean;
@@ -272,7 +318,18 @@ export interface HistoryState {
 }
 
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
-export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
+/**
+ * `fromPeer` is true for every event a peer update caused through `applyUpdate`, including
+ * the `'local'` re-encoding a replica forwards after adopting a whole-document state.
+ */
+export interface WorkbookUpdateInfo {
+  fromPeer: boolean;
+}
+export type WorkbookUpdateListener = (
+  update: Uint8Array,
+  origin: WorkbookUpdateOrigin,
+  info: WorkbookUpdateInfo
+) => void;
 
 export interface WorkbookCalculationContext {
   nowSerial: number;
@@ -296,6 +353,7 @@ export interface CellEdit {
   a1: string;
   input: string;
   isFormula: boolean;
+  isArrayFormula?: boolean;
 }
 
 export interface XlsxTextSearchOptions {
@@ -322,6 +380,7 @@ export interface CellInputEdit {
   row: number;
   col: number;
   input: string;
+  copyFrom?: CellPoint;
 }
 
 /**
@@ -451,7 +510,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
-  /** Clamps tracks to the grid; throws {@link DisplayTooLargeError} above {@link getDisplayListCellLimit}. */
+  /** Clamps tracks to the grid and truncates oversized frames at the scroll origin. */
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
   displayListProfiled(viewport: Viewport): ProfiledDisplayList;
@@ -487,6 +546,13 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /** Move a range within one sheet and rewrite references in one native undo step. */
+  moveRange(sheet: number, source: string, destination: string): EditResult;
+  setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
+  removeHyperlink(sheet: number, range: MergedRange): EditResult;
+  charts(sheet: number): ChartInfo[];
+  editCharts(edits: ChartMutation[]): EditResult;
+  conditionalFormats(sheet: number): ConditionalFormatInfo[];
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -500,6 +566,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** Absolute sheet rectangle in unzoomed pixels. */
   cellRect(sheet: number, row: number, col: number): Rect;
+  selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -549,6 +616,7 @@ export interface WorkbookHandle extends CollaborationReplica {
    * it; selection, the active sheet and proposals do not.
    */
   version(): string;
+  listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   readCells(request: XlsxReadRequest): XlsxReadResult;
   /** Exact, case-sensitive search over display text, one match per cell. */
@@ -575,6 +643,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
@@ -598,7 +667,8 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   initialization = initWasmModule({ module_or_path: input }).then(
-    () => {
+    (output) => {
+      engineMemory = output.memory;
       initialized = true;
     },
     (error: unknown) => {
@@ -618,6 +688,16 @@ function toError(e: unknown): Error {
   if (e instanceof Error) return e;
   const message = typeof e === 'string' ? e : String(e);
   return displayErrorFrom(message) ?? new Error(message);
+}
+
+/**
+ * The allocation the engine could not get, if any. The core aborts when an
+ * allocation fails, so a trap after one means the engine ran out of memory.
+ */
+export function engineAllocationFailure(): { bytes: number; memoryBytes: number } | null {
+  if (!initialized) return null;
+  const bytes = xlsxWasm.allocationFailure();
+  return bytes > 0 ? { bytes, memoryBytes: engineMemory?.buffer.byteLength ?? 0 } : null;
 }
 
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
@@ -787,7 +867,8 @@ function wrapWorkbookDocument(
 ): WorkbookHandle {
   const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
-  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
+  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
+  let applyingPeerUpdate = 0;
   let nextListenerId = 0;
   let disposed = false;
   let hasCalculationContext = options.calculation !== undefined ||
@@ -795,6 +876,13 @@ function wrapWorkbookDocument(
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
+  let displayCapWarned = false;
+
+  function reportDisplayLimit(frame: DisplayList): void {
+    if (!frame.truncated || displayCapWarned) return;
+    displayCapWarned = true;
+    console.warn('xlsx: displayTooLarge: frame truncated at the display cell limit');
+  }
 
   function assertAlive(): void {
     if (disposed) throw new Error('workbook handle is disposed');
@@ -811,7 +899,7 @@ function wrapWorkbookDocument(
           if (disposed) return;
           if (listeners.get(id) !== listener) continue;
           try {
-            listener(event.update.slice(), event.origin);
+            listener(event.update.slice(), event.origin, { fromPeer: event.fromPeer });
           } catch {}
         }
       }
@@ -833,6 +921,7 @@ function wrapWorkbookDocument(
       pendingUpdates.push({
         update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
+        fromPeer: origin === 1 || applyingPeerUpdate > 0,
       });
     }
   }
@@ -920,7 +1009,12 @@ function wrapWorkbookDocument(
       );
     },
     applyUpdate(update: Uint8Array): EditResult {
-      return parseJson(() => doc.applyUpdateJson(update), true);
+      applyingPeerUpdate += 1;
+      try {
+        return parseJson(() => doc.applyUpdateJson(update), true);
+      } finally {
+        applyingPeerUpdate -= 1;
+      }
     },
     onUpdate(listener: WorkbookUpdateListener): () => void {
       assertAlive();
@@ -961,10 +1055,14 @@ function wrapWorkbookDocument(
       });
     },
     displayList(viewport: Viewport): DisplayList {
-      return parseJson(() => displayListJson(viewport));
+      const frame = parseJson<DisplayList>(() => displayListJson(viewport));
+      reportDisplayLimit(frame);
+      return frame;
     },
     displayListProfiled(viewport: Viewport): ProfiledDisplayList {
-      return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+      const result = parseJson<ProfiledDisplayList>(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+      reportDisplayLimit(result.displayList);
+      return result;
     },
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): DisplayList {
       return parseJson(() =>
@@ -991,6 +1089,32 @@ function wrapWorkbookDocument(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    moveRange(sheet: number, source: string, destination: string): EditResult {
+      return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);
+    },
+    setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{
+        type: 'setHyperlink', sheet, hyperlink: {
+          range: hyperlink.range,
+          external_target: hyperlink.externalTarget ?? null,
+          location: hyperlink.location ?? null,
+          tooltip: hyperlink.tooltip ?? null,
+          display: hyperlink.display ?? null,
+        },
+      }] })), true);
+    },
+    removeHyperlink(sheet: number, range: MergedRange): EditResult {
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
+    },
+    charts(sheet: number): ChartInfo[] {
+      return parseJson(() => doc.chartsJson(sheet));
+    },
+    editCharts(edits: ChartMutation[]): EditResult {
+      return parseJson(() => doc.editChartsJson(JSON.stringify(edits)), true);
+    },
+    conditionalFormats(sheet: number): ConditionalFormatInfo[] {
+      return parseJson(() => doc.conditionalFormatsJson(sheet));
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
@@ -1028,6 +1152,9 @@ function wrapWorkbookDocument(
     },
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
+    },
+    selectionData(sheet: number, row: number, col: number, direction?: Direction | 'usedRange' | 'rowEnd' | 'merge'): SelectionData {
+      return parseJson(() => doc.selectionDataJson(JSON.stringify({ sheet, row, col, direction })));
     },
     cellRect(sheet: number, row: number, col: number): Rect {
       return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));
@@ -1151,6 +1278,9 @@ function wrapWorkbookDocument(
     version(): string {
       return wasmCall(() => doc.documentVersion());
     },
+    listDefinedNames(request: XlsxDefinedNamesRequest = {}): XlsxDefinedNamesResult {
+      return parseJson(() => doc.listDefinedNamesJson(JSON.stringify(request)));
+    },
     readCells(request: XlsxReadRequest): XlsxReadResult {
       return parseJson(() => doc.readCellsJson(JSON.stringify(request)));
     },
@@ -1202,7 +1332,13 @@ function wrapWorkbookDocument(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
-  displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  displayListJsonReaders.set(handle, (viewport, sheet) => {
+    const json = wasmCall(() => displayListJson(viewport, sheet));
+    if (!displayCapWarned && json.includes('"truncated":true')) {
+      reportDisplayLimit(JSON.parse(json) as DisplayList);
+    }
+    return json;
+  });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
@@ -1279,9 +1415,9 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
     if (
       !Number.isSafeInteger(options.clientId) ||
       options.clientId <= 0 ||
-      options.clientId > Number.MAX_SAFE_INTEGER
+      options.clientId >= OPEN_SYNC_CLIENT
     ) {
-      throw new RangeError('clientId must be a nonzero safe integer');
+      throw new RangeError('clientId must be a nonzero safe integer below Number.MAX_SAFE_INTEGER - 1');
     }
     return options.clientId;
   }
@@ -1295,7 +1431,7 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
   do {
     random.getRandomValues(words);
     value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
-  } while (value === 0);
+  } while (value === 0 || value >= OPEN_SYNC_CLIENT);
   return value;
 }
 

@@ -90,7 +90,7 @@ pub fn parse_comments(
             .cloned();
         let date = date_utc.clone().or(local_date);
         let mut done =
-            matches!(child.attribute(Some("w"), "done"), Some("1" | "true")).then_some(true);
+            (child.parse_boolean_attribute(Some("w"), "done") == Some(true)).then_some(true);
         let parent_id = attribute_any(child, &[("w16cid", "parentId"), ("w", "parentId")])
             .as_deref()
             .and_then(parse_javascript_integer_prefix);
@@ -257,7 +257,7 @@ fn parse_comments_extended(
                 .parent_by_para_id
                 .insert(para_id.clone(), parent.to_ascii_uppercase());
         }
-        if child.attribute(Some("w15"), "done") == Some("1") {
+        if child.parse_boolean_attribute(Some("w15"), "done") == Some(true) {
             extended.done_by_para_id.insert(para_id, true);
         }
     }

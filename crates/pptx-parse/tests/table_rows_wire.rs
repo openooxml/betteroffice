@@ -134,6 +134,7 @@ fn any_cell() -> impl Strategy<Value = TableCell> {
                 merged,
                 fill,
                 borders,
+                ..TableCell::default()
             },
         )
 }

@@ -144,7 +144,12 @@ fn lower_shape(
         .map(|start| (Some(start as f64), Some((start + 1) as f64)))
         .unwrap_or((None, None));
     let mut nested_sequences = Vec::new();
-    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences, env);
+    let fill = shape_fill(shape, env);
+    let background = fill
+        .as_ref()
+        .filter(|fill| fill["type"] == "solid")
+        .and_then(|fill| fill["color"].as_str());
+    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences, env, background);
     let mut seen = HashSet::new();
     nested_sequences.retain(|name| seen.insert(name.clone()));
     let position = shape_position(shape);
@@ -154,7 +159,7 @@ fn lower_shape(
         id: BlockId::Str(block_id),
         shape_type,
         geometry_path,
-        fill: shape_fill(shape, env),
+        fill,
         stroke: shape_stroke(shape),
         transform: shape_transform(shape),
         width,
@@ -393,6 +398,7 @@ fn shape_inner_text(
     block_id: &str,
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
+    background: Option<&str>,
 ) -> Option<Vec<ParagraphBlock>> {
     let text_body = object(shape, "textBody")?;
     let content = text_body.get("content")?.as_array()?;
@@ -405,6 +411,7 @@ fn shape_inner_text(
             &mut blocks,
             nested_sequences,
             env,
+            (None, background),
         );
     }
     Some(blocks)
@@ -419,6 +426,7 @@ fn push_shape_body_block(
     output: &mut Vec<ParagraphBlock>,
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
+    backgrounds: (Option<&str>, Option<&str>),
 ) {
     if depth > MAX_SHAPE_BODY_DEPTH {
         skip_deep_content(block, nested_sequences);
@@ -428,6 +436,7 @@ fn push_shape_body_block(
         Some("table") => {
             for (row_index, row) in array(block, "rows").into_iter().flatten().enumerate() {
                 for (cell_index, cell) in array(row, "cells").into_iter().flatten().enumerate() {
+                    let cell_background = shape_shading(field(cell, "formatting"), env);
                     for (index, child) in array(cell, "content").into_iter().flatten().enumerate() {
                         push_shape_body_block(
                             child,
@@ -436,6 +445,7 @@ fn push_shape_body_block(
                             output,
                             nested_sequences,
                             env,
+                            (cell_background.as_deref().or(backgrounds.0), backgrounds.1),
                         );
                     }
                 }
@@ -450,10 +460,22 @@ fn push_shape_body_block(
                     output,
                     nested_sequences,
                     env,
+                    backgrounds,
                 );
             }
         }
-        _ => output.push(shape_paragraph(block, block_id, nested_sequences, env)),
+        _ => {
+            let mut paragraph = shape_paragraph(block, block_id, nested_sequences, env);
+            // text box tables lower to plain paragraphs, so the cell fill paints behind them
+            if let Some(cell_background) = backgrounds.0 {
+                let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+                if attrs.shading.is_none() {
+                    attrs.shading = Some(cell_background.to_owned());
+                }
+            }
+            super::resolve_paragraph_auto_text_color(&mut paragraph, backgrounds.0, backgrounds.1);
+            output.push(paragraph);
+        }
     }
 }
 
@@ -463,18 +485,43 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let alignment = object(paragraph, "formatting")
+    let formatting = object(paragraph, "formatting");
+    let alignment = formatting
         .and_then(|value| string_in(value, "alignment"))
         .and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
+    let values: std::collections::BTreeMap<String, yrs::Any> = formatting
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            Some((
+                key.clone(),
+                crate::seed::any_from_value(value.clone()).ok()?,
+            ))
+        })
+        .collect();
+    let mut attrs = ParagraphAttrs {
+        alignment,
+        ..ParagraphAttrs::default()
+    };
+    super::lower_paragraph_spacing(&values, &mut attrs, env);
+    super::lower_paragraph_indent(&values, &mut attrs);
+    attrs.shading = shape_shading(field(paragraph, "formatting"), env);
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
         .flat_map(|content| shape_content_runs(content, 0, nested_sequences, env))
         .collect();
+    for (index, run) in runs.iter_mut().enumerate() {
+        if let Run::Image(image) = run
+            && let Some(chart) = image.inline_chart.as_mut()
+        {
+            chart.id = BlockId::Str(format!("{block_id}:chart:{index}"));
+        }
+    }
     runs.retain_mut(|run| {
         let formatting = match run {
             Run::Text(run) => &mut run.fmt,
@@ -505,10 +552,7 @@ fn shape_paragraph(
         id: BlockId::Str(block_id),
         para_id: string(paragraph, "paraId"),
         runs,
-        attrs: Some(ParagraphAttrs {
-            alignment,
-            ..ParagraphAttrs::default()
-        }),
+        attrs: Some(attrs),
         pm_start: None,
         pm_end: None,
     }
@@ -531,7 +575,7 @@ fn shape_content_runs(
             {
                 Vec::new()
             } else {
-                shape_document_runs(content)
+                shape_document_runs(content, env)
             }
         }
         Some("hyperlink") => {
@@ -678,7 +722,10 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
         _ => "OTHER".to_owned(),
     };
-    let mut fmt = shape_run_formatting(formatting.or_else(|| field(field_value, "formatting")));
+    let mut fmt = shape_run_formatting_with_shading(
+        formatting.or_else(|| field(field_value, "formatting")),
+        env,
+    );
     let mut nested_sequences = crate::seed::nested_sequence_names(field_value);
     if hidden_result {
         nested_sequences.extend(
@@ -703,8 +750,8 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
     })
 }
 
-fn shape_document_runs(run: &Value) -> Vec<Run> {
-    let formatting = shape_run_formatting(field(run, "formatting"));
+fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
+    let formatting = shape_run_formatting_with_shading(field(run, "formatting"), env);
     array(run, "content")
         .into_iter()
         .flatten()
@@ -731,9 +778,47 @@ fn shape_document_runs(run: &Value) -> Vec<Run> {
                 pm_start: None,
                 pm_end: None,
             })),
+            Some(kind @ ("drawing" | "opaqueDrawing")) => {
+                let image_key = if kind == "drawing" {
+                    "image"
+                } else {
+                    "preview"
+                };
+                let image = field(content, image_key)?;
+                let values = crate::seed::payload(crate::seed::image_payload(image)).ok()?;
+                Some(Run::Image(super::lower_image_values(
+                    &values.into_iter().collect(),
+                    &formatting,
+                    env,
+                )))
+            }
+            Some("chart") => {
+                let chart = field(content, "chart")?;
+                let payload = crate::seed::chart_payload(chart, &Default::default());
+                let values = crate::seed::payload(payload).ok()?;
+                let values = values.into_iter().collect();
+                let chart = super::lower_chart_block(&values, None, env)?;
+                let mut image = super::lower_image_values(&values, &formatting, env);
+                image.width = chart.width;
+                image.height = chart.height;
+                image.inline_chart = Some(Box::new(chart));
+                Some(Run::Image(image))
+            }
             _ => None,
         })
         .collect()
+}
+
+fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> {
+    let shading = field(formatting?, "shading")?;
+    let shading = crate::seed::any_from_value(shading.clone()).ok()?;
+    super::resolve_paragraph_shading(&shading, env)
+}
+
+fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
+    let mut formatting = shape_run_formatting(source);
+    formatting.highlight = shape_shading(source, env);
+    formatting
 }
 
 fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
@@ -792,6 +877,10 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
     let base = shape_base_color(value)?;
     let mut color = ColorValue {
+        transforms: value
+            .get("transforms")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         theme_tint: string_in(value, "themeTint"),
         theme_shade: string_in(value, "themeShade"),
         luminance_modulation: number_in(value, "luminanceModulation"),
@@ -1259,8 +1348,40 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
 }
 
 #[cfg(test)]
+#[path = "textbox_pictures_tests.rs"]
+mod textbox_pictures_tests;
+
+#[cfg(test)]
+#[path = "textbox_charts_tests.rs"]
+mod textbox_charts_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_colors_resolve_ordered_drawingml_transforms() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"204060","transforms":[{"kind":"shade","value":0.5}]}),
+                "#142C44",
+            ),
+            (
+                json!({"themeColor":"accent4","transforms":[{"kind":"tint","value":0.4}]}),
+                "#FFE8CB",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"tint","value":0.5},{"kind":"lumMod","value":0.5}]}),
+                "#3F5493",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"lumMod","value":0.5},{"kind":"tint","value":0.5}]}),
+                "#BDBFC6",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {
@@ -1408,7 +1529,7 @@ mod tests {
         let link = json!({"type": "hyperlink", "anchor": "top", "children": [text]});
         let page = json!({"type": "simpleField", "fieldType": "PAGE",
             "instruction": "PAGE", "content": [text]});
-        let text_runs = shape_document_runs(&text);
+        let text_runs = shape_document_runs(&text, &RenderEnv::default());
         let mut text_and_page = text_runs.clone();
         text_and_page.push(shape_field_run(&page, &RenderEnv::default()));
         for (result, expected) in [
@@ -1906,5 +2027,146 @@ mod tests {
         block.width = 96.0;
         block.children[0].width = f64::NAN;
         assert!(!inline_native_shape(&block));
+    }
+
+    fn parse_group_drawing_value(
+        xml: &str,
+        mut resolve: impl FnMut(&str) -> Option<docx_parse::image::Image>,
+    ) -> Value {
+        let limits = docx_parse::xml::ParseLimits::default();
+        let doc = docx_parse::xml::parse_xml(
+            xml.as_bytes(),
+            "drawing.xml",
+            &mut docx_parse::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let root = doc.root().unwrap();
+        let mut shape = docx_parse::shape::shape_for_rendering(root).unwrap();
+        fn resolve_pictures(
+            shape: &mut docx_parse::shape::Shape,
+            resolve: &mut impl FnMut(&str) -> Option<docx_parse::image::Image>,
+        ) {
+            if let Some(picture) = shape
+                .fill_paint
+                .as_mut()
+                .and_then(|paint| paint.picture.as_mut())
+                && let Some(resolved) = resolve(&picture.relationship_id)
+            {
+                picture.src = resolved.src;
+            }
+            if let Some(children) = &mut shape.children {
+                for child in children {
+                    resolve_pictures(child, resolve);
+                }
+            }
+        }
+        resolve_pictures(&mut shape, &mut resolve);
+        serde_json::to_value(shape).unwrap()
+    }
+
+    fn resolved_test_image(r_id: &str, src: &str) -> docx_parse::image::Image {
+        let mut image = docx_parse::image::placeholder_image(r_id);
+        image.src = Some(src.into());
+        image
+    }
+
+    #[test]
+    fn lowers_group_with_picture_and_shape_preserving_composed_geometry_and_media() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="1905000" cy="952500"/><wp:docPr id="1" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="952500"/><a:chOff x="95250" y="190500"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPic"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="190500" y="238125"/><a:ext cx="285750" cy="142875"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="3" name="RectShape"/><wps:spPr><a:xfrm><a:off x="571500" y="285750"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="336699"/></a:solidFill></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdPic").then(|| resolved_test_image(rel_id, "media:0")),
+        );
+
+        let block = lower_shape_json(&shape, 700, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        assert!((block.width - 200.0).abs() < 1e-6);
+        assert!((block.height - 100.0).abs() < 1e-6);
+        assert_eq!(block.children.len(), 2);
+
+        let pic_child = &block.children[0];
+        assert!((pic_child.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic_child.y.unwrap_or(-1.0) - 10.0).abs() < 1e-6);
+        assert!((pic_child.width - 60.0).abs() < 1e-6);
+        assert!((pic_child.height - 30.0).abs() < 1e-6);
+        let fill = pic_child.fill.as_ref().expect("picture fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureSrc"], "media:0");
+        assert_eq!(fill["pictureRelId"], "rIdPic");
+        assert_eq!(fill["pictureFillMode"], "stretch");
+
+        let shape_child = &block.children[1];
+        assert!((shape_child.x.unwrap_or(-1.0) - 100.0).abs() < 1e-6);
+        assert!((shape_child.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((shape_child.width - 40.0).abs() < 1e-6);
+        assert!((shape_child.height - 20.0).abs() < 1e-6);
+        assert_eq!(shape_child.fill.as_ref().unwrap()["color"], "#336699");
+    }
+
+    #[test]
+    fn lowers_nested_group_picture_with_composed_transforms() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="3810000" cy="1905000"/><wp:docPr id="10" name="Outer"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="0" y="0"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></wpg:grpSpPr><wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="190500" y="95250"/><a:ext cx="952500" cy="476250"/><a:chOff x="95250" y="47625"/><a:chExt cx="476250" cy="238125"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="11" name="NestedPic"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdNested"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="142875" y="95250"/><a:ext cx="95250" cy="47625"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="12" name="NestedShape"/><wps:spPr><a:xfrm><a:off x="285750" y="142875"/><a:ext cx="47625" cy="23812.5"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></wpg:grpSp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdNested").then(|| resolved_test_image(rel_id, "media:1")),
+        );
+
+        let block = lower_shape_json(&shape, 701, &RenderEnv::default()).unwrap();
+        assert_eq!(block.children.len(), 1);
+        let inner = &block.children[0];
+        assert!((inner.x.unwrap_or(-1.0) - 40.0).abs() < 1e-6);
+        assert!((inner.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert_eq!(inner.children.len(), 2);
+
+        let pic = &inner.children[0];
+        assert!((pic.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.y.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.width - 40.0).abs() < 1e-6);
+        assert!((pic.height - 20.0).abs() < 1e-6);
+        assert_eq!(pic.fill.as_ref().unwrap()["pictureSrc"], "media:1");
+    }
+
+    #[test]
+    fn lowers_cropped_and_rotated_group_picture_preserving_src_rect_and_transform() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="1905000" cy="952500"/><wp:docPr id="20" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="952500"/><a:chOff x="0" y="0"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="21" name="CroppedRot"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdCrop"/><a:srcRect l="10000" t="20000" r="15000" b="25000"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm rot="5400000" flipH="1" flipV="1"><a:off x="95250" y="47625"/><a:ext cx="381000" cy="190500"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |rel_id| (rel_id == "rIdCrop").then(|| resolved_test_image(rel_id, "media:2")),
+        );
+
+        let block = lower_shape_json(&shape, 702, &RenderEnv::default()).unwrap();
+        let pic = &block.children[0];
+        assert!((pic.x.unwrap_or(-1.0) - 20.0).abs() < 1e-6);
+        assert!((pic.y.unwrap_or(-1.0) - 10.0).abs() < 1e-6);
+        assert!((pic.width - 80.0).abs() < 1e-6);
+        assert!((pic.height - 40.0).abs() < 1e-6);
+
+        let fill = pic.fill.as_ref().expect("fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureSrc"], "media:2");
+        assert_eq!(
+            fill["pictureSrcRect"],
+            json!({"left": 0.1, "top": 0.2, "right": 0.15, "bottom": 0.25})
+        );
+        let transform = pic.transform.as_ref().unwrap();
+        assert!((transform["rotation"].as_f64().unwrap() + 90.0).abs() < 1e-6);
+        assert!(transform.get("flipH").is_none());
+        assert!(transform.get("flipV").is_none());
+    }
+
+    #[test]
+    fn lowers_group_picture_with_missing_media_without_dropping_siblings() {
+        let shape = parse_group_drawing_value(
+            r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="952500" cy="476250"/><wp:docPr id="30" name="Group"/><a:graphic><a:graphicData><wpg:wgp><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/><a:chOff x="0" y="0"/><a:chExt cx="952500" cy="476250"/></a:xfrm></wpg:grpSpPr><pic:pic><pic:nvPicPr><pic:cNvPr id="31" name="MissingMedia"/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdMissing"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="95250" y="95250"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic><wps:wsp><wps:cNvPr id="32" name="SiblingShape"/><wps:spPr><a:xfrm><a:off x="381000" y="95250"/><a:ext cx="190500" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="AA0000"/></a:solidFill></wps:spPr></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            |_| None,
+        );
+
+        let block = lower_shape_json(&shape, 703, &RenderEnv::default()).unwrap();
+        assert_eq!(block.children.len(), 2);
+        let missing_pic = &block.children[0];
+        let fill = missing_pic.fill.as_ref().expect("fill");
+        assert_eq!(fill["type"], "picture");
+        assert_eq!(fill["pictureRelId"], "rIdMissing");
+        assert!(fill.get("pictureSrc").is_none());
+
+        let sibling = &block.children[1];
+        assert_eq!(sibling.fill.as_ref().unwrap()["color"], "#AA0000");
     }
 }

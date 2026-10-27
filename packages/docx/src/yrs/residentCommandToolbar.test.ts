@@ -17,6 +17,30 @@ test('worker_selection_formatting_and_list_commands_cover_multiple_paragraphs', 
   expect(arm.engine.paragraphs('body').every(p => p.properties.numPr == null)).toBe(true);
   expect(execute(arm, command(arm, 'changeIndent', { direction: 'increase' }))).toMatchObject({ status: 'applied' });
   expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([720, 720]);
+  expect(execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }))).toMatchObject({ status: 'applied' });
+  expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([0, 0]);
+  execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }));
+  expect(arm.engine.paragraphs('body').map(p => p.properties.indentLeft)).toEqual([0, 0]);
+}, TIMEOUT);
+
+test('list promotion preserves level-zero numbering in mixed selections', async () => {
+  for (const levels of [[0, 1], [1, 0]]) {
+    const arm = await openCommandEngine(['Alpha', 'Beta']);
+    const paragraphs = arm.engine.paragraphs('body');
+    for (const [index, paragraph] of paragraphs.entries()) {
+      execute(arm, command(arm, 'setParagraphAttrs', {
+        selection: selection(paragraph.paraId, 0), attrs: { numPr: { numId: 1, ilvl: levels[index]! } },
+      }));
+    }
+    execute(arm, command(arm, 'select', { selection: {
+      anchor: { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+      focus: { story: 'body', paraId: paragraphs[1]!.paraId, offset: 4 },
+    } }));
+    expect(execute(arm, command(arm, 'changeIndent', { direction: 'decrease', preserveNumbering: true }))).toMatchObject({ status: 'applied' });
+    expect(arm.engine.paragraphs('body').map(p => p.properties.numPr)).toEqual([{ numId: 1, ilvl: 0 }, { numId: 1, ilvl: 0 }]);
+    execute(arm, command(arm, 'changeIndent', { direction: 'decrease' }));
+    expect(arm.engine.paragraphs('body').every(p => p.properties.numPr == null)).toBe(true);
+  }
 }, TIMEOUT);
 
 test('collapsed_toolbar_marks_follow_insertions_and_insertion_refusals_are_atomic', async () => {
@@ -41,6 +65,6 @@ test('worker_insertions_replace_selection_and_create_worker_owned_cells', async 
   expect(execute(arm, command(arm, 'undo', {}))).toMatchObject({ status: 'applied' });
   expect(texts(arm)).toEqual(['Alpha']);
   expect(execute(arm, command(arm, 'insertTable', { rows: 2, columns: 2, selection: selection(paraId, 5) }))).toMatchObject({ status: 'applied' });
-  expect(arm.state.selection?.focus.story).toMatch(/:t\d+:r0c0$/);
+  expect(arm.state.selection?.focus.story).toMatch(/:t\d+:r0c0~\d+$/);
   expect(arm.engine.paragraphs(arm.state.selection!.focus.story)).toHaveLength(1);
 }, TIMEOUT);

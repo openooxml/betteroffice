@@ -266,11 +266,11 @@ fn parse_drawing_run_formatting(run: &XmlElement) -> Option<serde_json::Value> {
     let properties = run.child_by_local_name("rPr")?;
     let mut formatting = serde_json::Map::new();
     let mut property_count = 0;
-    if properties.attribute(None, "b") == Some("1") {
+    if properties.parse_boolean_attribute(None, "b") == Some(true) {
         formatting.insert("bold".to_owned(), serde_json::json!(true));
         property_count += 1;
     }
-    if properties.attribute(None, "i") == Some("1") {
+    if properties.parse_boolean_attribute(None, "i") == Some(true) {
         formatting.insert("italic".to_owned(), serde_json::json!(true));
         property_count += 1;
     }

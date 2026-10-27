@@ -1,4 +1,4 @@
-export type CellInputOperation = { kind: 'insert'; text: string } | { kind: 'selectAll' } |
+export type CellInputOperation = { kind: 'insert'; text: string } | { kind: 'selectAll' } | { kind: 'select'; anchor: number; focus: number } |
   { kind: 'move'; direction: 'start' | 'end' | 'left' | 'right'; extend?: boolean; unit?: 'word' } |
   { kind: 'delete'; direction: 'backward' | 'forward'; unit: 'character' | 'word' | 'line' };
 
@@ -59,6 +59,11 @@ export function replayCellInput(value: string, operations: readonly CellInputOpe
   for (const operation of operations) {
     let start = Math.min(anchor, focus);
     let end = Math.max(anchor, focus);
+    if (operation.kind === 'select') {
+      anchor = Math.max(0, Math.min(value.length, operation.anchor));
+      focus = Math.max(0, Math.min(value.length, operation.focus));
+      continue;
+    }
     if (operation.kind === 'selectAll') { anchor = 0; focus = value.length; continue; }
     if (operation.kind === 'move') {
       const backward = operation.direction === 'left';

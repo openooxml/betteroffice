@@ -1,0 +1,20 @@
+{
+  "name": "compare-sheets-site",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@univerjs/preset-sheets-core": "1.2.0",
+    "@univerjs/preset-sheets-table": "1.2.0",
+    "@univerjs/presets": "1.2.0",
+    "exceljs": "4.4.0",
+    "jszip": "3.10.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "rxjs": "7.8.2",
+    "@univerjs/preset-sheets-hyper-link": "1.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.0.5",
+    "vite": "8.1.6"
+  }
+}

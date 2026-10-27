@@ -6,7 +6,7 @@
  * the F2/Enter handlers below.
  */
 
-import { extendTo, moveFocus, selectionAt } from './model';
+import { extendTo, mergeAnchor, moveFocus, normalizeRange, selectionAt } from './model';
 import type {
   CellAddr,
   Direction,
@@ -14,6 +14,9 @@ import type {
   Selection,
   SelectionAction,
   SelectionLimits,
+  SelectionData,
+  SelectionHidden,
+  SelectionMerges,
 } from './types';
 
 const ARROWS: Record<string, Direction> = {
@@ -27,8 +30,6 @@ function mod(key: KeyInput): boolean {
   return Boolean(key.metaKey || key.ctrlKey);
 }
 
-// jump to the used-range edge in a direction (ctrl/cmd+arrow) — we have no data
-// map here, so the boundary is the used range itself.
 function edgeInDirection(focus: CellAddr, direction: Direction, limits: SelectionLimits): CellAddr {
   switch (direction) {
     case 'up':
@@ -46,17 +47,47 @@ function moveAction(selection: Selection): SelectionAction {
   return { type: 'move', selection };
 }
 
-// tab/shift-tab: step within the row, wrapping to the next/previous row's far
-// edge at the used-range bounds. always collapses (excel commits the cell).
-function tabMove(sel: Selection, back: boolean, limits: SelectionLimits): Selection {
+function visibleIndex(start: number, step: number, limit: number, hidden?: (index: number) => boolean): number | null {
+  let index = start;
+  while (index >= 0 && index < limit && hidden?.(index)) index += step;
+  return index >= 0 && index < limit ? index : null;
+}
+
+function tabMove(sel: Selection, back: boolean, limits: SelectionLimits, hidden?: SelectionHidden,
+  merges?: SelectionMerges): Selection {
   const { row, col } = sel.focus;
-  if (!back && col >= limits.cols - 1) {
-    return selectionAt({ row: Math.min(row + 1, limits.rows - 1), col: 0 });
-  }
-  if (back && col <= 0) {
-    return selectionAt({ row: Math.max(row - 1, 0), col: limits.cols - 1 });
-  }
-  return selectionAt({ row, col: col + (back ? -1 : 1) });
+  const merged = merges?.mergeAt(row, col);
+  const step = back ? -1 : 1;
+  const next = visibleIndex((merged ? back ? merged.left : merged.right : col) + step, step, limits.cols,
+    hidden?.isColHidden);
+  if (next !== null) return selectionAt(mergeAnchor({ row, col: next }, merges));
+  const wrappedCol = visibleIndex(back ? limits.cols - 1 : 0, step, limits.cols, hidden?.isColHidden);
+  const wrappedRow = visibleIndex((merged ? back ? merged.top : merged.bottom : row) + step, step, limits.rows,
+    hidden?.isRowHidden);
+  if (wrappedCol === null || (hidden && wrappedRow === null)) return sel;
+  return selectionAt(mergeAnchor({ row: wrappedRow ?? row, col: wrappedCol }, merges));
+}
+
+function visibleEdge(state: Selection, edge: CellAddr, direction: Direction, limits: SelectionLimits,
+  hidden?: SelectionHidden): CellAddr {
+  if (!hidden || (!hidden.isRowHidden(edge.row) && !hidden.isColHidden(edge.col))) return edge;
+  const vertical = direction === 'up' || direction === 'down';
+  const back = direction === 'up' || direction === 'left';
+  const origin = vertical ? state.focus.row : state.focus.col;
+  const target = vertical ? edge.row : edge.col;
+  const limit = vertical ? limits.rows : limits.cols;
+  const isHidden = vertical ? hidden.isRowHidden : hidden.isColHidden;
+  const index = visibleIndex(target, back ? -1 : 1, limit, isHidden) ??
+    visibleIndex(target, back ? 1 : -1, limit, isHidden);
+  if (index === null || (back ? index >= origin : index <= origin)) return state.focus;
+  return vertical ? { row: index, col: edge.col } : { row: edge.row, col: index };
+}
+
+function home(state: Selection, sheet: boolean, limits: SelectionLimits, hidden?: SelectionHidden): Selection {
+  const col = visibleIndex(0, 1, limits.cols, hidden?.isColHidden);
+  const row = sheet ? visibleIndex(0, 1, limits.rows, hidden?.isRowHidden) : state.focus.row;
+  if (row === null || col === null || (hidden && row === state.focus.row && col === state.focus.col)) return state;
+  return selectionAt({ row, col });
 }
 
 // a lone printable character (no ctrl/cmd/alt) opens the editor seeded with it.
@@ -72,46 +103,57 @@ function isPrintable(key: KeyInput): boolean {
 export function selectionKeyReducer(
   state: Selection,
   key: KeyInput,
-  limits: SelectionLimits
+  limits: SelectionLimits,
+  data?: SelectionData,
+  hidden?: SelectionHidden,
+  merges?: SelectionMerges
 ): SelectionAction {
+  const land = (addr: CellAddr) => selectionAt(mergeAnchor(addr, merges));
   const direction = ARROWS[key.key];
   if (direction) {
     if (mod(key)) {
-      const edge = edgeInDirection(state.focus, direction, limits);
-      return moveAction(key.shiftKey ? extendTo(state, edge, limits) : selectionAt(edge));
+      const edge = visibleEdge(state, data?.edge ?? edgeInDirection(state.focus, direction, limits), direction, limits, hidden);
+      if (hidden && edge.row === state.focus.row && edge.col === state.focus.col) return moveAction(state);
+      return moveAction(key.shiftKey ? extendTo(state, edge) : land(edge));
     }
-    return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits }));
+    return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits, hidden, merges }));
   }
 
   switch (key.key) {
     case 'Tab':
-      return moveAction(tabMove(state, Boolean(key.shiftKey), limits));
+      return moveAction(tabMove(state, Boolean(key.shiftKey), limits, hidden, merges));
 
     // enter navigates (down/up); it never opens the editor — F2 does. this is
     // the excel split: type to overwrite, F2 to edit in place, enter to commit.
     case 'Enter':
-      return moveAction(moveFocus(state, key.shiftKey ? 'up' : 'down', { extend: false, limits }));
+      return moveAction(moveFocus(state, key.shiftKey ? 'up' : 'down', { extend: false, limits, hidden, merges }));
 
-    case 'Home':
-      return moveAction(
-        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.focus.row, col: 0 })
-      );
+    case 'Home': {
+      const next = home(state, mod(key), limits, hidden);
+      return moveAction(next === state ? state : land(next.focus));
+    }
 
-    case 'End':
-      return moveAction(
-        mod(key)
-          ? selectionAt({ row: limits.rows - 1, col: limits.cols - 1 })
-          : selectionAt({ row: state.focus.row, col: limits.cols - 1 })
-      );
+    case 'End': {
+      const used = data?.usedRange;
+      const found = mod(key) ? used === undefined ? undefined
+        : data?.edge ?? (used && { row: used.bottom, col: used.right }) : data?.edge;
+      if (found === undefined) return { type: 'none' };
+      if (found === null && !mod(key)) return moveAction(state);
+      const target = {
+        row: Math.max(0, Math.min(found?.row ?? 0, limits.rows - 1)),
+        col: Math.max(0, Math.min(found?.col ?? 0, limits.cols - 1)),
+      };
+      return moveAction(key.shiftKey ? extendTo(state, target, limits) : land(target));
+    }
 
     case 'PageDown':
       return moveAction(
-        moveFocus(state, 'down', { extend: key.shiftKey, step: limits.rowsPerPage, limits })
+        moveFocus(state, 'down', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden, merges })
       );
 
     case 'PageUp':
       return moveAction(
-        moveFocus(state, 'up', { extend: key.shiftKey, step: limits.rowsPerPage, limits })
+        moveFocus(state, 'up', { extend: key.shiftKey, step: limits.rowsPerPage, limits, hidden, merges })
       );
 
     // F2 opens the editor on the current cell without seeding input.
@@ -123,8 +165,15 @@ export function selectionKeyReducer(
       return { type: 'clear' };
   }
 
-  // cmd/ctrl+A selects the whole used range.
   if ((key.key === 'a' || key.key === 'A') && mod(key)) {
+    if (data) {
+      const current = normalizeRange(state);
+      const region = data.region;
+      const range = region && (current.top !== region.top || current.left !== region.left ||
+        current.bottom !== region.bottom || current.right !== region.right)
+        ? region : { top: 0, left: 0, bottom: limits.rows - 1, right: limits.cols - 1 };
+      return moveAction({ ...selectionAt(state.focus), range: { ...range } });
+    }
     return moveAction({
       anchor: { row: 0, col: 0 },
       focus: { row: limits.rows - 1, col: limits.cols - 1 },

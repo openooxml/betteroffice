@@ -150,3 +150,15 @@ test('cell_navigation_after_leaving_a_table_preserves_following_input', async ()
   expect(execute(arm, command(arm, 'insertText', { text: 'valid' }, { afterSeq: next.seq }), navigated.selection).status).toBe('applied');
   expect(arm.engine.paragraphs('body')[0]!.text).toBe('validBefore');
 }, TIMEOUT);
+
+test('cell_navigation_walks_the_cells_an_edit_created', async () => {
+  const arm = await openCommandEngine(['Alpha']);
+  const paraId = arm.state.selection!.focus.paraId;
+  expect(execute(arm, command(arm, 'insertTable', { rows: 2, columns: 2, selection: selection(paraId, 5) })).status).toBe('applied');
+  const visited = [arm.state.selection!.focus.story];
+  for (let step = 0; step < 3; step++) {
+    expect(execute(arm, command(arm, 'navigateCell', navigation('forward'))).status).toBe('noop');
+    visited.push(arm.state.selection!.focus.story);
+  }
+  expect(visited.map((story) => story.match(/:t\d+:(r\d+c\d+)~\d+$/)?.[1])).toEqual(['r0c0', 'r0c1', 'r1c0', 'r1c1']);
+}, TIMEOUT);

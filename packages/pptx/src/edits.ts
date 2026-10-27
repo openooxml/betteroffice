@@ -93,6 +93,14 @@ export type PptxEditStep =
       expect?: PptxTextGuard;
     }
   | { op: 'setSlideNotes'; target: PptxSlideTarget; text: string; expect?: PptxTextGuard }
+  | {
+      op: 'setSlideBackground';
+      target: PptxSlideTarget;
+      /** A solid or gradient fill; `null` removes the slide's own background. */
+      background: ShapeFill | null;
+      /** The effective background, as `snapshot()` reports it. */
+      expect?: { background: ShapeFill | null };
+    }
   | { op: 'setShapeRect'; target: PptxShapeTarget; rect: ShapeRect; expect?: { rect: ShapeRect } }
   | { op: 'setShapeAdjust'; target: PptxShapeTarget; adjustments: Record<string, number> }
   | {
@@ -180,6 +188,7 @@ export interface PptxTextField {
 }
 
 export interface PptxParagraphText {
+  list?: import('./structuredExport').PptxExportList | null;
   paragraphId: string;
   /** Story offsets of the paragraph's text; a following separator sits at `end`. */
   start: number;

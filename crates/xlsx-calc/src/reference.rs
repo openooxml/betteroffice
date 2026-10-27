@@ -288,3 +288,62 @@ pub(crate) fn column(source: &str) -> Result<CellRef, AddrError> {
     }
     CellRef::parse_a1(&format!("{}1", source.to_ascii_uppercase()))
 }
+
+pub(crate) fn r1c1_rect(source: &str, cell: Option<CellRef>) -> Option<CellRange> {
+    fn axis(source: &mut &str, marker: u8, origin: Option<u32>, limit: u32) -> Option<u32> {
+        if !source.as_bytes().first()?.eq_ignore_ascii_case(&marker) {
+            return None;
+        }
+        *source = &source[1..];
+        let index = if let Some(relative) = source.strip_prefix('[') {
+            let (delta, rest) = relative.split_once(']')?;
+            let digits = delta.strip_prefix(['-', '+']).unwrap_or(delta);
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *source = rest;
+            i64::from(origin?).checked_add(delta.parse::<i64>().ok()?)?
+        } else {
+            let digits = source.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                i64::from(origin?)
+            } else {
+                let absolute = source[..digits].parse::<i64>().ok()?;
+                *source = &source[digits..];
+                absolute.checked_sub(1)?
+            }
+        };
+        (0..i64::from(limit))
+            .contains(&index)
+            .then_some(index as u32)
+    }
+
+    fn endpoint(source: &str, cell: Option<CellRef>) -> Option<(Option<u32>, Option<u32>)> {
+        let mut rest = source;
+        let row = if rest.starts_with(['R', 'r']) {
+            Some(axis(&mut rest, b'R', cell.map(|at| at.row), MAX_ROWS)?)
+        } else {
+            None
+        };
+        let col = if rest.starts_with(['C', 'c']) {
+            Some(axis(&mut rest, b'C', cell.map(|at| at.col), MAX_COLS)?)
+        } else {
+            None
+        };
+        (rest.is_empty() && (row.is_some() || col.is_some())).then_some((row, col))
+    }
+
+    let (start, end) = source.split_once(':').unwrap_or((source, source));
+    let (start_row, start_col) = endpoint(start, cell)?;
+    let (end_row, end_col) = endpoint(end, cell)?;
+    if start_row.is_some() != end_row.is_some() || start_col.is_some() != end_col.is_some() {
+        return None;
+    }
+    Some(CellRange::new(
+        CellRef::new(start_row.unwrap_or(0), start_col.unwrap_or(0)),
+        CellRef::new(
+            end_row.unwrap_or(MAX_ROWS - 1),
+            end_col.unwrap_or(MAX_COLS - 1),
+        ),
+    ))
+}

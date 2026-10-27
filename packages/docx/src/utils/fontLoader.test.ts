@@ -63,6 +63,7 @@ class FakeFontFaceSetLoadEvent extends Event {
 }
 
 beforeAll(() => {
+  setGoogleFontsEnabled(true);
   Object.assign(globalThis, { FontFace: FakeFontFace, FontFaceSetLoadEvent: FakeFontFaceSetLoadEvent });
   const probe = {
     font: '',

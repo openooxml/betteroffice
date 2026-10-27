@@ -178,6 +178,65 @@ fn full_workbook_round_trip_via_undo_stack() {
 }
 
 #[test]
+fn hidden_custom_dimensions_follow_deletions_and_undo() {
+    let mut wb = Workbook::default();
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(2, 0.0);
+    sheet.hidden_col_widths.insert(2, 24.0);
+    sheet.row_heights.insert(3, 0.0);
+    sheet.hidden_row_heights.insert(3, 30.0);
+    wb.sheets.push(sheet);
+    let baseline = wb.clone();
+
+    let tx = Transaction::new(
+        vec![
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+        ],
+        Provenance::User,
+    );
+    let mut stack = UndoStack::new();
+    stack.commit(&mut wb, &tx).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+    stack.undo(&mut wb).unwrap();
+    assert_eq!(wb, baseline);
+    stack.redo(&mut wb).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+
+    let delete_hidden = Transaction::new(
+        vec![
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ],
+        Provenance::User,
+    );
+    stack.commit(&mut wb, &delete_hidden).unwrap();
+    assert!(wb.sheets[0].hidden_col_widths.is_empty());
+    assert!(wb.sheets[0].hidden_row_heights.is_empty());
+    stack.undo(&mut wb).unwrap();
+    assert_eq!(wb.sheets[0].hidden_col_widths.get(&1), Some(&24.0));
+    assert_eq!(wb.sheets[0].hidden_row_heights.get(&2), Some(&30.0));
+}
+
+#[test]
 fn merge_replaces_intersections_and_undo_restores_them() {
     let cases = [
         (
@@ -608,4 +667,32 @@ fn undoing_a_row_delete_at_the_row_style_cap_restores_the_map() {
     assert_eq!(wb.sheets[0].row_styles, original);
     stack.redo(&mut wb).unwrap();
     assert_eq!(wb.sheets[0].row_styles, original);
+}
+
+#[test]
+fn row_visibility_unhides_implicit_zero_height_rows_and_undo_restores_them() {
+    let mut sheet = Sheet::new("Rows");
+    sheet.format.zero_height = true;
+    sheet.format.default_row_height_pt = Some(24.0);
+    let mut workbook = Workbook {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    assert!(workbook.sheets[0].row_hidden(5));
+    let inverse = apply(
+        &mut workbook,
+        &Op::SetRowVisibility {
+            sheet: SheetId(0),
+            row: 5,
+            hidden: false,
+        },
+    )
+    .unwrap();
+    assert!(!workbook.sheets[0].row_hidden(5));
+    assert_eq!(workbook.sheets[0].row_heights.get(&5), Some(&24.0));
+    for op in inverse.0 {
+        apply(&mut workbook, &op).unwrap();
+    }
+    assert!(workbook.sheets[0].row_hidden(5));
+    assert!(workbook.sheets[0].row_heights.is_empty());
 }

@@ -52,7 +52,7 @@ impl Ownership {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return ownership;
         };
-        for (story_id, value) in stories.iter(txn) {
+        for (story_id, value) in crate::live_stories(&stories, txn) {
             let Out::YText(story) = value else {
                 continue;
             };

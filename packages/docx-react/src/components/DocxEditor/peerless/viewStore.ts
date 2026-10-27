@@ -7,6 +7,7 @@ import type {
   DocxEditState,
   DocxEchoRect,
   DocxEchoTransform,
+  DocxFrameReservations,
 } from '@betteroffice/docx/yrs';
 
 /** @internal */
@@ -29,8 +30,12 @@ export interface PeerlessFrameGeometry {
   coversThroughSeq: number;
   frameEpoch: number;
   layoutRevision: number;
+  /** The worker pagination run the pages show; frames that only move the caret keep it. */
+  layoutEpoch?: number;
   documentWidth?: number;
   layoutProvisional?: boolean;
+  /** The reservation set the layout includes. */
+  reservations?: DocxFrameReservations;
   pages: readonly {
     page: DocxCommandPageIdentity;
     bounds: DocxEchoRect;
@@ -38,9 +43,17 @@ export interface PeerlessFrameGeometry {
     displayPage?: DisplayPage;
   }[];
   caret: DocxEchoRect | null;
+  selectionFocus?: DocxEchoRect | null;
   selectionRects: readonly DocxEchoRect[];
   parts?: DocxCommandFrame['payload']['parts'];
   objects?: DocxCommandFrame['payload']['geometry'];
+}
+
+/** @internal */
+export interface PeerlessProvisionalCaret {
+  readonly throughSeq: number | undefined;
+  pageIndex: number;
+  rect: DocxEchoRect;
 }
 
 /** @internal */
@@ -49,10 +62,23 @@ export interface PeerlessViewSnapshot {
   version: number;
   throughSeq: number;
   presentedThroughSeq: number;
+  /** The throughSeq of the first worker state at the current version; set by the store. */
+  versionSinceSeq?: number;
   workerSelection: DocxCommandSelection | null | undefined;
   anchors: PeerlessSelectionAnchors | null;
   editState: DocxEditState | undefined;
   geometry: PeerlessFrameGeometry | null;
+  provisionalCaret?: PeerlessProvisionalCaret | null;
+}
+
+/**
+ * @internal Installed geometry shows the document as acknowledged: it covers the acknowledged sequence, or it covers
+ * the start of the current document version, so only selection commands lie between them.
+ */
+export function geometryMatchesDocument(snapshot: PeerlessViewSnapshot): boolean {
+  const covers = snapshot.geometry?.coversThroughSeq;
+  return covers !== undefined && (covers === snapshot.throughSeq ||
+    snapshot.versionSinceSeq !== undefined && snapshot.versionSinceSeq <= covers && covers < snapshot.throughSeq);
 }
 
 /** @internal Stable snapshots and subscriptions for useSyncExternalStore. */
@@ -65,6 +91,7 @@ export interface PeerlessViewStore {
     state: EditSessionState<DocxCommandSelection | null, DocxEditState>
   ): void;
   installFrameGeometry(geometry: PeerlessFrameGeometry): void;
+  setProvisionalCaret(caret: PeerlessProvisionalCaret | null): void;
   dispose(): void;
 }
 
@@ -74,10 +101,13 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
     selection?.anchor.sticky && selection.focus.sticky
       ? { anchor: selection.anchor.sticky.slice(), focus: selection.focus.sticky.slice() } : null;
   let snapshot: PeerlessViewSnapshot = {
-    ...initial, identity: { ...initial.identity }, anchors: anchors(initial.workerSelection),
+    ...initial, versionSinceSeq: initial.throughSeq, provisionalCaret: null, identity: { ...initial.identity }, anchors: anchors(initial.workerSelection),
     workerSelection: initial.workerSelection === undefined ? undefined : structuredClone(initial.workerSelection),
   };
   let selectionInput = initial.workerSelection;
+  let provisionalRevision = {
+    version: initial.version, documentVersion: initial.geometry?.documentVersion, layoutRevision: initial.geometry?.layoutRevision,
+  };
   let disposed = false;
   const listeners = new Set<() => void>();
   const sameIdentity = (identity: PeerlessViewIdentity) =>
@@ -107,17 +137,32 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       selectionInput = selected;
       publish({
         identity: { ...identity }, version: state.version, throughSeq: state.throughSeq,
+        versionSinceSeq: replacement || state.version !== snapshot.version ? state.throughSeq : snapshot.versionSinceSeq,
         presentedThroughSeq: replacement ? -1 : snapshot.presentedThroughSeq,
         workerSelection: selected === undefined ? undefined : structuredClone(selected),
         anchors: anchors(selected), editState,
         geometry: replacement ? null : snapshot.geometry,
+        provisionalCaret: replacement || state.version > provisionalRevision.version ? null : snapshot.provisionalCaret,
       });
     },
     installFrameGeometry(geometry) {
       if (disposed || !sameIdentity(geometry.identity) || geometry.coversThroughSeq < snapshot.presentedThroughSeq ||
         (snapshot.geometry && (geometry.frameEpoch <= snapshot.geometry.frameEpoch ||
           geometry.layoutRevision < snapshot.geometry.layoutRevision))) return;
-      publish({ ...snapshot, presentedThroughSeq: geometry.coversThroughSeq, geometry });
+      const seq = snapshot.provisionalCaret?.throughSeq;
+      publish({ ...snapshot, presentedThroughSeq: geometry.coversThroughSeq, geometry,
+        provisionalCaret: (seq !== undefined && geometry.coversThroughSeq >= seq) ||
+          geometry.documentVersion !== provisionalRevision.documentVersion ||
+          (provisionalRevision.layoutRevision !== undefined && geometry.layoutRevision > provisionalRevision.layoutRevision)
+          ? null : snapshot.provisionalCaret });
+    },
+    setProvisionalCaret(caret) {
+      if (disposed || snapshot.provisionalCaret === caret ||
+        (caret?.throughSeq !== undefined && snapshot.geometry && snapshot.geometry.coversThroughSeq >= caret.throughSeq)) return;
+      provisionalRevision = {
+        version: snapshot.version, documentVersion: snapshot.geometry?.documentVersion, layoutRevision: snapshot.geometry?.layoutRevision,
+      };
+      publish({ ...snapshot, provisionalCaret: caret });
     },
     dispose() {
       disposed = true;

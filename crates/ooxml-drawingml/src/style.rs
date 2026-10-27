@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ColorValue, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme};
+use crate::{
+    ColorValue, ShapeEffects, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
+};
 
 /// Line width applied to a style reference the theme does not define.
 const DEFAULT_STYLE_LINE_WIDTH_EMU: f64 = 9_525.0;
@@ -18,6 +20,8 @@ pub struct ThemeFormatScheme {
     pub fills: Vec<Option<ShapeFill>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<Option<ShapeOutline>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Option<ShapeEffects>>,
     /// `a:bgFillStyleLst`, which `a:fillRef` indices from 1001 name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_fills: Vec<Option<ShapeFill>>,
@@ -25,7 +29,10 @@ pub struct ThemeFormatScheme {
 
 impl ThemeFormatScheme {
     pub fn is_empty(&self) -> bool {
-        self.fills.is_empty() && self.lines.is_empty() && self.background_fills.is_empty()
+        self.fills.is_empty()
+            && self.lines.is_empty()
+            && self.effects.is_empty()
+            && self.background_fills.is_empty()
     }
 
     fn fill(&self, index: u32) -> Option<&ShapeFill> {
@@ -61,6 +68,8 @@ pub struct ShapeStyle {
     pub fill: Option<StyleReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<StyleReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<StyleReference>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fill_disabled: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -76,6 +85,7 @@ impl ShapeStyle {
         self.font_color.is_none()
             && self.fill.is_none()
             && self.line.is_none()
+            && self.effect.is_none()
             && !self.fill_disabled
             && !self.line_disabled
     }
@@ -142,9 +152,48 @@ pub fn style_outline(
     Some(resolved)
 }
 
+/// Resolves `a:effectRef`; index 0 means no effects.
+pub fn style_effects(
+    scheme: &ThemeFormatScheme,
+    reference: &StyleReference,
+    theme: &Theme,
+) -> Option<ShapeEffects> {
+    let index = reference.index.checked_sub(1)? as usize;
+    let mut effects = scheme.effects.get(index)?.as_ref()?.clone();
+    if let Some(shadow) = &mut effects.outer_shadow {
+        shadow.color = substitute_color(
+            shadow.color.as_ref(),
+            placeholder_color(reference, theme).as_ref(),
+        );
+    }
+    Some(effects)
+}
+
+/// Resolves a `phClr` colour against the reference's colour, as a style fill does.
+pub fn style_reference_color(
+    value: &ColorValue,
+    reference: &StyleReference,
+    theme: &Theme,
+) -> Option<ColorValue> {
+    substitute_color(Some(value), placeholder_color(reference, theme).as_ref())
+}
+
 /// Applies reference modifiers before style modifiers.
 fn placeholder_color(reference: &StyleReference, theme: &Theme) -> Option<ColorValue> {
     let color = reference.color.as_ref()?;
+    if !color.transforms.is_empty() {
+        let base = ColorValue {
+            rgb: color.rgb.clone(),
+            theme_color: color.theme_color.clone(),
+            ..ColorValue::default()
+        };
+        let rgb = resolve_color_value_to_hex_with_theme(Some(&base), Some(theme))?;
+        return Some(ColorValue {
+            rgb: Some(rgb.trim_start_matches('#').to_owned()),
+            theme_color: None,
+            ..color.clone()
+        });
+    }
     let rgb = resolve_color_value_to_hex_with_theme(Some(color), Some(theme))?;
     Some(ColorValue {
         rgb: Some(rgb.trim_start_matches('#').to_owned()),
@@ -165,11 +214,37 @@ fn substitute_color(
     let Some(placeholder) = placeholder else {
         return Some(value.clone());
     };
+    let legacy = value.theme_tint.is_some()
+        || value.theme_shade.is_some()
+        || value.luminance_modulation.is_some()
+        || value.luminance_offset.is_some()
+        || value.saturation_modulation.is_some()
+        || value.alpha.is_some();
+    let placeholder = if !placeholder.transforms.is_empty() && value.transforms.is_empty() && legacy
+    {
+        ColorValue {
+            rgb: resolve_color_value_to_hex_with_theme(Some(placeholder), None)
+                .map(|hex| hex.trim_start_matches('#').to_owned()),
+            alpha: Some(crate::resolve_color_value_alpha(placeholder)),
+            ..ColorValue::default()
+        }
+    } else {
+        placeholder.clone()
+    };
+    let mut transforms: Vec<_> = placeholder.drawingml_transforms().collect();
+    if transforms.is_empty()
+        && !value.transforms.is_empty()
+        && let Some(alpha) = placeholder.alpha
+    {
+        transforms.push(crate::ColorTransform::Alpha(alpha));
+    }
+    transforms.extend(value.drawingml_transforms());
     Some(ColorValue {
         rgb: placeholder.rgb.clone(),
         theme_color: None,
         auto: None,
         alpha: value.alpha.or(placeholder.alpha),
+        transforms,
         ..value.clone()
     })
 }
@@ -270,6 +345,80 @@ mod tests {
                 ShapeFill::named("none")
             );
         }
+    }
+
+    #[test]
+    fn ordered_placeholder_transforms_compose_without_intermediate_rounding() {
+        use crate::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        let color = ColorValue {
+            theme_color: Some("phClr".to_owned()),
+            transforms: vec![ColorTransform::LumMod(0.6), ColorTransform::AlphaMod(0.5)],
+            ..Default::default()
+        };
+        let scheme = ThemeFormatScheme {
+            fills: vec![
+                Some(solid(color.clone())),
+                Some(ShapeFill {
+                    fill_type: "gradient".to_owned(),
+                    color: None,
+                    gradient: Some(GradientFill {
+                        gradient_type: "linear".to_owned(),
+                        angle: None,
+                        stops: vec![GradientStop {
+                            position: 0.0,
+                            color: color.clone(),
+                        }],
+                    }),
+                }),
+            ],
+            lines: vec![Some(ShapeOutline {
+                color: Some(color),
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let mut reference = StyleReference {
+            index: 1,
+            color: Some(ColorValue {
+                theme_color: Some("accent1".to_owned()),
+                transforms: vec![ColorTransform::Tint(0.5), ColorTransform::Alpha(0.5)],
+                ..Default::default()
+            }),
+        };
+        let theme = Theme::default();
+        let solid = style_fill(&scheme, &reference, &theme).color.unwrap();
+        let line = style_outline(&scheme, &reference, &theme)
+            .unwrap()
+            .color
+            .unwrap();
+        reference.index = 2;
+        let gradient = style_fill(&scheme, &reference, &theme).gradient.unwrap();
+        for color in [&solid, &line, &gradient.stops[0].color] {
+            assert_eq!(
+                color.transforms,
+                vec![
+                    ColorTransform::Tint(0.5),
+                    ColorTransform::Alpha(0.5),
+                    ColorTransform::LumMod(0.6),
+                    ColorTransform::AlphaMod(0.5),
+                ]
+            );
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(color), Some(&theme)).as_deref(),
+                Some("#4C64B040")
+            );
+        }
+        reference.index = 1;
+        let color = reference.color.as_mut().unwrap();
+        color.transforms = vec![ColorTransform::Tint(0.5)];
+        color.alpha = Some(0.5);
+        let mixed = style_fill(&scheme, &reference, &theme).color.unwrap();
+        assert_eq!(mixed.transforms, solid.transforms);
+        assert_eq!(
+            resolve_color_value_to_rgba_hex(Some(&mixed), Some(&theme)).as_deref(),
+            Some("#4C64B040")
+        );
     }
 
     #[test]

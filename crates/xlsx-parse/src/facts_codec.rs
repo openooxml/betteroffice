@@ -425,6 +425,7 @@ fn encode_sheet(writer: &mut Writer, sheet: &SheetFacts) {
         visibility,
         worksheet,
         protected,
+        format_cells,
     } = sheet;
     writer.string(path);
     writer.uint(match kind {
@@ -441,11 +442,15 @@ fn encode_sheet(writer: &mut Writer, sheet: &SheetFacts) {
         SheetVisibility::Unknown => 3,
     });
     writer.bool(*worksheet);
-    writer.bool(*protected);
+    writer.uint(match (*protected, *format_cells) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    });
 }
 
 fn decode_sheet(reader: &mut Reader<'_>) -> Result<SheetFacts, ParseError> {
-    Ok(SheetFacts {
+    let mut sheet = SheetFacts {
         path: reader.string()?,
         kind: match reader.uint()? {
             0 => SourceSheetKind::Worksheet,
@@ -463,8 +468,16 @@ fn decode_sheet(reader: &mut Reader<'_>) -> Result<SheetFacts, ParseError> {
             _ => return Err(malformed("invalid facts visibility")),
         },
         worksheet: reader.bool()?,
-        protected: reader.bool()?,
-    })
+        protected: false,
+        format_cells: false,
+    };
+    (sheet.protected, sheet.format_cells) = match reader.uint()? {
+        0 => (false, false),
+        1 => (true, false),
+        2 => (true, true),
+        _ => return Err(malformed("invalid facts protection")),
+    };
+    Ok(sheet)
 }
 
 fn encode_reference(writer: &mut Writer, reference: &ReferenceFacts) {
@@ -765,6 +778,7 @@ mod tests {
                 visibility: SheetVisibility::VeryHidden,
                 worksheet: false,
                 protected: false,
+                format_cells: false,
             },
             SheetFacts {
                 path: "macro".to_owned(),
@@ -772,6 +786,7 @@ mod tests {
                 visibility: SheetVisibility::Unknown,
                 worksheet: false,
                 protected: true,
+                format_cells: false,
             },
             SheetFacts {
                 path: "other".to_owned(),
@@ -779,6 +794,7 @@ mod tests {
                 visibility: SheetVisibility::Visible,
                 worksheet: true,
                 protected: false,
+                format_cells: false,
             },
         ]);
         let bytes = encode_facts(&expected);

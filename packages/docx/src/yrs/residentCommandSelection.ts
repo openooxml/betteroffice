@@ -1,18 +1,20 @@
 import { retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
+import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
-import { createDisplayListQueries, type DisplayListQueries, type DisplayListVisualLine } from '../layout/render/displayListQueries';
+import { createDisplayListQueries, type DisplayListQueries, type DisplayListRect, type DisplayListVisualLine } from '../layout/render/displayListQueries';
 import { loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import { findWordBoundaries } from '../utils/textSelection';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { displayPositionToYrsLoc } from './inputPositionMap';
 import { commandSelectionRange, readCommandSelection, resolveCommandSelection } from './residentCommandAnchors';
-import type { YrsLoc, YrsStoryRange } from './index';
+import { cellSelectionHeadPosition, resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
+import type { YrsLoc, YrsStoryRange, YrsTableRange } from './index';
 import type {
   DocxCommandApplyContext,
   DocxCommandIntent,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
 
 /** @internal */
@@ -28,8 +30,8 @@ export interface DocxCommandSelectionLayout {
 
 /** @internal */
 export interface ResolveDocxSelectionIntentInput {
-  engine: ResidentDocxCommandEngine;
-  state: ResidentDocxCommandState;
+  engine: DocxWorkerCommandEngine;
+  state: DocxWorkerCommandState;
   command: DocxSelectionCommandIntent;
   context: DocxCommandApplyContext;
   readLayout?: () => DocxCommandSelectionLayout;
@@ -41,6 +43,7 @@ export type ResolveDocxSelectionIntentResult = {
   selection: DocxCommandSelection;
   range: YrsStoryRange;
   goalX?: number;
+  cells?: YrsTableRange | null;
 };
 
 interface SelectionReads {
@@ -50,7 +53,7 @@ interface SelectionReads {
   roots: Map<string, string>;
   parts: Map<string, number>;
   paragraphs: Map<string, {
-    spans: ReturnType<ResidentDocxCommandEngine['geometryReader']['paragraphSpans']>;
+    spans: ReturnType<DocxWorkerCommandEngine['geometryReader']['paragraphSpans']>;
     indices: Map<string, number>;
   }>;
   frame?: RetainedFrame;
@@ -58,14 +61,14 @@ interface SelectionReads {
   queries: Map<string, DisplayListQueries>;
 }
 
-const selectionReads = new WeakMap<ResidentDocxCommandEngine, SelectionReads>();
+const selectionReads = new WeakMap<DocxWorkerCommandEngine, SelectionReads>();
 
-export function releaseResidentSelectionReads(engine: ResidentDocxCommandEngine): void {
+export function releaseResidentSelectionReads(engine: DocxWorkerCommandEngine): void {
   for (const queries of selectionReads.get(engine)?.queries.values() ?? []) queries.dispose();
   selectionReads.delete(engine);
 }
 
-function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
+function readsFor(engine: DocxWorkerCommandEngine): SelectionReads {
   const reader = engine.geometryReader;
   const version = reader.version();
   let reads = selectionReads.get(engine);
@@ -80,7 +83,7 @@ function readsFor(engine: ResidentDocxCommandEngine): SelectionReads {
   return reads;
 }
 
-function indexFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, root: string): DisplayPositionIndex {
+function indexFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, root: string): DisplayPositionIndex {
   let index = reads.indexes.get(root);
   if (!index) {
     if (reads.indexes.size >= 4) {
@@ -96,7 +99,7 @@ function indexFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, root
   return index;
 }
 
-function paragraphsFor(reads: SelectionReads, engine: ResidentDocxCommandEngine, story: string) {
+function paragraphsFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, story: string) {
   let paragraphs = reads.paragraphs.get(story);
   if (!paragraphs) {
     const spans = engine.geometryReader.paragraphSpans(story);
@@ -106,7 +109,7 @@ function paragraphsFor(reads: SelectionReads, engine: ResidentDocxCommandEngine,
   return paragraphs;
 }
 
-function paragraphText(reads: SelectionReads, engine: ResidentDocxCommandEngine, at: YrsLoc): string {
+function paragraphText(reads: SelectionReads, engine: DocxWorkerCommandEngine, at: YrsLoc): string {
   const ordinal = paragraphsFor(reads, engine, at.story).indices.get(at.paraId);
   if (ordinal === undefined) throw new Error('Selection lacks paragraph');
   return (engine.paragraphSegments(at.story, [ordinal])[0] ?? []).map((segment) =>
@@ -114,7 +117,7 @@ function paragraphText(reads: SelectionReads, engine: ResidentDocxCommandEngine,
   ).join('');
 }
 
-function locationAt(reads: SelectionReads, engine: ResidentDocxCommandEngine, root: string, position: number): YrsLoc | null {
+function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root: string, position: number): YrsLoc | null {
   const index = indexFor(reads, engine, root);
   const projection = index.projection(root);
   if (!projection) return null;
@@ -201,6 +204,53 @@ function queriesFor(reads: SelectionReads, frame: RetainedFrame, root = 'body'):
   return queries;
 }
 
+function rootFor(reads: SelectionReads, engine: DocxWorkerCommandEngine, at: YrsLoc): string {
+  const cached = reads.roots.get(at.story);
+  if (cached) return cached;
+  const roots = /^(body|(?:hf|fn|en):[^:]+)$/u.test(at.story)
+    ? [at.story] : ['body', ...engine.geometryReader.storyIds().filter((story) => /^(hf|fn|en):/u.test(story))];
+  for (const story of roots) {
+    if (indexFor(reads, engine, story).projection(story)?.positionForLoc(at) != null) {
+      if (reads.roots.size >= 32) reads.roots.clear();
+      reads.roots.set(at.story, story);
+      return story;
+    }
+  }
+  return at.story;
+}
+
+function selectPartPage(reads: SelectionReads, root: string, pageIndex: number): void {
+  if (reads.parts.get(root) === pageIndex) return;
+  reads.parts.set(root, pageIndex);
+  reads.queries.get(root)?.dispose();
+  reads.queries.delete(root);
+}
+
+export function selectResidentPartPage(engine: DocxWorkerCommandEngine, story: string, pageIndex: number): void {
+  if (story.startsWith('hf:')) selectPartPage(readsFor(engine), story, pageIndex);
+}
+
+export function readDocxSelectionFocus(
+  engine: DocxWorkerCommandEngine, selection: DocxCommandSelection, layout: DocxCommandSelectionLayout
+): DisplayListRect | null {
+  const reads = readsFor(engine);
+  const root = rootFor(reads, engine, selection.focus);
+  const position = indexFor(reads, engine, root).positionOf(selection.focus, root);
+  if (position === null) return null;
+  const queries = queriesFor(reads, layout.frame, root);
+  const rect = caretAt(queries, position);
+  return rect && { ...rect, pageIndex: queries.displayList.pages[rect.pageIndex]?.pageIndex ?? rect.pageIndex };
+}
+
+function caretAt(queries: DisplayListQueries, position: number): DisplayListRect | null {
+  const caret = queries.caretRect(position);
+  if (caret && caret.height > 0) return caret;
+  const forward = queries.rangeRects(position, position + 1)[0];
+  if (forward && forward.height > 0) return { ...forward, width: 0 };
+  const previous = position > 0 ? queries.rangeRects(position - 1, position).at(-1) : undefined;
+  return previous && previous.height > 0 ? { ...previous, x: previous.x + previous.width, width: 0 } : null;
+}
+
 function lineAt(queries: DisplayListQueries, position: number): DisplayListVisualLine | null {
   const caret = queries.caretRect(position);
   if (!caret) return null;
@@ -212,6 +262,63 @@ function lineAt(queries: DisplayListQueries, position: number): DisplayListVisua
     if (!best || distance(line) < distance(best)) best = line;
   }
   return best;
+}
+
+function pageMove(queries: DisplayListQueries, position: number, direction: 'up' | 'down', goalX: number, distance: number,
+  documentWidth: number, rootSize: number): number | null {
+  const caret = caretAt(queries, position);
+  if (!caret) return null;
+  let top = 0;
+  const pages = queries.displayList.pages.map((page, index) => {
+    const entry = { page, index, top };
+    top += page.height + CANVAS_PAGE_GAP_PX;
+    return entry;
+  });
+  const current = pages[caret.pageIndex];
+  if (!current) return null;
+  const origin = current.top + caret.y + caret.height / 2;
+  const target = origin + (direction === 'down' ? distance : -distance);
+  const lines = new Map<number, readonly DisplayListVisualLine[]>();
+  const linesFor = (pageIndex: number) => {
+    let pageLines = lines.get(pageIndex);
+    if (!pageLines) {
+      const page = pages[pageIndex]!.page;
+      pageLines = [...queries.visualLinesOnPage(pageIndex).map(line => ({ ...line, pageIndex })), ...page.primitives.flatMap<DisplayListVisualLine>(primitive =>
+        primitive.kind === 'image' && primitive.docStart !== undefined && primitive.docEnd !== undefined
+          ? [{ pageIndex, x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h,
+            baseline: primitive.y + primitive.h, from: primitive.docStart, to: primitive.docEnd }] : [])]
+        .sort((a, b) => a.y - b.y || a.x - b.x);
+      lines.set(pageIndex, pageLines);
+    }
+    return pageLines;
+  };
+  const firstPage = pages.find(({ page, index }) => !page.unbuilt && linesFor(index).length);
+  const lastPage = [...pages].reverse().find(({ page, index }) => !page.unbuilt && linesFor(index).length);
+  if (!firstPage || !lastPage) return null;
+  const first = linesFor(firstPage.index)[0]!;
+  const last = linesFor(lastPage.index).at(-1)!;
+  if (target < firstPage.top + first.y && !pages.some(({ page, index }) => index < first.pageIndex && page.unbuilt)) return 0;
+  if (target > lastPage.top + last.y + last.height && !pages.some(({ page, index }) => index > last.pageIndex && page.unbuilt)) return rootSize;
+  const pageDistance = (entry: typeof pages[number]) => Math.max(entry.top - target, 0, target - entry.top - entry.page.height);
+  let nearest: DisplayListVisualLine | undefined;
+  let best = Infinity;
+  for (const entry of [...pages].sort((a, b) => pageDistance(a) - pageDistance(b))) {
+    if (pageDistance(entry) > best) break;
+    if (entry.page.unbuilt) continue;
+    for (const line of linesFor(entry.index)) {
+      const center = entry.top + line.y + line.height / 2;
+      if (line.pageIndex === caret.pageIndex && line.from <= position && position <= line.to &&
+        Math.abs(center - origin) < Math.max(line.height, caret.height)) continue;
+      if (direction === 'down' ? center <= origin : center >= origin) continue;
+      const gap = Math.abs(center - target);
+      if (gap < best) { nearest = line; best = gap; }
+    }
+  }
+  if (!nearest) return direction === 'down' ? rootSize : 0;
+  const page = pages[nearest.pageIndex]!.page;
+  const x = goalX - (documentWidth - page.width) / 2;
+  return queries.hitTestRegions(nearest.pageIndex, x, nearest.y + nearest.height / 2)?.pos ??
+    (x > nearest.x + nearest.width / 2 ? nearest.to : nearest.from);
 }
 
 /** @internal */
@@ -236,20 +343,6 @@ export function resolveDocxSelectionIntent(
     return { status: 'clamped', selection: base, range };
   };
   const reads = readsFor(engine);
-  const rootFor = (at: YrsLoc): string => {
-    const cached = reads.roots.get(at.story);
-    if (cached) return cached;
-    const roots = /^(body|(?:hf|fn|en):[^:]+)$/u.test(at.story)
-      ? [at.story] : ['body', ...reader.storyIds().filter((story) => /^(hf|fn|en):/u.test(story))];
-    for (const story of roots) {
-      if (indexFor(reads, engine, story).projection(story)?.positionForLoc(at) != null) {
-        if (reads.roots.size >= 32) reads.roots.clear();
-        reads.roots.set(at.story, story);
-        return story;
-      }
-    }
-    return at.story;
-  };
   const atDisplay = (root: string, position: number): YrsLoc | null => {
     return locationAt(reads, engine, root, position);
   };
@@ -257,6 +350,7 @@ export function resolveDocxSelectionIntent(
   let goalX: number | undefined;
   let anchor: YrsLoc = base.anchor;
   let focus: YrsLoc = base.focus;
+  let cells: YrsTableRange | null | undefined;
   if (command.kind === 'navigate') {
     const navigation = command.payload;
     const backward = navigation.direction === 'backward' || navigation.direction === 'up';
@@ -271,14 +365,19 @@ export function resolveDocxSelectionIntent(
     } else if (navigation.unit === 'document-boundary') {
       const edge = backward ? spans[0]! : spans.at(-1)!;
       focus = { story: focus.story, paraId: edge.paraId, offset: backward ? 0 : edge.length };
-    } else if (navigation.unit === 'line' && input.readLayout) {
+    } else if ((navigation.unit === 'line' || navigation.unit === 'page') && input.readLayout) {
       const layout = input.readLayout();
-      const root = rootFor(focus);
+      const origin = navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus;
+      const root = rootFor(reads, engine, origin);
       const queries = queriesFor(reads, layout.frame, root);
-      const position = indexFor(reads, engine, root).positionOf(focus, root);
+      const position = indexFor(reads, engine, root).positionOf(origin, root);
       if (position !== null && queries.isReady()) {
         if (navigation.direction === 'up' || navigation.direction === 'down') {
-          const movement = queries.verticalMove(position, navigation.direction, navigation.goalX);
+          const movement = navigation.unit === 'page'
+            ? { position: pageMove(queries, position, navigation.direction, navigation.goalX, navigation.distance,
+              layout.frame.pages.reduce((width, { page }) => Math.max(width, page.width), 0),
+              indexFor(reads, engine, root).projection(root)!.size) ?? position, goalX: navigation.goalX }
+            : queries.verticalMove(position, navigation.direction, navigation.goalX);
           if (movement) {
             focus = atDisplay(root, movement.position) ?? focus;
             goalX = movement.goalX;
@@ -288,6 +387,8 @@ export function resolveDocxSelectionIntent(
           if (line) focus = atDisplay(root, backward ? line.from : line.to) ?? focus;
         }
       }
+    } else if (navigation.unit === 'page') {
+      goalX = navigation.goalX;
     } else if (navigation.unit === 'line' || navigation.unit === 'paragraph') {
       if (navigation.direction === 'up' || navigation.direction === 'down') {
         paragraph = Math.max(0, Math.min(spans.length - 1, paragraph + (backward ? -1 : 1)));
@@ -321,9 +422,18 @@ export function resolveDocxSelectionIntent(
       }
       focus = { story: focus.story, paraId: spans[paragraph]!.paraId, offset };
     }
-    if (navigation.extend && anchor.story !== focus.story) {
-      focus = base.focus;
-      clamped = true;
+    if (navigation.extend) {
+      const stepped = resolveShiftArrowCellRange(engine, base, focus, navigation.unit, navigation.direction,
+        'goalX' in navigation ? navigation.goalX : undefined);
+      if (stepped) {
+        anchor = stepped.selection.anchor;
+        focus = stepped.selection.focus;
+        cells = stepped.cells;
+        if (stepped.goalX !== undefined) goalX = stepped.goalX;
+      } else if (anchor.story !== focus.story) {
+        focus = base.focus;
+        clamped = true;
+      }
     }
     if (!navigation.extend) anchor = focus;
   } else {
@@ -348,11 +458,7 @@ export function resolveDocxSelectionIntent(
       ? atDisplay(hitRoot, hit.pos) : null;
     if (at) {
       focus = at;
-      if (hitRoot?.startsWith('hf:') && reads.parts.get(hitRoot) !== page.pageIndex) {
-        reads.parts.set(hitRoot, page.pageIndex);
-        reads.queries.get(hitRoot)?.dispose();
-        reads.queries.delete(hitRoot);
-      }
+      if (hitRoot?.startsWith('hf:')) selectPartPage(reads, hitRoot, page.pageIndex);
     } else {
       clamped = true;
       const lines = queries.visualLinesOnPage(page.pageIndex);
@@ -368,8 +474,15 @@ export function resolveDocxSelectionIntent(
     }
     if (command.kind === 'extendSelection' || point.modifiers.shift) {
       if (anchor.story !== focus.story) {
-        focus = base.focus;
-        clamped = true;
+        const pointer = resolvePointerCellRange(engine, base.anchor, focus);
+        if (pointer) {
+          anchor = pointer.textAnchor;
+          focus = pointer.textAnchor;
+          cells = pointer.cells;
+        } else {
+          focus = base.focus;
+          clamped = true;
+        }
       }
     } else {
       anchor = focus;
@@ -390,5 +503,6 @@ export function resolveDocxSelectionIntent(
     clamped = true;
   }
   if (!range) throw new Error('Document has no valid selection');
-  return { status: clamped ? 'clamped' : 'resolved', selection, range, ...(goalX === undefined ? {} : { goalX }) };
+  return { status: clamped ? 'clamped' : 'resolved', selection, range,
+    ...(goalX === undefined ? {} : { goalX }), ...(cells === undefined ? {} : { cells }) };
 }

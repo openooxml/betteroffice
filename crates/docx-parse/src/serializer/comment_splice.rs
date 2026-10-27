@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::block::BlockContent;
 use crate::comments::Comment;
 use crate::paragraph::HexIdAllocator;
-use crate::paragraph_identity::{attribute, parse_paragraph_id, tags, unescaped};
+use crate::paragraph_identity::{Tag, attribute, parse_paragraph_id, tags, unescaped};
 use crate::relationships::parse_relationships;
 use crate::s8::{find_part, parse_comment_part};
 use crate::styles::StyleMap;
@@ -18,8 +18,16 @@ use crate::xml::{
 };
 
 use super::context::SerializerContext;
-use super::parts::{CommentParaInfo, serialize_comments_with_info};
+use super::parts::{
+    CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
+    serialize_comments_ids_part, serialize_comments_with_info,
+};
 use super::xml_writer::js_number;
+
+pub(super) struct SplicedComments {
+    pub(super) xml: String,
+    pub(super) companions: Option<Vec<(String, String)>>,
+}
 
 pub(super) fn splice_comments(
     source: &[u8],
@@ -29,13 +37,13 @@ pub(super) fn splice_comments(
     serialized: &str,
     infos: &mut Vec<CommentParaInfo>,
     mut source_context: SerializerContext,
-) -> Result<String, ParseError> {
+) -> Result<SplicedComments, ParseError> {
     if !crate::xml::reads_as_written(source) {
         return Err(error_xml("source requires whole-part writing"));
     }
     let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
     let original = source_comments(parts, seed)?;
-    let spans = comment_spans(source)?;
+    let (spans, close) = comment_spans(source)?;
     let source_ids: HashSet<_> = spans.iter().map(|(id, _)| id.as_str()).collect();
     let model_ids: HashSet<_> = comments
         .iter()
@@ -51,7 +59,7 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("duplicate comment ids"));
     }
-    if comments.len() != original.len()
+    if comments.len() < original.len()
         || comments
             .iter()
             .zip(&original)
@@ -59,15 +67,32 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("comment ids or order changed"));
     }
-    let parent_ids: HashSet<_> = comments
+    let (kept, added) = comments.split_at(original.len());
+    let thread_changed = added.iter().any(|comment| comment.parent_id.is_some())
+        || kept.iter().zip(&original).any(|(comment, source)| {
+            comment.done != source.done || comment.parent_id != source.parent_id
+        });
+    let mut parent_ids: HashSet<_> = added
         .iter()
+        .chain(
+            kept.iter()
+                .zip(&original)
+                .filter(|(comment, source)| source_metadata_changed(source, comment))
+                .map(|(comment, _)| comment),
+        )
         .filter_map(|comment| comment.parent_id.map(js_number))
         .collect();
+    if !thread_changed {
+        parent_ids.extend(
+            kept.iter()
+                .filter_map(|comment| comment.parent_id.map(js_number)),
+        );
+    }
     let fragments: HashMap<_, _> = spans
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
-    for (comment, original) in comments.iter().zip(&original) {
+    for (comment, original) in kept.iter().zip(&original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
@@ -77,28 +102,59 @@ pub(super) fn splice_comments(
             (None, None) => true,
             _ => false,
         };
-        if (original.para_id.is_none() && parent_ids.contains(&id))
+        if (!thread_changed && original.para_id.is_none() && parent_ids.contains(&id))
             || !same_para_id
-            || source_metadata_changed(original, comment)
-            || !can_replay(original, comment, fragment)?
+            || !can_replay(original, comment, fragment, thread_changed)?
         {
             return Err(error_xml("comment changed"));
         }
+        if original.para_id.is_some()
+            && (source_metadata_changed(original, comment) || parent_ids.contains(&id))
+        {
+            let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid comment"))?;
+            if direct_paragraphs(&fragment_tags)
+                .last()
+                .and_then(|paragraph| attribute(paragraph, "w14:paraId"))
+                .is_none()
+            {
+                return Err(error_xml("missing final comment paragraph id"));
+            }
+        }
     }
-    let (source_xml, source_infos) = serialize_comments_with_info(&original, &mut source_context);
-    if source_xml != serialized || source_infos != *infos {
+    let (source_xml, source_infos) =
+        serialize_comments_with_info(&original, &mut source_context.clone());
+    let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
+    let infos_changed = if thread_changed {
+        source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
+            source.comment_id != kept.comment_id
+                || source.last_para_id != kept.last_para_id
+                || source.durable_id != kept.durable_id
+        })
+    } else {
+        source_infos != kept_infos
+    };
+    if source_xml != kept_xml || infos_changed {
         return Err(error_xml("comment serialization changed"));
     }
     let original_para_ids: HashMap<_, _> = original
         .iter()
         .map(|comment| (js_number(comment.id), comment.para_id.as_ref()))
         .collect();
+    let added_ids: HashSet<_> = added.iter().map(|comment| js_number(comment.id)).collect();
+    let needed_ids: HashSet<_> = kept
+        .iter()
+        .zip(&original)
+        .filter(|(comment, source)| source_metadata_changed(source, comment))
+        .map(|(comment, _)| js_number(comment.id))
+        .chain(parent_ids)
+        .collect();
     infos.retain_mut(|info| {
-        if let Some(Some(para_id)) = original_para_ids.get(&js_number(info.comment_id)) {
+        let id = js_number(info.comment_id);
+        if let Some(Some(para_id)) = original_para_ids.get(&id) {
             info.last_para_id.clone_from(para_id);
             true
         } else {
-            false
+            added_ids.contains(&id) || needed_ids.contains(&id)
         }
     });
     if infos.is_empty()
@@ -112,7 +168,336 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("empty comment companions"));
     }
-    Ok(source.to_owned())
+    let mut patches = Vec::new();
+    for (id, span) in &spans {
+        if original_para_ids.get(id).is_some_and(|id| id.is_none()) && needed_ids.contains(id) {
+            let fragment = &source[span.clone()];
+            let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid parent"))?;
+            let paragraph = direct_paragraphs(&fragment_tags)
+                .last()
+                .ok_or_else(|| error_xml("missing parent paragraph"))?;
+            if paragraph
+                .attributes
+                .iter()
+                .any(|(key, _)| key.ends_with(":paraId"))
+            {
+                return Err(error_xml("unsupported parent paragraph id"));
+            }
+            let info = infos
+                .iter()
+                .find(|info| js_number(info.comment_id) == *id)
+                .ok_or_else(|| error_xml("missing parent info"))?;
+            let opening = &fragment[paragraph.range.clone()];
+            let mut patched = set_attribute(opening, "w14:paraId", Some(&info.last_para_id))?;
+            patched = with_namespaces(&patched, serialized, source)?;
+            patches.push((
+                span.start + paragraph.range.start..span.start + paragraph.range.end,
+                patched,
+            ));
+        }
+    }
+    if !added.is_empty() {
+        let close = close.ok_or_else(|| error_xml("self-closing comments root"))?;
+        let written: HashMap<_, _> = comment_spans(serialized)?.0.into_iter().collect();
+        let mut appended = String::new();
+        for comment in added {
+            let span = written
+                .get(&js_number(comment.id))
+                .ok_or_else(|| error_xml("missing written comment"))?;
+            appended.push_str(&serialized[span.clone()]);
+        }
+        patches.push((close..close, appended));
+    }
+    let spliced = apply_patches(source, patches);
+    if !crate::xml::reads_as_written(spliced.as_bytes()) {
+        return Err(error_xml("added comments require whole-part writing"));
+    }
+    let companions = if thread_changed {
+        Some(splice_companions(
+            parts, &original, comments, infos, &added_ids,
+        )?)
+    } else {
+        None
+    };
+    Ok(SplicedComments {
+        xml: spliced,
+        companions,
+    })
+}
+
+fn direct_paragraphs<'a, 'b>(tags: &'a [Tag<'b>]) -> impl Iterator<Item = &'a Tag<'b>> {
+    let mut depth = 0usize;
+    tags.iter().filter(move |tag| {
+        if tag.end {
+            depth = depth.saturating_sub(1);
+            false
+        } else {
+            let paragraph = depth == 1 && tag.name == "w:p";
+            depth += usize::from(!tag.empty);
+            paragraph
+        }
+    })
+}
+
+fn apply_patches(source: &str, mut patches: Vec<(Range<usize>, String)>) -> String {
+    patches.sort_by_key(|(span, _)| span.start);
+    let mut result = source.to_owned();
+    for (span, replacement) in patches.into_iter().rev() {
+        result.replace_range(span, &replacement);
+    }
+    result
+}
+
+fn set_attribute(xml: &str, key: &str, value: Option<&str>) -> Result<String, ParseError> {
+    let parsed = tags(xml).ok_or_else(|| error_xml("invalid attribute target"))?;
+    let tag = parsed
+        .first()
+        .ok_or_else(|| error_xml("missing attribute target"))?;
+    let mut result = xml.to_owned();
+    if let Some(span) = attribute(tag, key) {
+        if let Some(value) = value {
+            result.replace_range(span, value);
+        } else {
+            let start = xml[..span.start]
+                .rfind(key)
+                .ok_or_else(|| error_xml("missing attribute name"))?;
+            let mut start = start;
+            while start > 0 && xml.as_bytes()[start - 1].is_ascii_whitespace() {
+                start -= 1;
+            }
+            result.replace_range(start..span.end + 1, "");
+        }
+    } else if let Some(value) = value {
+        let end = tag.range.end - if tag.empty { 2 } else { 1 };
+        result.insert_str(end, &format!(" {key}=\"{value}\""));
+    }
+    Ok(result)
+}
+
+fn with_namespaces(fragment: &str, serialized: &str, source: &str) -> Result<String, ParseError> {
+    let written = tags(serialized).ok_or_else(|| error_xml("invalid written namespaces"))?;
+    let source_tags = tags(source).ok_or_else(|| error_xml("invalid source namespaces"))?;
+    let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid fragment namespaces"))?;
+    let written_root = written
+        .first()
+        .ok_or_else(|| error_xml("missing written root"))?;
+    let source_root = source_tags
+        .first()
+        .ok_or_else(|| error_xml("missing source root"))?;
+    let fragment_root = fragment_tags
+        .first()
+        .ok_or_else(|| error_xml("missing fragment root"))?;
+    let prefixes: HashSet<_> = fragment_tags
+        .iter()
+        .flat_map(|tag| std::iter::once(tag.name).chain(tag.attributes.iter().map(|(key, _)| *key)))
+        .filter_map(|name| name.split_once(':').map(|(prefix, _)| prefix))
+        .filter(|prefix| *prefix != "xml" && *prefix != "xmlns")
+        .collect();
+    let mut prefixes: Vec<_> = prefixes.into_iter().collect();
+    prefixes.sort_unstable();
+    let mut result = fragment.to_owned();
+    for prefix in prefixes {
+        let key = format!("xmlns:{prefix}");
+        if attribute(fragment_root, &key).is_some() {
+            continue;
+        }
+        let Some(value) =
+            attribute(written_root, &key).and_then(|range| unescaped(serialized, range))
+        else {
+            return Err(error_xml("missing written namespace"));
+        };
+        if attribute(source_root, &key)
+            .and_then(|range| unescaped(source, range))
+            .as_ref()
+            != Some(&value)
+        {
+            result = set_attribute(&result, &key, Some(&value))?;
+        }
+    }
+    Ok(result)
+}
+
+fn splice_companions(
+    parts: &[(String, Vec<u8>)],
+    original: &[Comment],
+    comments: &[Comment],
+    infos: &[CommentParaInfo],
+    added_ids: &HashSet<String>,
+) -> Result<Vec<(String, String)>, ParseError> {
+    let changed: HashSet<_> = comments
+        .iter()
+        .zip(original)
+        .filter(|(comment, source)| source_metadata_changed(source, comment))
+        .map(|(comment, _)| js_number(comment.id))
+        .collect();
+    let added_infos: Vec<_> = infos
+        .iter()
+        .filter(|info| added_ids.contains(&js_number(info.comment_id)))
+        .cloned()
+        .collect();
+    let identity_infos = if changed.is_empty() && added_ids.is_empty() {
+        infos
+    } else {
+        &added_infos
+    };
+    let written = [
+        (
+            "word/commentsExtended.xml",
+            "commentEx",
+            serialize_comments_extended_part(infos),
+        ),
+        (
+            "word/commentsIds.xml",
+            "commentId",
+            serialize_comments_ids_part(identity_infos),
+        ),
+        (
+            "word/commentsExtensible.xml",
+            "commentExtensible",
+            serialize_comments_extensible_part(identity_infos, comments),
+        ),
+    ];
+    let mut result = Vec::new();
+    for (path, row_name, serialized) in written {
+        let Some((_, source)) = find_part(parts, path) else {
+            if !serialized.is_empty() {
+                result.push((path.to_owned(), serialized));
+            }
+            continue;
+        };
+        if added_ids.is_empty() && (row_name != "commentEx" || changed.is_empty()) {
+            continue;
+        }
+        if !crate::xml::reads_as_written(source) {
+            return Err(error_xml("companion requires whole-part writing"));
+        }
+        let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
+        let (rows, close) = companion_rows(source, row_name)?;
+        let (written_rows, _) = companion_rows(&serialized, row_name)?;
+        let (prefix, key) = match row_name {
+            "commentEx" => ("w15", "paraId"),
+            "commentId" => ("w16cid", "paraId"),
+            _ => ("w16cex", "durableId"),
+        };
+        let qualified_key = format!("{prefix}:{key}");
+        let row_id = |xml: &str, span: &Range<usize>| -> Result<String, ParseError> {
+            let parsed =
+                tags(&xml[span.clone()]).ok_or_else(|| error_xml("invalid companion row"))?;
+            let tag = parsed
+                .first()
+                .ok_or_else(|| error_xml("missing companion row"))?;
+            let range = attribute(tag, &qualified_key)
+                .or_else(|| attribute(tag, key))
+                .ok_or_else(|| error_xml("missing companion key"))?;
+            unescaped(&xml[span.clone()], range)
+                .map(|value| value.to_ascii_uppercase())
+                .ok_or_else(|| error_xml("invalid companion key"))
+        };
+        let mut by_id = HashMap::new();
+        for span in &rows {
+            if by_id.insert(row_id(source, span)?, span).is_some() {
+                return Err(error_xml("duplicate companion rows"));
+            }
+        }
+        let mut patches = Vec::new();
+        let mut appended = String::new();
+        for span in written_rows {
+            let id = row_id(&serialized, &span)?;
+            let info = infos
+                .iter()
+                .find(|info| {
+                    if key == "durableId" {
+                        info.durable_id.eq_ignore_ascii_case(&id)
+                    } else {
+                        info.last_para_id.eq_ignore_ascii_case(&id)
+                    }
+                })
+                .ok_or_else(|| error_xml("missing companion info"))?;
+            let comment_id = js_number(info.comment_id);
+            let added = added_ids.contains(&comment_id);
+            let metadata_changed = row_name == "commentEx" && changed.contains(&comment_id);
+            if !added && !metadata_changed {
+                continue;
+            }
+            if let Some(source_span) = by_id.get(&id) {
+                if added {
+                    return Err(error_xml("added companion identity collision"));
+                }
+                let fragment = &source[(*source_span).clone()];
+                let parsed = tags(fragment).ok_or_else(|| error_xml("invalid extended row"))?;
+                let tag = parsed
+                    .first()
+                    .ok_or_else(|| error_xml("missing extended row"))?;
+                let prefix = if attribute(tag, &qualified_key).is_some() {
+                    "w15:"
+                } else {
+                    ""
+                };
+                let original = original
+                    .iter()
+                    .find(|comment| comment.id == info.comment_id)
+                    .ok_or_else(|| error_xml("missing original comment"))?;
+                let mut patched = fragment.to_owned();
+                if (info.done == Some(true)) != (original.done == Some(true)) {
+                    let done = if info.done == Some(true) { "1" } else { "0" };
+                    patched = set_attribute(&patched, &format!("{prefix}done"), Some(done))?;
+                }
+                if info.parent_id != original.parent_id {
+                    let parent = info
+                        .parent_id
+                        .and_then(|id| infos.iter().find(|candidate| candidate.comment_id == id));
+                    patched = set_attribute(
+                        &patched,
+                        &format!("{prefix}paraIdParent"),
+                        parent.map(|parent| parent.last_para_id.as_str()),
+                    )?;
+                }
+                patches.push(((*source_span).clone(), patched));
+            } else {
+                appended.push_str(&with_namespaces(&serialized[span], &serialized, source)?);
+            }
+        }
+        if !appended.is_empty() {
+            let close = close.ok_or_else(|| error_xml("self-closing companion root"))?;
+            patches.push((close..close, appended));
+        }
+        result.push((path.to_owned(), apply_patches(source, patches)));
+    }
+    Ok(result)
+}
+
+fn companion_rows(
+    xml: &str,
+    row_name: &str,
+) -> Result<(Vec<Range<usize>>, Option<usize>), ParseError> {
+    let mut rows = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut close = None;
+    for tag in tags(xml).ok_or_else(|| error_xml("invalid companion spans"))? {
+        if tag.end {
+            depth = depth
+                .checked_sub(1)
+                .ok_or_else(|| error_xml("unbalanced companion"))?;
+            if depth == 1 {
+                if let Some(start) = start.take() {
+                    rows.push(start..tag.range.end);
+                }
+            } else if depth == 0 {
+                close = Some(tag.range.start);
+            }
+        } else {
+            if depth == 1 && tag.name.rsplit(':').next() == Some(row_name) {
+                if tag.empty {
+                    rows.push(tag.range.clone());
+                } else {
+                    start = Some(tag.range.start);
+                }
+            }
+            depth += usize::from(!tag.empty);
+        }
+    }
+    Ok((rows, close))
 }
 
 fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
@@ -120,7 +505,12 @@ fn source_metadata_changed(source: &Comment, written: &Comment) -> bool {
         || source.parent_id != written.parent_id
 }
 
-fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<bool, ParseError> {
+fn can_replay(
+    source: &Comment,
+    written: &Comment,
+    fragment: &str,
+    thread_changed: bool,
+) -> Result<bool, ParseError> {
     if source
         .para_id
         .as_deref()
@@ -164,27 +554,42 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
     let Some(model_ids) = comment_paragraph_ids(written) else {
         return Ok(false);
     };
-    if source_ids.iter().all(Option::is_none) {
-        if source_ids.len() != model_ids.len() || model_ids.iter().any(Option::is_some) {
-            return Ok(false);
-        }
-    } else {
-        let source_ids: Option<Vec<_>> = source_ids
-            .iter()
-            .map(|id| id.as_deref().and_then(parse_paragraph_id))
-            .collect();
-        let model_ids: Option<Vec<_>> = model_ids
-            .iter()
-            .map(|id| id.and_then(parse_paragraph_id))
-            .collect();
-        if source_ids.is_none() || source_ids != model_ids {
-            return Ok(false);
-        }
+    if !thread_changed
+        && source_ids.iter().any(Option::is_some)
+        && source_ids.iter().any(Option::is_none)
+    {
+        return Ok(false);
     }
-    let last_para_id = source_ids
-        .last()
-        .and_then(|id| id.as_ref())
-        .map(|id| id.to_ascii_uppercase());
+    let source_values: Option<Vec<_>> = source_ids
+        .iter()
+        .map(|id| match id {
+            Some(id) => parse_paragraph_id(id).map(Some),
+            None => Some(None),
+        })
+        .collect();
+    let model_values: Option<Vec<_>> = model_ids
+        .iter()
+        .map(|id| match id {
+            Some(id) => parse_paragraph_id(id).map(Some),
+            None => Some(None),
+        })
+        .collect();
+    if source_values.is_none() || source_values != model_values {
+        return Ok(false);
+    }
+    let last_para_id = if thread_changed {
+        direct_paragraphs(&fragment_tags)
+            .filter_map(|tag| {
+                attribute(tag, "w14:paraId").and_then(|range| unescaped(fragment, range))
+            })
+            .last()
+            .map(|id| id.to_ascii_uppercase())
+    } else {
+        source_ids
+            .last()
+            .and_then(|id| id.as_ref())
+            .map(|id| id.to_ascii_uppercase())
+    };
     if last_para_id != source.para_id {
         return Ok(false);
     }
@@ -195,17 +600,14 @@ fn can_replay(source: &Comment, written: &Comment, fragment: &str) -> Result<boo
         let inline_metadata = root.attributes.iter().any(|(name, range)| {
             (name.ends_with(":done") || *name == "done")
                 && written.done != Some(true)
-                && matches!(
-                    unescaped(fragment, range.clone()).as_deref(),
-                    Some("1" | "true")
-                )
+                && unescaped(fragment, range.clone())
+                    .as_deref()
+                    .and_then(crate::xml::parse_on_off)
+                    == Some(true)
                 || (name.ends_with(":parentId") || *name == "parentId")
                     && source.parent_id != written.parent_id
         });
-        if source.para_id.is_some() && !inline_metadata {
-            return Ok(true);
-        }
-        return Ok(false);
+        return Ok(!inline_metadata);
     }
     Ok(true)
 }
@@ -371,9 +773,10 @@ fn source_comments(parts: &[(String, Vec<u8>)], seed: &str) -> Result<Vec<Commen
     )
 }
 
-fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
+/// Each comment's span and where the root's end tag starts (`None` for a self-closing root).
+fn comment_spans(xml: &str) -> Result<(Vec<(String, Range<usize>)>, Option<usize>), ParseError> {
     if xml.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let limits = ParseLimits::default();
     let document = parse_xml(
@@ -411,7 +814,7 @@ fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
                     spans.push((id, start..tag.range.end));
                 }
             } else if depth == 0 {
-                end = Some(tag.range.start);
+                end = Some(Some(tag.range.start));
             }
         } else {
             if depth == 1 {
@@ -428,12 +831,12 @@ fn comment_spans(xml: &str) -> Result<Vec<(String, Range<usize>)>, ParseError> {
             }
             depth += usize::from(!tag.empty);
             if depth == 0 && tag.empty {
-                end = Some(tag.range.end);
+                end = Some(None);
             }
         }
     }
-    end.ok_or_else(|| error_xml("missing comments end"))?;
-    Ok(spans)
+    let close = end.ok_or_else(|| error_xml("missing comments end"))?;
+    Ok((spans, close))
 }
 
 fn error_xml(message: impl Into<String>) -> ParseError {

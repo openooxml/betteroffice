@@ -1,4 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 
 interface PointRead {
   target: {
@@ -89,14 +90,14 @@ async function replica(page: Page) {
 }
 
 async function copied(page: Page): Promise<string> {
-  await page.evaluate(async (sentinel) => {
+  await pinnedEvaluate(page, async (sentinel) => {
     (window as unknown as ViewerWindow).__viewerSelectionProbe.copies.length = 0;
     await navigator.clipboard.writeText(sentinel);
   }, SENTINEL);
   await page.keyboard.press('ControlOrMeta+C');
   let text = SENTINEL;
   await expect.poll(async () => {
-    text = await page.evaluate(async (sentinel) => {
+    text = await pinnedEvaluate(page, async (sentinel) => {
       const copies = (window as unknown as ViewerWindow).__viewerSelectionProbe.copies;
       const clipboard = await navigator.clipboard.readText();
       return clipboard !== sentinel ? clipboard : (copies.at(-1) ?? sentinel);
@@ -107,13 +108,13 @@ async function copied(page: Page): Promise<string> {
 }
 
 async function copiedNow(page: Page): Promise<string> {
-  await page.evaluate(async (sentinel) => {
+  await pinnedEvaluate(page, async (sentinel) => {
     (window as unknown as ViewerWindow).__viewerSelectionProbe.copies.length = 0;
     await navigator.clipboard.writeText(sentinel);
   }, SENTINEL);
   await page.keyboard.press('ControlOrMeta+C');
   await page.waitForTimeout(200);
-  return page.evaluate(async (sentinel) => {
+  return pinnedEvaluate(page, async (sentinel) => {
     const copies = (window as unknown as ViewerWindow).__viewerSelectionProbe.copies;
     const clipboard = await navigator.clipboard.readText();
     return clipboard !== sentinel ? clipboard : (copies.filter((text) => text !== '').at(-1) ?? sentinel);
@@ -128,7 +129,7 @@ async function paragraph(page: Page, index: number) {
 }
 
 async function pointAt(page: Page, x: number, y: number) {
-  return page.evaluate(
+  return pinnedEvaluate(page,
     ([px, py]) => (window as unknown as ViewerWindow).__viewerSelectionProbe.editor!.readPositionAtPoint(px!, py!),
     [x, y]
   );
@@ -250,7 +251,7 @@ test('a proposal clears the selection, and a triple-click right after it selects
   await page.mouse.click(x, y, { clickCount: 2 });
   const word = await copied(page);
   expect(word).toBe(wordAround(await paragraph(page, 1), read!.target.start.offset));
-  await page.evaluate(async () => {
+  await pinnedEvaluate(page, async () => {
     const editor = (window as unknown as ViewerWindow).__viewerSelectionProbe.editor!;
     const identities = await editor.getParagraphIdentities();
     const first = identities.paragraphs.find((entry) => entry.session?.story === 'body')!;

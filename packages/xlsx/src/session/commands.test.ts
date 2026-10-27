@@ -9,13 +9,14 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { createWorkbookCommandState } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
 import { batchRequests, capturedWorkbookCommand, createTestWorkbookSession } from './testHelpers';
 
 let bytes: Uint8Array;
+let plainBytes: Uint8Array;
 
 beforeAll(async () => {
   await wasm.initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
@@ -31,6 +32,14 @@ beforeAll(async () => {
   zip.file('xl/drawings/_rels/drawing1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>');
   zip.file('xl/charts/chart1.xml', '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>Data!$A$1:$B$1</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>');
   bytes = await zip.generateAsync({ type: 'uint8array' });
+  const plain = new JSZip();
+  plain.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  plain.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  plain.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Other" sheetId="2" r:id="rId2"/></sheets></workbook>');
+  plain.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>');
+  plain.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c></row></sheetData></worksheet>');
+  plain.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
+  plainBytes = await plain.generateAsync({ type: 'uint8array' });
 });
 
 function command<K extends WorkbookCommand['kind']>(
@@ -159,8 +168,29 @@ describe('workbook commands', () => {
     } finally { clearing.mockRestore(); await session.dispose(); }
   });
 
+  test('toolbar clear to the sheet edge clears only its used cells', async () => {
+    const { session, handle } = await trackedSession();
+    const target = { ...selected, range: { kind: 'a1' as const, a1: 'A2:XFD1048576' } };
+    try {
+      await session.submit(command(session, 1, 'editCells', { args: [0, [
+        { row: 1, col: 0, input: 'text' }, { row: 3, col: 2, input: '=A2' },
+      ]] }));
+      const clearing = spyOn(handle, 'editCells');
+      try {
+        expect(await session.submit(command(session, 2, 'applyOps', {
+          toolbar: { id: 'clear', args: null, target }, selection: target,
+        }))).toMatchObject({ status: 'applied', committed: true });
+        expect(clearing).toHaveBeenCalledTimes(1);
+        expect(clearing.mock.calls[0]![1].length).toBeLessThan(100_000);
+        expect(handle.cell(0, 1, 0).input).toBe('');
+        expect(handle.cell(0, 3, 2).input).toBe('');
+      } finally { clearing.mockRestore(); }
+    } finally { await session.dispose(); }
+  });
+
   test('toolbar clear refuses oversized ranges before expanding cells', async () => {
     const { session, handle } = await trackedSession();
+    await session.submit(command(session, 1, 'editCells', { args: [0, [{ row: 1_048_575, col: 16_383, input: 'far' }]] }));
     const resolving = spyOn(toolbarCommands, 'resolveWorkbookToolbar').mockImplementation(() => {
       throw new Error('Oversized clear reached cell expansion');
     });
@@ -170,7 +200,7 @@ describe('workbook commands', () => {
       const version = handle.version();
       const history = handle.historyState();
       const selection = structuredClone(session.selection);
-      let seq = 0;
+      let seq = 1;
       for (const a1 of ['A2:A100002', 'A1:XFD1048576']) {
         const target = { ...selected, range: { kind: 'a1' as const, a1 } };
         expect(await session.submit(command(session, ++seq, 'applyOps', {
@@ -1836,10 +1866,46 @@ describe('workbook commands', () => {
       await send('undo', { args: [] });
       expect(state.selection).toEqual(branchSelection);
       await send('redo', { args: [] });
-      expect(state.selection).toEqual(after);
+      expect(state.selection).toEqual({ ...selected, activeCell: { row: 1, col: 0 },
+        range: { kind: 'rowCol', start: { row: 1, col: 0 }, end: { row: 1, col: 0 } } });
       expect(handle.cell(0, 1, 0).input).toBe('branch');
     } finally { handle.dispose(); }
   });
+
+  for (const targeted of [false, true]) {
+    test(`redo selects the edited cell after Enter and independent navigation${targeted ? ' with a stable target' : ''}`, async () => {
+      const { session, handle } = await trackedSession();
+      const edited = { ...selected, activeCell: { row: 2, col: 2 },
+        range: { kind: 'rowCol' as const, start: { row: 2, col: 2 }, end: { row: 2, col: 2 } } };
+      const next = { ...selected, range: { kind: 'a1' as const, a1: 'C4' }, activeCell: { row: 3, col: 2 } };
+      const elsewhere = { ...selected, range: { kind: 'a1' as const, a1: 'B2' } };
+      const acks: WorkbookAck[] = [];
+      session.onAck((ack) => { acks.push(ack); });
+      try {
+        await session.submit(command(session, 1, 'select', { selection: edited }));
+        await session.submit(command(session, 2, 'editCell', {
+          args: targeted ? [1, 0, 0, '4242'] : [0, 2, 2, '4242'],
+          ...(targeted ? { target: edited } : {}), selection: next,
+        }));
+        expect(session.selection).toEqual(next);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+        await session.submit(command(session, 3, 'select', { selection: elsewhere }));
+        await session.submit(command(session, 4, 'undo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('');
+        await session.submit(command(session, 5, 'select', { selection: edited }));
+        await session.submit(command(session, 6, 'redo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+        await session.submit(command(session, 7, 'undo', { args: [] }));
+        await session.submit(command(session, 8, 'select', { selection: elsewhere }));
+        await session.submit(command(session, 9, 'redo', { args: [] }));
+        expect(session.selection).toEqual(edited);
+        expect(acks[acks.length - 1]?.selection).toEqual(edited);
+        expect(handle.cell(0, 2, 2).input).toBe('4242');
+      } finally { await session.dispose(); }
+    });
+  }
 
   test('undo redo restore worker selection and history availability', async () => {
     const session = await createTestWorkbookSession(bytes);
@@ -1854,7 +1920,8 @@ describe('workbook commands', () => {
       expect(acks[acks.length - 1]?.selection).toEqual(selected);
       expect(acks[acks.length - 1]?.editState).toMatchObject({ canUndo: false, canRedo: true });
       await session.submit(command(session, 4, 'redo', { args: [] }));
-      expect(acks[acks.length - 1]?.selection?.range).toEqual({ kind: 'a1', a1: 'A2' });
+      expect(acks[acks.length - 1]?.selection).toEqual({ ...selected, activeCell: { row: 0, col: 0 },
+        range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } });
       expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('5');
     } finally { await session.dispose(); }
   });
@@ -1899,12 +1966,86 @@ describe('workbook commands', () => {
     } finally { failing.mockRestore(); await session.dispose(); }
   });
 
+  test('copy origin errors from batch edits are classified as invalid commands', () => {
+    expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+  });
+
+  test('out-of-grid copy origins are classified refusals without changing state', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      const before = await session.save();
+      for (const [index, copyFrom] of [
+        { row: 1_048_576, col: 0 }, { row: 0, col: 16_384 },
+        { row: Number.MAX_SAFE_INTEGER, col: 0 },
+      ].entries()) {
+        expect(await session.submit(command(session, index + 1, 'editCells', {
+          args: [0, [{ row: 2, col: 2, input: '=A1', copyFrom }]],
+        }))).toMatchObject({ status: 'refused', reason: 'invalid-command', committed: false });
+        expect(await session.save()).toEqual(before);
+        expect(session.failure).toBeUndefined();
+      }
+      expect(await session.submit(command(session, 4, 'editCell', { args: [0, 2, 2, 'valid'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+    } finally { await session.dispose(); }
+  });
+
+  test('copied formula origins survive worker command validation and undo', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCells', {
+        args: [0, [
+          { row: 2, col: 2, input: '=A1+$B$1+$A1+A$1', copyFrom: { row: 0, col: 2 } },
+          { row: 3, col: 2, input: '=SUM(A1:B2)', copyFrom: { row: 0, col: 2 } },
+          { row: 2, col: 3, input: '=A1' },
+        ]],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const inputs = await session.call.cellInputs(0, 'C3:D4');
+      expect(inputs.cells.map((row) => row.map((cell) => cell.input))).toEqual([
+        ['=A3+$B$1+$A3+A$1', '=A1'], ['=SUM(A4:B5)', ''],
+      ]);
+      expect(await session.submit(command(session, 2, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'C3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+  });
+
+  test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'moveRange', {
+        args: [0, 'A1', 'C3'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A1:C3')).cells).toEqual([
+        [{ a1: 'A1', input: '', isFormula: false }, { a1: 'B1', input: '=C3*2', isFormula: true }, { a1: 'C1', input: '', isFormula: false }],
+        [{ a1: 'A2', input: '', isFormula: false }, { a1: 'B2', input: '', isFormula: false }, { a1: 'C2', input: '', isFormula: false }],
+        [{ a1: 'A3', input: '', isFormula: false }, { a1: 'B3', input: '', isFormula: false }, { a1: 'C3', input: '1', isFormula: false }],
+      ]);
+      expect(await session.submit(command(session, 2, 'editCell', {
+        args: [0, 0, 2, '=SUM(B1:C3)'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(await session.submit(command(session, 3, 'moveRange', {
+        args: [0, 'C3', 'D4'],
+      }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+      expect(await session.submit(command(session, 4, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(await session.submit(command(session, 5, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A1:B1')).cells[0]).toEqual([
+        { a1: 'A1', input: '1', isFormula: false },
+        { a1: 'B1', input: '=A1*2', isFormula: true },
+      ]);
+      expect((await session.call.cellInputs(0, 'C3')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+  });
+
   for (const kind of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     test(`applies replay mutator ${kind} without an edit peer`, async () => {
-      const session = await createTestWorkbookSession(bytes);
+      const source = kind === 'moveRange' ? plainBytes : bytes;
+      const session = await createTestWorkbookSession(source);
       let seq = 0;
       const send = (op: WorkbookCommand) => session.submit(op);
-      const main = wasm.openWorkbook(bytes);
+      const main = wasm.openWorkbook(source);
       try {
         let payload: WorkbookCommandPayload<WorkbookReplayMethod>;
         switch (kind) {
@@ -1925,6 +2066,7 @@ describe('workbook commands', () => {
             payload = { args: [0, chart.id, 24, 12] };
             break;
           }
+          case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;
           case 'setActiveSheet': payload = { args: [1] }; break;
           case 'undo':
           case 'redo':
@@ -1957,6 +2099,7 @@ describe('workbook commands', () => {
         if (['editCell', 'editCells', 'applyEdits', 'acceptProposal', 'redo', 'undo'].includes(kind)) {
           expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe(kind === 'undo' ? '1' : '7');
         }
+        if (kind === 'moveRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
         if (kind === 'patchRangeStyle' || kind === 'applyFormat') expect(session.editState.formatting?.bold).toBe(true);
         if (kind === 'setNumberFormat') expect(session.editState.formatting?.numberFormat).toBe('percent');
         if (kind === 'setActiveSheet') expect(session.state.activeSheet).toBe(1);

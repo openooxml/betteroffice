@@ -65,27 +65,47 @@ fn parse_color_scheme(element: Option<&XmlElement>) -> ThemeColorScheme {
 }
 
 fn parse_theme_color_element(element: &XmlElement) -> Option<String> {
-    match element.local_name() {
+    let rgb = match element.local_name() {
         "srgbClr" => nonempty(element.attribute(Some("a"), "val")),
         "sysClr" => {
             if let Some(last_color) = nonempty(element.attribute(Some("a"), "lastClr")) {
-                return Some(last_color);
-            }
-            match element.attribute(Some("a"), "val") {
-                Some("windowText" | "menuText" | "captionText" | "btnText") => {
-                    Some("000000".to_owned())
+                Some(last_color)
+            } else {
+                match element.attribute(Some("a"), "val") {
+                    Some("windowText" | "menuText" | "captionText" | "btnText") => {
+                        Some("000000".to_owned())
+                    }
+                    Some("window" | "menu" | "btnFace" | "btnHighlight" | "highlightText") => {
+                        Some("FFFFFF".to_owned())
+                    }
+                    Some("highlight") => Some("0078D7".to_owned()),
+                    Some("grayText") => Some("808080".to_owned()),
+                    _ => None,
                 }
-                Some("window" | "menu" | "btnFace" | "btnHighlight" | "highlightText") => {
-                    Some("FFFFFF".to_owned())
-                }
-                Some("highlight") => Some("0078D7".to_owned()),
-                Some("grayText") => Some("808080".to_owned()),
-                _ => None,
             }
         }
         // Scheme references inside the scheme remain unresolved.
         "schemeClr" => None,
         _ => None,
+    }?;
+    let transforms: Vec<_> = element
+        .child_elements()
+        .filter_map(|child| {
+            ooxml_drawingml::ColorTransform::from_xml(
+                child.local_name(),
+                child.attribute(None, "val"),
+            )
+        })
+        .collect();
+    if transforms.is_empty() {
+        Some(rgb)
+    } else {
+        ooxml_drawingml::resolve_color_value_to_hex(Some(&ooxml_drawingml::ColorValue {
+            rgb: Some(rgb),
+            transforms,
+            ..Default::default()
+        }))
+        .map(|hex| hex.trim_start_matches('#').to_owned())
     }
 }
 
@@ -208,6 +228,15 @@ mod tests {
             &mut ParseBudget::new(&limits),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn theme_color_definitions_apply_ordered_transforms() {
+        let theme = parse(Some(
+            r#"<a:theme><a:themeElements><a:clrScheme><a:accent1><a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="50000"/></a:srgbClr></a:accent1><a:accent2><a:sysClr lastClr="4472C4"><a:lumMod val="50000"/><a:tint val="50000"/></a:sysClr></a:accent2></a:clrScheme></a:themeElements></a:theme>"#,
+        ));
+        assert_eq!(theme.color_scheme.accent1, "3F5493");
+        assert_eq!(theme.color_scheme.accent2, "BDBFC6");
     }
 
     #[test]

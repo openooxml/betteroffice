@@ -3,13 +3,13 @@ import type {
   DocxEchoGlyphLine,
   DocxEchoRect,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
+  DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
 import type { DocxCommandSelectionLayout } from './residentCommandSelection';
 import type { DisplayPrimitive, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { displayPrimitiveRect } from '../layout/render/displayListGeometry';
-import { echoRound3, placeEchoGlyphs, type EchoGlyphIndex } from './residentEchoGlyphs';
+import { echoRound3, placeEchoLine, type EchoGlyphIndex } from './residentEchoGlyphs';
 
 /** @internal */
 export const DOCX_ECHO_MAX_CONTEXT_BYTES = 16 * 1024;
@@ -38,7 +38,7 @@ export interface EchoGlyphProvider {
 
 /** @internal */
 export interface ProjectCommandEchoContextInput {
-  engine: ResidentDocxCommandEngine;
+  engine: DocxWorkerCommandEngine;
   selection: DocxCommandSelection | null;
   layout: DocxCommandSelectionLayout;
   /** Without it the context carries no exact glyph line. */
@@ -175,8 +175,9 @@ export function projectCommandEchoContext(
     const x = positions.get(0)!;
     const y = Math.max(0, baseline - size);
     const height = Math.min(retained.page.height - y, size * 1.5);
-    let edge = retained.page.contentBounds
+    const contentEdge = retained.page.contentBounds
       ? retained.page.contentBounds.x + retained.page.contentBounds.width : retained.page.width;
+    let edge = contentEdge;
     const active = new Set(runs);
     const omitted = new Set<number>();
     for (let index = 0; index < retained.page.primitives.length; index += 1) {
@@ -197,7 +198,8 @@ export function projectCommandEchoContext(
         primitive.y < y + height && primitive.y + primitive.h > y && primitive.x + primitive.w > x) {
         edge = Math.min(edge, primitive.x);
       }
-      if ((primitive.kind === 'text' || primitive.kind === 'glyphRun') && !omitted.has(index) &&
+      // an empty text primitive only marks a blank line's position for hit testing and paints nothing
+      if ((primitive.kind === 'text' && primitive.text !== '' || primitive.kind === 'glyphRun') && !omitted.has(index) &&
         (primitive.kind === 'text' ? Math.abs(primitive.baselineY - baseline) < size :
           primitive.glyphs.some((glyph) => Math.abs(glyph.y - baseline) < size))) supported = false;
     }
@@ -207,6 +209,7 @@ export function projectCommandEchoContext(
     let glyphLine: DocxEchoGlyphLine | undefined;
     if (input.glyphs) {
       const projected = projectGlyphLine({ provider: input.glyphs, retained, runs, omitted, text, baseline, edge,
+        obstructed: edge < contentEdge,
         paragraphText: paragraph.text, lineOffset, start, end, paragraphStart, paragraphEnd });
       if (!projected) return undefined;
       ({ line: glyphLine, rect: damageRect } = projected);
@@ -257,6 +260,8 @@ interface GlyphLineInput {
   text: string;
   baseline: number;
   edge: number;
+  /** Whether an image or shape beside the line, not the page's content box, sets `edge`. */
+  obstructed: boolean;
   paragraphText: string;
   lineOffset: number;
   start: number;
@@ -280,7 +285,12 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   if (!facts || facts.primaryFont === false || runs.some(run => !run.echo || run.echo.primaryFont === false ||
     run.echo.x !== facts.x || run.echo.right !== facts.right || (run.echo.kern ?? false) !== kern ||
     (run.echo.kerning ?? 0) !== (facts.kerning ?? 0) ||
-    run.echo.letterSpacing || run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100)) return undefined;
+    run.echo.letterSpacing || run.echo.position || run.echo.scale !== undefined && run.echo.scale !== 100 ||
+    run.echo.stretch !== undefined || run.echo.centerWidth !== facts.centerWidth)) return undefined;
+  // a centered line moves as a whole when its width changes, so only a paragraph of one line is placed
+  const center = facts.centerWidth;
+  if (center !== undefined && (input.lineOffset !== 0 || text.length !== input.paragraphText.length ||
+    text.endsWith(' '))) return undefined;
   if (runs.some((run) => run.fontId !== first.fontId || run.size !== first.size || run.color !== first.color ||
     run.fallbackFont !== first.fallbackFont) ||
     [...input.omitted].some((index) => retained.page.primitives[index]!.kind !== 'glyphRun')) return undefined;
@@ -315,10 +325,11 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
     previous = index;
   }
   const page = retained.page;
-  const placement = placeEchoGlyphs(source.glyphs, text, next, facts.x);
+  const placement = placeEchoLine(source.glyphs, text, next, facts.x, center);
   if (!placement || placement.glyphIds.some((id, index) => id !== glyphIds[index]) ||
     placement.xs.some((value, index) => value !== xs[index]) || !Number.isFinite(facts.x + facts.right) ||
-    input.edge < facts.right || facts.right <= facts.x) return undefined;
+    // the content box is serialized to 0.001 px, so its edge may round just short of the line's
+    (input.obstructed ? input.edge < facts.right : facts.right - input.edge > 0.01) || facts.right <= facts.x) return undefined;
   const chosen = { x: facts.x };
   const right = facts.right;
   let inkEnd = chosen.x;
@@ -341,7 +352,16 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
     const last = previous.at(-1)!;
     const glyph = last.glyphs.at(-1)!;
     if (!last.echo) return undefined;
-    previousSlack = last.echo.right - (glyph.x + (glyph.advance ?? 0));
+    if (last.echo.stretch === undefined) previousSlack = last.echo.right - (glyph.x + (glyph.advance ?? 0));
+    else {
+      // a justified line takes a word that fits once a quarter of its space width is squeezed out
+      const line = previous.filter((run) => run.glyphs[0]!.y === last.glyphs[0]!.y);
+      const space = source.glyphs.chars.get(' ');
+      if (space === undefined || line.some((run) => run.fontId !== first.fontId || run.size !== first.size)) return undefined;
+      const spaces = line.reduce((count, run) => count + [...run.text].filter((char) => char === ' ').length, 0);
+      previousSlack = last.echo.right - (last.echo.x + last.echo.stretch) +
+        (spaces / 4 + 1) * source.glyphs.advance(source.glyphs.set.advances[space]!);
+    }
   }
   let nextWord: number | undefined;
   if (input.lineOffset + text.length < input.paragraphText.length) {
@@ -355,7 +375,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const ink = { xMin: Math.min(0, source.ink.xMin / source.ink.upem), yMin: Math.min(0, source.ink.yMin / source.ink.upem),
     yMax: Math.max(0, source.ink.yMax / source.ink.upem), overhang: Math.max(0, source.ink.overhang / source.ink.upem) };
   const ratio = provider.pixelRatio;
-  const left = Math.floor((xs[0]! + ink.xMin * first.size) * ratio) - 1;
+  const left = Math.floor(((center === undefined ? xs[0]! : chosen.x) + ink.xMin * first.size) * ratio) - 1;
   const top = Math.floor((baseline - ink.yMax * first.size) * ratio) - 1;
   const inkRight = Math.ceil((Math.max(right, placement.end) + ink.overhang * first.size) * ratio) + 1;
   const bottom = Math.ceil((baseline - ink.yMin * first.size) * ratio) + 1;
@@ -369,7 +389,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   if (paintedOver(provider, page, input.omitted, band)) return undefined;
   return {
     line: { glyphSet: source.key, fontId: first.fontId, size: first.size,
-      color: first.color, x: chosen.x, y: baseline, next, right,
+      color: first.color, x: chosen.x, y: baseline, next, right, ...(center === undefined ? {} : { center }),
       ...(facts.canEmpty === undefined ? {} : { canEmpty: facts.canEmpty }),
       ...(previousSlack === undefined ? {} : { previousSlack }), ...(nextWord === undefined ? {} : { nextWord }),
       device, pixelRatio: ratio },
@@ -389,6 +409,7 @@ function paintedOver(
     rect.x - margin < band.x + band.w && rect.x + rect.w + margin > band.x &&
     rect.y - margin < band.y + band.h && rect.y + rect.h + margin > band.y;
   const reaches = (primitive: DisplayPrimitive): boolean => {
+    if (primitive.kind === 'text' && primitive.text === '') return false;
     if (primitive.kind !== 'glyphRun') {
       const rect = displayPrimitiveRect(primitive);
       const slack = primitive.kind === 'shape' || primitive.kind === 'image' || primitive.kind === 'text'

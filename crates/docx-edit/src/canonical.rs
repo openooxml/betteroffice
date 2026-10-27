@@ -49,6 +49,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::OpError;
+use crate::sticky_positions::sticky_offset;
 use crate::{EditingDoc, KIND_KEY, PARA_ID, is_pilcrow, map_string, story_ref};
 
 const VERSION: &str = "canonical-stream-v1";
@@ -173,6 +174,8 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
 fn canonical_embed(kind: String, mut payload: BTreeMap<String, Value>) -> CanonicalItem {
     if kind == "opaqueDrawing" {
         payload.remove("preview");
+        payload.remove("previews");
+        payload.remove("textBoxJson");
     } else if kind == "sdt"
         && let Some(content) = payload.get_mut("content")
     {
@@ -193,6 +196,8 @@ fn exclude_inline_opaque_previews(content: &mut Value) {
         match kind.as_deref() {
             Some("opaqueDrawing") => {
                 payload.remove("preview");
+                payload.remove("previews");
+                payload.remove("textBoxJson");
             }
             Some("sdt") => {
                 if let Some(content) = payload.get_mut("content") {
@@ -294,9 +299,10 @@ pub(crate) fn story_comment_anchors<T: ReadTxn>(
             if anchor.story != story_id {
                 continue;
             }
-            if let (Some(start), Some(end)) =
-                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            {
+            if let (Some(start), Some(end)) = (
+                sticky_offset(&anchor.start, txn),
+                sticky_offset(&anchor.end, txn),
+            ) {
                 offsets.push((start.index, end.index));
             }
         }
@@ -525,14 +531,19 @@ mod tests {
             control_depth: usize,
             xml: &str,
             preview: Option<Value>,
+            multiple: bool,
         ) -> EditingDoc {
             let mut kind = "opaqueDrawing";
             let mut payload = serde_json::json!({ "kind": "object", "xml": xml });
             if let Some(preview) = preview {
-                payload
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("preview".to_owned(), preview);
+                payload.as_object_mut().unwrap().insert(
+                    if multiple { "previews" } else { "preview" }.to_owned(),
+                    if multiple {
+                        serde_json::json!([preview])
+                    } else {
+                        preview
+                    },
+                );
             }
             for _ in 0..control_depth {
                 payload = serde_json::json!({
@@ -577,7 +588,7 @@ mod tests {
         const XML: &str = r#"<w:object><o:OLEObject Type="Embed"/></w:object>"#;
         for shared in [false, true] {
             for control_depth in 0..=2 {
-                let original = opaque_story(shared, control_depth, XML, None);
+                let original = opaque_story(shared, control_depth, XML, None, false);
                 let original_items = project_story(&original, "body").unwrap();
                 let original_bytes = to_canonical_bytes(&original_items);
                 let original_checksum = story_checksum(&original, "body").unwrap();
@@ -595,20 +606,29 @@ mod tests {
                         "src": "data:image/png;base64,AQ=="
                     }),
                 ] {
-                    let refreshed = opaque_story(shared, control_depth, XML, Some(preview));
-                    let refreshed_items = project_story(&refreshed, "body").unwrap();
-                    assert_eq!(original_items, refreshed_items);
-                    assert_eq!(original_bytes, to_canonical_bytes(&refreshed_items));
-                    assert_eq!(
-                        original_checksum,
-                        story_checksum(&refreshed, "body").unwrap()
-                    );
+                    for multiple in [false, true] {
+                        let refreshed = opaque_story(
+                            shared,
+                            control_depth,
+                            XML,
+                            Some(preview.clone()),
+                            multiple,
+                        );
+                        let refreshed_items = project_story(&refreshed, "body").unwrap();
+                        assert_eq!(original_items, refreshed_items);
+                        assert_eq!(original_bytes, to_canonical_bytes(&refreshed_items));
+                        assert_eq!(
+                            original_checksum,
+                            story_checksum(&refreshed, "body").unwrap()
+                        );
+                    }
                 }
                 let changed = opaque_story(
                     shared,
                     control_depth,
                     r#"<w:object><o:OLEObject Type="Link"/></w:object>"#,
                     None,
+                    false,
                 );
                 assert_ne!(original_items, project_story(&changed, "body").unwrap());
                 assert_ne!(original_checksum, story_checksum(&changed, "body").unwrap());

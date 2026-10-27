@@ -58,7 +58,8 @@ match workbook.apply_edits(&request)? {
 ```
 
 Batches do not insert or delete rows, columns or sheets, and refuse writes to
-merged-cell followers, array-formula cells and protected sheets.
+merged-cell followers, array-formula cells and locked cells of protected sheets.
+Formats on a protected sheet need its protection to allow formatting cells.
 
 `Workbook::export_structured` and `export_markdown` read the committed workbook
 with its version as sparse cells, sheet metadata and diagnostics, or as bounded
@@ -289,4 +290,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | `betteroffice-pptx-render` | Slide layout and the PPTX display-list compiler. |
 | `betteroffice-pptx-raster` | The tiny-skia backend that paints a PPTX display list to PNG. For native builds. |
 
-The published Rust crates share a version.
+The published Rust crates share a version. `betteroffice-docx`, `betteroffice-xlsx`
+and `betteroffice-pptx` are the supported API. The crates above follow the engines:
+their public types gain fields and variants, and their functions change, in any
+release.

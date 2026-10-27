@@ -3,6 +3,9 @@
 
 mod order;
 
+#[cfg(test)]
+mod criteria_index_differential;
+
 use order::{Step, topo_order};
 
 use std::borrow::Cow;
@@ -10,14 +13,15 @@ use std::cell::Cell as Flag;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use xlsx_model::progress::tick as progress;
 use xlsx_model::{
-    Cell, CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId,
-    SheetId, Table, Workbook,
+    CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId, SheetId,
+    Table, Workbook,
 };
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
-use crate::graph::DepGraph;
+use crate::graph::{DepGraph, ReaderIndex};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -45,6 +49,9 @@ pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
     pub limited_cells: Vec<(SheetId, CellRef)>,
+    /// the recalculation's shared budget ran out, so formulas it refused kept
+    /// their cached values or show `#NUM!` without one.
+    pub budget_exhausted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +59,11 @@ struct RecalcContext {
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
 }
+
+/// registers a function that parsing, building a workbook's authority and
+/// recalculation call every few thousand units of work, so a host blocked on
+/// a long one can report that it is alive.
+pub use xlsx_model::progress::set_hook as set_progress_hook;
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
 type Key = (SheetId, RowId, ColId);
@@ -144,7 +156,9 @@ pub fn rebuild_and_recalc_all_with_seed(
         rand_seed,
     };
     let result = run_recalc(wb, &graph, recompute, context, None);
+    xlsx_model::progress::pulse();
     graph.refresh_spills(wb);
+    xlsx_model::progress::pulse();
     (graph, result)
 }
 
@@ -168,17 +182,61 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     }
 
     let mut expanded: HashSet<Key> = HashSet::new();
+    let mut readers = Readers::new(graph);
+    let mut found = Vec::new();
     while let Some(k) = worklist.pop() {
         if !expanded.insert(k) {
             continue;
         }
-        for (ds, dc) in graph.dependents_of(k.0, cell_of(k)) {
+        progress();
+        readers.dependents_of(k, &mut found);
+        for (ds, dc) in found.drain(..) {
             let dk = key(ds, dc);
             recompute.insert(dk);
             worklist.push(dk);
         }
     }
     recompute
+}
+
+/// lookups a walk makes into one sheet by scanning its edges before it
+/// indexes that sheet.
+const SCANNED_LOOKUPS: usize = 16;
+
+/// the readers of a cell for a walk through the graph: a scan per lookup for
+/// short walks, and one [`ReaderIndex`] per sheet the walk keeps returning to,
+/// so a chain of `n` formulas costs `O(n + edges)` rather than `O(n * edges)`.
+struct Readers<'g> {
+    graph: &'g DepGraph,
+    sheets: HashMap<SheetId, SheetReaders<'g>>,
+}
+
+enum SheetReaders<'g> {
+    Scanned(usize),
+    Indexed(ReaderIndex<'g>),
+}
+
+impl<'g> Readers<'g> {
+    fn new(graph: &'g DepGraph) -> Self {
+        Self {
+            graph,
+            sheets: HashMap::new(),
+        }
+    }
+
+    fn dependents_of(&mut self, k: Key, out: &mut Vec<(SheetId, CellRef)>) {
+        let readers = self.sheets.entry(k.0).or_insert(SheetReaders::Scanned(0));
+        if let SheetReaders::Scanned(lookups) = readers {
+            *lookups += 1;
+            if *lookups > SCANNED_LOOKUPS {
+                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+            }
+        }
+        match readers {
+            SheetReaders::Indexed(index) => index.dependents_of(cell_of(k), out),
+            SheetReaders::Scanned(_) => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
+        }
+    }
 }
 
 /// a spilled rectangle that grows or shrinks uncovers cells whose readers were
@@ -194,12 +252,42 @@ fn run_recalc(
     graph: &DepGraph,
     recompute: HashSet<Key>,
     context: RecalcContext,
-    mut recomputed: Option<&mut HashSet<Key>>,
+    recomputed: Option<&mut HashSet<Key>>,
 ) -> RecalcResult {
+    let mut budget = EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS);
+    budget.currency_coercion = crate::coercion::CurrencyCoercion::from_workbook(wb);
+    run_recalc_with_budget(wb, graph, recompute, context, recomputed, Rc::new(budget))
+}
+
+fn run_recalc_with_budget(
+    wb: &mut Workbook,
+    graph: &DepGraph,
+    mut recompute: HashSet<Key>,
+    context: RecalcContext,
+    mut recomputed: Option<&mut HashSet<Key>>,
+    budget: Rc<EvaluationBudget>,
+) -> RecalcResult {
+    {
+        let mut previous = graph
+            .currency_coercion
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        // every builder records the evidence it was built over; a graph that
+        // recorded none takes the current evidence as the one its values
+        // were computed with
+        if previous
+            .as_ref()
+            .is_some_and(|previous| *previous != budget.currency_coercion)
+        {
+            recompute.extend(graph.formula_cells().map(|(sheet, cell)| key(sheet, cell)));
+        }
+        *previous = Some(budget.currency_coercion.clone());
+    }
     let mut pass = Pass {
         graph,
+        name_index: graph.names_match(&wb.defined_names).then_some(graph),
         context,
-        budget: Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS)),
+        budget,
         changed: Vec::new(),
         cycle_cells: Vec::new(),
         limited_cells: Vec::new(),
@@ -207,14 +295,33 @@ fn run_recalc(
     };
     let mut pending = recompute;
 
-    for _ in 0..MAX_SPILL_ROUNDS {
+    for round in 0..MAX_SPILL_ROUNDS {
+        if round > 0 {
+            pass.budget.begin_spill_round();
+        }
         if let Some(recomputed) = &mut recomputed {
             recomputed.extend(pending.iter().copied());
         }
+        *pass.budget.pending_formulas.borrow_mut() =
+            pending.iter().map(|&u| (u.0, cell_of(u))).collect();
         for step in topo_order(graph, &pending) {
             match step {
-                Step::Cell(u) => pass.evaluate(wb, u),
-                Step::Component(members) => pass.settle(wb, &members),
+                Step::Cell(u) => {
+                    pass.evaluate(wb, u);
+                    pass.budget
+                        .pending_formulas
+                        .borrow_mut()
+                        .remove(&(u.0, cell_of(u)));
+                }
+                Step::Component(members) => {
+                    pass.settle(wb, &members);
+                    for u in members {
+                        pass.budget
+                            .pending_formulas
+                            .borrow_mut()
+                            .remove(&(u.0, cell_of(u)));
+                    }
+                }
             }
         }
         if pass.spilled.is_empty() {
@@ -226,6 +333,7 @@ fn run_recalc(
         }
     }
 
+    let budget_exhausted = pass.budget.refused();
     let Pass {
         mut changed,
         mut cycle_cells,
@@ -240,6 +348,7 @@ fn run_recalc(
         changed,
         cycle_cells,
         limited_cells,
+        budget_exhausted,
     }
 }
 
@@ -248,11 +357,15 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
     let mut found: HashSet<Key> = HashSet::new();
     let mut expanded: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
+    let mut readers = Readers::new(graph);
+    let mut dependents = Vec::new();
     while let Some(node) = worklist.pop() {
         if !expanded.insert(node) {
             continue;
         }
-        for (sheet, cell) in graph.dependents_of(node.0, cell_of(node)) {
+        progress();
+        readers.dependents_of(node, &mut dependents);
+        for (sheet, cell) in dependents.drain(..) {
             let dependent = key(sheet, cell);
             if found.insert(dependent) {
                 worklist.push(dependent);
@@ -291,6 +404,9 @@ enum NodeValue {
 /// one recalc: the budget its evaluations share and what they found.
 struct Pass<'g> {
     graph: &'g DepGraph,
+    /// the graph again when its names are the workbook's, so evaluation looks
+    /// names up there rather than scanning the workbook's table.
+    name_index: Option<&'g DepGraph>,
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     changed: Vec<(SheetId, CellRef)>,
@@ -305,7 +421,15 @@ impl Pass<'_> {
     fn evaluate(&mut self, wb: &mut Workbook, u: Key) {
         #[cfg(test)]
         FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
-        let (value, limited) = eval_node(wb, u, self.context, Rc::clone(&self.budget), self.graph);
+        progress();
+        let (value, limited) = eval_node(
+            wb,
+            u,
+            self.context,
+            Rc::clone(&self.budget),
+            self.graph,
+            self.name_index,
+        );
         self.write(wb, u, value, limited);
     }
 
@@ -317,6 +441,7 @@ impl Pass<'_> {
     /// are circular and settle at `circular_value`, and the member waiting on
     /// the first of them runs again with that value.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
+        self.budget.set_settling(true);
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
         let spills = Spills::new(wb, members);
         let mut settled = vec![false; members.len()];
@@ -339,6 +464,7 @@ impl Pass<'_> {
                 };
                 #[cfg(test)]
                 FORMULA_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                progress();
                 let (value, limited) = eval_node_with(
                     &log,
                     wb,
@@ -346,6 +472,7 @@ impl Pass<'_> {
                     self.context,
                     Rc::clone(&self.budget),
                     self.graph,
+                    self.name_index,
                 );
                 let Some(target) = log.first.get() else {
                     self.write(wb, u, value, limited);
@@ -365,7 +492,7 @@ impl Pass<'_> {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
-                    if write_if_changed(wb, u, circular_value(wb, u)) {
+                    if write_if_changed(wb, u, circular_value(wb, u), &self.budget) {
                         self.changed.push((u.0, cell_of(u)));
                     }
                     self.cycle_cells.push((u.0, cell_of(u)));
@@ -374,6 +501,7 @@ impl Pass<'_> {
                 }
             }
         }
+        self.budget.set_settling(false);
     }
 
     fn write(&mut self, wb: &mut Workbook, u: Key, value: Option<NodeValue>, limited: bool) {
@@ -383,22 +511,27 @@ impl Pass<'_> {
         }
         match value {
             Some(NodeValue::Scalar(value)) => {
-                if write_if_changed(wb, u, value) {
+                if write_if_changed(wb, u, value, &self.budget) {
                     self.changed.push(at);
                 }
             }
             Some(NodeValue::Spill(spill)) => {
                 match write_spill(wb, u, spill, &self.budget, &mut self.changed) {
-                    Some(moved) => self.spilled.extend(moved),
+                    Some(moved) => {
+                        if !moved.is_empty() {
+                            self.budget.schedule_spill_round();
+                            self.spilled.extend(moved);
+                        }
+                    }
                     None => {
                         if !limited {
                             self.limited_cells.push(at);
                         }
-                        refuse(wb, u, &mut self.changed);
+                        refuse(wb, u, &self.budget, &mut self.changed);
                     }
                 }
             }
-            Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed),
+            Some(NodeValue::Refused) => refuse(wb, u, &self.budget, &mut self.changed),
             None => {}
         }
     }
@@ -516,6 +649,10 @@ fn starts(at: u32, size: u32) -> std::ops::RangeInclusive<u32> {
 }
 
 impl CellProvider for ReadLog<'_> {
+    fn workbook(&self) -> Option<&Workbook> {
+        Some(self.inner)
+    }
+
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
         self.note(sheet, at);
         self.inner.value(sheet, at)
@@ -543,7 +680,14 @@ impl CellProvider for ReadLog<'_> {
     }
 
     fn used_rows(&self, sheet: SheetId) -> RowId {
-        self.inner.used_rows(sheet)
+        let spilled = self.inner.sheet(sheet).map_or(0, |sheet| {
+            sheet
+                .array_formulas()
+                .map(|(_, range)| range.end.row.saturating_add(1))
+                .max()
+                .unwrap_or(0)
+        });
+        self.inner.used_rows(sheet).max(spilled)
     }
 
     fn used_cols(&self, sheet: SheetId) -> ColId {
@@ -576,8 +720,9 @@ fn eval_node(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    name_index: Option<&DepGraph>,
 ) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, context, budget, graph)
+    eval_node_with(wb, wb, u, context, budget, graph, name_index)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
@@ -589,6 +734,7 @@ fn eval_node_with(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    name_index: Option<&DepGraph>,
 ) -> (Option<NodeValue>, bool) {
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
@@ -607,6 +753,8 @@ fn eval_node_with(
     ctx.rand_seed = context.rand_seed.map(|seed| cell_random_seed(seed, u));
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
+    ctx.name_index = name_index;
+    ctx.spill_index = Some(graph);
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
@@ -616,8 +764,16 @@ fn eval_node_with(
     if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
-    if refused && authored.is_some() {
-        return (Some(NodeValue::Refused), ctx.exhausted());
+    // a refusal is no error value a wrapper may answer, so what `IFERROR` or
+    // `ISERROR` made of it never stands in for the result
+    if refused {
+        let refused = match authored {
+            Some(_) => NodeValue::Refused,
+            None => NodeValue::Scalar(CellValue::Error {
+                value: ErrorValue::Num,
+            }),
+        };
+        return (Some(refused), ctx.exhausted());
     }
     // a rectangle an engine gap reshaped would retire cells the real result
     // still covers, so report the gap over the recorded rectangle instead.
@@ -662,12 +818,17 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
 
 /// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
 /// and a cached one, like the rest of its rectangle, keeps what it had.
-fn refuse(wb: &mut Workbook, u: Key, changed: &mut Vec<(SheetId, CellRef)>) {
+fn refuse(
+    wb: &mut Workbook,
+    u: Key,
+    budget: &EvaluationBudget,
+    changed: &mut Vec<(SheetId, CellRef)>,
+) {
     let refused = CellValue::Error {
         value: ErrorValue::Num,
     };
     if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
-        && write_if_changed(wb, u, refused)
+        && write_if_changed(wb, u, refused, budget)
     {
         changed.push((u.0, cell_of(u)));
     }
@@ -706,18 +867,19 @@ fn write_spill(
             wb,
             (u.0, at.row, at.col),
             CellValue::Empty,
+            budget,
             changed,
             &mut moved,
         );
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value) {
+            if write_if_changed(wb, (u.0, row, col), value, budget) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
+        write_spilled_cell(wb, (u.0, row, col), value, budget, changed, &mut moved);
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
@@ -798,13 +960,14 @@ fn write_spilled_cell(
     wb: &mut Workbook,
     u: Key,
     value: CellValue,
+    budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value) {
+    if write_if_changed(wb, u, value, budget) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
     }
@@ -817,26 +980,19 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
-fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
+fn write_if_changed(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    budget: &EvaluationBudget,
+) -> bool {
     if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
+    budget.invalidate_criteria_cell(u.0, cell_of(u));
     if let Some(sheet) = wb.sheet_mut(u.0) {
         let at = cell_of(u);
-        if let Some(cell) = sheet.cell_mut(at) {
-            cell.value = value;
-            if *cell == Cell::default() {
-                sheet.set_cell(at, Cell::default());
-            }
-        } else {
-            sheet.set_cell(
-                at,
-                Cell {
-                    value,
-                    ..Cell::default()
-                },
-            );
-        }
+        sheet.set_calculated_value(at, value);
     }
     true
 }
@@ -1335,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn indirect_in_r1c1_style_keeps_its_cached_result() {
+    fn indirect_in_r1c1_style_resolves_like_a1() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 5.0);
         put_cached_formula(&mut wb, s, "B1", "INDIRECT(\"R1C1\",FALSE)", num(8.0));
@@ -1345,12 +1501,12 @@ mod tests {
         put_cached_formula(&mut wb, s, "B5", "INDIRECT(\"Nowhere!A1\")", num(-1.0));
         put_cached_formula(&mut wb, s, "B6", "INDIRECT(\"'[1]Book'!Rate\")", num(0.25));
         rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "B1"), num(8.0));
-        assert_eq!(value(&wb, s, "B2"), num(9.0));
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+        assert_eq!(value(&wb, s, "B2"), num(6.0));
         let reference = CellValue::Error {
             value: ErrorValue::Ref,
         };
-        assert_eq!(value(&wb, s, "B3"), reference);
+        assert_eq!(value(&wb, s, "B3"), num(5.0));
         assert_eq!(value(&wb, s, "B4"), num(5.0));
         assert_eq!(value(&wb, s, "B5"), reference);
         assert_eq!(value(&wb, s, "B6"), num(0.25));
@@ -1449,6 +1605,87 @@ mod tests {
                 value: ErrorValue::Value
             }
         );
+    }
+
+    /// a year-first date reads alike in every locale, so arithmetic coerces it
+    /// to its serial, time of day included, under the workbook's date system.
+    #[test]
+    fn arithmetic_on_year_first_date_text_reads_its_serial() {
+        let (mut wb, s) = one_sheet();
+        put_text(&mut wb, s, "A1", "2017-04-27");
+        put_num(&mut wb, s, "A2", 41_309.0);
+        put_text(&mut wb, s, "A3", "2017/4/27 18:00");
+        put_text(&mut wb, s, "A4", "2017-02-30");
+        put_formula(&mut wb, s, "B1", "A1-A2");
+        put_formula(&mut wb, s, "B2", "A3-A1");
+        put_formula(&mut wb, s, "B3", "-A1");
+        put_formula(&mut wb, s, "B4", "A1%");
+        put_formula(&mut wb, s, "B5", "A4+1");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(1_543.0));
+        assert_eq!(value(&wb, s, "B2"), num(0.75));
+        assert_eq!(value(&wb, s, "B3"), num(-42_852.0));
+        assert_eq!(value(&wb, s, "B4"), num(428.52));
+        assert_eq!(
+            value(&wb, s, "B5"),
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        );
+
+        let (mut wb, s) = one_sheet();
+        wb.date_system = xlsx_model::DateSystem::V1904;
+        put_text(&mut wb, s, "A1", "2017-04-27");
+        put_formula(&mut wb, s, "B1", "A1+0");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(41_390.0));
+    }
+
+    /// excel trims only ascii spaces off date text, so other unicode spaces,
+    /// full-width digits and number-like clock junk leave it text.
+    #[test]
+    fn year_first_date_text_with_foreign_spacing_stays_text() {
+        let (mut wb, s) = one_sheet();
+        let texts = [
+            "\u{a0}2024-03-05",
+            "2024-03-05\u{a0}",
+            "\u{3000}2024-03-05",
+            "2024-03-05\u{2009}18:00",
+            "2024-03-05 \u{a0}18:00",
+            "2024-03-05 18:00\u{a0}",
+            "\u{ff12}024-03-05",
+            "2024-03-05 1e1:00",
+            "2024-03-05 +6:00",
+        ];
+        for (row, text) in texts.iter().enumerate() {
+            let row = row + 1;
+            put_text(&mut wb, s, &format!("A{row}"), text);
+            put_cached_formula(
+                &mut wb,
+                s,
+                &format!("B{row}"),
+                &format!("A{row}+0"),
+                CellValue::Error {
+                    value: ErrorValue::Value,
+                },
+            );
+        }
+        put_text(&mut wb, s, "C1", "  2024-03-05  ");
+        put_text(&mut wb, s, "C2", "2024-03-05   18:00 ");
+        put_formula(&mut wb, s, "D1", "C1+0");
+        put_formula(&mut wb, s, "D2", "C2+0");
+        rebuild_and_recalc_all(&mut wb, None);
+        for (row, text) in texts.iter().enumerate() {
+            assert_eq!(
+                value(&wb, s, &format!("B{}", row + 1)),
+                CellValue::Error {
+                    value: ErrorValue::Value
+                },
+                "{text:?}"
+            );
+        }
+        assert_eq!(value(&wb, s, "D1"), num(45_356.0));
+        assert_eq!(value(&wb, s, "D2"), num(45_356.75));
     }
 
     #[test]
@@ -1668,6 +1905,27 @@ mod tests {
         let result = recalc_after(&mut wb, &mut graph, &[(SheetId(1), a1("A2"))], None);
         assert_eq!(value(&wb, SheetId(0), "A1"), num(24.0));
         assert_eq!(result.changed, vec![(SheetId(0), a1("A1"))]);
+    }
+
+    #[test]
+    fn names_edited_after_the_graph_was_built_still_evaluate_from_the_workbook() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        for index in 0..3 {
+            wb.defined_names.push(DefinedName {
+                name: format!("Rate_{index}"),
+                formula: format!("{index}"),
+                local_sheet: None,
+                hidden: index == 1,
+            });
+        }
+        put_formula(&mut wb, SheetId(0), "A1", "Rate_1*2");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(2.0));
+
+        wb.defined_names[1].formula = "5".into();
+        recalc_after(&mut wb, &mut graph, &[(SheetId(0), a1("A1"))], None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(10.0));
     }
 
     /// recalc runs on open, so a `Chain_0=Chain_1+Chain_1` ladder in an
@@ -2423,61 +2681,254 @@ mod tests {
         assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
     }
 
-    #[test]
-    fn handled_budget_error_updates_the_cached_value() {
+    /// a far corner cell gives `Data!A1:XFD1048576` the extent the
+    /// per-formula cap refuses; formulas go on the second sheet.
+    fn over_the_formula_cap() -> Workbook {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
         wb.sheets.push(Sheet::new("Formula"));
-        // a cell in the far corner gives Data the extent the guard is for
-        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
-            a1("XFD1048576"),
-            Cell {
-                value: num(1.0),
-                formula: None,
-                style: None,
-            },
-        );
-        put_formula(
-            &mut wb,
-            SheetId(1),
-            "A1",
+        put_num(&mut wb, SheetId(0), "XFD1048576", 1.0);
+        wb
+    }
+
+    /// an error handler over a formula's refused work answers nothing: the
+    /// cell keeps its cached value, or shows `#NUM!` without one.
+    #[test]
+    fn error_handlers_do_not_answer_a_formula_over_its_cap() {
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        let s = SheetId(1);
+        for formula in [
             "IFERROR(SUM(Data!A1:XFD1048576),42)",
-        );
+            "IFERROR(SUM(Data!A1:XFD1048576),#NUM!)",
+            "ISERROR(SUM(Data!A1:XFD1048576))",
+            "ISNUMBER(SUM(Data!A1:XFD1048576))",
+            "COUNT(1,SUM(Data!A1:XFD1048576))",
+        ] {
+            let mut wb = over_the_formula_cap();
+            put_cached_formula(&mut wb, s, "A1", formula, num(123.0));
+            put_formula(&mut wb, s, "A2", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "A1"), num(123.0), "{formula}");
+            assert_eq!(value(&wb, s, "A2"), refused, "{formula}");
+            assert_eq!(result.limited_cells.len(), 2, "{formula}");
+            for at in ["A1", "A2"] {
+                assert!(result.limited_cells.contains(&(s, a1(at))), "{formula}");
+            }
+        }
+    }
+
+    /// a lookup that runs out of its formula's budget before the match keeps
+    /// the cached match under `IFERROR` instead of taking the fallback.
+    #[test]
+    fn a_lookup_over_its_cap_keeps_its_cached_match_under_iferror() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A600000", 600_000.0);
+        put_num(&mut wb, s, "C600000", 1.0);
+        put_num(&mut wb, s, "D600000", 42.0);
+        let formula = "IFERROR(_xlfn.XLOOKUP(1,OFFSET(C1,0,0,SUM(A:A)),OFFSET(D1,0,0,A600000)),0)";
+        put_cached_formula(&mut wb, s, "B1", formula, num(42.0));
+        put_formula(&mut wb, s, "B2", formula);
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, SheetId(1), "A1"), num(42.0));
+        assert_eq!(value(&wb, s, "B1"), num(42.0));
+        assert_eq!(
+            value(&wb, s, "B2"),
+            CellValue::Error {
+                value: ErrorValue::Num
+            }
+        );
+        assert!(result.limited_cells.contains(&(s, a1("B1"))));
+        assert!(result.limited_cells.contains(&(s, a1("B2"))));
+    }
+
+    /// an array formula whose refused work an error handler would answer
+    /// keeps its cached anchor and rectangle.
+    #[test]
+    fn a_refused_array_keeps_its_cache_under_an_error_handler() {
+        let s = SheetId(1);
+        for formula in [
+            "IFERROR(SUM(Data!A1:XFD1048576),0)",
+            "IFERROR(Data!A1:A10*SUM(Data!A1:XFD1048576),0)",
+            "ISERROR(SUM(Data!A1:XFD1048576))",
+        ] {
+            let mut wb = over_the_formula_cap();
+            put_cached_formula(&mut wb, s, "C20", formula, num(5.0));
+            put_num(&mut wb, s, "D25", 7.0);
+            wb.sheet_mut(s)
+                .unwrap()
+                .set_array_formula(a1("C20"), CellRange::parse_a1("C20:D29").unwrap());
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "C20"), num(5.0), "{formula}");
+            assert_eq!(value(&wb, s, "D25"), num(7.0), "{formula}");
+            assert_eq!(value(&wb, s, "D29"), CellValue::Empty, "{formula}");
+            assert!(result.limited_cells.contains(&(s, a1("C20"))), "{formula}");
+        }
+    }
+
+    /// once the recalculation's budget is spent, error handlers over the
+    /// refused work keep the cached values and uncached cells show `#NUM!`,
+    /// while a formula that charges nothing still computes.
+    #[test]
+    fn a_spent_recalculation_keeps_cached_values_under_error_handlers() {
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        for row in 1..=3 {
+            put_num(&mut wb, s, &format!("E{row}"), f64::from(row));
+        }
+        let cached = [
+            ("B20", "IFERROR(SUMPRODUCT(E1:E3,E1:E3),0)", num(14.0)),
+            (
+                "B21",
+                "ISERROR(SUMPRODUCT(E1:E3))",
+                CellValue::Bool { value: false },
+            ),
+            (
+                "B22",
+                "ISNUMBER(SUMPRODUCT(E1:E3))",
+                CellValue::Bool { value: true },
+            ),
+            ("B23", "ISERROR(B20)", CellValue::Bool { value: false }),
+            ("B24", "IF(ISERROR(SUM(E1:E3)),-1,SUM(E1:E3))", num(6.0)),
+        ];
+        for (at, formula, cache) in &cached {
+            put_cached_formula(&mut wb, s, at, formula, cache.clone());
+        }
+        put_formula(&mut wb, s, "B30", "IFERROR(SUMPRODUCT(E1:E3),0)");
+        put_formula(&mut wb, s, "B31", "ISERROR(SUMPRODUCT(E1:E3))");
+        put_formula(&mut wb, s, "B32", "1+2");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        for (at, formula, cache) in &cached {
+            assert_eq!(value(&wb, s, at), *cache, "{formula}");
+            assert!(result.limited_cells.contains(&(s, a1(at))), "{formula}");
+        }
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        assert_eq!(value(&wb, s, "B30"), refused);
+        assert_eq!(value(&wb, s, "B31"), refused);
+        assert_eq!(value(&wb, s, "B32"), num(3.0));
+        assert!(!result.limited_cells.contains(&(s, a1("B32"))));
+    }
+
+    /// the result says when the recalculation's own budget ran out, which a
+    /// single formula over its cap does not.
+    #[test]
+    fn a_spent_recalculation_reports_its_budget_exhausted() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "B1", "1+2");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(!result.budget_exhausted);
+
+        let mut wb = over_the_formula_cap();
+        put_formula(&mut wb, SheetId(1), "A1", "SUM(Data!A1:XFD1048576)");
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+        assert!(!result.budget_exhausted);
+
+        let (mut wb, s) = one_sheet();
+        spend_the_budget(&mut wb, s);
+        put_cached_formula(&mut wb, s, "B1", "SUM(A1:A11)", num(5.0));
+        let (mut graph, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.budget_exhausted);
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+
+        put_num(&mut wb, s, "C1", 1.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("C1"))], None);
+        assert!(!result.budget_exhausted);
+    }
+
+    /// an inner handler that answers an error after work was spent there
+    /// leaves a later refusal standing, so the outer handler cannot answer it.
+    #[test]
+    fn an_outer_handler_keeps_the_cache_after_an_inner_one_answers() {
+        let inputs = |spent: bool| {
+            let (mut wb, s) = one_sheet();
+            if spent {
+                spend_the_budget(&mut wb, s);
+            }
+            put_num(&mut wb, s, "A600000", 1.0);
+            put_num(&mut wb, s, "C1", 1.0);
+            put_num(&mut wb, s, "D1", 42.0);
+            (wb, s)
+        };
+        let lookup =
+            "IFERROR(IFERROR(_xlfn.XLOOKUP(NA(),OFFSET(C1,0,0,SUM(A:A)),D1),42)+SUM(A:A),0)";
+        // reads `A:A` twice, which is over the formula's cap
+        let twice = "IFERROR(IFERROR(INDEX(OFFSET(C1,0,0,SUM(A:A)),1)+NA(),42)+SUM(A:A),0)";
+        let refused = CellValue::Error {
+            value: ErrorValue::Num,
+        };
+        for (formula, spent) in [(lookup, true), (twice, false), (twice, true)] {
+            let (mut wb, s) = inputs(spent);
+            put_cached_formula(&mut wb, s, "E1", formula, num(43.0));
+            put_formula(&mut wb, s, "E2", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "E1"), num(43.0), "{formula} {spent}");
+            assert_eq!(value(&wb, s, "E2"), refused, "{formula} {spent}");
+            assert!(result.limited_cells.contains(&(s, a1("E1"))), "{formula}");
+        }
+        let missing =
+            "IFERROR(IFERROR(_xlfn.XLOOKUP(1,NA(),OFFSET(D1,0,0,SUM(A:A))),42)+SUM(A:A),0)";
+        for formula in [lookup, missing] {
+            let (mut wb, s) = inputs(false);
+            put_formula(&mut wb, s, "E1", formula);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(value(&wb, s, "E1"), num(43.0), "{formula}");
+            assert!(result.limited_cells.is_empty(), "{formula}");
+        }
     }
 
     #[test]
-    fn handled_budget_error_can_produce_an_explicit_num_error() {
-        let mut wb = Workbook::default();
-        wb.sheets.push(Sheet::new("Data"));
-        wb.sheets.push(Sheet::new("Formula"));
-        // a cell in the far corner gives Data the extent the guard is for
-        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
-            a1("XFD1048576"),
-            Cell {
-                value: num(1.0),
-                formula: None,
-                style: None,
-            },
-        );
-        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
-            a1("A1"),
-            Cell {
-                value: num(123.0),
-                formula: Some("IFERROR(SUM(Data!A1:XFD1048576),#NUM!)".into()),
-                style: None,
-            },
-        );
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(
-            value(&wb, SheetId(1), "A1"),
-            CellValue::Error {
-                value: xlsx_model::ErrorValue::Num
-            }
-        );
-        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+    fn a_long_recalculation_reports_progress() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 0.0);
+        for row in 1..20_000u32 {
+            let prev = CellRef::new(row - 1, 0).to_a1();
+            put_formula(
+                &mut wb,
+                s,
+                &CellRef::new(row, 0).to_a1(),
+                &format!("{prev}+1"),
+            );
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        set_progress_hook(Some(count));
+        put_num(&mut wb, s, "A1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        set_progress_hook(None);
+        assert!(CALLS.with(|calls| calls.get()) >= 4);
+    }
+
+    #[test]
+    fn progress_follows_the_cells_a_recalculation_reads() {
+        thread_local! {
+            static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn count() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        const ROWS: u32 = 100_000;
+        let (mut wb, s) = one_sheet();
+        for row in 0..ROWS {
+            put_num(&mut wb, s, &CellRef::new(row, 0).to_a1(), f64::from(row));
+        }
+        for (at, last) in [("B1", ROWS), ("B2", ROWS - 1), ("B3", ROWS - 2)] {
+            put_formula(&mut wb, s, at, &format!("SUM(A1:A{last})"));
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        set_progress_hook(Some(count));
+        put_num(&mut wb, s, "A1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        set_progress_hook(None);
+        let read = 3 * (ROWS - 1);
+        assert!(CALLS.with(|calls| calls.get()) >= read / xlsx_model::progress::EVERY);
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub(crate) struct SegmentIndex {
     len: u32,
     segs: Vec<Seg>,
     units: Option<Vec<Arc<IndexedUnit>>>,
+    formatting_current: bool,
 }
 
 #[derive(Clone)]
@@ -129,6 +130,7 @@ pub(crate) fn build_indexes<T: ReadTxn>(
             len,
             segs,
             units: Some(units),
+            formatting_current: true,
         },
         ParagraphIndex {
             paras,
@@ -139,6 +141,18 @@ pub(crate) fn build_indexes<T: ReadTxn>(
 }
 
 impl ParagraphIndex {
+    pub(crate) fn unit_at(&self, index: u32) -> (usize, u32) {
+        let slot = self.paras.partition_point(|para| para.pilcrow < index);
+        let start = slot
+            .checked_sub(1)
+            .map_or(0, |previous| self.paras[previous].pilcrow + 1);
+        (slot, start)
+    }
+
+    pub(crate) fn para_at_clamped(&self, index: u32) -> Option<&ParaEntry> {
+        self.para_at(index).or_else(|| self.paras.last())
+    }
+
     pub(crate) fn unit_range(&self, start: u32, end: u32) -> (usize, usize) {
         let first = self.paras.partition_point(|para| para.pilcrow < start);
         let last = self.paras.partition_point(|para| para.pilcrow < end);
@@ -153,6 +167,24 @@ impl ParagraphIndex {
     pub(crate) fn para_span(&self, para_id: &str) -> Option<(u32, u32)> {
         let para = self.paras.get(*self.by_para.get(para_id)? as usize)?;
         Some((para.start, para.pilcrow))
+    }
+
+    /// Index of the first paragraph with `para_id`.
+    pub(crate) fn para_slot(&self, para_id: &str) -> Option<u32> {
+        self.by_para.get(para_id).copied()
+    }
+
+    /// Whether some paragraph id is carried by more than one paragraph.
+    pub(crate) fn has_repeated(&self) -> bool {
+        !self.repeated.is_empty()
+    }
+
+    pub(crate) fn para_count(&self) -> usize {
+        self.paras.len()
+    }
+
+    pub(crate) fn pilcrow_at(&self, slot: usize) -> Option<u32> {
+        self.paras.get(slot).map(|para| para.pilcrow)
     }
 
     /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
@@ -212,6 +244,11 @@ impl ParagraphIndex {
 }
 
 impl SegmentIndex {
+    pub(crate) fn formatted_segment_units(&self) -> Option<&[Arc<IndexedUnit>]> {
+        self.formatting_current.then_some(())?;
+        self.segment_units()
+    }
+
     pub(crate) fn segment_units(&self) -> Option<&[Arc<IndexedUnit>]> {
         self.units.as_deref()
     }
@@ -222,7 +259,7 @@ impl SegmentIndex {
         end: u32,
         text: &str,
         attrs: Option<&Attrs>,
-    ) {
+    ) -> bool {
         let slot = self.segs.partition_point(|seg| seg.start < start);
         let paragraph = self.segs[..slot]
             .iter()
@@ -238,7 +275,7 @@ impl SegmentIndex {
             .as_mut()
             .and_then(|units| units.get_mut(paragraph))
         else {
-            return;
+            return false;
         };
         let mut replacement: IndexedUnit = Vec::new();
         let mut offset = paragraph_start;
@@ -301,6 +338,7 @@ impl SegmentIndex {
         #[cfg(test)]
         crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(built.get() + replacement.len()));
         *unit = Arc::new(replacement);
+        true
     }
 
     pub(crate) fn shift_for_text_insert(&mut self, index: u32, text: &str) -> bool {
@@ -321,7 +359,8 @@ impl SegmentIndex {
         {
             return false;
         }
-        self.splice_unit_text(index, index, text, attrs);
+        let spliced = self.splice_unit_text(index, index, text, attrs);
+        self.formatting_current &= spliced && attrs.is_some();
         let slot = self.segs.partition_point(|seg| seg.start < index);
         let text_slot = slot
             .checked_sub(1)
@@ -381,7 +420,9 @@ impl SegmentIndex {
             };
             cuts.push((slot, from, to));
         }
-        self.splice_unit_text(start, end, "", None);
+        if !self.splice_unit_text(start, end, "", None) {
+            self.formatting_current = false;
+        }
         for (slot, from, to) in cuts {
             let seg = &mut self.segs[slot];
             if let SegKind::Text(text) = &seg.kind {
@@ -750,6 +791,7 @@ pub(crate) mod tests {
         let original = SegmentIndex {
             len: 12,
             units: None,
+            formatting_current: false,
             segs: vec![
                 Seg {
                     start: 0,
@@ -824,6 +866,7 @@ pub(crate) mod tests {
         let mut empty = SegmentIndex {
             len: 0,
             units: None,
+            formatting_current: false,
             segs: Vec::new(),
         };
         assert!(empty.shift_for_text_insert(0, "é😀"));
@@ -852,6 +895,11 @@ pub(crate) mod tests {
                 let ctx = EditCtx::local("", "");
                 let advanced = if insert {
                     let text = random_text(&mut random);
+                    let at = {
+                        let txn = doc.yrs_doc().transact();
+                        let story = crate::story_ref(&txn, "body").unwrap();
+                        crate::ops::past_leading_blocks(&story, &txn, start)
+                    };
                     if doc
                         .insert_text(
                             &ctx,
@@ -874,7 +922,7 @@ pub(crate) mod tests {
                             text,
                         );
                     }
-                    exact && maintained.shift_for_text_insert(start, text)
+                    exact && maintained.shift_for_text_insert(at, text)
                 } else {
                     let end = (start + 1 + next_random(&mut random) % 3).min(len);
                     let end = end + u32::from(!maintained.is_char_boundary(end));
@@ -1245,7 +1293,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn segment_index_advances_when_paragraph_shift_is_rejected() {
+    fn indexes_advance_past_leading_blocks_for_text_inserted_inside_them() {
         let doc = seeded_doc();
         doc.paragraph_index("body").unwrap();
         let before = doc.committed_epoch();
@@ -1258,13 +1306,12 @@ pub(crate) mod tests {
         .unwrap();
         let after = doc.committed_epoch();
         doc.advance_indexes_after_text_insert("body", before, after, 5, "xy");
-        assert!(
-            doc.paragraph_indexes
-                .lock()
-                .unwrap()
-                .get("body", after)
-                .is_none()
-        );
+        let paragraphs = doc
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
         let segments = doc
             .segment_indexes
             .lock()
@@ -1273,8 +1320,10 @@ pub(crate) mod tests {
             .unwrap();
         let txn = doc.yrs_doc().transact();
         let story = crate::story_ref(&txn, "body").unwrap();
-        assert_eq!(units(&segments), units(&build_indexes(&story, &txn).0));
+        let (cold_segments, cold_paragraphs) = build_indexes(&story, &txn);
+        assert_eq!(units(&segments), units(&cold_segments));
         assert_segment_invariants(&segments);
+        assert_paragraph_indexes_eq(&paragraphs, &cold_paragraphs);
     }
 
     #[test]

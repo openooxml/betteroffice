@@ -301,6 +301,56 @@ fn adding_a_comment_saves_the_new_comment() {
     assert_comment_text(&saved, 0.0, " colorful");
     assert_comment_text(&saved, 1.0, "Plain");
     assert_comment_text(&saved, 2.0, "Added comment");
+    assert_rich_comment(&saved);
+    let original = String::from_utf8(part(&source, "word/comments.xml")).unwrap();
+    let written = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    let close = original.rfind("</w:comments>").unwrap();
+    assert!(written.starts_with(&original[..close]));
+    assert!(written.ends_with(&original[close..]));
+    assert!(written[close..].starts_with("<w:comment w:id=\"2\""));
+}
+
+#[test]
+fn adding_a_comment_where_its_prefixes_are_unbound_writes_the_part_whole() {
+    let plain = "<w:comment w:id=\"1\" w:author=\"Plain reviewer\"><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:comment>";
+    let mut parts = ooxml_opc::unzip_parts(&fixture_with_comment_parts(plain, &[])).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/comments.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(
+            " xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"",
+            "",
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let unchanged = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_eq!(
+        part(&unchanged, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "New reviewer", "content": [{
+                "type": "paragraph", "content": [{
+                    "type": "run", "content": [{ "type": "text", "text": "Added comment" }]
+                }]
+            }]
+        }))
+        .unwrap(),
+    );
+    let expected = serialize_comments_part(
+        request.document.comments.as_ref().unwrap(),
+        &mut SerializerContext::new(&request.determinism).unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+    assert_comment_companion_ids(&saved);
+    assert_comment_text(&saved, 1.0, "Plain");
+    assert_comment_text(&saved, 2.0, "Added comment");
 }
 
 fn without_rich_paragraph_ids(xml: &str) -> String {
@@ -968,7 +1018,7 @@ fn setting_a_comment_paragraph_id_without_source_ids_saves_it_in_all_comment_par
 }
 
 #[test]
-fn changing_only_comment_metadata_writes_the_whole_comments_part() {
+fn comment_metadata_splices_resolution_and_rewrites_identity() {
     for change in ["done", "durable_id", "para_id", "explicit_done"] {
         let source = fixture();
         let mut request = save_request(&source);
@@ -981,11 +1031,19 @@ fn changing_only_comment_metadata_writes_the_whole_comments_part() {
             _ => unreachable!(),
         }
         let saved = write_docx_s13(request, &source).unwrap();
-        assert_ne!(
-            part(&saved, "word/comments.xml"),
-            part(&source, "word/comments.xml"),
-            "{change}"
-        );
+        if matches!(change, "done" | "explicit_done") {
+            assert_eq!(
+                part(&saved, "word/comments.xml"),
+                part(&source, "word/comments.xml"),
+                "{change}"
+            );
+        } else {
+            assert_ne!(
+                part(&saved, "word/comments.xml"),
+                part(&source, "word/comments.xml"),
+                "{change}"
+            );
+        }
         assert_comment_companion_ids(&saved);
         assert_comment_text(&saved, 0.0, " colorful");
         assert_comment_text(&saved, 1.0, "Plain");
@@ -999,4 +1057,160 @@ fn changing_only_comment_metadata_writes_the_whole_comments_part() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn reply_and_resolution_splice_companions_without_changing_unrelated_rows() {
+    let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" xmlns:x=\"urn:extra\">\n<w15:commentEx x:keep='root' w15:paraId=\"10000006\" w15:done='0'><x:extra/></w15:commentEx>\n<w15:commentEx w15:paraId=\"10000004\" x:keep='other'/>\n<x:tail/></w15:commentsEx>";
+    let ids = "<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" xmlns:x=\"urn:extra\"><w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\" x:keep='yes'/><x:tail/></w16cid:commentsIds>";
+    let extensible = "<w16cex:commentsExtensible xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\" xmlns:x=\"urn:extra\"><w16cex:commentExtensible w16cex:durableId=\"20000001\" x:keep='yes'/><x:tail/></w16cex:commentsExtensible>";
+    let source = fixture_with_comment_parts(
+        &format!("{RICH_COMMENT}\n{PLAIN_COMMENT}"),
+        &[
+            ("word/commentsExtended.xml", extended),
+            ("word/commentsIds.xml", ids),
+            ("word/commentsExtensible.xml", extensible),
+        ],
+    );
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[0].done = Some(true);
+    let resolved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(
+        part(&resolved, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    assert_eq!(
+        part(&resolved, "word/commentsExtended.xml"),
+        extended.replace("w15:done='0'", "w15:done='1'").as_bytes()
+    );
+    assert_eq!(part(&resolved, "word/commentsIds.xml"), ids.as_bytes());
+    assert_eq!(
+        part(&resolved, "word/commentsExtensible.xml"),
+        extensible.as_bytes()
+    );
+    let mut request = save_request(&resolved);
+    request.document.comments.as_mut().unwrap().push(serde_json::from_value(json!({
+        "id": 2, "author": "Editor", "date": "2026-10-01T00:00:00Z", "parentId": 0,
+        "content": [{ "type": "paragraph", "content": [{ "type": "run", "content": [{ "type": "text", "text": "Follow up" }] }] }]
+    })).unwrap());
+    let saved = write_docx_s13(request, &resolved).unwrap();
+    let xml = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    assert!(xml.contains(RICH_COMMENT));
+    assert!(xml.contains(PLAIN_COMMENT));
+    for (path, original, close) in [
+        (
+            "word/commentsExtended.xml",
+            extended.replace("w15:done='0'", "w15:done='1'"),
+            "</w15:commentsEx>",
+        ),
+        (
+            "word/commentsIds.xml",
+            ids.to_owned(),
+            "</w16cid:commentsIds>",
+        ),
+        (
+            "word/commentsExtensible.xml",
+            extensible.to_owned(),
+            "</w16cex:commentsExtensible>",
+        ),
+    ] {
+        let written = String::from_utf8(part(&saved, path)).unwrap();
+        assert!(
+            written.starts_with(original.strip_suffix(close).unwrap()),
+            "{path}"
+        );
+    }
+    assert!(
+        String::from_utf8(part(&saved, "word/commentsExtended.xml"))
+            .unwrap()
+            .contains("paraIdParent=\"10000006\"")
+    );
+}
+
+#[test]
+fn reply_only_patches_the_last_parent_paragraph_when_its_id_is_missing() {
+    let source = fixture_without_rich_paragraph_ids();
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "Editor", "parentId": 0,
+            "content": [{ "type": "paragraph", "content": [] }]
+        }))
+        .unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    let original = String::from_utf8(part(&source, "word/comments.xml")).unwrap();
+    let written = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
+    let start = original.find("<w:comment ").unwrap();
+    let end = original.find("</w:comment>").unwrap() + "</w:comment>".len();
+    let original_fragment = &original[start..end];
+    let last = original_fragment.rfind("<w:p>").unwrap();
+    let parent = save_request(&saved).document.comments.unwrap().remove(0);
+    let patched = format!(
+        "{}<w:p w14:paraId=\"{}\">{}",
+        &original_fragment[..last],
+        parent.para_id.unwrap(),
+        &original_fragment[last + 5..]
+    );
+    assert!(written.contains(&patched));
+    assert!(written.contains(PLAIN_COMMENT));
+    assert_comment_companion_ids(&saved);
+}
+
+#[test]
+fn reopening_a_resolved_comment_only_patches_its_done_attribute() {
+    let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w15:commentEx w15:paraId='10000006' w15:done='true'/><w15:commentEx w15:paraId='10000004' w15:done='1'/></w15:commentsEx>";
+    let source = fixture_with_comment_parts(
+        &format!("{RICH_COMMENT}\n{PLAIN_COMMENT}"),
+        &[("word/commentsExtended.xml", extended)],
+    );
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap()[0].done = Some(false);
+    let saved = write_docx_s13(request, &source).unwrap();
+    assert_eq!(
+        part(&saved, "word/comments.xml"),
+        part(&source, "word/comments.xml")
+    );
+    assert_eq!(
+        part(&saved, "word/commentsExtended.xml"),
+        extended
+            .replace("w15:done='true'", "w15:done='0'")
+            .as_bytes()
+    );
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_ne!(comments[0].done, Some(true));
+    assert_eq!(comments[1].done, Some(true));
+}
+
+#[test]
+fn replying_to_a_parent_with_a_trailing_table_preserves_it_across_resolution() {
+    let parent = "<w:comment w:id=\"0\" w:author=\"Reviewer\"><w:p><w:r><w:t>Root</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:comment>";
+    let source = fixture_with_comment_parts(&format!("{parent}\n{PLAIN_COMMENT}"), &[]);
+    let mut request = save_request(&source);
+    request.document.comments.as_mut().unwrap().push(
+        serde_json::from_value(json!({
+            "id": 2, "author": "Editor", "parentId": 0,
+            "content": [{ "type": "paragraph", "content": [] }]
+        }))
+        .unwrap(),
+    );
+    let saved = write_docx_s13(request, &source).unwrap();
+    let mut request = save_request(&saved);
+    assert_eq!(
+        request.document.comments.as_ref().unwrap()[2].parent_id,
+        Some(0.0)
+    );
+    let xml = part(&saved, "word/comments.xml");
+    assert!(
+        String::from_utf8(xml.clone())
+            .unwrap()
+            .contains(PLAIN_COMMENT)
+    );
+    request.document.comments.as_mut().unwrap()[0].done = Some(true);
+    let resolved = write_docx_s13(request, &saved).unwrap();
+    assert_eq!(part(&resolved, "word/comments.xml"), xml);
+    assert_eq!(
+        save_request(&resolved).document.comments.unwrap()[2].parent_id,
+        Some(0.0)
+    );
 }

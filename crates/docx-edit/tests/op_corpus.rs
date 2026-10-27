@@ -681,21 +681,28 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
 }
 
 #[test]
-fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
+fn split_at_end_carries_the_insertion_point_run_formatting() {
     let (doc, original) = doc_with("heading");
-    let dtf: BTreeMap<String, Any> = [
-        ("fontFamily".to_string(), Any::from("Georgia")),
-        ("fontSize".to_string(), Any::Number(48.0)),
-        ("color".to_string(), Any::from("336699")),
-        ("bold".to_string(), Any::Bool(true)),
-    ]
-    .into_iter()
-    .collect();
-    doc.set_paragraph_default_format(&ctx(), &ParaSelector::One(original.clone()), Some(&dtf))
-        .unwrap();
+    doc.format_range(
+        &ctx(),
+        StoryRange::new("body", 0, 7),
+        &InlineFormatDelta {
+            bold: Patch::Set(true),
+            italic: Patch::Set(true),
+            underline: Patch::Set(UnderlinePatch::default()),
+            color: Patch::Set(ColorPatch::Rgb("336699".into())),
+            font_size: Patch::Set(24.0),
+            font_family: Patch::Set(FontFamilyPatch {
+                ascii: "Georgia".into(),
+                h_ansi: None,
+            }),
+            ..InlineFormatDelta::default()
+        },
+    )
+    .unwrap();
     doc.set_paragraph_attrs(
         &ctx(),
-        &ParaSelector::One(original.clone()),
+        &ParaSelector::One(original),
         &ParaAttrDelta {
             alignment: Patch::Set("center".into()),
             space_after: Patch::Set(240.0),
@@ -703,27 +710,167 @@ fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
         },
     )
     .unwrap();
-    // Split at the end of the paragraph text → empty second half.
-    doc.split_paragraph(&ctx(), Position::new("body", 7), None)
+    doc.insert_text(
+        &sug("Bea"),
+        Position::new("body", 7),
+        "!",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    doc.split_paragraph(&sug("Bea"), Position::new("body", 8), None)
         .unwrap();
     let paragraphs = doc.paragraphs("body").unwrap();
     assert_eq!(paragraphs[1].text, "");
     let second = &paragraphs[1].properties;
-    // Inherited subset kept: pStyle, spaceAfter; alignment (not in the subset) dropped.
     assert_eq!(second.get("pStyle"), Some(&Any::from("Normal")));
     assert_eq!(second.get("spaceAfter"), Some(&Any::Number(240.0)));
     assert_eq!(second.get("alignment"), None);
-    // dtf reduced to the font/size/color carry — bold dropped.
-    let dtf = second.get("defaultTextFormatting").expect("dtf kept");
-    assert_eq!(map_get(dtf, "fontFamily"), Some(&Any::from("Georgia")));
-    assert_eq!(map_get(dtf, "fontSize"), Some(&Any::Number(48.0)));
-    assert_eq!(map_get(dtf, "color"), Some(&Any::from("336699")));
-    assert_eq!(map_get(dtf, "bold"), None);
-    // First half untouched.
     assert_eq!(
         paragraphs[0].properties.get("alignment"),
         Some(&Any::from("center"))
     );
+    let dtf = second
+        .get("defaultTextFormatting")
+        .expect("the run formatting carries");
+    assert_eq!(map_get(dtf, "bold"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(dtf, "italic"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(dtf, "fontSize"), Some(&Any::Number(48.0)));
+    for key in ["ins", "del", "textColor"] {
+        assert_eq!(map_get(dtf, key), None, "{key} stays off the mark");
+    }
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 9),
+        "Next",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let (typed, source) = (seg_attrs(&doc, "Next"), seg_attrs(&doc, "heading"));
+    for key in ["bold", "italic", "underline", "fontSize", "fontFamily"] {
+        assert_eq!(typed.get(key), source.get(key), "{key}");
+    }
+    assert_eq!(
+        typed
+            .get("textColor")
+            .and_then(|color| map_get(color, "rgb")),
+        Some(&Any::from("336699"))
+    );
+    assert!(!active(&typed, "ins"));
+}
+
+#[test]
+fn split_at_end_after_plain_text_leaves_the_mark_only_formatting_behind() {
+    for (run_bold, mark_bold) in [(false, true), (true, false)] {
+        let (doc, original) = doc_with("heading");
+        if run_bold {
+            doc.toggle_format(&ctx(), StoryRange::new("body", 0, 7), SimpleFormat::Bold)
+                .unwrap();
+        }
+        let dtf: BTreeMap<String, Any> =
+            BTreeMap::from([("bold".to_string(), Any::Bool(mark_bold))]);
+        doc.set_paragraph_default_format(&ctx(), &ParaSelector::One(original), Some(&dtf))
+            .unwrap();
+        // A plain-text paste over the run: the first line replaces it, the next follows a split.
+        doc.replace_range(&ctx(), StoryRange::new("body", 0, 7), "One")
+            .unwrap();
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 4),
+            "Two",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        for line in ["One", "Two"] {
+            assert_eq!(
+                active(&seg_attrs(&doc, line), "bold"),
+                run_bold,
+                "{line} with a bold run {run_bold} and a bold mark {mark_bold}"
+            );
+        }
+    }
+}
+
+#[test]
+fn split_at_end_of_an_empty_paragraph_keeps_only_what_typed_runs_hold() {
+    let (doc, original) = doc_with("");
+    let language = Any::Map(Arc::new(
+        [("bidi".to_string(), Any::from("ar-SA"))]
+            .into_iter()
+            .collect(),
+    ));
+    let dtf: BTreeMap<String, Any> = [
+        ("bold".to_string(), Any::Bool(true)),
+        ("boldCs".to_string(), Any::Bool(true)),
+        ("italicCs".to_string(), Any::Bool(true)),
+        ("cs".to_string(), Any::Bool(true)),
+        ("language".to_string(), language),
+    ]
+    .into_iter()
+    .collect();
+    doc.set_paragraph_default_format(&ctx(), &ParaSelector::One(original), Some(&dtf))
+        .unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", 0), None)
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let carried = paragraphs[1]
+        .properties
+        .get("defaultTextFormatting")
+        .expect("the mark formatting carries");
+    assert_eq!(map_get(carried, "bold"), Some(&Any::Bool(true)));
+    for key in ["boldCs", "italicCs", "cs", "language"] {
+        assert_eq!(map_get(carried, key), None, "{key} has no run form");
+    }
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 1),
+        "Next",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert!(active(&seg_attrs(&doc, "Next"), "bold"));
+}
+
+#[test]
+fn split_at_end_leaves_the_grid_opt_out_behind() {
+    let (doc, original) = doc_with("");
+    let dtf: BTreeMap<String, Any> = BTreeMap::from([
+        ("bold".to_string(), Any::Bool(true)),
+        ("snapToGrid".to_string(), Any::Bool(false)),
+    ]);
+    doc.set_paragraph_default_format(&ctx(), &ParaSelector::One(original), Some(&dtf))
+        .unwrap();
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 0),
+        "Grid",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert_eq!(
+        seg_attrs(&doc, "Grid").get("snapToGrid"),
+        Some(&Any::Bool(false))
+    );
+    doc.split_paragraph(&ctx(), Position::new("body", 4), None)
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let carried = paragraphs[1]
+        .properties
+        .get("defaultTextFormatting")
+        .expect("the run formatting carries");
+    assert_eq!(map_get(carried, "bold"), Some(&Any::Bool(true)));
+    assert_eq!(map_get(carried, "snapToGrid"), None);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 5),
+        "Next",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let typed = seg_attrs(&doc, "Next");
+    assert!(active(&typed, "bold"));
+    assert!(!active(&typed, "snapToGrid"));
 }
 
 #[test]

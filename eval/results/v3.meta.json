@@ -1,0 +1,48 @@
+{
+  "fixtures": {
+    "kind": "real-world",
+    "description": [
+      "The v3 manifest pins 90 unmodified public corpus originals by size and SHA-256. Each file has source, publisher, license and attribution metadata. Downloads and local fixtures are verified against those pins.",
+      "The basic tier has 96 tasks and the complex tier has 33 tasks. Both tiers use pinned corpus documents; complex tasks include multi-step edits and exact JSON answers to layout questions."
+    ]
+  },
+  "harness": "codex exec",
+  "limits": [
+    "The v3 results use gpt-6-luna with three independent runs per task in each arm. They measure the agent and tools together on selected corpus tasks. They do not establish performance on other documents or models. Checkers validate defined edits and answers rather than general visual rendering quality.",
+    "Each task starts in a fresh temporary directory. Tasks have a 600-second time limit; MCP startup has a separate 60-second preflight limit. The commands run at most two task sessions concurrently.",
+    "Tool counts differ by arm. Timings cannot support a speed comparison across arms. Wilson intervals do not account for task selection or dependence between repeated runs, and do not predict results on other document sets."
+  ],
+  "reproduce": [
+    "python3 eval/formats/run.py --suite v3 --runs 3 --jobs 2 \"node packages/agents/dist/cli.js\" /tmp/evals-v3-basic-bo gpt-6-luna",
+    "python3 eval/formats/run.py --suite v3 --runs 3 --jobs 2 --arm generic --python /path/to/venv/bin/python /tmp/evals-v3-basic-generic gpt-6-luna",
+    "python3 eval/formats/run.py --suite v3 --tier complex --runs 3 --jobs 2 \"node packages/agents/dist/cli.js\" /tmp/evals-v3-complex-bo gpt-6-luna",
+    "python3 eval/formats/run.py --suite v3 --tier complex --runs 3 --jobs 2 --arm generic --python /path/to/venv/bin/python /tmp/evals-v3-complex-generic gpt-6-luna"
+  ],
+  "arms": [
+    {
+      "id": "generic",
+      "label": "Generic file tools",
+      "summary": "Shell and Python with python-docx, openpyxl and python-pptx, without network access.",
+      "details": [
+        "The agent uses shell commands and Python with python-docx, openpyxl and python-pptx in a workspace-write sandbox, with no network or MCP servers. Logged commands are audited for access to the repository or task metadata. Reads are not isolated by the filesystem sandbox."
+      ],
+      "tool_calls": "Shell commands and file edits; one command can run a whole script.",
+      "comparison_label": "generic file tools"
+    },
+    {
+      "id": "betteroffice",
+      "label": "BetterOffice MCP",
+      "summary": "Only the BetterOffice MCP server for document access.",
+      "details": [
+        "The agent runs in a read-only sandbox. The required BetterOffice MCP server is rooted at the task directory and is the only writer. Other document access tools are disabled. Code mode can call tools but has no file or network access. Server startup and required tools are checked before tasks run."
+      ],
+      "tool_calls": "BetterOffice MCP calls.",
+      "comparison_label": "the BetterOffice MCP server"
+    }
+  ],
+  "checker_validation": {
+    "accepted": 209,
+    "untouched_rejected": 140,
+    "corrupted_rejected": 1267
+  }
+}

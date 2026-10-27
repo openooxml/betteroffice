@@ -1,14 +1,20 @@
-import { createPeerlessSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION } from '@betteroffice/pptx/peerless';
-import { sizeCanvasForSlide, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx/editor';
+import {
+  createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION, PptxWorkerEditorDisposedError,
+  PptxWorkerEditorFailedError,
+} from '@betteroffice/pptx/worker';
+import { sizeCanvasForSlide } from '@betteroffice/pptx';
+import type { DeckSnapshot, PptxFontFace } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxFontFace, PeerlessSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
-} from '@betteroffice/pptx';
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
+} from '@betteroffice/pptx/worker';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
-import type { PptxAsyncEditorProps } from '../PptxEditor';
+import { useFontWarning } from '../fontFaces';
+import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
+import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
@@ -16,7 +22,10 @@ import {
   type PeerlessConfirmedFrame, type PeerlessViewSnapshot, type PeerlessViewStore,
 } from './peerlessViewStore';
 
-export const peerlessSessionOpener = { open: createPeerlessSession };
+export const peerlessSessionOpener = { open: createPptxWorkerSession };
+export const peerlessViewStoreFactory = {
+  create: (...args: Parameters<typeof createPeerlessViewStore>) => createPeerlessViewStore(...args),
+};
 export const peerlessPainterFactories = {
   frame: createCommandFramePainter,
   echo: createLocalEchoPainter,
@@ -36,7 +45,8 @@ export interface PeerlessVisualSnapshot { view: PeerlessViewSnapshot; fit: Slide
 
 export interface PeerlessPresentation {
   readonly fileGeneration: object;
-  readonly session: PeerlessSession;
+  readonly collaborationClientId?: number;
+  readonly session: PptxWorkerSession;
   readonly client: PresentationCommandClient;
   readonly store: PeerlessViewStore;
   readonly images: CommandFrameImages;
@@ -58,7 +68,7 @@ export interface PeerlessPresentation {
 }
 
 export function usePeerlessPresentation(
-  props: PptxAsyncEditorProps, canvas: RefObject<HTMLCanvasElement | null>,
+  props: PptxAsyncEditorInternalProps, canvas: RefObject<HTMLCanvasElement | null>,
 ): { presentation: PeerlessPresentation | null; pending: PeerlessPresentation | null; failure: Error | null } {
   const fonts = useStableFonts(props.fonts);
   const collaboration = props.collaboration;
@@ -70,6 +80,7 @@ export function usePeerlessPresentation(
   }
   const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.clientId, Boolean(collaboration),
     collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
   const callbacks = useRef(props);
@@ -91,8 +102,10 @@ export function usePeerlessPresentation(
     if (!props.file || !canvas.current) return;
     const surface = canvas.current;
     let alive = true;
-    let session: PeerlessSession | undefined;
+    let session: PptxWorkerSession | undefined;
     let observedChanges = Boolean(callbacks.current.onChange);
+    const sessionCollaboration = props.collaboration && { ...props.collaboration,
+      clientId: props.collaboration.clientId ?? generateCollaborationClientId() };
     let base: PeerlessViewStore | undefined;
     let run: PeerlessPresentation | undefined;
     let framePainter: ReturnType<typeof createCommandFramePainter> | undefined;
@@ -109,6 +122,13 @@ export function usePeerlessPresentation(
     let draining = false;
     let changeSeq: number | undefined;
     let changeEvent: PresentationCommandAck['change'];
+    let notifiedVersion: string | undefined;
+    const notifyDocumentVersion = (version: string) => {
+      if (notifiedVersion === version) return;
+      notifiedVersion = version;
+      try { callbacks.current.onDocumentChange?.({ version }); }
+      catch (error) { console.error('documentChange listener threw:', error); }
+    };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
     const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
     let checkpoint = { bytes: recoveryBase, throughSeq: 0, version: '' };
@@ -150,6 +170,14 @@ export function usePeerlessPresentation(
     const report = (cause: unknown) => {
       if (!current()) return;
       fatal = cause instanceof PptxWorkerEditorFailedError ? cause : new PptxWorkerEditorFailedError(cause);
+      const event = changeEvent;
+      if (changeSeq !== undefined && modeClient && (!event || (event.throughSeq >= changeSeq &&
+        event.throughSeq <= modeClient.state.throughSeq && event.version === modeClient.state.version))) {
+        changeSeq = undefined;
+        changeEvent = undefined;
+        if (event) { try { callbacks.current.onChange?.(event.snapshot); } catch {} }
+        notifyDocumentVersion(event?.version ?? modeClient.state.version);
+      }
       cancelIdle?.(); cancelIdle = undefined;
       clearTimeout(checkpointTimer); checkpointTimer = undefined;
       framePainter?.freeze();
@@ -172,7 +200,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current);
+    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts);
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -241,8 +269,10 @@ export function usePeerlessPresentation(
       if (!current() || !base || (base.getSnapshot().confirmed && !firstPainted) || cancelIdle || draining) return;
       cancelIdle = idle(() => {
         cancelIdle = undefined;
-        if (!current() || !base || (base.getSnapshot().confirmed && (!firstPainted || !paintedFrame ||
-          paintedFrame.coversThroughSeq < client.state.throughSeq))) return;
+        if (!current() || !base) return;
+        const view = base.getSnapshot();
+        if (view.confirmed && (!firstPainted || !paintedFrame ||
+          paintedView?.confirmed !== view.confirmed || view.presentedThroughSeq < client.state.throughSeq)) return;
         draining = true;
         void drain(client).catch(report).finally(() => {
           draining = false;
@@ -270,32 +300,44 @@ export function usePeerlessPresentation(
     async function drain(client: PresentationCommandClient): Promise<void> {
       if (!base || !current()) return;
       await whenPainted();
-      if (changeSeq !== undefined) {
-        changeSeq = undefined;
+      const pendingSeq = changeSeq;
+      if (pendingSeq !== undefined) {
         if (callbacks.current.onChange) {
           await base.fence();
           if (!current()) return;
           await whenPainted();
           const event = changeEvent;
           if (event) {
+            changeEvent = undefined;
+            if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
             if (event.throughSeq <= client.state.throughSeq && event.version === client.state.version) {
               try { callbacks.current.onChange?.(event.snapshot); } catch {}
+              notifyDocumentVersion(event.version);
             }
-            if (changeEvent === event) changeEvent = undefined;
-            if (changeSeq !== undefined && changeSeq <= event.throughSeq) changeSeq = undefined;
           } else {
           const reply = await client.read();
           if (!current()) return;
           await whenPainted();
+          let snapshot: DeckSnapshot | undefined;
           if (reply.result.ok) {
-            const snapshot: DeckSnapshot = client.access ? await client.access('snapshot') : { widthEmu: client.state.size.width,
+            snapshot = client.access ? await client.access('snapshot') : { widthEmu: client.state.size.width,
               heightEmu: client.state.size.height, slides: reply.result.slides };
             if (!current()) return;
+          }
+          if (changeSeq !== undefined && changeSeq <= Math.max(pendingSeq, reply.throughSeq)) changeSeq = undefined;
+          if (snapshot) {
             try { callbacks.current.onChange?.(snapshot); } catch {}
+            notifyDocumentVersion(client.state.version);
           }
-          if (changeSeq !== undefined && changeSeq <= reply.throughSeq) changeSeq = undefined;
           }
-        }
+        } else if (callbacks.current.onDocumentChange) {
+          await base.fence();
+          if (!current()) return;
+          await whenPainted();
+          changeSeq = undefined;
+          changeEvent = undefined;
+          notifyDocumentVersion(client.state.version);
+        } else { changeSeq = undefined; changeEvent = undefined; }
       }
       if (!current()) return;
       await whenPainted();
@@ -330,7 +372,7 @@ export function usePeerlessPresentation(
 
     try {
       session = peerlessSessionOpener.open(props.file, {
-        fonts, clientId: props.clientId, collaboration: props.collaboration,
+        fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
       });
@@ -355,7 +397,7 @@ export function usePeerlessPresentation(
         if (!current()) return;
         checkpoint.version = client.state.version;
         checkpointUpdate = client.state.recoveryUpdate ? new Uint8Array(client.state.recoveryUpdate).slice() : undefined;
-        base = createPeerlessViewStore(client, {
+        base = peerlessViewStoreFactory.create(client, {
           checkpoint(pixels) {
             const restoreFrame = framePainter?.checkpoint(pixels);
             const restoreEcho = echoPainter?.checkpoint();
@@ -419,17 +461,17 @@ export function usePeerlessPresentation(
           },
           subscribePresentation: (listener) => subscribe(subscribePresentation, listener),
           subscribeEditState: (listener) => subscribe(subscribeEditState, listener),
-          dispatch: (intent) => {
+          dispatch: (intent, options) => {
             try {
               require();
               const admission = PRESENTATION_COMMAND_ADMISSION[intent.kind];
               if (admission === 'local-write' && (mode.current || !modeReady() || getSnapshot().editState.readOnly)) {
                 throw new Error('The editor is read-only');
               }
-              if (admission !== 'mode' && !selectionEnabled() && !['undo', 'redo', 'applyEdits', 'registerFont', 'invoke', 'setChangeObserver'].includes(intent.kind)) {
+              if (admission !== 'mode' && intent.kind !== 'collabPipe' && !selectionEnabled() && !['undo', 'redo', 'applyEdits', 'registerFont', 'invoke', 'setChangeObserver'].includes(intent.kind)) {
                 throw new Error('Slide input is unavailable');
               }
-              return dispatch(intent);
+              return dispatch(intent, options);
             } catch (error) { return Promise.reject(error); }
           },
           fence: async () => { require(); await fence(); require(); },
@@ -472,7 +514,7 @@ export function usePeerlessPresentation(
             if (!vanished.has(id) && !dirty.has(id)) dirty.set(id, 0);
           }
           if (ack.outcomes.some((outcome) => outcome.committed)) scheduleCheckpoint(client);
-          if (callbacks.current.onChange && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
+          if ((callbacks.current.onChange || callbacks.current.onDocumentChange) && ack.outcomes.some((outcome) => outcome.committed)) { changeSeq = ack.throughSeq; changeEvent = ack.change; }
           schedule(client);
         }));
         const subscribeVisual = (listener: () => void) => {
@@ -480,7 +522,7 @@ export function usePeerlessPresentation(
           return () => { visualListeners.delete(listener); };
         };
         run = {
-          fileGeneration, session: owner, client, store, images,
+          fileGeneration, session: owner, client, store, images, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual, subscribeVisual,
           get ready() { return whenPainted(); },
@@ -520,7 +562,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
-            await installFonts([face], installedFonts, current);
+            await installFonts([face], installedFonts, current, warnFonts);
             require();
           },
           fit(token) {
@@ -612,7 +654,7 @@ export function usePeerlessPresentation(
       visualListeners.clear(); failureListeners.clear();
       if (!fatal) void session?.dispose().catch(() => {});
     };
-  }, [fileGeneration, canvas]);
+  }, [fileGeneration, canvas, warnFonts]);
 
   useLayoutEffect(() => {
     const run = presentation?.fileGeneration === fileGeneration ? presentation : null;

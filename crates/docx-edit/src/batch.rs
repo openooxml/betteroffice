@@ -213,6 +213,14 @@ pub enum EditOperation {
         target: ParagraphTarget,
         style_id: String,
     },
+    InsertSectionBreakAfter {
+        target: ParagraphTarget,
+        kind: String,
+    },
+    SetSectionProperties {
+        section: String,
+        properties: Value,
+    },
     /// Replaces the content of a plain- or rich-text content control with plain text and clears
     /// its placeholder state. LF is a line break, or a paragraph break in a rich-text block
     /// control.
@@ -494,6 +502,21 @@ pub(crate) fn refusal(version: DocumentVersion, failure: EditFailure) -> EditRef
     EditRefusal { version, failure }
 }
 
+fn holds_pending<T: ReadTxn>(txn: &T) -> bool {
+    txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
+}
+
+fn unintegrated(version: DocumentVersion) -> EditRefusal {
+    refusal(
+        version,
+        failure(
+            EditFailureCode::Unsupported,
+            "the document holds updates that are not integrated yet".to_owned(),
+            None,
+        ),
+    )
+}
+
 /// What one step did, in request order. Ranges use the final accepted view; a deletion reports
 /// its collapsed boundary, and removed paragraph ids are history, not anchors.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -591,6 +614,7 @@ enum Effect {
     },
     Style(StylePlan),
     Control(ControlFill),
+    Section(crate::sections::SectionPlan),
 }
 
 impl Effect {
@@ -602,7 +626,7 @@ impl Effect {
             | Self::Delete { start, .. }
             | Self::Rich { start, .. }
             | Self::RemoveParagraphs { start, .. } => Some(*start),
-            Self::Style(_) | Self::Control(_) => None,
+            Self::Style(_) | Self::Control(_) | Self::Section(_) => None,
         }
     }
 }
@@ -702,6 +726,7 @@ fn direct_admissible<T: ReadTxn>(doc: &EditingDoc, txn: &T, steps: &[Planned]) -
     if txn.root_refs().any(|(name, _)| {
         ![
             crate::STORIES,
+            crate::REMOVED_STORIES,
             crate::COMMENTS,
             crate::part_metadata::PART_METADATA,
             crate::document_properties::DOCUMENT_PROPERTIES,
@@ -2336,6 +2361,87 @@ fn plan_block_fill<T: ReadTxn>(
     })
 }
 
+fn plan_section<T: ReadTxn>(
+    views: &mut Views<'_, T>,
+    source: Option<&SourceMetadata>,
+    index: u32,
+    step: &EditStep,
+    plan: crate::sections::SectionPlan,
+) -> Result<Planned, EditFailure> {
+    let story = views.story("body", EditTextView::Accepted).ok_or_else(|| {
+        failure(
+            EditFailureCode::MissingTarget,
+            "body story unavailable".to_owned(),
+            None,
+        )
+    })?;
+    let last = story.paragraphs.last().ok_or_else(|| {
+        failure(
+            EditFailureCode::MissingTarget,
+            "body paragraph unavailable".to_owned(),
+            None,
+        )
+    })?;
+    let id = match &step.operation {
+        EditOperation::SetSectionProperties { section, .. } if section != "final" => {
+            section.clone()
+        }
+        _ => plan
+            .paragraphs
+            .first()
+            .map(|(id, _)| id)
+            .unwrap_or(&last.para_id)
+            .clone(),
+    };
+    let target = ParagraphTarget {
+        story: "body".to_owned(),
+        para_id: id.clone(),
+    };
+    let requested = EditTarget::Paragraph(target.clone());
+    require_source(source, &requested)?;
+    refuse_suggestion(step, &requested)?;
+    views.check_story_writable("body", &requested)?;
+    let mut touched: Vec<String> = plan.paragraphs.iter().map(|(id, _)| id.clone()).collect();
+    if plan.final_properties.is_some() {
+        touched.push(last.para_id.clone());
+    }
+    for id in &touched {
+        let (story, at) = views.paragraph(
+            &ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: id.clone(),
+            },
+            EditTextView::Accepted,
+        )?;
+        if story.structurally_revised(at) || story.paragraphs[at].has_revisions() {
+            return Err(revision_conflict(
+                "the section boundary carries a tracked change",
+                &requested,
+            ));
+        }
+    }
+    let (_, at) = views.paragraph(&target, EditTextView::Accepted)?;
+    guard(&step.expect, &story.paragraphs[at].text, &requested)?;
+    let append = plan.append.is_some();
+    let changed = !plan.paragraphs.is_empty() || plan.final_properties.is_some();
+    Ok(Planned {
+        index,
+        story: "body".to_owned(),
+        target: requested,
+        claims: Vec::new(),
+        touched,
+        exclusive: true,
+        effect: changed.then_some(Effect::Section(plan)),
+        shape: Shape::Paragraph(id),
+        removed: Vec::new(),
+        new_paragraph_count: u32::from(append),
+        suggest: false,
+        control: None,
+        also_changes: None,
+        companion: false,
+    })
+}
+
 fn plan_step<T: ReadTxn>(
     views: &mut Views<'_, T>,
     source: Option<&SourceMetadata>,
@@ -2378,6 +2484,33 @@ fn plan_step<T: ReadTxn>(
         EditOperation::SetParagraphStyle { target, style_id } => {
             plan_style(views, source, index, step, target, style_id)
         }
+        EditOperation::InsertSectionBreakAfter { target, kind } => {
+            if target.story != "body" {
+                return Err(unsupported(
+                    "section breaks require a body paragraph",
+                    &EditTarget::Paragraph(target.clone()),
+                ));
+            }
+            let plan = views
+                .doc()
+                .plan_section_break(&target.para_id, kind)
+                .map_err(|message| invalid(message, &EditTarget::Paragraph(target.clone())))?;
+            plan_section(views, source, index, step, plan)
+        }
+        EditOperation::SetSectionProperties {
+            section,
+            properties,
+        } => {
+            let target = EditTarget::Paragraph(ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: section.clone(),
+            });
+            let plan = views
+                .doc()
+                .plan_section_properties(section, properties)
+                .map_err(|message| invalid(message, &target))?;
+            plan_section(views, source, index, step, plan)
+        }
         EditOperation::SetContentControlText { target, text } => {
             return plan_control(views, source, index, step, target, text);
         }
@@ -2408,6 +2541,16 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .apply_style_plan(&planned.story, plan)
                     .map_err(|error| staging_error(planned.index, error))?;
                 executed[slot] = Some(Executed::default());
+            }
+            Some(Effect::Section(plan)) => {
+                let new_ids = stage
+                    .apply_section_plan(plan)
+                    .map_err(|error| staging_error(planned.index, error))?;
+                executed[slot] = Some(Executed {
+                    delta: new_ids.len() as i64,
+                    new_ids,
+                    ..Executed::default()
+                });
             }
             Some(Effect::Control(fill)) => {
                 let new_ids = stage
@@ -2475,7 +2618,7 @@ fn execute(stage: &EditingDoc, steps: &[Planned]) -> EditResult<Vec<Option<Execu
                     .remove_paragraph_records(story, *start, *end)
                     .map_err(fail)?;
             }
-            Some(Effect::Style(_) | Effect::Control(_)) | None => continue,
+            Some(Effect::Style(_) | Effect::Control(_) | Effect::Section(_)) | None => continue,
         }
         outcome.delta = i64::from(stage.story_len(story)?) - i64::from(before);
         executed[slot] = Some(outcome);
@@ -2728,15 +2871,8 @@ impl EditingDoc {
             ));
         }
         let txn = self.yrs_doc().transact();
-        if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-            return Err(refusal(
-                version,
-                failure(
-                    EditFailureCode::Unsupported,
-                    "the document holds updates that are not integrated yet".to_owned(),
-                    None,
-                ),
-            ));
+        if holds_pending(&txn) {
+            return Err(unintegrated(version));
         }
         let source = self.source_metadata();
         let mut views = Views::committed(self, &txn);
@@ -2787,7 +2923,7 @@ impl EditingDoc {
         {
             let direct_len =
                 if matches!(capture, Capture::Direct) && direct_admissible(self, &txn, &steps) {
-                    deterministic::fork_state_len_v1(&txn)
+                    deterministic::fork_state_len_v1(&txn, self.keeps_deleted())
                 } else {
                     None
                 };
@@ -3049,13 +3185,14 @@ impl EditingDoc {
     /// batch commits: the `accept` ids apply and the `reject` ids roll back, as
     /// [`EditingDoc::accept_change`] and [`EditingDoc::reject_change`] resolve them. An id that
     /// matches nothing is skipped; any other failure leaves the document unchanged. Returns the
-    /// ids resolved.
+    /// ids resolved, or an `unsupported` refusal while the document holds updates that are not
+    /// integrated yet.
     pub fn settle_revisions(
         &self,
         accept: &[crate::RevisionId],
         reject: &[crate::RevisionId],
         history: &UndoSession,
-    ) -> crate::OpResult<Vec<crate::RevisionId>> {
+    ) -> crate::OpResult<Result<Vec<crate::RevisionId>, EditRefusal>> {
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
@@ -3068,11 +3205,8 @@ impl EditingDoc {
         );
         let (state, state_vector) = {
             let txn = self.yrs_doc().transact();
-            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-                return Err(EditError::InvalidUpdate(
-                    "the document holds updates that are not integrated yet".to_owned(),
-                )
-                .into());
+            if holds_pending(&txn) {
+                return Ok(Err(unintegrated(self.version())));
             }
             (
                 deterministic::encode_state_as_update_v1(&txn, &StateVector::default()),
@@ -3098,7 +3232,7 @@ impl EditingDoc {
             }
         }
         if resolved.is_empty() {
-            return Ok(resolved);
+            return Ok(Ok(resolved));
         }
         let update = deterministic::encode_diff_v1(&stage.yrs_doc().transact(), &state_vector);
         let adoption = Update::decode_v1(&update)
@@ -3114,11 +3248,8 @@ impl EditingDoc {
                 )
                 .into());
             }
-            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-                return Err(EditError::InvalidUpdate(
-                    "the document holds updates that are not integrated yet".to_owned(),
-                )
-                .into());
+            if holds_pending(&txn) {
+                return Ok(Err(unintegrated(self.version())));
             }
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
@@ -3126,7 +3257,7 @@ impl EditingDoc {
         history.add_undo_barrier();
         self.id_counter
             .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
-        Ok(resolved)
+        Ok(Ok(resolved))
     }
 
     /// Drops the authored values of the text controls a committed batch filled, in a transaction
@@ -3151,15 +3282,8 @@ impl EditingDoc {
         {
             return Err(stale(current));
         }
-        if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
-            return Err(refusal(
-                current,
-                failure(
-                    EditFailureCode::Unsupported,
-                    "the document holds updates that are not integrated yet".to_owned(),
-                    None,
-                ),
-            ));
+        if holds_pending(&txn) {
+            return Err(unintegrated(current));
         }
         Ok(())
     }
@@ -3247,8 +3371,9 @@ fn validate_stage(
     Ok(())
 }
 
-/// Integrates the staged update into an untouched copy of the base and checks it reproduces the
-/// staged stories; adoption then cannot meet a failure the rehearsal did not.
+/// Integrates the staged update into an untouched copy of the base, in the stage's GC mode, and
+/// checks it reproduces the staged stories; adoption then cannot meet a failure the rehearsal did
+/// not.
 fn rehearse(
     client_id: u64,
     base: &[u8],
@@ -3256,7 +3381,7 @@ fn rehearse(
     stage: &EditingDoc,
     changed_stories: &[String],
 ) -> EditResult<()> {
-    let rehearsal = EditingDoc::new(client_id);
+    let rehearsal = EditingDoc::build(client_id, stage.keeps_deleted());
     rehearsal.apply_verbatim_v1(base)?;
     rehearsal.apply_verbatim_v1(update)?;
     let pending = {
@@ -3392,7 +3517,9 @@ mod direct_tests {
         let story_ids: Vec<_> = {
             let txn = direct.yrs_doc().transact();
             let stories = txn.get_map(crate::STORIES).unwrap();
-            stories.keys(&txn).map(str::to_owned).collect()
+            crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_owned())
+                .collect()
         };
         for story_id in story_ids {
             assert_eq!(
@@ -3540,7 +3667,7 @@ mod direct_tests {
         assert_eq!(base, replica.encode_state_as_update_v1());
         let n = base.len();
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             Some(n)
         );
         direct.set_direct_batches(true);
@@ -4093,7 +4220,7 @@ mod direct_tests {
             );
         });
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             None
         );
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
@@ -4111,7 +4238,7 @@ mod direct_tests {
                 ],
             );
         });
-        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact()).is_some());
+        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false).is_some());
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
         assert_replica_fallback_docs(
             direct,
@@ -4136,7 +4263,7 @@ mod direct_tests {
     }
 
     #[test]
-    fn retained_deleted_text_uses_replica_path() {
+    fn retained_deleted_text_takes_the_direct_path() {
         let [direct, replica] = seeded_pair(&["ABX", "C"], |_| {});
         let histories = [&direct, &replica].map(|doc| {
             let history = doc.undo_manager();
@@ -4151,17 +4278,115 @@ mod direct_tests {
         });
         assert_eq!(histories[0].undo_depth(), 1);
         assert_eq!(
-            deterministic::fork_state_len_v1(&direct.yrs_doc().transact()),
+            deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), false),
             None
         );
+        assert!(deterministic::fork_state_len_v1(&direct.yrs_doc().transact(), true).is_some());
+        direct.set_direct_batches(true);
         let paragraph = direct.paragraphs("body").unwrap()[0].para_id.clone();
-        assert_replica_fallback_docs(
-            direct,
-            replica,
-            vec![EditStep::new(EditOperation::DeleteText {
-                target: TextTarget::Range(text_range("body", &paragraph, 1, &paragraph, 2)),
-            })],
+        let step = delete_in(&paragraph, 1, 2);
+        let steps = [BatchStep::Edit(&step)];
+        let a = apply_text_steps(&direct, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        let b = apply_text_steps(&replica, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
+        assert!(a.applied);
+        assert_eq!(normalized(&a), normalized(&b));
+        assert_eq!(direct.direct_batches_applied(), 1);
+        assert_eq!(
+            direct.story_segments("body").unwrap(),
+            replica.story_segments("body").unwrap()
         );
+        assert_eq!(
+            direct.encode_state_as_update_v1(),
+            replica.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn kept_deleted_content_takes_the_direct_path() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Track {
+            BeforeLoad,
+            AfterRemote,
+            Never,
+        }
+        let ctx = EditCtx::local("User", DATE);
+        let seed = EditingDoc::new(9002);
+        let _seed_history = seed.undo_manager();
+        let paragraphs =
+            ["Alpha beta", "Gamma delta", "Epsilon zeta"].map(|text| crate::SeedParagraph {
+                text: text.to_owned(),
+                p_style: "Normal".to_owned(),
+                alignment: "left".to_owned(),
+            });
+        seed.seed_story("body", &paragraphs).unwrap();
+        seed.delete_range(&ctx, StoryRange::new("body", 0, 6))
+            .unwrap();
+        let state = seed.encode_state_as_update_v1();
+        let peer = EditingDoc::new(9003);
+        peer.apply_update_v1(&state).unwrap();
+        peer.delete_range(&ctx, StoryRange::new("body", 5, 11))
+            .unwrap();
+        let remote = peer.encode_diff_v1(&seed.encode_state_vector_v1()).unwrap();
+        let arm = |track: Track| {
+            let doc = EditingDoc::new(9001);
+            let history = UndoSession::new();
+            if track == Track::BeforeLoad {
+                history.track(&doc);
+            }
+            doc.apply_update_v1(&state).unwrap();
+            doc.apply_update_v1(&remote).unwrap();
+            if track == Track::AfterRemote {
+                history.track(&doc);
+            }
+            doc.delete_range(&ctx, StoryRange::new("body", 11, 19))
+                .unwrap();
+            (doc, history)
+        };
+        for track in [Track::BeforeLoad, Track::AfterRemote, Track::Never] {
+            for (paragraph, start, end, text) in
+                [(0, 0, 4, "BETA"), (1, 0, 0, "new "), (2, 0, 4, "")]
+            {
+                let [(direct, direct_history), (replica, replica_history)] = [track; 2].map(&arm);
+                let id = direct.paragraphs("body").unwrap()[paragraph]
+                    .para_id
+                    .clone();
+                let target = TextTarget::Range(text_range("body", &id, start, &id, end));
+                let text = text.to_owned();
+                let step = EditStep::new(if start == end {
+                    EditOperation::InsertText {
+                        target,
+                        at: TargetEdge::Start,
+                        text,
+                    }
+                } else if text.is_empty() {
+                    EditOperation::DeleteText { target }
+                } else {
+                    EditOperation::ReplaceText { target, text }
+                });
+                direct.set_direct_batches(true);
+                let steps = [BatchStep::Edit(&step)];
+                let a =
+                    apply_text_steps(&direct, &steps, &direct_history, MAX_STAGING_BYTES).unwrap();
+                let b = apply_text_steps(&replica, &steps, &replica_history, MAX_STAGING_BYTES)
+                    .unwrap();
+                assert!(a.applied);
+                assert_eq!(
+                    direct.direct_batches_applied(),
+                    1,
+                    "paragraph {paragraph}, {track:?}"
+                );
+                assert_eq!(normalized(&a), normalized(&b));
+                assert_eq!(
+                    direct.encode_state_vector_v1(),
+                    replica.encode_state_vector_v1()
+                );
+                assert_eq!(
+                    direct.encode_state_as_update_v1(),
+                    replica.encode_state_as_update_v1()
+                );
+                assert_eq!(raw_export(&direct), raw_export(&replica));
+            }
+        }
     }
 
     #[test]

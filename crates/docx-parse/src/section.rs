@@ -404,15 +404,11 @@ fn boolean_child(parent: &XmlElement, child: &str) -> Option<bool> {
 }
 
 fn explicit_bool_attribute(element: &XmlElement, name: &str) -> Option<bool> {
-    match element.attribute(Some("w"), name) {
-        Some("1" | "true") => Some(true),
-        Some("0" | "false") => Some(false),
-        _ => None,
-    }
+    element.parse_boolean_attribute(Some("w"), name)
 }
 
 fn truthy_attribute(element: &XmlElement, name: &str) -> Option<bool> {
-    matches!(element.attribute(Some("w"), name), Some("1" | "true")).then_some(true)
+    (element.parse_boolean_attribute(Some("w"), name) == Some(true)).then_some(true)
 }
 
 #[cfg(test)]

@@ -3,9 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{
-    Area, EvalContext, as_area, cmp_text, evaluate, parse_num, used_height, used_width,
-};
+use crate::eval::{Area, EvalContext, as_area, cmp_text, evaluate, used_height, used_width};
 use crate::parser::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +30,7 @@ pub(crate) struct Criterion {
 
 impl Criterion {
     /// build a criterion from an already-evaluated cell value.
-    pub(crate) fn from_value(v: &CellValue) -> Criterion {
+    pub(crate) fn from_value(v: &CellValue, ctx: &EvalContext<'_>) -> Criterion {
         match v {
             CellValue::Number { value } => Criterion {
                 op: Op::Eq,
@@ -40,8 +38,10 @@ impl Criterion {
                 text: String::new(),
                 wildcard: false,
             },
-            CellValue::Bool { value } => Criterion::parse(if *value { "TRUE" } else { "FALSE" }),
-            CellValue::Text { value } => Criterion::parse(value),
+            CellValue::Bool { value } => {
+                Criterion::parse(if *value { "TRUE" } else { "FALSE" }, ctx)
+            }
+            CellValue::Text { value } => Criterion::parse(value, ctx),
             // a criterion cell that is blank reads as the number 0, unlike a
             // `""` written into the formula, which asks for the blanks
             CellValue::Empty => Criterion {
@@ -50,14 +50,14 @@ impl Criterion {
                 text: String::new(),
                 wildcard: false,
             },
-            _ => Criterion::parse(""),
+            _ => Criterion::parse("", ctx),
         }
     }
 
     /// parse a criteria string such as `">=5"`, `"<>x"`, `"5"`, `"a*"`.
-    pub(crate) fn parse(raw: &str) -> Criterion {
+    pub(crate) fn parse(raw: &str, ctx: &EvalContext<'_>) -> Criterion {
         let (op, rest) = split_op(raw);
-        let number = parse_num(rest);
+        let number = ctx.parse_number(rest);
         let wildcard = has_wildcard(rest);
         Criterion {
             op,
@@ -68,17 +68,17 @@ impl Criterion {
     }
 
     /// does a cell value satisfy this criterion?
-    pub(crate) fn matches(&self, v: &CellValue) -> bool {
+    pub(crate) fn matches(&self, v: &CellValue, ctx: &EvalContext<'_>) -> bool {
         match self.op {
-            Op::Eq => self.eq_matches(v),
-            Op::Ne => !self.eq_matches(v),
-            Op::Gt | Op::Ge | Op::Lt | Op::Le => self.ord_matches(v),
+            Op::Eq => self.eq_matches(v, ctx),
+            Op::Ne => !self.eq_matches(v, ctx),
+            Op::Gt | Op::Ge | Op::Lt | Op::Le => self.ord_matches(v, ctx),
         }
     }
 
-    fn eq_matches(&self, v: &CellValue) -> bool {
+    fn eq_matches(&self, v: &CellValue, ctx: &EvalContext<'_>) -> bool {
         if let Some(target) = self.number {
-            return cell_number(v).map(|n| n == target).unwrap_or(false);
+            return cell_number(v, ctx).map(|n| n == target).unwrap_or(false);
         }
         if self.text.is_empty() {
             return matches!(v, CellValue::Empty);
@@ -93,10 +93,10 @@ impl Criterion {
         }
     }
 
-    fn ord_matches(&self, v: &CellValue) -> bool {
+    fn ord_matches(&self, v: &CellValue, ctx: &EvalContext<'_>) -> bool {
         use std::cmp::Ordering;
         let ord = if let Some(target) = self.number {
-            match cell_number(v) {
+            match cell_number(v, ctx) {
                 Some(n) => n.partial_cmp(&target),
                 None => return false,
             }
@@ -143,11 +143,11 @@ fn split_op(s: &str) -> (Op, &str) {
     }
 }
 
-fn cell_number(v: &CellValue) -> Option<f64> {
+fn cell_number(v: &CellValue, ctx: &EvalContext<'_>) -> Option<f64> {
     match v {
         CellValue::Number { value } => Some(*value),
         CellValue::Bool { value } => Some(if *value { 1.0 } else { 0.0 }),
-        CellValue::Text { value } => parse_num(value),
+        CellValue::Text { value } => ctx.parse_number(value),
         _ => None,
     }
 }
@@ -197,7 +197,7 @@ pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
 
 /// build a criterion from a criteria argument's evaluated value.
 pub(crate) fn criterion_from_arg(arg: &Expr, ctx: &EvalContext<'_>) -> Criterion {
-    Criterion::from_value(&evaluate(arg, ctx))
+    Criterion::from_value(&evaluate(arg, ctx), ctx)
 }
 
 /// the criteria of a `...IFS` call, cut to the extent the data reaches.
@@ -211,11 +211,11 @@ pub(crate) struct Criteria {
 
 impl Criteria {
     /// how many of the unread blanks satisfy every criterion: all or none.
-    pub(crate) fn unread_matches(&self) -> u64 {
+    pub(crate) fn unread_matches(&self, ctx: &EvalContext<'_>) -> u64 {
         if self
             .pairs
             .iter()
-            .all(|(_, criterion)| criterion.matches(&CellValue::Empty))
+            .all(|(_, criterion)| criterion.matches(&CellValue::Empty, ctx))
         {
             self.unread
         } else {
@@ -346,7 +346,7 @@ pub(crate) fn matching_indices(
         let col = usize::try_from(index % cols).map_err(|_| ErrorValue::Num)?;
         let mut matches = true;
         for (area, criterion) in pairs {
-            if !criterion.matches(area.get_ref(ctx, row, col)?.as_ref()) {
+            if !criterion.matches(area.get_ref(ctx, row, col)?.as_ref(), ctx) {
                 matches = false;
                 break;
             }
@@ -373,45 +373,53 @@ mod tests {
 
     #[test]
     fn numeric_operators() {
-        let c = Criterion::parse(">=5");
-        assert!(c.matches(&num(5.0)));
-        assert!(c.matches(&num(9.0)));
-        assert!(!c.matches(&num(4.0)));
-        assert!(!c.matches(&txt("x")));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        let c = Criterion::parse(">=5", &ctx);
+        assert!(c.matches(&num(5.0), &ctx));
+        assert!(c.matches(&num(9.0), &ctx));
+        assert!(!c.matches(&num(4.0), &ctx));
+        assert!(!c.matches(&txt("x"), &ctx));
 
-        let c = Criterion::parse("<>0");
-        assert!(c.matches(&num(3.0)));
-        assert!(!c.matches(&num(0.0)));
+        let c = Criterion::parse("<>0", &ctx);
+        assert!(c.matches(&num(3.0), &ctx));
+        assert!(!c.matches(&num(0.0), &ctx));
 
-        assert!(Criterion::parse("5").matches(&num(5.0)));
-        assert!(Criterion::parse("5").matches(&txt("5")));
+        assert!(Criterion::parse("5", &ctx).matches(&num(5.0), &ctx));
+        assert!(Criterion::parse("5", &ctx).matches(&txt("5"), &ctx));
     }
 
     #[test]
     fn text_and_wildcards() {
-        assert!(Criterion::parse("apple").matches(&txt("Apple")));
-        assert!(!Criterion::parse("apple").matches(&txt("apples")));
-        assert!(Criterion::parse("a*").matches(&txt("Apple")));
-        assert!(Criterion::parse("a?ple").matches(&txt("apple")));
-        assert!(!Criterion::parse("a?ple").matches(&txt("aple")));
-        assert!(Criterion::parse("<>apple").matches(&txt("pear")));
-        assert!(Criterion::parse("a~*").matches(&txt("a*")));
-        assert!(!Criterion::parse("a~*").matches(&txt("ab")));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        assert!(Criterion::parse("apple", &ctx).matches(&txt("Apple"), &ctx));
+        assert!(!Criterion::parse("apple", &ctx).matches(&txt("apples"), &ctx));
+        assert!(Criterion::parse("a*", &ctx).matches(&txt("Apple"), &ctx));
+        assert!(Criterion::parse("a?ple", &ctx).matches(&txt("apple"), &ctx));
+        assert!(!Criterion::parse("a?ple", &ctx).matches(&txt("aple"), &ctx));
+        assert!(Criterion::parse("<>apple", &ctx).matches(&txt("pear"), &ctx));
+        assert!(Criterion::parse("a~*", &ctx).matches(&txt("a*"), &ctx));
+        assert!(!Criterion::parse("a~*", &ctx).matches(&txt("ab"), &ctx));
     }
 
     #[test]
     fn tilde_escapes_only_wildcard_metacharacters() {
-        assert!(Criterion::parse("~a").matches(&txt("~a")));
-        assert!(!Criterion::parse("~a").matches(&txt("a")));
-        assert!(Criterion::parse("~").matches(&txt("~")));
-        assert!(!Criterion::parse("~").matches(&txt("")));
-        assert!(Criterion::parse("~~").matches(&txt("~")));
-        assert!(Criterion::parse("~*").matches(&txt("*")));
-        assert!(Criterion::parse("~?").matches(&txt("?")));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        assert!(Criterion::parse("~a", &ctx).matches(&txt("~a"), &ctx));
+        assert!(!Criterion::parse("~a", &ctx).matches(&txt("a"), &ctx));
+        assert!(Criterion::parse("~", &ctx).matches(&txt("~"), &ctx));
+        assert!(!Criterion::parse("~", &ctx).matches(&txt(""), &ctx));
+        assert!(Criterion::parse("~~", &ctx).matches(&txt("~"), &ctx));
+        assert!(Criterion::parse("~*", &ctx).matches(&txt("*"), &ctx));
+        assert!(Criterion::parse("~?", &ctx).matches(&txt("?"), &ctx));
     }
 
     #[test]
     fn tilde_patterns_preserve_literals_and_escape_pairs() {
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
         for (pattern, text, expected) in [
             ("*~a", "prefix~a", true),
             ("*~a", "prefixa", false),
@@ -443,7 +451,7 @@ mod tests {
             );
             for (prefix, expected) in [("", expected), ("=", expected), ("<>", !expected)] {
                 assert_eq!(
-                    Criterion::parse(&format!("{prefix}{pattern}")).matches(&txt(text)),
+                    Criterion::parse(&format!("{prefix}{pattern}"), &ctx).matches(&txt(text), &ctx),
                     expected,
                     "{prefix}{pattern:?} against {text:?}"
                 );
@@ -453,63 +461,73 @@ mod tests {
 
     #[test]
     fn blank_criteria() {
-        assert!(Criterion::parse("").matches(&CellValue::Empty));
-        assert!(!Criterion::parse("").matches(&txt("x")));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        assert!(Criterion::parse("", &ctx).matches(&CellValue::Empty, &ctx));
+        assert!(!Criterion::parse("", &ctx).matches(&txt("x"), &ctx));
     }
 
     /// a wildcard describes text: `*` counts the text cells in a range, not
     /// its numbers or its blanks.
     #[test]
     fn a_wildcard_criterion_matches_only_text() {
-        let any = Criterion::parse("*");
-        assert!(any.matches(&txt("TSLA")));
-        assert!(any.matches(&txt("")));
-        assert!(!any.matches(&num(5.0)));
-        assert!(!any.matches(&CellValue::Empty));
-        let prefix = Criterion::parse("TS*");
-        assert!(prefix.matches(&txt("TSLA")));
-        assert!(!prefix.matches(&txt("AAPL")));
-        assert!(!prefix.matches(&num(5.0)));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        let any = Criterion::parse("*", &ctx);
+        assert!(any.matches(&txt("TSLA"), &ctx));
+        assert!(any.matches(&txt(""), &ctx));
+        assert!(!any.matches(&num(5.0), &ctx));
+        assert!(!any.matches(&CellValue::Empty, &ctx));
+        let prefix = Criterion::parse("TS*", &ctx);
+        assert!(prefix.matches(&txt("TSLA"), &ctx));
+        assert!(!prefix.matches(&txt("AAPL"), &ctx));
+        assert!(!prefix.matches(&num(5.0), &ctx));
     }
 
     /// a criterion taken from a blank cell asks for zero, where a `""`
     /// written into the formula asks for the blanks.
     #[test]
     fn a_blank_criterion_cell_asks_for_zero() {
-        let blank = Criterion::from_value(&CellValue::Empty);
-        assert!(blank.matches(&num(0.0)));
-        assert!(!blank.matches(&CellValue::Empty));
-        assert!(!blank.matches(&txt("A")));
-        let written = Criterion::parse("");
-        assert!(written.matches(&CellValue::Empty));
-        assert!(!written.matches(&num(0.0)));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        let blank = Criterion::from_value(&CellValue::Empty, &ctx);
+        assert!(blank.matches(&num(0.0), &ctx));
+        assert!(!blank.matches(&CellValue::Empty, &ctx));
+        assert!(!blank.matches(&txt("A"), &ctx));
+        let written = Criterion::parse("", &ctx);
+        assert!(written.matches(&CellValue::Empty, &ctx));
+        assert!(!written.matches(&num(0.0), &ctx));
     }
 
     /// A cell holding "" — what `=""` caches — sorts below every other text
     /// and takes part in a text inequality; a blank cell takes part in none.
     #[test]
     fn the_empty_string_is_the_smallest_text() {
-        let less = Criterion::parse("<m");
-        assert!(less.matches(&txt("abc")));
-        assert!(less.matches(&txt("")));
-        assert!(!less.matches(&CellValue::Empty));
-        assert!(!less.matches(&num(1.0)));
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
+        let less = Criterion::parse("<m", &ctx);
+        assert!(less.matches(&txt("abc"), &ctx));
+        assert!(less.matches(&txt(""), &ctx));
+        assert!(!less.matches(&CellValue::Empty, &ctx));
+        assert!(!less.matches(&num(1.0), &ctx));
 
-        let c = Criterion::parse("<14/0430");
-        assert!(c.matches(&txt("")));
-        assert!(c.matches(&txt("13/0450")));
-        assert!(!c.matches(&txt("14/0431")));
-        assert!(!c.matches(&CellValue::Empty));
+        let c = Criterion::parse("<14/0430", &ctx);
+        assert!(c.matches(&txt(""), &ctx));
+        assert!(c.matches(&txt("13/0450"), &ctx));
+        assert!(!c.matches(&txt("14/0431"), &ctx));
+        assert!(!c.matches(&CellValue::Empty, &ctx));
 
-        assert!(!Criterion::parse(">14/0430").matches(&txt("")));
-        assert!(Criterion::parse(">=").matches(&txt("")));
-        assert!(Criterion::parse(">=").matches(&CellValue::Empty));
+        assert!(!Criterion::parse(">14/0430", &ctx).matches(&txt(""), &ctx));
+        assert!(Criterion::parse(">=", &ctx).matches(&txt(""), &ctx));
+        assert!(Criterion::parse(">=", &ctx).matches(&CellValue::Empty, &ctx));
     }
 
     /// the criteria comparison is the collation the operators and SORT use,
     /// so `COUNTIF(r,"<x")` cannot disagree with `=r<"x"` about the same pair.
     #[test]
     fn ordering_criteria_use_the_same_collation_as_comparison() {
+        let wb = xlsx_model::Workbook::default();
+        let ctx = EvalContext::new(&wb, xlsx_model::SheetId(0));
         use crate::eval::cmp_values;
         for (criterion, cell) in [
             ("<[person_10]", "[Person_1]"),
@@ -525,7 +543,7 @@ mod tests {
             };
             assert!(wanted, "the operator itself disagrees for {criterion}");
             assert!(
-                Criterion::parse(criterion).matches(&txt(cell)),
+                Criterion::parse(criterion, &ctx).matches(&txt(cell), &ctx),
                 "{criterion} against {cell:?}"
             );
         }

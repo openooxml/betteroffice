@@ -1,20 +1,38 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/editor';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { Proposal } from '@betteroffice/pptx';
 import type { PptxCommandStore } from '../commands/types';
+import { pptxCommandController } from '../commands/createPptxCommandStore';
+import { commandReason } from '../commands/evaluate';
 import { useTranslation } from '../i18n';
+import { proposalsPanelStyles as styles } from '../components/proposalsPanelStyles';
 import { PeerlessPresentationOverlay } from './PeerlessPresentationOverlay';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessFrameSource } from './peerlessFrameSource';
-import { commitComposition, PeerlessCommandRefusedError } from './peerlessViewStore';
+import { commitComposition, PptxCommandRefusedError } from './peerlessViewStore';
+
+const location = { ...styles.link, cursor: 'default' };
+
+const ProposalChangeDetails = lazy(() => import('../components/ProposalDetails').then((module) => ({ default: module.ProposalChangeDetails })));
+
+function changesKey(proposal: Proposal): string {
+  return JSON.stringify(proposal.changes, (_key, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+}
 
 export interface PeerlessReviewState { open: boolean; selectedId: string | null; diff: boolean; presenting: boolean }
 
-function Diff({ run, id, onError }: { run: PeerlessPresentation; id: string; onError(error: Error): void }) {
+function Diff({ run, id, onPreview, onError }: { run: PeerlessPresentation; id: string; onPreview(proposal: Proposal | null): void; onError(error: Error): void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const reportError = useRef(onError);
+  reportError.current = onError;
   const visual = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
   useEffect(() => {
     let cancelled = false;
+    onPreview(null);
     const index = run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId);
     void (async () => {
       const source = await peerlessFrameSource(run, index);
@@ -30,28 +48,82 @@ function Diff({ run, id, onError }: { run: PeerlessPresentation; id: string; onE
         if (!cancelled && canvas.current && run.current) {
           sizeCanvasForSlide(canvas.current, diff.frame, 1, scale);
           canvas.current.getContext('2d')?.drawImage(buffer, 0, 0);
+          onPreview(diff.proposal);
         }
       } finally { source.release(); }
-    })().catch((error: unknown) => { if (!cancelled && run.current) onError(error instanceof Error ? error : new Error(String(error))); });
+    })().catch((error: unknown) => { if (!cancelled && run.current) reportError.current(error instanceof Error ? error : new Error(String(error))); });
     return () => { cancelled = true; };
-  }, [run, id, visual, onError]);
+  }, [run, id, visual, onPreview]);
   return <canvas ref={canvas} data-testid="pptx-proposal-diff" style={{ position: 'absolute', left: 0, top: 0 }} />;
 }
 
-export function PeerlessReview({ run, state, proposals, commands, onError, exit }: {
-  run: PeerlessPresentation; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
+export function PeerlessReview({ run, diffHost, state, proposals, commands, onError, exit }: {
+  run: PeerlessPresentation; diffHost: RefObject<HTMLElement | null>; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
   onError(error: Error): void; exit(): void;
 }) {
   const { t } = useTranslation();
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [reviewed, setReviewed] = useState<Proposal | null>(null);
+  const accepting = useRef(false);
+  const [previewGeneration, setPreviewGeneration] = useState(0);
+  const selected = useRef(state.selectedId);
+  selected.current = state.diff ? state.selectedId : null;
+  const onPreview = useCallback((proposal: Proposal | null) => setReviewed(proposal), [run]);
+  const frameSource = useCallback((index: number) => peerlessFrameSource(run, index), [run]);
+  const subscribeRevision = useCallback((listener: () => void) => {
+    const offStructure = run.store.subscribeStructure(listener);
+    const offPresentation = run.store.subscribePresentation(listener);
+    return () => { offStructure(); offPresentation(); };
+  }, [run]);
+  const revision = useCallback((index: number) => {
+    const id = run.client.state.slides[index]?.id;
+    if (!id) return null;
+    const view = run.store.getSnapshot();
+    const frame = id === view.confirmed?.frame.slideId ? view.confirmed : view.thumbnails.get(id);
+    return `${id}:${frame?.frame.slideRevision ?? 'stale'}`;
+  }, [run]);
+  const acceptPreview = async () => {
+    if (!reviewed || selected.current !== reviewed.id || accepting.current) return;
+    const target = reviewed;
+    const accept = pptxCommandController(commands)?.defer('proposalAccept', { proposalId: target.id, force: true });
+    if (!accept) return;
+    accepting.current = true;
+    try {
+      await accept.complete(async (perform) => {
+        const latest = await run.client.access!('previewProposal', target.id);
+        run.require();
+        if (selected.current !== target.id) return { ok: false, failure: commandReason('target-changed', { translate: t }) };
+        if (changesKey(latest.proposal) !== changesKey(target)) {
+          setReviewed(latest.proposal);
+          setPreviewError(t('proposals.changedAgain'));
+          return { ok: false, failure: commandReason('target-changed', { translate: t }) };
+        }
+        return perform();
+      });
+    } catch (error: unknown) {
+      if (run.current) {
+        setReviewed(null);
+        const failure = error instanceof Error ? error : new Error(String(error));
+        setPreviewError(failure.message);
+        onError(failure);
+      }
+    } finally { accepting.current = false; }
+  };
+  const target = (change: Proposal['changes'][number]) => {
+    const slide = run.client.state.slides.findIndex((slide) => slide.id === change.slideId);
+    return slide < 0 ? t('proposals.targetMissing')
+      : t('proposals.target', { slide: slide + 1, name: change.before?.name || t('notes.panelLabel') });
+  };
   const preview = async (proposal: Proposal) => {
     setPreviewError(null);
+    setReviewed(null);
+    setPreviewGeneration((generation) => generation + 1);
     try {
       const composition = run.store.getSnapshot().composition;
       if (composition) {
         const ack = await commitComposition(run.store, composition.text, performance.now());
         const refused = ack?.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
-        if (refused) throw new PeerlessCommandRefusedError('compositionCommit', refused);
+        if (refused) throw new PptxCommandRefusedError('compositionCommit', refused);
         await run.store.fence();
       }
       run.require();
@@ -59,7 +131,7 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
       if (slideId && slideId !== run.client.state.activeSlideId) {
         const ack = await run.store.dispatch({ kind: 'activateSlide', payload: { slideId } });
         const refused = ack.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
-        if (refused) throw new PeerlessCommandRefusedError('activateSlide', refused);
+        if (refused) throw new PptxCommandRefusedError('activateSlide', refused);
         await run.ready;
       }
       const selected = await commands.execute('proposalSelect', { proposalId: proposal.id });
@@ -75,19 +147,40 @@ export function PeerlessReview({ run, state, proposals, commands, onError, exit 
     }
   };
   return <>
-    {state.open && <aside data-testid="pptx-proposals-panel" aria-label={t('proposals.title')} style={{ width: 280, overflowY: 'auto' }}>
-      <strong>{t('proposals.title')}</strong>
-      {previewError && <div role="alert">{previewError}</div>}
-      <button type="button" aria-label={t('proposals.close')} onClick={() => { void commands.execute('proposalsPanel', { open: false }); }}>×</button>
-      {proposals.map((proposal) => <div key={proposal.id}>
-        <span>{proposal.note ?? proposal.agentId}</span>
-        <button type="button" onClick={() => { void preview(proposal); }}>{t('proposals.preview')}</button>
-        <button type="button" disabled={proposal.staleTargets.length > 0} onClick={() => { void commands.execute('proposalAccept', { proposalId: proposal.id }); }}>{t('proposals.accept')}</button>
-        <button type="button" onClick={() => { void commands.execute('proposalReject', { proposalId: proposal.id }); }}>{t('proposals.reject')}</button>
-      </div>)}
+    {state.open && <aside data-testid="pptx-proposals-panel" aria-label={t('proposals.title')} style={styles.panel}>
+      <header style={styles.header}>
+        <strong>{t('proposals.title')} <span style={styles.count}>{proposals.length}</span></strong>
+        <button type="button" aria-label={t('proposals.close')} style={styles.button} onClick={() => { void commands.execute('proposalsPanel', { open: false }); }}>×</button>
+      </header>
+      {previewError && <div role="alert" style={styles.warning}>{previewError}</div>}
+      {proposals.length === 0 && <p style={styles.muted}>{t('proposals.empty')}</p>}
+      {proposals.map((proposal) => <section key={proposal.id} data-testid="pptx-proposal" data-proposal-id={proposal.id} style={styles.card}>
+        <strong style={styles.author}>{proposal.agentId}</strong>
+        {proposal.note && <p style={styles.note}>{proposal.note}</p>}
+        <Suspense fallback={null}>
+          {(state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id ? reviewed : proposal).changes.map((change, index) => <div key={index} style={styles.change}>
+            <span style={location}>{target(change)}</span>
+            <ProposalChangeDetails change={change} t={t} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
+          </div>)}
+          {proposal.staleTargets.length > 0 && state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id && <>
+            <p style={styles.warning}>{t('proposals.stalePreview')}</p>
+            <button type="button" data-testid="pptx-proposal-force" style={styles.primary} onClick={() => { void acceptPreview(); }}>{t('proposals.force')}</button>
+          </>}
+        </Suspense>
+        {proposal.staleTargets.length > 0 && <p role="alert" data-testid="pptx-proposal-stale" style={styles.warning}>{t('proposals.stale')}</p>}
+        <div style={styles.actions}>
+          <button type="button" data-testid="pptx-proposal-preview" style={styles.button} onClick={() => { void preview(proposal); }}>{t('proposals.preview')}</button>
+        </div>
+        <div style={styles.actions}>
+          <button type="button" data-testid="pptx-proposal-accept" disabled={proposal.staleTargets.length > 0}
+            style={proposal.staleTargets.length > 0 ? { ...styles.primary, opacity: 0.5, cursor: 'default' } : styles.primary}
+            onClick={() => { void commands.execute('proposalAccept', { proposalId: proposal.id }); }}>{t('proposals.accept')}</button>
+          <button type="button" data-testid="pptx-proposal-reject" style={styles.button} onClick={() => { void commands.execute('proposalReject', { proposalId: proposal.id }); }}>{t('proposals.reject')}</button>
+        </div>
+      </section>)}
     </aside>}
-    {state.diff && state.selectedId && <Diff run={run} id={state.selectedId} onError={onError} />}
-    {state.presenting && <PeerlessPresentationOverlay frameSource={(index) => peerlessFrameSource(run, index)}
+    {state.diff && state.selectedId && diffHost.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} onPreview={onPreview} onError={onError} />, diffHost.current)}
+    {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} subscribeRevision={subscribeRevision} revision={revision}
       slideCount={run.client.state.slides.length} startIndex={run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId)}
       label={t('presentation.label')} counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
       previousLabel={t('presentation.previousSlide')} nextLabel={t('presentation.nextSlide')} exitLabel={t('presentation.exit')}

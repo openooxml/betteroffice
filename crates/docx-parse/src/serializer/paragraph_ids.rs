@@ -16,6 +16,8 @@ use crate::xml::ParseError;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct S13ParagraphIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_edits: Option<super::section_patch::SectionEdits>,
     /// IDs of source paragraphs by part and occurrence, applied to the parts
     /// this save serializes.
     #[serde(default)]
@@ -50,6 +52,23 @@ pub struct S13SplicedPart {
     /// The source paragraphs the model no longer holds.
     #[serde(default)]
     pub removed: Vec<u32>,
+    /// Edit scripts for changed paragraphs, applied to their source XML instead of
+    /// re-serializing them.
+    #[serde(default)]
+    pub paragraph_patches: Vec<crate::paragraph_patch::ParagraphPatchV1>,
+    /// Changed paragraphs no patch can express, written as today.
+    #[serde(default)]
+    pub legacy_paragraphs: Vec<crate::paragraph_patch::LegacyParagraphV1>,
+    #[serde(default)]
+    pub table_patches: Vec<S13TablePatch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13TablePatch {
+    pub ordinal: u32,
+    pub before: Value,
+    pub after: Value,
 }
 
 /// Where a spliced part takes a paragraph its source lacks: right before or right after the

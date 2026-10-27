@@ -17,4 +17,6 @@ Random mode preserves Latin, Hiragana, Katakana, and Han scripts automatically, 
 
 Files stay local unless `--share` is supplied. Existing output files and the original input cannot be overwritten.
 
-The Rust API adds `RedactionOptions { random_characters: true }` to `redact_with_options` and `redact_with_report_and_options`. Existing `redact`, `redact_with_report`, and CLI-library `redact_local` calls retain their default behavior; `redact_local_with_options` selects the new mode.
+Use `--preserve-media-size` (`RedactionOptions::preserve_media_size: true`) to replace images and metafiles with synthetic placeholders that keep original dimensions, format, and approximate byte size for realistic benchmark loads. `--preserve-media-size` may be combined with `--share`, subject to the existing 64 MiB limit on both input and redacted output/upload bytes.
+
+The Rust API exposes `RedactionOptions { random_characters, preserve_media_size }` on `redact_with_options` and `redact_with_report_and_options`. Existing `redact`, `redact_with_report`, and CLI-library `redact_local` calls retain their default behavior; `redact_local_with_options` selects the configured options.

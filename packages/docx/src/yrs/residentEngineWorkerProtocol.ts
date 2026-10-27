@@ -1,12 +1,14 @@
-import type { ResidentRangeHighlights } from './residentRangeHighlights';
+import type { DocxRangeHighlights } from './residentRangeHighlights';
+import type { DocxPresencePeer, DocxPresenceGeometry, ResidentCollaborationUpdates } from './residentCollaboration';
+export type { DocxPresencePeer, DocxPresenceGeometry } from './residentCollaboration';
 import type { ResidentPartGeometry, ResidentPartMetadata } from './residentParts';
 import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
 import type { YrsStoryRange } from './index';
-import type { ResidentReviewSnapshot } from './residentReview';
+import type { DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
-import type { ResidentToolbarMetadata } from './residentToolbarMetadata';
+import type { DocxToolbarMetadata } from './residentToolbarMetadata';
 import type { LayoutMetaV1 } from './layoutMeta';
 import type { Checkpoint } from '../../../../shared/office-session/commands/types';
 import type { ReplyError } from '../../../../shared/office-session/protocol';
@@ -17,9 +19,11 @@ import type {
   DocxCommandFrame,
   DocxCommandSelection,
   DocxSelectionPointIntent,
-  ResidentCommandInitReply,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandInitReply,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
+  DocxHostImage,
+  DocxSvgMedia,
 } from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
@@ -80,8 +84,8 @@ import type {
 } from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
 import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
-import type { ResidentSourceOpenRequest } from './residentSource';
-import type { ResidentFontEnvironmentEvent, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+import type { DocxSourceOpenRequest, DocxSourcePreviewOptions } from './residentSource';
+import type { DocxFontEnvironmentEvent, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 
 /** @internal */
 export interface ResidentEngineWorkerFontSync {
@@ -110,18 +114,23 @@ export interface ResidentProposalResponse {
 }
 
 /** @internal */
-export type ResidentDocumentRead =
+export type DocxDocumentRead =
+  | { kind: 'collabStateVector' }
+  | { kind: 'collabDiff'; stateVector?: Uint8Array }
+  | { kind: 'collabDiffChunks'; stateVector: Uint8Array; maxChunkBytes: number }
+  | { kind: 'collabPresence'; peers: DocxPresencePeer[]; pages: [number, number]; expectVersion: string; expectFrameEpoch: number; expectLayoutRevision: number }
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
   | { kind: 'sectionProperties' }
-  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'rangeHighlights'; ranges: YrsStoryRange[]; expectVersion: string; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'reviewSnapshot'; expectPreviewVersion?: number }
   | { kind: 'commentInsertionRange'; paraId: string; search?: string }
+  | { kind: 'commentSelectionRange'; selection: DocxCommandSelection }
   | { kind: 'toolbarMetadata' }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
@@ -136,7 +145,9 @@ export type ResidentDocumentRead =
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'bookmarkTarget'; story: string; name: string }
   | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
+  | { kind: 'reviewTarget'; target: DocxReviewTarget }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string; nativePoint?: DocxSelectionPointIntent }
   | {
       kind: 'selectionUnit';
@@ -152,10 +163,15 @@ export type ResidentDocumentRead =
   | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
-  | { kind: 'headings'; expectVersion: string };
+  | { kind: 'headings'; expectVersion: string }
+  | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
-export interface ResidentDocumentReadValues {
+export interface DocxDocumentReadValues {
+  collabStateVector: Uint8Array;
+  collabDiff: Uint8Array;
+  collabDiffChunks: Uint8Array[];
+  collabPresence: DocxPresenceGeometry | null;
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
   partSnapshot: { metadata: ResidentPartMetadata; geometry: ResidentPartGeometry[]; frameEpoch: number | null; layoutRevision: number };
@@ -164,10 +180,11 @@ export interface ResidentDocumentReadValues {
   exportStructuredWithPages: string;
   listContentControls: DocxContentControlsResult;
   findContentControls: DocxContentControlsResult;
-  rangeHighlights: ResidentRangeHighlights | null;
-  reviewSnapshot: ResidentReviewSnapshot | null;
+  rangeHighlights: DocxRangeHighlights | null;
+  reviewSnapshot: DocxReviewSnapshot | null;
   commentInsertionRange: ResidentCommentInsertionRange;
-  toolbarMetadata: ResidentToolbarMetadata;
+  commentSelectionRange: YrsStoryRange | null;
+  toolbarMetadata: DocxToolbarMetadata;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
@@ -178,7 +195,9 @@ export interface ResidentDocumentReadValues {
   findText: DocxFindTextResult;
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  bookmarkTarget: { loc: YrsLoc; position: number } | null;
   anchorTargets: ProposalGeometryTarget[];
+  reviewTarget: DocxReviewTargetRanges | null;
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
@@ -192,26 +211,28 @@ export interface ResidentDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  adjacentRevision: { revisionId: string } | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
 export const RESIDENT_HOST_MODULE_WAIT_MS = 10_000;
 
 /** @internal */
-export type ResidentEngineWorkerHostModule = {
+export type DocxEngineWorkerHostModule = {
   type: 'editModule';
   module: WebAssembly.Module | null;
 };
 
-export type ResidentEngineWorkerRequest =
+export type DocxEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
-  | { id: number; type: 'openSource'; source: ResidentSourceOpenRequest }
-  | { id: number; type: 'commandInit'; request: ResidentCommandInitRequest }
+  | { id: number; type: 'openSource'; source: DocxSourceOpenRequest }
+  | { id: number; type: 'previewSource'; preview: DocxSourcePreviewOptions & { layoutInput: string } }
+  | { id: number; type: 'commandInit'; request: DocxCommandInitRequest }
   | { id: number; type: 'edit'; command: DocxCommandEnvelope }
   | { id: number; type: 'checkpoint' }
   | { id: number; type: 'requestFullFrame' }
   | { id: number; type: 'commandUpdate'; update: Uint8Array }
-  | { id: number; type: 'commandViewport'; request: ResidentCommandViewportRequest }
+  | { id: number; type: 'commandViewport'; request: DocxCommandViewportRequest }
   | {
       id: number;
       type: 'bootstrap';
@@ -264,6 +285,8 @@ export type ResidentEngineWorkerRequest =
       id: number;
       type: 'save';
       comments: Comment[];
+      /** `host` when `comments` is the host's list and wins over the worker's own comments. @internal */
+      commentsSource?: 'host';
       host?: Document;
       stateVector?: Uint8Array;
       /** The editor peer's marked stories. @internal */
@@ -275,7 +298,7 @@ export type ResidentEngineWorkerRequest =
   | {
       id: number;
       type: 'documentRead';
-      read: ResidentDocumentRead;
+      read: DocxDocumentRead;
       /** Answered `superseded` instead when the document's version differs. */
       expectVersion?: string;
     }
@@ -305,6 +328,10 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       paintCaret: boolean;
       background?: boolean;
+      /** Pictures the host decoded after `commandInit`; the displayed pages repaint with them. Transferred. */
+      hostImages?: DocxHostImage[];
+      /** The command session `hostImages` were decoded for; any other session closes them unused. */
+      hostImagesFor?: { session: string; incarnation: number; epoch: number };
     }
   | {
       id: number;
@@ -374,21 +401,21 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'eraseCaret' }
   | { id: number; type: 'destroy' };
 
-export type ResidentEngineWorkerRequestWithoutId = ResidentEngineWorkerRequest extends infer Request
+export type ResidentEngineWorkerRequestWithoutId = DocxEngineWorkerRequest extends infer Request
   ? Request extends { id: number }
     ? Omit<Request, 'id'>
     : never
   : never;
 
-export type ResidentEngineWorkerResponse = (
+export type DocxEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
-      commandInitial?: ResidentCommandInitReply;
+      commandInitial?: DocxCommandInitReply;
       commandAck?: DocxCommandAck;
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
-      fontEnvironmentEvent?: ResidentFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
-      fontEnvironment?: ResidentFontEnvironmentSnapshot;
+      fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
+      fontEnvironment?: DocxFontEnvironmentSnapshot;
       checkpoint?: Checkpoint;
       frame?: ArrayBuffer;
       pageFrames?: ArrayBuffer[];
@@ -426,6 +453,12 @@ export type ResidentEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      /** An `openSource` reply: SVG pictures for the host to decode. */
+      svgMedia?: DocxSvgMedia[];
+      /** An `openSource` reply: the client id the opened replica writes with. */
+      clientId?: number;
+      /** An `openSource` reply: the opened state's clock for `clientId`. */
+      clientClock?: number;
       /** An `open` reply: the package cannot open as a preview; nothing was opened. */
       previewRefused?: boolean;
       /** A `fontRequirements` reply. */
@@ -446,6 +479,8 @@ export type ResidentEngineWorkerResponse = (
       proposal?: ResidentProposalResponse;
       /** @internal */
       read?: { version: string; value: unknown };
+      /** Sent with id 0 while the request with this id is still working. */
+      progress?: number;
     }
   | {
       id: number;
@@ -454,7 +489,7 @@ export type ResidentEngineWorkerResponse = (
       commandError?: ReplyError;
       failureCode?: SessionFailureCode;
       /** @internal */
-      code?: 'save-unavailable';
+      code?: 'save-unavailable' | 'cut-kept';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
@@ -462,6 +497,7 @@ export type ResidentEngineWorkerResponse = (
       outOfMemory?: boolean;
     }
 ) & {
+  collabUpdates?: ResidentCollaborationUpdates & { session?: string; incarnation?: number; epoch?: number };
   /** The worker's wasm memories as the reply left. */
   memory?: WasmModuleMemory[];
 };

@@ -7,6 +7,7 @@
 export type {
   // Color & Styling Primitives
   ThemeColorSlot,
+  ColorTransform,
   ColorValue,
   BorderSpec,
   ShadingProperties,
@@ -23,6 +24,7 @@ export type {
   TabStop,
   LineSpacingRule,
   ParagraphAlignment,
+  ParagraphCnfStyle,
   ParagraphFormatting,
 
   // Table Formatting

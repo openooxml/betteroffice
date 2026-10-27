@@ -9,6 +9,8 @@ pub(crate) const DRAWINGML_NS: &str = "http://schemas.openxmlformats.org/drawing
 pub(crate) const PRESENTATIONML_NS: &str =
     "http://schemas.openxmlformats.org/presentationml/2006/main";
 
+const MAX_GEOMETRY_COMMANDS: usize = 1 << 20;
+
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,
@@ -53,6 +55,7 @@ pub(crate) struct ParseBudget<'a> {
     paragraphs: usize,
     runs: usize,
     comments: usize,
+    geometry_commands: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -67,7 +70,36 @@ impl<'a> ParseBudget<'a> {
             paragraphs: 0,
             runs: 0,
             comments: 0,
+            geometry_commands: 0,
         }
+    }
+
+    pub fn scratch(&self) -> Self {
+        Self::new(self.limits)
+    }
+
+    pub fn charge_xml_from(&mut self, source: &Self, part: &str) -> Result<(), PptxError> {
+        charge(
+            &mut self.xml_bytes,
+            source.xml_bytes,
+            self.limits.max_xml_bytes,
+            "xmlBytes",
+            part,
+        )?;
+        charge(
+            &mut self.xml_events,
+            source.xml_events,
+            self.limits.max_xml_events,
+            "xmlEvents",
+            part,
+        )?;
+        charge(
+            &mut self.xml_text_bytes,
+            source.xml_text_bytes,
+            self.limits.max_xml_text_bytes,
+            "xmlTextBytes",
+            part,
+        )
     }
 
     /// XML events this budget has been charged, including the one that broke it.
@@ -111,6 +143,16 @@ impl<'a> ParseBudget<'a> {
             "comments",
             part,
         )
+    }
+
+    /// Custom geometry commands the rest of the package may still expand to.
+    /// Shapes past it draw their fallback outline instead of failing the open.
+    pub(crate) fn geometry_commands_left(&self) -> usize {
+        MAX_GEOMETRY_COMMANDS.saturating_sub(self.geometry_commands)
+    }
+
+    pub(crate) fn spend_geometry_commands(&mut self, amount: usize) {
+        self.geometry_commands = self.geometry_commands.saturating_add(amount);
     }
 }
 

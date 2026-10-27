@@ -6,10 +6,11 @@ use pptx_edit::structured::{
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
     DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
-    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
-    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
-    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
-    UpdateEvent, UpdateSubscription, ValidationOutcome,
+    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
+    ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt,
+    SlideBackgroundReceipt, SlideReceipt, SlideScope, StorySnapshot, TextReceipt, TextSearchMatch,
+    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
+    ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -53,9 +54,10 @@ impl Presentation {
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
         let scope = slide_scope(&preview, slide_index)?;
-        Ok(self
-            .renderer
-            .layout_scoped_slide(preview.package(), &scope)?)
+        self.with_fonts(
+            self.renderer
+                .layout_scoped_slide(preview.package(), &scope)?,
+        )
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -236,9 +238,35 @@ impl Presentation {
         Ok(self.session.move_slide(context, slide_id, to_index)?)
     }
 
+    /// Changes layout and maps existing placeholders.
+    pub fn set_slide_layout(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        layout_part_path: &str,
+        mapping: &[(String, u32)],
+    ) -> Result<()> {
+        Ok(self
+            .session
+            .set_slide_layout(context, slide_id, layout_part_path, mapping)?)
+    }
+
     /// Sets a slide's speaker notes; empty text clears them.
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
         Ok(self.session.set_slide_notes(context, slide_id, text)?)
+    }
+
+    /// Replaces the slide's background; `None` clears the declaration so the
+    /// layout or master background shows.
+    pub fn set_slide_background(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        background: Option<&ShapeFill>,
+    ) -> Result<SlideBackgroundReceipt> {
+        Ok(self
+            .session
+            .set_slide_background(context, slide_id, background)?)
     }
 
     pub fn add_text_box(
@@ -495,9 +523,19 @@ impl Presentation {
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
         let scope = slide_scope(&self.session, slide_index)?;
-        Ok(self
-            .renderer
-            .layout_scoped_slide(self.session.package(), &scope)?)
+        self.with_fonts(
+            self.renderer
+                .layout_scoped_slide(self.session.package(), &scope)?,
+        )
+    }
+
+    /// Native hosts draw text from the registered faces' outlines, so a slide
+    /// with text needs one; the layout's fontless fallback is for browser hosts.
+    fn with_fonts(&self, rendered: RenderedSlide) -> Result<RenderedSlide> {
+        if rendered.display_list.has_glyphs() && self.renderer.fonts().font_count() == 0 {
+            return Err(RenderError::NoFont.into());
+        }
+        Ok(rendered)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their
@@ -505,7 +543,7 @@ impl Presentation {
     /// The container is rebuilt, so the output is not byte-identical to the
     /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(self.session.save()?)
+        Ok(self.renderer.save(&self.session)?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {

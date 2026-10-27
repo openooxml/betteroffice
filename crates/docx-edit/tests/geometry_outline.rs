@@ -26,8 +26,8 @@ fn outlines_of_existing_block_boundary_fixtures() {
             "{kind}"
         );
         if kind == "table" {
-            assert_eq!(outline["body:t0:r0c0"].content_start, 8);
-            assert_eq!(outline["body:t0:r0c0"].size, 6);
+            assert_eq!(outline["body:t0:r0c0~84201"].content_start, 8);
+            assert_eq!(outline["body:t0:r0c0~84201"].size, 6);
         }
         if kind == "blockSdt" {
             assert_eq!(outline["control"].content_start, 6);

@@ -1,3 +1,7 @@
+import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
+import { pipeOpBuffers, type PipeCommandPayload, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
+import { isHostMessage } from '../../../../shared/office-session/protocol';
+import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
@@ -12,6 +16,7 @@ import {
   WORKBOOK_SESSION_METHODS,
   WORKBOOK_SESSION_POLICIES,
   WorkbookPngUnavailableError,
+  type WorkbookCollaborationPipeReply,
   type WorkbookFrame,
   type WorkbookFrameOptions,
   type WorkbookInitialPaint,
@@ -36,12 +41,13 @@ import type {
   WorkbookSharedAck, WorkbookSharedWireAck,
 } from './commandProtocol';
 import { createWorkbookEditSession, type WorkbookEditSession } from './editSession';
-import { createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
+import { attachCollaborationPipe, createAsyncCollaborationReplica, type AsyncReplicaAdapter } from '../collaboration/asyncReplica';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookSessionRecovery, workbookSessionRecovery } from './clientRecovery';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
+  collaborationPipe: PipeOutputBatch<AwarenessPeer>[];
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
@@ -71,7 +77,11 @@ export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
 export interface WorkbookSession {
   readonly pngExport?: boolean;
   readonly replica?: AsyncReplicaAdapter;
-  bindCollaboration?(apply: (update: Uint8Array) => Promise<unknown>): () => void;
+  bindCollaboration?(
+    apply: (update: Uint8Array) => Promise<unknown>,
+    applyChunks?: (updates: Uint8Array[]) => Promise<unknown>,
+    applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => Promise<unknown>
+  ): () => void;
   readonly state: WorkbookSessionState;
   readonly initialPaint?: WorkbookInitialPaint;
   readonly commandIdentity: CommandIdentity;
@@ -255,6 +265,26 @@ export async function createWorkbookSession(
   options: OpenWorkbookSessionOptions,
   transport: SessionTransport
 ): Promise<WorkbookSession> {
+  const endpoints = new Map<number, { receive: Parameters<CollaborationPipeChannel<AwarenessCursor, AwarenessPeer>['open']>[0];
+    lost: (reason: string) => void }>();
+  let nextProvider = 0;
+  const receivePipe = (batches: PipeOutputBatch<AwarenessPeer>[]) => {
+    for (const batch of batches) endpoints.get(batch.provider)?.receive(batch.out);
+  };
+  const losePipes = (reason: string) => {
+    const active = [...endpoints.values()];
+    endpoints.clear();
+    for (const endpoint of active) endpoint.lost(reason);
+  };
+  const pipeTransport: SessionTransport = { ...transport, listen(listener) {
+    return transport.listen((message) => {
+      if (isHostMessage(message) && message.kind === 'reply') {
+        const batches = (message as typeof message & WorkbookCollaborationPipeReply).collabPipe;
+        if (batches) receivePipe(batches);
+      }
+      listener(message);
+    });
+  } };
   let document: ArrayBuffer;
   let input: WorkbookSessionOpenOptions;
   let transfer: Transferable[];
@@ -280,7 +310,7 @@ export async function createWorkbookSession(
         disposed: false,
       };
     }
-    client = createSessionClient<Methods, Events>(transport, {
+    client = createSessionClient<Methods, Events>(pipeTransport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
       onWasmModuleMessage: ({ url, module, hydration, version, sequence }) => {
         if (url !== wasmAssetUrl().href) return;
@@ -322,8 +352,9 @@ export async function createWorkbookSession(
     initialVersion = opened.version;
     if (peerSource) peerSource.initialCalculation = opened.initialCalculation;
   });
+  client.on('collaborationPipe', receivePipe);
   client.on('changed', (change) => { state = { ...state, ...change }; });
-  client.onFailure(() => { state = { ...state, stage: 'failed' }; });
+  client.onFailure(() => { state = { ...state, stage: 'failed' }; losePipes('Collaboration worker failed'); });
   const signal = options.signal;
   const abort = () => {
     if (peerSource) peerSource.disposed = true;
@@ -393,7 +424,7 @@ export async function createWorkbookSession(
     } });
   }
   const {
-    version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry,
+    version, listDefinedNames, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry, selectionData,
     cellInputs, captureFormat, sheets, calculationStatus, save,
     renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList,
     collaborationStateVector, collaborationStateAsUpdate,
@@ -404,6 +435,8 @@ export async function createWorkbookSession(
   let commandMode = false;
   let selectionPublished = openedSelection !== undefined;
   const basis = commandContext?.basis ?? { epoch: 1, version: initialVersion ?? '' };
+  let recoveryFailure: SessionFailure | undefined;
+  const recoveryFailureListeners = new Set<(failure: SessionFailure) => void>();
   const recovery = recoverySource ? createWorkbookSessionRecovery(recoverySource,
     { ...options, calculation: input.calculation },
     async (allowed) => {
@@ -411,7 +444,12 @@ export async function createWorkbookSession(
         reply: allowed() ? client.call.checkpoint(true) : undefined,
       }));
       return dispatched.reply;
-    }, basis.epoch, options.calculation === undefined, initialVersion) : undefined;
+    }, basis.epoch, options.calculation === undefined, initialVersion, (error) => {
+      if (recoveryFailure || client.failure || edits.failure) return;
+      recoveryFailure = error instanceof SessionFailure ? error : Object.assign(new SessionFailure('message',
+        `Workbook recovery checkpoint failed: ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+      for (const listener of [...recoveryFailureListeners]) { try { listener(recoveryFailure); } catch {} }
+    }) : undefined;
   recoverySource = undefined;
   function decodeAck(reply: WorkbookSharedWireAck): WorkbookSharedAck {
     const { frame: paint, compatibility, ...receipt } = reply;
@@ -437,14 +475,22 @@ export async function createWorkbookSession(
       client: {
         call: { edit: async (input) => {
           const compatibility = input.payload.compatibility;
-          if (!compatibility || compatibility.kind === 'applyUpdate') return decodeAck(await client.call.edit(input));
+          if (!compatibility || compatibility.kind === 'applyUpdate' || compatibility.kind === 'collabPipe') {
+            const payload = input.payload.payload;
+            const transfer = input.kind === 'collabPipe' && 'ops' in payload ? pipeOpBuffers(payload.ops) : [];
+            return decodeAck(await client.callWithTransfer('edit', [input], transfer));
+          }
           const reply = await client.call.command(compatibility);
           if (!reply.shared) throw new Error('Workbook command omitted shared acknowledgement');
           return decodeAck(reply.shared);
         },
           checkpoint: () => client.call.checkpoint() },
-        get failure() { return client.failure; },
-        onFailure: (listener) => client.onFailure(listener),
+        get failure() { return client.failure ?? recoveryFailure; },
+        onFailure: (listener) => {
+          recoveryFailureListeners.add(listener);
+          const off = client.onFailure(listener);
+          return () => { recoveryFailureListeners.delete(listener); off(); };
+        },
         dispose: () => client.dispose(),
       },
     },
@@ -456,7 +502,7 @@ export async function createWorkbookSession(
         outcomes: [], ...(paint ? { frame: { ...paint, payload: { ...paint.payload, ...decodeFrame(paint.payload) } } } : {}) };
     },
   });
-  edits.onFailure(() => { state = { ...state, stage: 'failed' }; });
+  edits.onFailure(() => { state = { ...state, stage: 'failed' }; losePipes('Collaboration worker failed'); });
   edits.onAck((ack) => {
     recovery?.acknowledge(ack);
     if (ack.selection && (selectionPublished ||
@@ -502,7 +548,7 @@ export async function createWorkbookSession(
       }
     },
     call: {
-      version, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, cellInputs,
+      version, listDefinedNames, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, selectionData, cellInputs,
       captureFormat, sheets, calculationStatus, save, command, exportStructured, exportMarkdown,
       collaborationStateVector, collaborationStateAsUpdate,
       renderPng: (viewport, options) => pngBytes(renderPng(viewport, options)),
@@ -516,28 +562,73 @@ export async function createWorkbookSession(
     get failure() { return edits.failure ?? client.failure; },
     dispose: () => {
       if (peerSource) peerSource.disposed = true;
+      losePipes('Collaboration replica is retired');
       recovery?.dispose();
       return edits.dispose();
     },
   };
   if (clientId !== undefined && !peerSource) {
     let applyRemote: ((update: Uint8Array) => Promise<unknown>) | undefined;
+    let applyRemoteChunks: ((updates: Uint8Array[]) => Promise<unknown>) | undefined;
+    let applyRemotePipe: ((payload: PipeCommandPayload<AwarenessCursor>) => Promise<unknown>) | undefined;
+    const submitUpdates = async (updates: Uint8Array[]) => {
+      const [update, ...rest] = updates.map((chunk) => chunk.slice());
+      const ticket = edits.submit('applyUpdate', { payload: { update: update!, ...rest.length ? { updates: rest } : {} } },
+        { lane: 'collab', fence: true });
+      const ack = await ticket.ack;
+      if (ack.status !== 'applied' && ack.status !== 'noop') throw new Error(ack.reason ?? 'Remote update refused');
+      const refused = (ack.workbook?.result as { refusedUpdate?: string } | undefined)?.refusedUpdate;
+      if (refused) throw new Error(refused);
+      return ack;
+    };
     const replica = createAsyncCollaborationReplica({ clientId,
       encodeStateVector: () => collaborationStateVector(),
       encodeStateAsUpdate: (remoteStateVector) => collaborationStateAsUpdate(remoteStateVector?.slice()),
       applyUpdate: async (update) => {
         if (applyRemote) return applyRemote(update.slice());
-        const ticket = edits.submit('applyUpdate', { payload: { update: update.slice() } }, { lane: 'collab', fence: true });
-        const ack = await ticket.ack;
-        if (ack.status !== 'applied' && ack.status !== 'noop') throw new Error(ack.reason ?? 'Remote update refused');
-        return ack;
+        return submitUpdates([update]);
+      },
+      applyUpdateChunks: async (updates) => {
+        if (updates.length === 0) throw new RangeError('applyUpdateChunks requires at least one update');
+        if (applyRemoteChunks) return applyRemoteChunks(updates.map((update) => update.slice()));
+        if (!applyRemote) return submitUpdates([...updates]);
+        let last: unknown;
+        for (const update of updates) last = await applyRemote(update.slice());
+        return last;
       },
       onUpdate: (listener) => client.on('collaborationUpdate', ({ update, origin }) => listener(update.slice(), origin)),
     });
+    const channel: CollaborationPipeChannel<AwarenessCursor, AwarenessPeer> = {
+      open(receive, lost) {
+        const provider = ++nextProvider;
+        endpoints.set(provider, { receive, lost });
+        return {
+          async post(ops) {
+            if (!endpoints.has(provider) || session.failure) throw new Error('Collaboration replica is retired');
+            const payload = { provider, ops };
+            if (applyRemotePipe) return applyRemotePipe(payload);
+            const outcome = await edits.submit('collabPipe', { payload }, { lane: 'collab', fence: true }).ack;
+            if (outcome.status !== 'applied' && outcome.status !== 'noop') throw new Error(outcome.reason ?? 'Collaboration pipe refused');
+            return outcome;
+          },
+          close: () => { endpoints.delete(provider); },
+        };
+      },
+    };
+    attachCollaborationPipe(replica, channel);
     Object.defineProperty(session, 'replica', { value: replica, enumerable: true });
-    session.bindCollaboration = (apply) => {
+    session.bindCollaboration = (apply, applyChunks, applyPipe) => {
       applyRemote = apply;
-      return () => { if (applyRemote === apply) applyRemote = undefined; };
+      applyRemoteChunks = applyChunks;
+      applyRemotePipe = applyPipe;
+      attachCollaborationPipe(replica, applyPipe ? channel : undefined);
+      return () => {
+        if (applyRemote !== apply) return;
+        applyRemote = undefined;
+        applyRemoteChunks = undefined;
+        applyRemotePipe = undefined;
+        attachCollaborationPipe(replica, channel);
+      };
     };
   }
   const replay = async (envelope: WorkbookReplayEnvelope) => {

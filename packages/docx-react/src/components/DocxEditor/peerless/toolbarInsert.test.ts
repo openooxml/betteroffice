@@ -2,6 +2,32 @@ import { expect, mock, test } from 'bun:test';
 import { toolbarFixture } from './toolbarCommands.testing';
 import type { DocxCommandResult } from '../../../commands/types';
 
+const breaks = ['insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous'] as const;
+
+test('worker page and section breaks submit their worker intents', async () => {
+  const { controller, submit, parity } = toolbarFixture();
+  for (const id of breaks) {
+    parity(id);
+    expect(controller.commands.store.getState(id).enabled).toBe(true);
+    expect(await controller.commands.store.execute(id, null)).toMatchObject({ ok: true });
+    expect(submit).toHaveBeenLastCalledWith(id === 'insertPageBreak' ? { kind: 'insertPageBreak', payload: {} } :
+      { kind: 'insertSectionBreak', payload: { type: id === 'insertSectionBreakNextPage' ? 'nextPage' : 'continuous' } }, { fence: true });
+  }
+});
+
+test('worker breaks refuse suggesting and read-only with existing reasons', () => {
+  const { controller, read, parity } = toolbarFixture();
+  for (const mode of ['suggesting', 'viewing', 'editing'] as const) {
+    controller.update({ read: read as never, focus() {}, zoom: 1, mode, readOnly: mode === 'editing' });
+    for (const id of breaks) {
+      parity(id);
+      expect(controller.commands.store.getState(id)).toMatchObject({ enabled: false,
+        disabledReason: { code: mode === 'suggesting' ? 'suggesting-unsupported' : mode === 'viewing' ? 'viewing-mode' : 'read-only' } });
+    }
+    expect(controller.commands.store.getState('highlightColor').enabled).toBe(mode === 'suggesting');
+  }
+});
+
 test('worker table insertion submits dimensions through the shared tail', async () => {
   const { controller, submit, flush, parity } = toolbarFixture();
   parity('insertTable', { rows: 2, columns: 3 });

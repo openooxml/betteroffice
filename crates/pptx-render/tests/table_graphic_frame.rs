@@ -1,4 +1,5 @@
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
+use pptx_parse::{GraphicFrameData, PictureCrop, ShapeNode};
 use pptx_render::{Paint, Primitive, SlideRenderer, SurfaceDisplayList};
 
 const DECK: &[u8] = include_bytes!("fixtures/table-basic.pptx");
@@ -19,6 +20,226 @@ fn display_list(session: &DeckSession) -> SurfaceDisplayList {
 
 fn round(value: f32) -> f32 {
     (value * 100.0).round() / 100.0
+}
+
+#[test]
+fn table_cell_picture_fills_are_clipped_to_spans_below_borders_and_text() {
+    let session =
+        DeckSession::open(include_bytes!("fixtures/table-picture-fill.pptx"), 4102).unwrap();
+    let rendered = table(&display_list(&session));
+    let images: Vec<_> = rendered
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, primitive)| {
+            if let Primitive::Image {
+                x,
+                y,
+                w,
+                h,
+                asset_id,
+                crop,
+                tile,
+                path,
+                effects,
+                ..
+            } = primitive
+            {
+                Some((index, (*x, *y, *w, *h), asset_id, crop, tile, path, effects))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(images.len(), 2, "both origin cells paint their pictures");
+    let rounded =
+        |rect: (f32, f32, f32, f32)| (round(rect.0), round(rect.1), round(rect.2), round(rect.3));
+    assert_eq!(rounded(images[0].1), (64.0, 64.0, 320.0, 38.93));
+    assert_eq!(rounded(images[1].1), (64.0, 102.93, 192.0, 77.87));
+    for image in &images {
+        assert_eq!(image.2.as_deref(), Some("ppt/media/image1.png"));
+        assert!(image.5.is_none(), "rectangular images clip to their bounds");
+    }
+    let crop = images[0].3;
+    assert!((crop.left - 1.42558 / 3.44418).abs() < 1e-6);
+    assert!((crop.top - 2.14634 / 22.60975).abs() < 1e-6);
+    assert!((crop.right - 1.01860 / 3.44418).abs() < 1e-6);
+    assert!((crop.bottom - 19.46341 / 22.60975).abs() < 1e-6);
+    assert_eq!(images[0].6, &[pptx_render::ImageEffect::Grayscale]);
+    let tile = images[1].4.as_ref().expect("the row span uses a tile");
+    assert_eq!((tile.scale_x, tile.scale_y), (0.5, 2.0));
+    let last_image = images.last().unwrap().0;
+    assert!(rendered.cells.iter().enumerate().all(|(index, primitive)| {
+        !matches!(
+            primitive,
+            Primitive::TextBox { .. }
+                | Primitive::Shape {
+                    stroke: Some(_),
+                    ..
+                }
+        ) || index > last_image
+    }));
+    let restored =
+        DeckSession::open_from_update(&session.encode_state_as_update_v1(), 4103).unwrap();
+    assert_eq!(display_list(&session), display_list(&restored));
+}
+
+fn cell_picture(fill_rect: PictureCrop, crop: PictureCrop) -> Primitive {
+    const FIXTURE: &[u8] = include_bytes!("fixtures/table-picture-fill.pptx");
+    let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+    let ShapeNode::GraphicFrame(frame) = &mut package.slides[0].shapes[0] else {
+        panic!("expected a table frame")
+    };
+    let GraphicFrameData::Table(model) = &mut frame.data else {
+        panic!("expected a table")
+    };
+    let picture = model.rows[0].cells[0].picture_fill.as_mut().unwrap();
+    picture.fill_rect = fill_rect;
+    picture.crop = crop;
+    let session = DeckSession::from_package_with_source(package, FIXTURE, 4104).unwrap();
+    table(&display_list(&session))
+        .cells
+        .into_iter()
+        .find(|primitive| matches!(primitive, Primitive::Image { .. }))
+        .unwrap()
+}
+
+#[test]
+fn table_cell_picture_positive_fill_insets_letterbox_the_destination() {
+    let Primitive::Image {
+        x, y, w, h, crop, ..
+    } = cell_picture(
+        PictureCrop {
+            left: 25_000,
+            right: 25_000,
+            ..PictureCrop::default()
+        },
+        PictureCrop::default(),
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (144.0, 64.0, 160.0, 38.93)
+    );
+    assert!(crop.is_whole());
+
+    let Primitive::Image {
+        x, y, w, h, crop, ..
+    } = cell_picture(
+        PictureCrop {
+            top: 25_000,
+            bottom: 25_000,
+            ..PictureCrop::default()
+        },
+        PictureCrop::default(),
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (64.0, 73.73, 320.0, 19.47)
+    );
+    assert!(crop.is_whole());
+}
+
+#[test]
+fn table_cell_picture_outset_crop_stays_inside_the_inset_destination() {
+    let Primitive::Image {
+        x,
+        y,
+        w,
+        h,
+        crop,
+        destination,
+        ..
+    } = cell_picture(
+        PictureCrop {
+            left: 25_000,
+            top: 25_000,
+            right: 25_000,
+            bottom: 25_000,
+        },
+        PictureCrop {
+            left: -50_000,
+            top: -25_000,
+            right: -50_000,
+            bottom: -75_000,
+        },
+    )
+    else {
+        panic!("expected a cell image")
+    };
+    assert_eq!(
+        (round(x), round(y), round(w), round(h)),
+        (144.0, 73.73, 160.0, 19.47)
+    );
+    assert!(crop.is_whole());
+    let destination = destination.expect("outset crop places the bitmap inside the frame");
+    for (actual, expected) in [destination.x, destination.y, destination.w, destination.h]
+        .into_iter()
+        .zip([x + w * 0.25, y + h * 0.125, w * 0.5, h * 0.5])
+    {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
+    assert!(destination.x >= x && destination.y >= y);
+    assert!(destination.x + destination.w <= x + w);
+    assert!(destination.y + destination.h <= y + h);
+}
+
+#[test]
+fn table_cell_picture_mixed_fill_insets_letterbox_and_crop_the_source() {
+    for (fill_rect, expected_rect, expected_crop) in [
+        (
+            PictureCrop {
+                left: 25_000,
+                top: -50_000,
+                right: -25_000,
+                bottom: 25_000,
+            },
+            (144.0, 64.0, 240.0, 29.2),
+            (0.1, 0.41, 0.375, 0.05),
+        ),
+        (
+            PictureCrop {
+                left: -25_000,
+                top: 25_000,
+                right: 25_000,
+                bottom: -50_000,
+            },
+            (64.0, 73.73, 240.0, 29.2),
+            (0.275, 0.05, 0.2, 0.41),
+        ),
+    ] {
+        let Primitive::Image {
+            x, y, w, h, crop, ..
+        } = cell_picture(
+            fill_rect,
+            PictureCrop {
+                left: 10_000,
+                top: 5_000,
+                right: 20_000,
+                bottom: 5_000,
+            },
+        )
+        else {
+            panic!("expected a cell image")
+        };
+        assert_eq!((round(x), round(y), round(w), round(h)), expected_rect);
+        for (actual, expected) in [crop.left, crop.top, crop.right, crop.bottom]
+            .into_iter()
+            .zip([
+                expected_crop.0,
+                expected_crop.1,
+                expected_crop.2,
+                expected_crop.3,
+            ])
+        {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
 }
 
 struct RenderedTable {
@@ -276,5 +497,196 @@ fn a_turned_table_keeps_the_frame_height_so_its_pivot_does_not_move() {
          ({}) so the rotation pivot stays on the frame centre",
         heights[0],
         heights[1]
+    );
+}
+
+#[test]
+fn normal_autofit_table_cell_keeps_its_scale_and_grows_its_row_after_typing() {
+    for cell_index in [0, 4] {
+        assert_normal_autofit_cell(cell_index);
+    }
+}
+
+fn assert_normal_autofit_cell(cell_index: usize) {
+    let mut package = pptx_parse::parse_pptx(DECK).unwrap();
+    let path = "ppt/slides/slide1.xml";
+    let mut source = std::str::from_utf8(package.part_bytes(path).unwrap())
+        .unwrap()
+        .replace("<a:tr h=\"370840\">", "<a:tr h=\"952500\">");
+    let body_start = source
+        .match_indices("<a:bodyPr/>")
+        .nth(cell_index)
+        .unwrap()
+        .0;
+    source.replace_range(
+        body_start..body_start + "<a:bodyPr/>".len(),
+        "<a:bodyPr><a:normAutofit fontScale=\"50000\" lnSpcReduction=\"10000\"/></a:bodyPr>",
+    );
+    assert!(package.replace_part(path, source.as_bytes().to_vec()));
+    let bytes = pptx_parse::write_pptx(&package).unwrap();
+    let session = DeckSession::open(&bytes, 4102).unwrap();
+    session.set_undo_capture_mode(pptx_edit::UndoCaptureMode::Manual);
+    let story = session.snapshot().unwrap().slides[0].shapes[0].text_stories[cell_index].clone();
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    let before = renderer
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap();
+    let untouched = pptx_parse::parse_pptx(&renderer.save(&session).unwrap()).unwrap();
+    assert_eq!(untouched.part_bytes(path).unwrap(), source.as_bytes());
+    session
+        .insert_text(
+            &EditCtx::local("test"),
+            &story.id,
+            story.length - 1,
+            &" more words to fit in this cell".repeat(8),
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let after = renderer
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap();
+    let before_table = table(&before.display_list);
+    let after_table = table(&after.display_list);
+    let rendered_index = if cell_index == 0 { 0 } else { 3 };
+    assert!(
+        boxes(&after_table.cells)[rendered_index].4 > boxes(&before_table.cells)[rendered_index].4
+    );
+    assert!(after_table.rect.3 > before_table.rect.3);
+    let (y, height, width, lines) = after_table
+        .cells
+        .iter()
+        .filter_map(|cell| match cell {
+            Primitive::TextBox { y, h, w, lines, .. } => Some((*y, *h, *w, lines)),
+            _ => None,
+        })
+        .nth(rendered_index)
+        .unwrap();
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.y + line.height <= y + height + 0.01)
+    );
+    assert!(lines.iter().all(|line| line.width <= width + 0.01));
+    let saved = renderer.save(&session).unwrap();
+    let reopened = DeckSession::open(&saved, 4103).unwrap();
+    let pptx_parse::ShapeNode::GraphicFrame(frame) = &reopened.package().slides[0].shapes[0] else {
+        panic!("expected table frame");
+    };
+    let pptx_parse::GraphicFrameData::Table(table) = &frame.data else {
+        panic!("expected table");
+    };
+    let Some(pptx_parse::TextAutofit::Normal {
+        font_scale: Some(scale),
+        line_space_reduction: Some(reduction),
+    }) = table.rows[cell_index / 3].cells[cell_index % 3]
+        .text
+        .autofit
+    else {
+        panic!("expected persisted normal autofit");
+    };
+    assert_eq!(scale, 0.5, "typing must preserve the stored cell scale");
+    assert_eq!(reduction, 0.1);
+    let expected_size = ((18.0 * scale).round().max(1.0) * 96.0 / 72.0) as f32;
+    assert!((lines[0].runs[0].font_size_px - expected_size).abs() < 0.01);
+    assert_eq!(table.rows[0].cells[2].text.autofit, None);
+    let mut reopened_renderer = SlideRenderer::new();
+    reopened_renderer
+        .register_font("Arial", false, false, FONT)
+        .unwrap();
+    assert_eq!(
+        reopened_renderer
+            .layout_slide(reopened.package(), &reopened.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list,
+        after.display_list,
+    );
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(
+        renderer
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list,
+        before.display_list,
+    );
+    let restored = pptx_parse::parse_pptx(&renderer.save(&session).unwrap()).unwrap();
+    assert_eq!(restored.part_bytes(path).unwrap(), source.as_bytes());
+}
+
+#[test]
+fn text_columns_measure_table_rows_with_the_rendered_flow() {
+    let session = session();
+    let mut package = session.package().clone();
+    let pptx_parse::ShapeNode::GraphicFrame(frame) = &mut package.slides[0].shapes[0] else {
+        panic!("expected a table frame");
+    };
+    let pptx_parse::GraphicFrameData::Table(table_data) = &mut frame.data else {
+        panic!("expected table data");
+    };
+    table_data.rows.truncate(1);
+    table_data.grid.truncate(1);
+    table_data.rows[0].height = 428_625;
+    table_data.rows[0].cells.truncate(1);
+    let cell = &mut table_data.rows[0].cells[0];
+    cell.grid_span = 1;
+    cell.row_span = 1;
+    cell.text.num_col = Some(2);
+    cell.text.spc_col = Some(95_250);
+    cell.text.anchor = Some("t".to_owned());
+    cell.text.paragraphs.truncate(1);
+    cell.text.paragraphs[0].runs.truncate(1);
+    cell.text.paragraphs[0].runs[0].text = "one\ntwo\nthree\nfour\nfive".to_owned();
+    cell.text.paragraphs[0].properties.line_spacing =
+        Some(pptx_parse::LineSpacing::Points { value: 12.0 });
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, FONT).unwrap();
+    let mut snapshot = session.snapshot().unwrap();
+    snapshot.slides[0].shapes.clear();
+    package.masters[0].shapes = package.slides[0].shapes.clone();
+    package.layouts[0].shapes.clear();
+    let render = |package: &pptx_parse::PptxPackage| {
+        table(
+            &renderer
+                .layout_slide(package, &snapshot, 0)
+                .unwrap()
+                .display_list,
+        )
+    };
+    let columns = render(&package);
+    let pptx_parse::ShapeNode::GraphicFrame(frame) = &mut package.masters[0].shapes[0] else {
+        unreachable!()
+    };
+    let pptx_parse::GraphicFrameData::Table(data) = &mut frame.data else {
+        unreachable!()
+    };
+    data.rows[0].cells[0].text.num_col = None;
+    let single = render(&package);
+    let columns_row = &boxes(&columns.cells)[0];
+    let single_row = &boxes(&single.cells)[0];
+    assert_eq!(columns.rect.3, 116.8);
+    assert_eq!(single.rect.3, 116.8);
+    assert_eq!(columns_row.4, 57.6);
+    assert_eq!(single_row.4, 89.6);
+    assert!(
+        columns_row.4 < single_row.4,
+        "{} >= {}",
+        columns_row.4,
+        single_row.4
+    );
+    let lines = columns
+        .cells
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(lines.len(), 5);
+    assert!(lines.iter().any(|line| line.x > lines[0].x + 50.0));
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.y + line.height <= columns_row.2 + columns_row.4 + 0.05)
     );
 }

@@ -424,7 +424,7 @@ pub fn contributes_to_flow(block: &LayoutBlock) -> bool {
             image.anchor.as_ref().and_then(|anchor| anchor.is_anchored) != Some(true)
         }
         LayoutBlock::Shape(shape) => shape.position.is_none(),
-        LayoutBlock::Chart(_) => true,
+        LayoutBlock::Chart(_) | LayoutBlock::Reserved(_) => true,
         LayoutBlock::TextBox(text_box) => {
             matches!(text_box.display_mode.as_deref(), None | Some("inline"))
         }
@@ -506,7 +506,8 @@ fn visual_bounds(
             LayoutBlock::Table(_)
             | LayoutBlock::Image(_)
             | LayoutBlock::Shape(_)
-            | LayoutBlock::Chart(_) => {
+            | LayoutBlock::Chart(_)
+            | LayoutBlock::Reserved(_) => {
                 visual_top = visual_top.min(cursor);
                 visual_bottom = visual_bottom.max(cursor + block_height);
             }

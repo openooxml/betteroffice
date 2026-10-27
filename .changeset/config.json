@@ -4,22 +4,18 @@
   "commit": false,
   "fixed": [
     [
+      "@betteroffice/docx",
+      "@betteroffice/docx-react",
+      "@betteroffice/docx-i18n",
+      "@betteroffice/docx-native",
+      "@betteroffice/xlsx",
+      "@betteroffice/xlsx-react",
+      "@betteroffice/xlsx-i18n",
+      "@betteroffice/xlsx-native",
       "@betteroffice/pptx",
       "@betteroffice/pptx-react",
       "@betteroffice/pptx-i18n",
       "@betteroffice/pptx-native"
-    ],
-    [
-      "@betteroffice/xlsx",
-      "@betteroffice/xlsx-react",
-      "@betteroffice/xlsx-i18n",
-      "@betteroffice/xlsx-native"
-    ],
-    [
-      "@betteroffice/docx",
-      "@betteroffice/docx-react",
-      "@betteroffice/docx-i18n",
-      "@betteroffice/docx-native"
     ],
     [
       "@betteroffice/fonts",

@@ -4,6 +4,12 @@ type CommandResult = { ok: true } | { ok: false; failure: { code: string; messag
 
 /** The part of XlsxAsyncEditorApi the specs drive, typed without the built xlsx-react package. */
 export interface WorkerEditorApiProbe {
+  version(): Promise<string>;
+  readCells(request: Parameters<WorkbookHandle['readCells']>[0]): Promise<ReturnType<WorkbookHandle['readCells']>>;
+  findText(request: Parameters<WorkbookHandle['findText']>[0]): Promise<ReturnType<WorkbookHandle['findText']>>;
+  validateEdits(request: Parameters<WorkbookHandle['validateEdits']>[0]): Promise<ReturnType<WorkbookHandle['validateEdits']>>;
+  applyEdits(request: Parameters<WorkbookHandle['applyEdits']>[0]): Promise<ReturnType<WorkbookHandle['applyEdits']>>;
+  save(): Promise<Uint8Array>;
   readonly commands: {
     getState(id: 'proposalsPanel'): { value: number };
     execute(id: 'proposalsPanel', args: { open: boolean } | null): Promise<CommandResult>;
@@ -19,26 +25,29 @@ export interface WorkerEditorProbe {
   mainThreadEngines(): number;
   peerless: {
     readonly editor: WorkerEditorApiProbe;
-    cells(sheet: number, range: string): Promise<string[][]>;
-    selection(): Promise<{
+    editorAt(index?: number): WorkerEditorApiProbe;
+    cells(sheet: number, range: string, index?: number): Promise<string[][]>;
+    selection(index?: number): Promise<{
       sheetIndex: number;
       cells: { anchor: { row: number; col: number }; focus: { row: number; col: number } } | null;
     } | null>;
-    failure(): string | null;
+    failure(index?: number): string | null;
     /** Cell rects of the painted frame in canvas CSS pixels, read through plugin geometry. */
-    cellRects(cells: [number, number][]): Promise<{
+    cellRects(cells: [number, number][], index?: number): Promise<{
       zoom: number;
       rects: { x: number; y: number; width: number; height: number }[];
     } | null>;
+    formulaBar(index?: number): string;
     workerCount(): number;
     saveAndReopen(): Promise<number>;
     recoverAndReopen(): Promise<number>;
   } | null;
   peerEntries: { generation: number; method: string; args: unknown[] }[];
   replayEntries: { generation: number; sequence: number; method: string; args: unknown[] }[];
-  generation(): number;
+  generation(index?: number): number;
   readyCount(): number;
-  setReadOnly(value: boolean): void;
+  saves: number[][];
+  setReadOnly(value: boolean, toolbar?: boolean): void;
   readOnlyEditRefusal(): string;
   savedInputs(): Promise<string[]>;
   releaseHydration(): void;
@@ -75,14 +84,19 @@ export interface WorkerEditorProbe {
   previews: string[];
   previewFrames: string[];
   commitOrder: { kind: 'painted-preview' | 'mutator-entry'; text: string }[];
-  hydrated(): boolean;
+  hydrated(index?: number): boolean;
   holdPreview(): void;
   previewHeld(): boolean;
   releasePreview(text: string): void;
-  paintedTexts(): string[];
-  cell(): Promise<string | null>;
+  paintedTexts(index?: number): string[];
+  formulaBar(index?: number): string;
+  cell(index?: number): Promise<string | null>;
   saveAndReopen(): Promise<number>;
-  undo(): Promise<boolean>;
+  undo(index?: number): Promise<boolean>;
+  pauseDelivery(): void;
+  resumeDelivery(): Promise<void>;
+  pendingUpdates(sender: number): number;
+  savedBytes(index?: number): number[] | null;
 }
 
 declare global {

@@ -6,7 +6,7 @@ import { attachPptx, openPptx } from '../src/pptx';
 import type { PptxAgentPresentation } from '../src/pptx';
 import type { PptxAgentEdit } from '../src/pptx-schema';
 import { pptxFixture } from './format-fixtures';
-import { presentationFixture } from './pptx-fixture';
+import { presentationFixture, layoutFixture, savedSlideIds, slideIdsFixture } from './pptx-fixture';
 
 const apply = (deck: PptxAgentPresentation, edits: PptxAgentEdit[]) => deck.edit({ version: deck.overview().version, edits });
 
@@ -166,6 +166,100 @@ test('PPTX adds, duplicates, moves and deletes slides with layout validation and
       expect(reopened.readSlide({ slide: reopened.outline().slides[1].id }).notes.text).toBe('Cloned notes 😀');
     } finally { reopened.close(); }
     expect(() => apply(deck, [{ op: 'add_slide', layout: 'missing' }])).toThrow('Copy a layout ID');
+  } finally { deck.close(); }
+});
+
+test('PPTX duplicate_slide after the first slide places the copy second', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const first = deck.outline().slides[0].id;
+    const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
+    const result = apply(deck, [{ op: 'duplicate_slide', slide: last, after: first }]).results[0];
+    expect(result.index).toBe(2);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, result.slideId as string, last]);
+  } finally { deck.close(); }
+});
+
+test('PPTX duplicate_slide after the last slide appends the copy', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const first = deck.outline().slides[0].id;
+    const last = apply(deck, [{ op: 'add_slide' }]).results[0].slideId as string;
+    const result = apply(deck, [{ op: 'duplicate_slide', slide: first, after: last }]).results[0];
+    expect(result.index).toBe(3);
+    expect(deck.outline().slides.map(slide => slide.id)).toEqual([first, last, result.slideId as string]);
+  } finally { deck.close(); }
+});
+
+test('PPTX duplicate_slide refuses after with index or an unknown slide ID', async () => {
+  const deck = await openPptx(await presentationFixture());
+  try {
+    const slide = deck.outline().slides[0].id;
+    const version = deck.overview().version;
+    const before = await deck.export();
+    const refused = (edit: PptxAgentEdit) => {
+      try { apply(deck, [edit]); } catch (error) { return error as { code: string; details: { validSlides?: unknown } }; }
+      throw new Error('Expected the edit to be refused.');
+    };
+    expect(refused({ op: 'duplicate_slide', slide, after: slide, index: 1 }).code).toBe('INVALID_ARGUMENT');
+    const unknown = refused({ op: 'duplicate_slide', slide, after: 'missing' });
+    expect(unknown.code).toBe('UNKNOWN_SLIDE');
+    expect(unknown.details.validSlides).toEqual([{ id: slide, index: 1 }]);
+    expect(refused({ op: 'duplicate_slide', slide: 'missing' }).code).toBe(unknown.code);
+    expect(deck.overview().version).toBe(version);
+    expect(await deck.export()).toEqual(before);
+  } finally { deck.close(); }
+});
+
+test('PPTX slide IDs stay with their slides across reorders and saves', async () => {
+  const source = await slideIdsFixture([256, 300, 270, 290]);
+  const before = await savedSlideIds(source);
+  for (let run = 0; run < 20; run++) {
+    const deck = await openPptx(source);
+    try {
+      const [a, b, c, d] = deck.outline().slides.map(s => s.id);
+      const moved = apply(deck, [{ op: 'move_slide', slide: d, index: 1 }, { op: 'move_slide', slide: a, after: c }, { op: 'move_slide', slide: b, before: d }]);
+      expect(moved.results.map(result => result.index)).toEqual([1, 4, 1]);
+      expect(deck.outline().slides.map(s => s.id)).toEqual([b, d, c, a]);
+      const saved = await deck.export();
+      expect(await savedSlideIds(saved)).toEqual([before[1], before[3], before[2], before[0]]);
+      const reopened = await openPptx(saved);
+      try {
+        const [rb, rd, , ra] = reopened.outline().slides.map(s => s.id);
+        reopened.edit({ version: reopened.overview().version, edits: [{ op: 'move_slide', slide: ra, index: 1 }, { op: 'move_slide', slide: rb, after: ra }, { op: 'move_slide', slide: rd, index: 4 }] });
+        expect(await savedSlideIds(await reopened.export())).toEqual(before);
+      } finally { reopened.close(); }
+    } finally { deck.close(); }
+  }
+});
+
+test('PPTX inserted slides take fresh IDs above every existing slide ID', async () => {
+  const source = await slideIdsFixture([256, 300, 270, 290]);
+  const before = await savedSlideIds(source);
+  let first: string[] | undefined;
+  for (let run = 0; run < 20; run++) {
+    const deck = await openPptx(source);
+    try {
+      const [a, b] = deck.outline().slides.map(s => s.id);
+      apply(deck, [{ op: 'add_slide', index: 2, layout: deck.outline().layouts[0].id }, { op: 'duplicate_slide', slide: b, index: 5 }, { op: 'move_slide', slide: a, index: 6 }]);
+      const saved = await savedSlideIds(await deck.export());
+      expect(saved.filter(entry => before.includes(entry)).sort()).toEqual([...before].sort());
+      expect(saved.filter(entry => !before.includes(entry)).map(entry => entry.split('=')[1]).sort()).toEqual(['301', '302']);
+      expect(saved.at(-1)).toBe(before[0]);
+      first ??= saved;
+      expect(saved).toEqual(first);
+    } finally { deck.close(); }
+  }
+});
+
+test('PPTX move_slide takes exactly one of index, after or before', async () => {
+  const deck = await openPptx(await slideIdsFixture([256, 257, 258]));
+  try {
+    const [a, b] = deck.outline().slides.map(s => s.id);
+    expect(() => apply(deck, [{ op: 'move_slide', slide: a }])).toThrow('exactly one of index, after or before');
+    expect(() => apply(deck, [{ op: 'move_slide', slide: a, index: 2, after: b }])).toThrow('exactly one of index, after or before');
+    expect(() => apply(deck, [{ op: 'move_slide', slide: a, after: a }])).toThrow('different slide');
+    expect(apply(deck, [{ op: 'move_slide', slide: a, before: b }]).results[0]).toMatchObject({ changed: false, oldIndex: 1, index: 1 });
   } finally { deck.close(); }
 });
 
@@ -330,5 +424,51 @@ test('PPTX duplication preserves added images and edits the copy independently',
       for (const slide of reopened.outline().slides) expect(reopened.readSlide({ slide: slide.id }).shapes.some(shape => shape.type === 'picture')).toBe(true);
       expect(reopened.outline().slides[1].title).toBe('Independent clone');
     } finally { reopened.close(); }
+  } finally { deck.close(); }
+});
+
+test('PPTX maps layout placeholders atomically and preview matches export', async () => {
+  const deck = await openPptx(await layoutFixture());
+  try {
+    const outline = deck.outline();
+    const layout = outline.layouts.find(layout => layout.name === 'Title Only')!;
+    expect(layout.placeholders).toEqual([{ id: '8', name: 'Heading', nameTruncated: false, type: 'title', idx: 4 }]);
+    expect(layout.masterId).toBe('ppt/slideMasters/slideMaster1.xml');
+    const target = first(deck);
+    expect(() => apply(deck, [{ op: 'set_notes', slide: target.slide, text: 'rollback' }, { op: 'set_slide_layout', slide: target.slide, layout: layout.id, placeholders: [{ shape: target.shape, layoutPlaceholder: 'missing' }] }])).toThrow();
+    expect(deck.overview().version).toBe(outline.version);
+    const result = apply(deck, [{ op: 'set_slide_layout', slide: target.slide, layout: 'Title Only', placeholders: [{ shape: target.shape, layoutPlaceholder: 'Heading' }] }]);
+    expect(result.results[0]).toMatchObject({ layoutId: layout.id, layoutName: 'Title Only', placeholders: [{ shape: target.shape, layoutPlaceholder: '8' }] });
+    expect(() => deck.edit({ version: outline.version, edits: [{ op: 'set_slide_layout', slide: target.slide, layout: layout.id }] })).toThrow('Deck changed');
+    const preview = await deck.preview(target.slide);
+    const reopened = await openPptx(await deck.export());
+    try {
+      const slide = reopened.outline().slides[0];
+      expect(slide.layoutId).toBe(layout.id);
+      expect(reopened.readSlide({ slide: slide.id }).shapes[0].placeholder).toMatchObject({ index: 4 });
+      expect((await reopened.preview(slide.id)).png).toEqual(preview.png);
+    } finally { reopened.close(); }
+  } finally { deck.close(); }
+});
+
+test('PPTX layout placeholder inventories paginate within the outline budget', async () => {
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const path = 'ppt/slideLayouts/slideLayout2.xml';
+  const shapes = Array.from({ length: 80 }, (_, index) => `<p:sp><p:nvSpPr><p:cNvPr id="${100 + index}" name="Slot ${index} ${'x'.repeat(180)}"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="${index}"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>`).join('');
+  zip.file(path, (await zip.file(path)!.async('string')).replace('</p:spTree>', `${shapes}</p:spTree>`));
+  const deck = await openPptx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const ids = new Set<string>();
+    let offset = 0;
+    while (true) {
+      const outline = deck.outline({ layoutPlaceholderOffset: offset });
+      expect(JSON.stringify(outline).length).toBeLessThan(17000);
+      const layout = outline.layouts.find(layout => layout.id === path)!;
+      for (const placeholder of layout.placeholders) ids.add(placeholder.id);
+      if (layout.nextPlaceholderOffset === null) break;
+      expect(layout.nextPlaceholderOffset).toBeGreaterThan(offset);
+      offset = layout.nextPlaceholderOffset;
+    }
+    expect(ids.size).toBe(81);
   } finally { deck.close(); }
 });

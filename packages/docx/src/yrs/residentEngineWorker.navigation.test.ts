@@ -1,15 +1,18 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { resolveReservations, validReservationsPayload } from './reservations';
 import * as queryModule from '../layout/render/displayListQueries';
 import type { DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries, type DisplayListRect } from '../layout/render/displayListQueries';
+import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import { FRAME_DELTA_VERSION, retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
 import type { YrsLoc, YrsStorySegment } from './index';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
 import { releaseResidentSelectionReads } from './residentCommandSelection';
+import { cellSelectionHeadPosition } from './residentCommandTableSelection';
 import { ResidentSessionFonts } from './residentFontEnvironment';
-import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, ResidentCommandHooks, ResidentCommandHooksFactory, ResidentCommandHostOptions, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandApplyContext, DocxCommandEnvelope, DocxCommandIntent, DocxCommandHooks, DocxCommandHooksFactory, DocxCommandHostOptions, DocxCommandInitRequest } from './residentCommandProtocol';
 
 const releasesAfterTest: (() => void)[] = [];
 
@@ -17,7 +20,7 @@ afterEach(() => {
   for (const release of releasesAfterTest.splice(0)) release();
 });
 
-function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQueryEngine, boundary?: 'cold' | 'warm', malformedTable: boolean | 'anonymous' = false, options: { caretPage?: number; malformedNeighbour?: boolean; warmCaret?: boolean; trailingEnd?: number; caretHint?: 'missing' | 'misleading'; productionHooks?: boolean } = {}) {
+function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQueryEngine, boundary?: 'cold' | 'warm', malformedTable: boolean | 'anonymous' = false, options: { caretPage?: number; malformedNeighbour?: boolean; warmCaret?: boolean; imageTail?: boolean; trailingEnd?: number; caretHint?: 'missing' | 'misleading'; productionHooks?: boolean } = {}) {
   const focus: YrsLoc = { story: boundary ? 'body' : 'body:t0:r0c0', paraId: boundary ? 'wrapped' : 'cell', offset: 20 };
   const position = 24;
   const caretPage = options.caretPage ?? 1;
@@ -48,6 +51,9 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     }),
   });
   const primitives = (pageIndex: number): DisplayPage['primitives'] => {
+    if (options.imageTail && pageIndex > caretPage) return [{
+      kind: 'image', relId: 'image', x: 20, y: 40, w: 60, h: 400, docStart: position + pageIndex, docEnd: position + pageIndex + 1,
+    }];
     const result = pageIndex < caretPage
       ? [text('abcdefghij', 4, options.caretHint ? position - 1 : 14), ...(boundary ? [text('klmnopqrst', 14, position, 80)] : [])]
       : pageIndex === caretPage ? [boundary ? text('uvwx', position, 28) : text('qrst', 20, options.trailingEnd ?? position)]
@@ -58,14 +64,14 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
   const changePages = (pages: number[], unbuilt: boolean, frameEpoch: number) => {
     expect(frameEpoch).toBe(frame.frameEpoch);
     frame = retain(frame.displayList.pages.map<DisplayPage>((page) => pages.includes(page.pageIndex)
-      ? { ...page, unbuilt, primitives: !queryEngine || unbuilt || page.pageIndex > caretPage + 1 ? [] : primitives(page.pageIndex) }
+      ? { ...page, unbuilt, primitives: unbuilt || !options.imageTail && (!queryEngine || page.pageIndex > caretPage + 1) ? [] : primitives(page.pageIndex) }
       : page), frameEpoch + 1);
     return frame;
   };
   if (boundary === 'warm') changePages([0], false, frame.frameEpoch);
   if (options.warmCaret) changePages([caretPage], false, frame.frameEpoch);
   let read: RetainedFrame | undefined;
-  const factory: ResidentCommandHooksFactory = (engine, init, environment) => options.productionHooks
+  const factory: DocxCommandHooksFactory = (engine, init, environment) => options.productionHooks
     ? createResidentDocxCommandHooks(engine, init, { readSelectionLayout: () => {
       const layout = environment!.readSelectionLayout();
       read = layout.frame;
@@ -81,10 +87,14 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     };
   const sticky = new Map<number, YrsLoc>();
   const source = readFileSync(new URL('./residentEngineWorker.ts', import.meta.url), 'utf8');
+  const reservationStart = source.indexOf('const appliedLayoutReservations =');
+  const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const parseFailures = source.indexOf('let queryParseFailures = 0;');
   const binding = source.slice(parseFailures < 0 ? source.indexOf('function bindResidentCommands(') : parseFailures,
     source.indexOf('function replacementCommandInit('));
   const dependencies = {
+    resolveReservations, validReservationsPayload, CANVAS_PAGE_GAP_PX,
+    cellSelectionHeadPosition,
     sessionFonts: null, ResidentSessionFonts, scope: {}, proposals: null, resetResidentObjectHandles() {},
     createProposalRegistry: () => ({ snapshot: () => ({ previewVersion: 0, proposals: [] }) }),
     session: {
@@ -128,10 +138,11 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       },
     },
     commandHooksFactory: factory,
-    init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as ResidentCommandInitRequest,
+    collaboration: null,
+    init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
     commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
-    createResidentCommandHost: (options: ResidentCommandHostOptions) => options.hooks,
+    createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => ({ positionOf: (at: YrsLoc, root: string) => {
       expect(at).toEqual(focus);
       expect(root).toBe('body');
@@ -165,6 +176,9 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       }
       return {
         dispose: () => { entry.disposed = true; },
+        visualLinesOnPage: (pageIndex: number) => list.pages[pageIndex]!.unbuilt || options.imageTail && pageIndex > caretPage ? [] : [
+          { pageIndex, x: 20, y: 40, width: 60, height: 10, baseline: 48, from: 1, to: 7 },
+        ],
         caretRect: (at: number) => {
           expect(at).toBe(position);
           if (!list.pages[caretPage]!.unbuilt) return { pageIndex: caretPage, x: 20, y: 40, width: 0, height: 10 };
@@ -178,9 +192,9 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     retainedPageByKey: (current: RetainedFrame, pageId: string) => retainedFramePageById(current, BigInt(pageId)),
   };
   const worker = new Function(...Object.keys(dependencies),
-    new Bun.Transpiler({ loader: 'ts' }).transformSync(binding) +
+    new Bun.Transpiler({ loader: 'ts' }).transformSync(`${reservations}\n${binding}`) +
     '\nlet hooks = bindResidentCommands(init); return { get hooks() { return hooks; }, rebind: () => { hooks = bindResidentCommands(init); }, release: () => { releaseCommandHost?.(); releaseCommandHost = null; }, changes: commandFrameChanges, install: (frame) => { retainedFrame = frame; } };'
-  )(...Object.values(dependencies)) as { hooks: ResidentCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
+  )(...Object.values(dependencies)) as { hooks: DocxCommandHooks; rebind(): void; release(): void; changes: { pages: Set<number> }; install(frame: RetainedFrame): void };
   releasesAfterTest.push(worker.release);
   return {
     builds, releases, queryFrames, navigationQueryFrames, caretHints, focus, caretPage, neighbour, position, changes: worker.changes,
@@ -190,7 +204,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       return { pages: frame.displayList.pages.map((page) => page.pageIndex === pageIndex
         ? { ...page, unbuilt: false, primitives: primitives(pageIndex) } : page) };
     },
-    async navigate() {
+    async navigate(distance?: number) {
       const queries = options.productionHooks ? spyOn(queryModule, 'createDisplayListQueries').mockImplementation((list) => {
         const facade = dependencies.createDisplayListQueries(list);
         navigationQueryFrames.push(queryFrames.at(-1)!);
@@ -198,7 +212,8 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
       }) : undefined;
       try {
         const command = { kind: 'navigate', basis: { epoch: 1, version: 0 },
-          payload: { unit: 'line', direction, extend: false, goalX: 20 } } as DocxCommandEnvelope;
+          payload: distance === undefined ? { unit: 'line', direction, extend: false, goalX: 20 }
+            : { unit: 'page', direction, extend: false, goalX: 20, distance } } as DocxCommandEnvelope;
         const result = await worker.hooks.preflight(command, { basis: command.basis, currentVersion: 0 } as DocxCommandApplyContext);
         expect(result.status).toBe('ready');
         return result.status === 'ready' ? result.prepared.selection : null;
@@ -221,6 +236,25 @@ test('rebinding_command_host_disposes_selection_queries', async () => {
   expect(previous.every((entry) => entry.disposed)).toBe(true);
   await worker.navigate();
   expect(worker.queryFrames.at(-1)!.disposed).toBe(false);
+});
+
+test('page_navigation_materializes_the_target_without_building_intervening_pages', async () => {
+  const worker = splitRowWorker('down');
+  await worker.navigate(2 * (800 + CANVAS_PAGE_GAP_PX));
+  expect(worker.builds).toEqual([[0], [1], [3, 4]]);
+  expect(worker.frame().pages[3]!.page.unbuilt).toBe(false);
+  expect(worker.frame().pages[2]!.page.unbuilt).toBe(true);
+  expect(worker.frame().pages[4]!.page.unbuilt).toBe(false);
+  expect(worker.frame().pages.slice(5).every(({ page }) => page.unbuilt)).toBe(true);
+});
+
+test('page_navigation_bounds_preflight_when_the_document_ends_in_image_only_pages', async () => {
+  const worker = splitRowWorker('down', undefined, undefined, false, { warmCaret: true, imageTail: true });
+  await worker.navigate(2 * (800 + CANVAS_PAGE_GAP_PX));
+  expect(worker.builds).toEqual([[3, 4]]);
+  expect(worker.frame().pages[3]!.page.primitives[0]?.kind).toBe('image');
+  expect(worker.frame().pages[3]!.page.unbuilt).toBe(false);
+  expect(worker.frame().pages.slice(5).every(({ page }) => page.unbuilt)).toBe(true);
 });
 
 test('long_split_row_arrows_stop_after_caret_and_neighbour', async () => {

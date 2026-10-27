@@ -9,10 +9,14 @@ import {
   DocxReplicaNotReadyError,
 } from './components/DocxEditor/hooks/useDocxEditorRefApi';
 import { DocxWorkerError } from './components/DocxEditor/internals/docxWorkerError';
+import { DocxCommandAdmissionError } from './commands/createDocxCommandStore';
+import { LEGACY_SYNC_API_PROP } from './components/DocxEditor/peerless/contracts';
 import type {
+  DocxCommandAdmissionCode,
   DocxCommentInsertion,
   DocxDocumentChange,
   DocxParagraphMatch,
+  DocxParagraphList,
   DocxSelectionInfo,
 } from './index';
 
@@ -24,11 +28,12 @@ function memberDocs(source: string, name: string): Map<string, string> {
   const body = source.match(new RegExp(`^export interface ${name}\\b[^\\n]*\\{\\r?\\n([\\s\\S]*?)^}`, 'm'))?.[1];
   if (body === undefined) throw new Error(`Missing interface ${name}`);
   const docs = new Map<string, string>();
-  for (const member of body.matchAll(/^  (?:readonly )?([\w$]+)\??\s*(?=[:(<])/gm)) {
+  for (const member of body.matchAll(/^  (?:readonly )?(\[[\w$]+\]|[\w$]+)\??\s*(?=[:(<])/gm)) {
     const before = body.slice(0, member.index);
     const comment = before.slice(before.lastIndexOf('/**'));
     const end = comment.indexOf('*/') + 2;
-    docs.set(member[1]!, end > 1 && comment.slice(end).trim() === '' ? comment.slice(0, end) : '');
+    const key = member[1] === '[LEGACY_SYNC_API_PROP]' ? LEGACY_SYNC_API_PROP : member[1]!;
+    docs.set(key, end > 1 && comment.slice(end).trim() === '' ? comment.slice(0, end) : '');
   }
   return docs;
 }
@@ -51,13 +56,14 @@ test('deprecated ref members have public non-deprecated twins or explicit exempt
 });
 
 test('deprecated props and plugin geometry retain their replacements', () => {
-  const props = memberDocs(editor, 'DocxEditorProps');
+  const props = memberDocs(editor, 'DocxEditorBaseProps');
   expect(props.has('experimentalWorkerOpen')).toBe(true);
   expect(props.get('experimentalWorkerOpen')).toContain('@deprecated');
   expect(editor).toMatch(/^  experimentalWorkerOpen\?: boolean;$/m);
-  expect(props.get('legacySyncApi')).toContain('@deprecated');
-  expect(props.get('legacySyncApi')).toContain('0.6.0');
-  const propExemptions = new Set(['pluginOverlays', 'pluginSidebarItems', 'pluginRenderedDomContext', 'legacySyncApi']);
+  const legacy = memberDocs(editor, 'DocxLegacyEditorProps');
+  expect(legacy.get(LEGACY_SYNC_API_PROP)).toContain('@deprecated');
+  expect(legacy.get(LEGACY_SYNC_API_PROP)).toContain('0.6.0');
+  const propExemptions = new Set(['pluginOverlays', 'pluginSidebarItems', 'pluginRenderedDomContext']);
   for (const [member, doc] of props) {
     if (!doc.includes('@deprecated') || propExemptions.has(member)) continue;
     if (member === 'experimentalWorkerOpen') continue;
@@ -96,11 +102,36 @@ test('errors and new public types are exported from the root', () => {
   }
   expect(new WorkerError('open').cause).toBeUndefined();
   expect(index).toMatch(/export\s*\{[^}]*\bDocxWorkerError\b[^}]*\}\s*from\s*['"]\.\/components\/DocxEditor\/internals\/docxWorkerError['"]/);
-  const names = ['DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange'];
+  const Admission: typeof import('./index').DocxCommandAdmissionError = DocxCommandAdmissionError;
+  const codes: DocxCommandAdmissionCode[] = ['input-failed', 'document-replaced', 'target-changed', 'editor-unavailable'];
+  for (const code of codes) {
+    const refusal = new Admission(code);
+    expect(refusal).toBeInstanceOf(Error);
+    expect(refusal).toMatchObject({ name: 'DocxCommandAdmissionError', code, message: code });
+  }
+  // @ts-expect-error
+  const notAdmission: DocxCommandAdmissionCode = 'command-failed';
+  expect(String(notAdmission)).toBe('command-failed');
+  expect(index).toMatch(/export\s*\{[^}]*\bDocxCommandAdmissionError\b[^}]*\bDocxCommandAdmissionCode\b[^}]*\}\s*from\s*['"]\.\/commands\/createDocxCommandStore['"]/);
+  const names = ['DocxParagraphList', 'DocxCommandAdmissionError', 'DocxCommandAdmissionCode', 'DocxWorkerError', 'DocxWorkerEditorChunkLoadError', 'DocxSyncApiError', 'DocxEditorNotReadyError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange', 'DocxEditorBaseProps', 'DocxAsyncEditorProps', 'DocxLegacyEditorProps', 'DocxInThreadEditorProps'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };
   const insertion: DocxCommentInsertion = { paraId: 'p', text: 'text', author: 'Author' };
   const change: DocxDocumentChange = { version: 'v' };
   expect([match.paraId, selection.paraId, insertion.paraId, change.version]).toEqual(['p', null, 'p', 'v']);
+});
+
+
+test('plugin notification drains stay internal', () => {
+  expect(index).not.toMatch(/\b(?:DocxPluginHost|createDocxPluginHost|notificationsIdle)\b/);
+  expect(plugins).not.toContain('notificationsIdle');
+  expect(editor).not.toContain('notificationsIdle');
+});
+
+test('paragraph list is exported by both public roots', () => {
+  const list: DocxParagraphList = { marker: '1.', level: 0, numId: '1', format: 'decimal' };
+  const core: import('@betteroffice/docx').DocxParagraphList = list;
+  expect(core).toEqual(list);
+  expect(index).toMatch(/export type \{[^}]*\bDocxParagraphList\b[^}]*\} from '@betteroffice\/docx\/yrs'/);
 });

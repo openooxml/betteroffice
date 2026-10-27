@@ -1,4 +1,8 @@
+import type { PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import type { AwarenessCursor } from '../collaboration/types';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../collaboration/awareness';
 import type { XlsxEditStep, XlsxRangeAddress, XlsxRangeTarget } from '../edits';
 import { StaleProposalError, type CapturedFormat, type CellPoint, type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import {
@@ -205,15 +209,27 @@ function admitFormatting(handle: WorkbookHandle, sheet: number, range: string): 
   }
 }
 
+function usedClearTarget(handle: WorkbookHandle, target: ReturnType<typeof resolveCommandTarget>) {
+  if (target.end.row < XLSX_MAX_ROWS - 1 && target.end.col < XLSX_MAX_COLUMNS - 1) return target;
+  const used = handle.selectionData(target.sheet, 0, 0, 'usedRange').usedRange;
+  if (!used) return null;
+  const start = { row: Math.max(target.start.row, used.top), col: Math.max(target.start.col, used.left) };
+  const end = { row: Math.min(target.end.row, used.bottom), col: Math.min(target.end.col, used.right) };
+  if (start.row > end.row || start.col > end.col) return null;
+  return { ...target, start, end, range: `${cellAddress(start)}:${cellAddress(end)}` };
+}
+
 function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand): WorkbookReplayOp {
-  if (command.kind === 'select' || command.kind === 'setReadOnly' || command.kind === 'applyUpdate') {
+  if (command.kind === 'select' || command.kind === 'setReadOnly' || command.kind === 'applyUpdate' || command.kind === 'collabPipe') {
     throw new WorkbookCommandRefusal('invalid-command');
   }
   const payload = command.payload;
   if (command.kind === 'applyOps' && 'toolbar' in payload) {
     const { toolbar } = payload;
     if (!toolbar.target) throw new WorkbookCommandRefusal('invalid-command');
-    const target = resolveCommandTarget(handle, toolbar.target, state.sheetIds);
+    const resolved = resolveCommandTarget(handle, toolbar.target, state.sheetIds);
+    const target = toolbar.id === 'clear' ? usedClearTarget(handle, resolved) : resolved;
+    if (!target) return { method: 'editCells', args: [resolved.sheet, []] };
     if (toolbar.id === 'clear' &&
       (target.end.row - target.start.row + 1) * (target.end.col - target.start.col + 1) > MAX_VALIDATION_CELLS) {
       throw new WorkbookCommandRefusal('limit-exceeded');
@@ -297,10 +313,11 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       case 'setNumberFormat':
       case 'applyFormat': op.args[0] = target.sheet; op.args[1] = target.range; break;
       case 'setActiveSheet': op.args[0] = target.sheet; break;
-      case 'moveChart': op.args[0] = target.sheet; break;
+      case 'moveChart':
+      case 'moveRange': op.args[0] = target.sheet; break;
       default: throw new WorkbookCommandRefusal('invalid-command');
     }
-  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart'].includes(op.method)) numericSheet();
+  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'moveRange'].includes(op.method)) numericSheet();
   return op;
 }
 
@@ -355,7 +372,8 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
       }
       break;
     case 'setActiveSheet':
-    case 'moveChart': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
+    case 'moveChart':
+    case 'moveRange': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
   }
 }
 
@@ -374,6 +392,12 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   if (['applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'propose', 'acceptProposal'].includes(method ?? '') &&
     error.message === 'number format table is full') return new WorkbookCommandRefusal('limit-exceeded');
   if (method === 'applyOps' && (
+    error.message === 'invalid collaborative workbook state: too many sheet merge edits' ||
+    error.message === 'invalid collaborative workbook state: too many sheet hyperlink edits'
+  )) {
+    return new WorkbookCommandRefusal('limit-exceeded');
+  }
+  if (method === 'applyOps' && (
     /^formula at sheet \d+, [A-Z]+[1-9]\d* cannot be safely rewritten$/.test(error.message) ||
     /^(?:defined name|chart reference in) .+ cannot be safely rewritten$/.test(error.message) ||
     /^.+ references cells this edit would move, and it cannot be rewritten$/.test(error.message) ||
@@ -382,11 +406,16 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
     /^chart .+ cannot change its anchor kind$/.test(error.message)
   )) return new WorkbookCommandRefusal('unsupported');
+  if (method === 'moveRange' && (
+    /^range move cannot safely preserve .+$/.test(error.message) ||
+    /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
+    /^.+ references cells this move would relocate, and it cannot be rewritten$/.test(error.message)
+  )) return new WorkbookCommandRefusal('unsupported');
   if (method === 'applyOps' &&
     /^chart frame .+ does not hold the chart part and anchor this op was recorded against; its drawing has changed$/.test(error.message)) {
     return new WorkbookCommandRefusal('stale-target');
   }
-  if ((method === 'editCell' || method === 'editCells' || method === 'propose' || method === 'acceptProposal') &&
+  if ((method === 'editCell' || method === 'editCells' || method === 'propose' || method === 'acceptProposal' || method === 'moveRange') &&
     /^(?:cell number must be finite|cell text exceeds Excel's length limit|formula exceeds the length limit)$/.test(error.message)) {
     return new WorkbookCommandRefusal('invalid-step');
   }
@@ -406,10 +435,12 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
   }
   if ((method === 'applyOps' && /^bad ops: /.test(error.message)) ||
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
+    (method === 'editCells' && /^bad edit args: /.test(error.message)) ||
+    (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');
   }
-  if ((method === 'applyOps' || method === 'moveChart') && (
+  if ((method === 'applyOps' || method === 'moveChart' || method === 'moveRange') && (
     /^(?:sheet(?: index)?|row|column) \d+ (?:is )?out of range$/.test(error.message) ||
     /^cell row \d+, column \d+ is out of range$/.test(error.message) ||
     /^sheet \d+ is not an editable worksheet$/.test(error.message) ||
@@ -435,6 +466,7 @@ export interface WorkbookCommandState {
   selection: WorkbookCommandSelection;
   readOnly: boolean;
   statuses: Map<number, CommandStatus>;
+  pipeFrameBytes?: Map<number, number>;
   bases: Map<string, number>;
   sheetRevision: number;
   editState?: WorkbookEditState;
@@ -510,21 +542,43 @@ export function projectEditState(handle: WorkbookHandle, state: WorkbookCommandS
   return Object.keys(changed).length > 0 ? changed : undefined;
 }
 
-function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand): CommandStatus {
-  validateWorkbookCommandPayload(command);
+function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
+  applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void): CommandStatus {
+  validateWorkbookCommandPayload(command, state.pipeFrameBytes);
   if (command.frame && command.frame.sheet >= handle.sheetCount()) throw new WorkbookCommandRefusal('missing-target');
+  if (command.kind === 'collabPipe') {
+    if (!applyPipe) throw new WorkbookCommandRefusal('unsupported');
+    const before = handle.version();
+    applyPipe(command.payload);
+    const limits = state.pipeFrameBytes ??= new Map();
+    for (const op of command.payload.ops) {
+      if (op.op === 'create') {
+        if (!limits.has(command.payload.provider)) limits.set(command.payload.provider, op.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES);
+      } else if (!limits.has(command.payload.provider)) break;
+      else if (op.op === 'destroy') limits.delete(command.payload.provider);
+    }
+    const changed = handle.version() !== before;
+    if (changed) state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
+    return { seq: command.seq, status: changed ? 'applied' : 'noop', committed: changed,
+      ...(changed ? { result: { remoteUpdate: true, proposals: handle.listProposals() } } : {}) };
+  }
   if (command.kind === 'applyUpdate') {
     const before = handle.version();
-    try { handle.applyUpdate(command.payload.update); }
-    catch (error) {
-      if (error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && handle.version() === before) {
-        throw new WorkbookCommandRefusal('invalid-update');
+    let refusedUpdate = false;
+    for (const update of [command.payload.update, ...command.payload.updates ?? []]) {
+      const at = handle.version();
+      try { handle.applyUpdate(update); }
+      catch (error) {
+        if (!(error instanceof Error) || error instanceof WebAssembly.RuntimeError || handle.version() !== at) throw error;
+        if (at === before) throw new WorkbookCommandRefusal('invalid-update');
+        refusedUpdate = true;
+        break;
       }
-      throw error;
     }
     state.formattingDirty = state.mergesDirty = state.catalogDirty = true;
     return { seq: command.seq, status: handle.version() === before ? 'noop' : 'applied',
-      committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals() } };
+      committed: handle.version() !== before, result: { remoteUpdate: true, proposals: handle.listProposals(),
+        ...refusedUpdate ? { refusedUpdate: 'invalid-update' } : {} } };
   }
   if (command.kind === 'select') {
     validateSelection(handle, state, command.payload.selection);
@@ -629,7 +683,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       state.mergesDirty = movesCells || types.some((type) => ['mergeCells', 'unmergeCells'].includes(type));
       state.catalogDirty = types.some((type) => ['addSheet', 'removeSheet', 'moveSheet', 'renameSheet'].includes(type));
     } else if (op.method === 'patchRangeStyle' || op.method === 'setNumberFormat' ||
-      op.method === 'applyFormat' || op.method === 'acceptProposal' ||
+      op.method === 'applyFormat' || op.method === 'acceptProposal' || op.method === 'moveRange' ||
       op.method === 'applyEdits' && op.args[0].steps.some((step) => step.op === 'patchStyle' || step.op === 'setNumberFormat')) {
       state.formattingDirty = true;
     }
@@ -647,7 +701,13 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
   if (op.method !== 'undo' && op.method !== 'redo') {
     if (committed && afterHistory.undoDepth > history.undoDepth) {
       if (state.historySelections.length > history.undoDepth + 1) state.historySelections.length = history.undoDepth + 1;
-      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after: structuredClone(state.selection),
+      let after = structuredClone(state.selection);
+      if (op.method === 'editCell') {
+        const [sheet, row, col] = op.args;
+        after = { sheetId: state.sheetIds[sheet], activeCell: { row, col },
+          range: { kind: 'rowCol', start: { row, col }, end: { row, col } } };
+      }
+      state.historySelections[afterHistory.undoDepth] = { before: beforeSelection, after,
         beforeSheets: beforeSheetIds, afterSheets: [...state.sheetIds] };
     }
   }
@@ -679,7 +739,7 @@ export function applyWorkbookCommand(
 
 export function applyWorkbookCommandIntent(
   handle: WorkbookHandle, state: WorkbookCommandState, command: WorkbookCommand,
-  refusal?: string, cancelled = false
+  refusal?: string, cancelled = false, applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void
 ): WorkbookWireAck {
   let status: CommandStatus;
   try {
@@ -689,7 +749,7 @@ export function applyWorkbookCommandIntent(
         affectedSeqs: [command.seq] };
     } else {
       if (!state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
-      status = applyIntent(handle, state, command);
+      status = applyIntent(handle, state, command, applyPipe);
     }
   } catch (error) {
     const refused = classifyRefusal(error);

@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import JSZip from 'jszip';
 import { xlsxFixture } from './format-fixtures';
 import { openXlsx } from '../src/xlsx';
 
-const toolNames = ['xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_format', 'xlsx_find_replace', 'xlsx_sort', 'xlsx_preview'];
+const toolNames = ['xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_list_defined_names', 'xlsx_format', 'xlsx_find_replace', 'xlsx_sort', 'xlsx_preview'];
 
 test('XLSX MCP discovers tight schemas and executes every spreadsheet tool through export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xlsx-mcp-'));
@@ -53,12 +54,14 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     const sheets = await call('xlsx_edit_sheets', { document, version, edits: [{ action: 'rename', sheet, name: 'Budget' }, { action: 'move', sheet, index: 2 }] });
     version = sheets.version;
     expect(sheets.sheets[2].sheetId).toBe(sheet);
+    const named = await call('xlsx_edit_defined_names', { document, version, edits: [{ action: 'set_defined_name', name: 'Rate', refersTo: '=7', sheet, hidden: true }] });
+    version = named.version;
+    expect((await call('xlsx_list_defined_names', { document, sheet })).items.find((name: { name: string }) => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7', hidden: true });
     const preview = await client.callTool({ name: 'xlsx_preview', arguments: { document, sheet, range: 'A100:C103' } });
     expect(preview.isError).not.toBe(true);
     expect((preview.content as Array<{ type: string }>).some(item => item.type === 'image')).toBe(true);
     for (const [name, args] of [
       ['xlsx_write_range', { document, version, edits: [{ sheet, range: 'A100', values: [[1]], formulas: [['1']] }] }],
-      ['xlsx_read_range', { document, sheet, range: 'A1', limit: 101 }],
       ['xlsx_preview', { document, sheet, range: 'A1', scale: 4 }],
       ['xlsx_edit_grid', { document, version, edits: [{ sheet, axis: 'rows', action: 'insert', at: 0, count: 1 }] }],
       ['xlsx_format', { document, version, edits: [{ sheet, range: 'A100', fill: 'red' }] }],
@@ -68,12 +71,13 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
       expect(invalid.isError).toBe(true);
       expect(invalid.structuredContent).toMatchObject({ code: 'INVALID_ARGUMENT' });
     }
+    expect((await call('xlsx_read_range', { document, sheet, range: 'A1', limit: 101 })).clamping).toContain('limit clamped to 100; follow pagination cursors for remaining content.');
     const missing = await client.callTool({ name: 'xlsx_read_range', arguments: { document, sheet: 'missing', range: 'A1' } });
     expect(missing.structuredContent).toMatchObject({ code: 'UNKNOWN_SHEET' });
     expect(JSON.stringify(missing.structuredContent)).toContain('Budget');
     await call('office_export', { document, path: 'result.xlsx' });
     const reopened = await openXlsx(await readFile(join(root, 'result.xlsx')));
-    try { expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
+    try { expect(reopened.listDefinedNames().items.find(name => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
     finally { reopened.close(); }
     expect(stderr).toBe('');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
@@ -87,7 +91,7 @@ test('XLSX MCP read-only mode removes writes and excludes replacement from its s
     await writeFile(join(root, 'book.xlsx'), await xlsxFixture());
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    for (const name of ['xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_format', 'xlsx_sort']) {
+    for (const name of ['xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_format', 'xlsx_sort']) {
       expect(tools.some(tool => tool.name === name)).toBe(false);
       expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
     }
@@ -99,5 +103,39 @@ test('XLSX MCP read-only mode removes writes and excludes replacement from its s
     expect((await client.callTool({ name: 'xlsx_find_replace', arguments: { document, query: 'Line', replacement: 'X' } })).isError).toBe(true);
     const read = await client.callTool({ name: 'xlsx_read_range', arguments: { document, sheet: 'sheet:0', range: 'B3' } });
     expect(read.structuredContent).toMatchObject({ cells: [{ value: { kind: 'number', value: 100 } }] });
+  } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
+}, 30000);
+
+test('XLSX MCP rename exports current sheet and qualified app titles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xlsx-app-titles-'));
+  const client = new Client({ name: 'xlsx-titles', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [resolve(import.meta.dir, '../src/cli.ts'), '--root', root], stderr: 'pipe' });
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const zip = new JSZip();
+  const names = ['Instructions', 'Version', 'Models'];
+  const app = `<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes" xmlns:x="urn:custom"><Application>Spreadsheet</Application><x:keep attr="exact &amp; intact"/><HeadingPairs><vt:vector size="4" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>3</vt:i4></vt:variant><vt:variant><vt:lpstr>Named Ranges</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant></vt:vector></HeadingPairs><TitlesOfParts><vt:vector size="5" baseType="lpstr"><vt:lpstr>Instructions</vt:lpstr><vt:lpstr>Version</vt:lpstr><vt:lpstr>Models</vt:lpstr><vt:lpstr>Version!Print_Area</vt:lpstr><vt:lpstr>Version</vt:lpstr></vt:vector></TitlesOfParts><x:tail>Keep  spaces</x:tail></Properties>`;
+  zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>${names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`);
+  zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="book" Type="${r}/officeDocument" Target="xl/workbook.xml"/><Relationship Id="app" Type="${r}/extended-properties" Target="docProps/app.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${r}"><sheets>${names.map((name, i) => `<sheet name="${name}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets><definedNames><definedName name="_xlnm.Print_Area" localSheetId="1">Version!$A$1</definedName><definedName name="Version">1</definedName></definedNames></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${names.map((_, i) => `<Relationship Id="rId${i + 1}" Type="${r}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}</Relationships>`);
+  names.forEach((_, i) => zip.file(`xl/worksheets/sheet${i + 1}.xml`, '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'));
+  zip.file('docProps/app.xml', app);
+  try {
+    await writeFile(join(root, 'book.xlsx'), await zip.generateAsync({ type: 'uint8array' }));
+    await client.connect(transport);
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const output = await client.callTool({ name, arguments: args });
+      expect(output.isError, JSON.stringify(output.structuredContent)).not.toBe(true);
+      return output.structuredContent as Record<string, any>;
+    };
+    const { document } = await call('office_open', { path: 'book.xlsx' });
+    const outline = await call('xlsx_outline', { document });
+    await call('xlsx_edit_sheets', { document, version: outline.version, edits: [{ action: 'rename', sheet: outline.items[1].sheetId, name: 'Version History' }] });
+    await call('office_export', { document, path: 'renamed.xlsx' });
+    const exported = await JSZip.loadAsync(await readFile(join(root, 'renamed.xlsx')));
+    expect(await exported.file('docProps/app.xml')!.async('string')).toBe(app
+      .replace('<vt:lpstr>Version</vt:lpstr>', '<vt:lpstr>Version History</vt:lpstr>')
+      .replace('Version!Print_Area', "'Version History'!Print_Area"));
+    expect(await exported.file('xl/workbook.xml')!.async('string')).toContain('name="Version History"');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);

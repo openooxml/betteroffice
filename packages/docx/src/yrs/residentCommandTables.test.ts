@@ -4,6 +4,7 @@ import {
   type CommandArm,
 } from './residentCommandTestSupport';
 import type { DocxCommandEnvelope } from './residentCommandProtocol';
+import type { YrsCellBorders } from './index';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 
 const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
@@ -297,6 +298,115 @@ test('set_table_cell_shading_shades_clears_and_keeps_selection', async () => {
   expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.backgroundColor).toBeUndefined();
 }, TIMEOUT);
 
+test('table_formatting_targets_live_rect_and_preserves_selection', async () => {
+  const arm = await inCell();
+  const kept = arm.state.selection!.focus;
+  const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+  selectCells(arm, [0, 0], [0, 0]);
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, right: line } })).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: line, right: line });
+  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders).toMatchObject({ left: line });
+  expect((payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders as YrsCellBorders | undefined)?.top).toBeUndefined();
+  expect(payload(arm)!.rows[1]!.cells[0]!.tcPr?.borders).toBeUndefined();
+  expect(payload(arm)!.rows[1]!.cells[1]!.tcPr?.borders).toBeUndefined();
+  expect(undo(arm).status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).not.toContain('single');
+  selectCells(arm, [0, 0], [1, 1]);
+  const applied = execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line, bottom: line, left: line, right: line, insideH: line, insideV: line } }));
+  expect(applied.status).toBe('applied');
+  expect(applied.selection?.focus).toMatchObject({ story: kept.story, paraId: kept.paraId, offset: kept.offset });
+  for (const row of payload(arm)!.rows) for (const entry of row.cells) {
+    expect(entry.tcPr?.borders).toMatchObject({ top: line, bottom: line, left: line, right: line });
+  }
+  expect(undo(arm).status).toBe('applied');
+  expect(JSON.stringify(payload(arm))).not.toContain('single');
+  expect(redo(arm).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: line });
+  const storyA = cellStory(arm, 'A');
+  expect(execute(arm, tableCommand(arm, 'insertText', { text: 'x' })).status).toBe('applied');
+  expect(cellText(arm, storyA)).toBe('xA');
+  selectCells(arm, [1, 1], [0, 0]);
+  const red = { style: 'single', size: 8, color: { rgb: 'FF0000' } };
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: red } })).status).toBe('applied');
+  expect(payload(arm)!.rows[0]!.cells[0]!.tcPr?.borders).toMatchObject({ top: red });
+  expect(payload(arm)!.rows[0]!.cells[1]!.tcPr?.borders).toMatchObject({ top: red });
+}, TIMEOUT);
+
+test('table_formatting_refusals_leave_state_unchanged', async () => {
+  const arm = await inCell();
+  const line = { style: 'single', size: 4, color: { rgb: '000000' } };
+  const cases: [Record<string, unknown>, string][] = [
+    [{ borders: { top: { style: '', size: 4, color: { rgb: '000000' } } } }, 'invalid-payload'],
+    [{ borders: { top: { style: 'single', size: -1, color: { rgb: '000000' } } } }, 'invalid-payload'],
+    [{ borders: { top: { style: 'single', size: 4, color: { rgb: 'ZZZZZZ' } } } }, 'invalid-payload'],
+    [{ borders: { middle: line } }, 'invalid-payload'],
+    [{}, 'invalid-payload'],
+  ];
+  for (const [extra, reason] of cases) {
+    const version = arm.engine.proposalEngine.version();
+    const vector = arm.engine.encodeStateVector();
+    const before = JSON.stringify(payload(arm));
+    expect(execute(arm, tableCommand(arm, 'setTableBorders', extra))).toMatchObject({ status: 'refused', reason });
+    expect(arm.engine.proposalEngine.version()).toBe(version);
+    expect(arm.engine.encodeStateVector()).toEqual(vector);
+    expect(JSON.stringify(payload(arm))).toBe(before);
+  }
+  arm.state.readOnly = true;
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line } })))
+    .toMatchObject({ status: 'refused', reason: 'read-only' });
+  arm.state.readOnly = false;
+  expect(execute(arm, tableCommand(arm, 'setTableBorders', { borders: { top: line }, suggesting: { name: 'W', date: '2026-01-01' } })))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+}, TIMEOUT);
+
+test('set_table_properties_patches_tblpr_and_refuses_stale_versions', async () => {
+  const arm = await inCell();
+  const applied = execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: 2500, widthType: 'pct', justification: 'center' },
+  }));
+  expect(applied.status).toBe('applied');
+  expect(payload(arm)!.tblPr).toMatchObject({ width: 2500, widthType: 'pct', justification: 'center' });
+  expect(undo(arm).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.justification).toBeUndefined();
+  expect(redo(arm).status).toBe('applied');
+  expect(payload(arm)!.tblPr).toMatchObject({ width: 2500, widthType: 'pct', justification: 'center' });
+  const cleared = execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: null, widthType: 'auto', justification: null },
+  }));
+  expect(cleared.status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBeUndefined();
+  expect(payload(arm)!.tblPr?.widthType).toBe('auto');
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { width: 3000, widthType: 'dxa' },
+  })).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBe(3000);
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { widthType: 'auto' },
+  })).status).toBe('applied');
+  expect(payload(arm)!.tblPr?.width).toBeUndefined();
+  expect(payload(arm)!.tblPr?.widthType).toBe('auto');
+  const version = arm.engine.proposalEngine.version();
+  const before = JSON.stringify(payload(arm));
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, expectVersion: 'stale',
+  }))).toMatchObject({ status: 'refused', reason: 'stale-version' });
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, expectVersion: 'stale',
+    selection: selection('missing', 0, 0, 'body'),
+  }))).toMatchObject({ status: 'refused', reason: 'stale-version' });
+  expect(arm.engine.proposalEngine.version()).toBe(version);
+  expect(JSON.stringify(payload(arm))).toBe(before);
+  for (const extra of [{ op: 'patch', patch: { widthType: 'wide' } }, { op: 'patch', patch: { width: -5 } },
+    { op: 'patch', patch: { width: 2500.5 } },
+    { op: 'rowHeight', patch: {} }, { op: 'patch', patch: { tableLayout: 'fixed' } }] as Record<string, unknown>[]) {
+    expect(execute(arm, tableCommand(arm, 'setTableProperties', extra)))
+      .toMatchObject({ status: 'refused', reason: 'invalid-payload' });
+  }
+  expect(execute(arm, tableCommand(arm, 'setTableProperties', {
+    op: 'patch', patch: { justification: 'right' }, suggesting: { name: 'W', date: '2026-01-01' },
+  }))).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+}, TIMEOUT);
+
 test('table_commands_refuse_outside_cells_readonly_and_bad_payloads_without_mutation', async () => {
   const arm = await openCommandEngine([], { bodyXml: body });
   const kinds: [string, Record<string, unknown>][] = [
@@ -308,6 +418,7 @@ test('table_commands_refuse_outside_cells_readonly_and_bad_payloads_without_muta
     ['mergeTableCells', {}],
     ['splitTableCell', { rows: 1, columns: 2 }],
     ['setTableCellShading', { color: 'FF0000' }],
+    ['setTableBorders', { borders: { top: { style: 'single', size: 4, color: { rgb: '000000' } } } }],
   ];
   for (const [kind, extra] of kinds) {
     const version = arm.engine.proposalEngine.version();

@@ -89,7 +89,7 @@ const measurementFontProvider = { resolve: () => async () => (await fetch(fontUr
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   useEffect(() => { void pagedDocx(3, 12).then(setBuffer); }, []);
-  return buffer && <DocxEditor ref={attachEditor} documentBuffer={buffer} experimentalPeerless={arm === 'worker'} legacySyncApi={arm === 'hybrid'}
+  return buffer && <DocxEditor ref={attachEditor} documentBuffer={buffer} legacySyncApi={arm === 'hybrid'}
     allowHostProposals showHostProposalsInSidebar commentsSidebarOpen plugins={plugins} fonts={fonts}
     measurementFontProvider={measurementFontProvider} showToolbar={false}
     onError={error => probe.errors.push(error.message)} onPluginError={error => probe.errors.push(String(error.error))} />;

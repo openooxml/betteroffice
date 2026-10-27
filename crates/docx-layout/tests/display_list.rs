@@ -2110,7 +2110,11 @@ fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
 fn carried_table_borders_preserve_cell_content_across_slices() {
     use serde_json::json;
 
-    for (alignment, first_baseline) in [("top", 12.0), ("center", 40.0), ("bottom", 68.0)] {
+    for (alignment, fragment_heights, first_baseline) in [
+        ("top", [90.0, 60.0, 80.0], 12.0),
+        ("center", [90.0, 88.0, 52.0], 40.0),
+        ("bottom", [90.0, 96.0, 44.0], 68.0),
+    ] {
         let paragraphs: Vec<_> = (0..4)
             .map(|index| {
                 json!({ "kind": "paragraph", "id": 70 + index,
@@ -2144,11 +2148,35 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
         )
         .unwrap();
         let dl = build_dl(&input.to_string());
-        assert_eq!(dl.pages.len(), 3, "{alignment}");
+        assert_eq!(dl.pages.len(), fragment_heights.len(), "{alignment}");
+        for (page_index, expected_height) in fragment_heights.iter().enumerate() {
+            let fragment = &input["layout"]["pages"][page_index]["fragments"][0];
+            assert_eq!(
+                fragment["height"].as_f64(),
+                Some(*expected_height),
+                "{alignment}, page {page_index}"
+            );
+        }
+        assert!(
+            text_prims(&dl.pages[0].primitives).is_empty(),
+            "{alignment}"
+        );
+        assert_eq!(input["layout"]["pages"][0]["fragments"][0]["rowEnd"], 1);
         assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
+        assert_eq!(
+            input["layout"]["pages"][1]["fragments"][0]["clipTop"]
+                .as_f64()
+                .unwrap_or(0.0),
+            0.0,
+            "{alignment}"
+        );
         assert!(dl.pages[1].primitives.iter().any(|primitive| {
             matches!(primitive, Primitive::Line(line)
-                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true))
+                if line.role == Some(docx_layout::display_list::LineRole::TableBorder)
+                    && line.attrs.cell.as_ref().is_some_and(|cell|
+                        cell.row == 1 && cell.col == 0
+                            && cell.owns_top_border == Some(true))
+                    && line.stroke_width.as_f64() == Some(8.0)
                     && line.y1 == line.y2 && line.y1.as_f64() == Some(0.0))
         }));
         let last_fragment =
@@ -3821,4 +3849,39 @@ fn a_row_after_per_cell_continuations_uses_the_shared_remaining_band() {
         .unwrap();
     assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(10.0));
     assert_eq!(clip.h.as_ref().unwrap().as_f64(), Some(80.0));
+}
+
+#[test]
+fn section_page_borders_paint_on_their_pages() {
+    use serde_json::json;
+    let mut input = json!({
+        "measured": [{
+            "block": {"kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 5,
+                "runs": [{"kind": "text", "text": "text", "pmStart": 1}]},
+            "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{"headRun": 0,
+                "headChar": 0, "tailRun": 0, "tailChar": 4, "width": 40, "ascent": 16,
+                "descent": 4, "lineHeight": 20}]}
+        }],
+        "options": {"pageSize": {"w": 240, "h": 120},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+    });
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let side = json!({"style": "single", "size": 4, "space": 24});
+    input["layout"]["pages"][0]["pageBorders"] = json!({"offsetFrom": "page",
+        "top": side, "right": side, "bottom": side, "left": side});
+    let dl = build_dl(&input.to_string());
+    let border = serde_json::to_value(&dl.pages[0].page_borders).unwrap();
+    assert_eq!(border.as_array().map(Vec::len), Some(1));
+    let edges = ["x", "y", "w", "h"].map(|key| border[0][key].as_f64());
+    assert_eq!(edges, [Some(32.0), Some(32.0), Some(176.0), Some(56.0)]);
+
+    input["layout"]["pages"][0]["pageBorders"]["display"] = json!("notFirstPage");
+    input["layout"]["pages"][0]["number"] = json!(5);
+    input["layout"]["pages"][0]["sectionPageIndex"] = json!(0);
+    assert!(
+        build_dl(&input.to_string()).pages[0]
+            .page_borders
+            .is_empty()
+    );
 }

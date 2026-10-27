@@ -22,9 +22,18 @@ import type { EditorApi, PreparedFile, Room } from "./Editor";
 
 const Editor = lazy(() => import("./Editor"));
 interface Session {
+  key: string;
   file: OpenFile;
   prepared: PreparedFile;
   revision: SessionRevision;
+  api: EditorApi | null;
+}
+interface PendingSession {
+  session: Session;
+  request: number;
+  previous: Session | null;
+  checkpoint: number;
+  promoting?: boolean;
 }
 const names = { docx: "Docs", xlsx: "Sheets", pptx: "Slides" };
 
@@ -39,6 +48,9 @@ export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  const [pending, setPending] = useState<PendingSession | null>(null);
+  const pendingRef = useRef<PendingSession | null>(null);
+  const [openingDocx, setOpeningDocx] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,10 +58,10 @@ export function App() {
   const [room, setRoom] = useState<Room | null>(null);
   const [roomPanel, setRoomPanel] = useState(false);
   const [status, setStatus] = useState("");
-  const api = useRef<EditorApi | null>(null);
   const sequence = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
-  const saving = useRef<Promise<boolean> | null>(null);
+  const saving = useRef<{ session: Session; task: Promise<boolean> } | null>(null);
+  const promotions = useRef<Promise<void>>(Promise.resolve());
   const busyRef = useRef(false);
 
   const report = useCallback(
@@ -84,15 +96,13 @@ export function App() {
     current.revision.change();
     synchronizeDirty(current);
   }, [synchronizeDirty]);
-  const ready = useCallback((value: EditorApi | null) => {
-    api.current = value;
-  }, []);
 
   const save = useCallback(
-    (saveAs = false, supplied?: Uint8Array): Promise<boolean> => {
-      if (saving.current) return saving.current;
-      const current = sessionRef.current;
-      if (!current || !api.current) return Promise.resolve(false);
+    (saveAs = false, supplied?: Uint8Array, current = sessionRef.current): Promise<boolean> => {
+      if (saving.current)
+        return saving.current.session === current ? saving.current.task : Promise.resolve(false);
+      const editor = current?.api;
+      if (!current || !editor || sessionRef.current !== current) return Promise.resolve(false);
       const suppliedCheckpoint = current.revision.checkpoint();
       const task = (async () => {
         try {
@@ -102,7 +112,7 @@ export function App() {
           const checkpoint = supplied
             ? suppliedCheckpoint
             : current.revision.checkpoint();
-          const bytes = supplied ?? (await api.current!.serialize());
+          const bytes = supplied ?? (await editor.serialize());
           if (isNative()) {
             const result = await invoke<{ name: string } | null>({
               type: "save",
@@ -132,37 +142,52 @@ export function App() {
           return false;
         }
       })();
-      saving.current = task;
+      saving.current = { session: current, task };
       void task.finally(() => {
-        saving.current = null;
+        if (saving.current?.task === task) saving.current = null;
       });
       return task;
     },
     [refreshConfig, report, synchronizeDirty]
   );
 
-  const mayLeave = useCallback(async (): Promise<boolean> => {
+  const mayLeave = useCallback(async (current = sessionRef.current): Promise<number | false> => {
     if (document.activeElement instanceof HTMLElement)
       document.activeElement.blur();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    const current = sessionRef.current;
-    if (!current || !current.revision.dirty) return true;
-    const choice = isNative()
-      ? await invoke<string>({ type: "confirmClose", name: current.file.name })
-      : window.confirm("Discard unsaved changes?")
-      ? "discard"
-      : "cancel";
-    return (
-      choice === "discard" ||
-      (choice === "save" && (await save()) && !current.revision.dirty)
-    );
+    let approved: number | null = null;
+    while (sessionRef.current === current) {
+      if (saving.current) {
+        await saving.current.task;
+        continue;
+      }
+      const checkpoint = current?.revision.checkpoint() ?? 0;
+      if (!current?.revision.dirty || checkpoint === approved) return checkpoint;
+      const choice = isNative()
+        ? await invoke<string>({ type: "confirmClose", name: current.file.name })
+        : window.confirm("Discard unsaved changes?")
+        ? "discard"
+        : "cancel";
+      if (choice === "discard") approved = checkpoint;
+      else if (choice !== "save" || !(await save(false, undefined, current))) return false;
+    }
+    return false;
   }, [save]);
 
   const open = useCallback(
     async (file?: OpenFile) => {
       const request = ++sequence.current;
+      pendingRef.current = null;
+      setPending(null);
+      setOpeningDocx(false);
+      setBusy(false);
+      busyRef.current = false;
       try {
-        if (!(await mayLeave()) || request !== sequence.current) return;
+        await promotions.current;
+        if (request !== sequence.current) return;
+        const checkpoint = await mayLeave();
+        if (checkpoint === false || request !== sequence.current) return;
+        const previous = sessionRef.current;
         if (!file) {
           if (!isNative()) {
             fileInput.current?.click();
@@ -178,6 +203,9 @@ export function App() {
           );
         setBusy(true);
         busyRef.current = true;
+        const workerDocx = format === "docx" &&
+          new URLSearchParams(location.search).get("peerless") !== "0";
+        setOpeningDocx(workerDocx);
         setError(null);
         const response = await fetch(file.url);
         if (!response.ok) throw new Error(`Could not read ${file.name}.`);
@@ -187,7 +215,13 @@ export function App() {
           format
         );
         if (request !== sequence.current) return;
-        const next = { file, prepared, revision: new SessionRevision() };
+        const next = { key: crypto.randomUUID(), file, prepared, revision: new SessionRevision(), api: null };
+        if (workerDocx) {
+          const loading = { session: next, request, previous, checkpoint };
+          pendingRef.current = loading;
+          setPending(loading);
+          return;
+        }
         if (isNative()) await invoke({ type: "activate", id: file.id });
         setRoom(null);
         setStatus("");
@@ -198,14 +232,107 @@ export function App() {
       } catch (cause) {
         if (request === sequence.current) report(cause);
       } finally {
-        if (request === sequence.current) {
+        if (request === sequence.current && pendingRef.current?.request !== request) {
           setBusy(false);
           busyRef.current = false;
+          setOpeningDocx(false);
         }
       }
     },
     [config.format, mayLeave, refreshConfig, report]
   );
+
+  const discardPending = useCallback((current: PendingSession) => {
+    if (pendingRef.current !== current) return;
+    pendingRef.current = null;
+    setPending(null);
+    setOpeningDocx(false);
+    setBusy(false);
+    busyRef.current = false;
+  }, []);
+  const editorReady = useCallback((current: Session, value: EditorApi | null) => {
+    current.api = value;
+    if (sessionRef.current === current) return;
+    const loading = pendingRef.current;
+    if (!value || loading?.session !== current || loading.promoting) return;
+    loading.promoting = true;
+    const promote = async () => {
+      let activated = false;
+      const saveTask = () => saving.current?.task;
+      const valid = () => pendingRef.current === loading && loading.request === sequence.current &&
+        sessionRef.current === loading.previous && current.api === value;
+      const restore = async () => {
+        if (!activated) return;
+        const previous = sessionRef.current;
+        if (previous) {
+          await invoke({ type: "activate", id: previous.file.id });
+          synchronizeDirty(previous);
+        } else await invoke({ type: "deactivate" });
+        activated = false;
+      };
+      try {
+        if (!valid()) return;
+        while (saving.current) await saving.current.task;
+        if (!valid()) return;
+        if (isNative()) {
+          await invoke({ type: "activate", id: current.file.id, retainId: loading.previous?.file.id });
+          activated = true;
+          await refreshConfig();
+        }
+        let approved = loading.checkpoint;
+        while (valid()) {
+          const previous = loading.previous;
+          if (previous?.api?.flushPendingInput) {
+            await previous.api.flushPendingInput();
+            if (!valid()) break;
+          }
+          const task = saveTask();
+          if (task) {
+            await task;
+            continue;
+          }
+          const checkpoint = previous?.revision.checkpoint() ?? 0;
+          if (previous?.revision.dirty && checkpoint !== approved) {
+            const consent = await mayLeave(previous);
+            if (consent === false) {
+              await restore();
+              discardPending(loading);
+              return;
+            }
+            approved = consent;
+            continue;
+          }
+          sessionRef.current = current;
+          setSession(current);
+          setRoom(null);
+          setStatus("");
+          setDirty(false);
+          discardPending(loading);
+          if (activated) {
+            activated = false;
+            await invoke({ type: "activate", id: current.file.id });
+            synchronizeDirty(current);
+          }
+          return;
+        }
+        await restore();
+      } catch (cause) {
+        try { await restore(); } catch (failure) { report(failure); }
+        if (pendingRef.current === loading) {
+          discardPending(loading);
+          report(cause);
+        } else if (sessionRef.current === current) report(cause);
+      }
+    };
+    promotions.current = promotions.current.then(promote, promote);
+  }, [discardPending, mayLeave, refreshConfig, report, synchronizeDirty]);
+  const editorError = useCallback((current: Session, cause: Error) => {
+    const loading = pendingRef.current;
+    if (loading?.session === current) {
+      discardPending(loading);
+      report(cause);
+    } else if (sessionRef.current === current) report(cause);
+  }, [discardPending, report]);
 
   const openBrowserFile = useCallback(
     async (file: File) => {
@@ -233,7 +360,15 @@ export function App() {
   );
 
   const close = useCallback(async () => {
-    if (busyRef.current || !(await mayLeave())) return false;
+    if (busyRef.current) return false;
+    const current = sessionRef.current;
+    while (sessionRef.current === current) {
+      const consent = await mayLeave(current);
+      if (consent === false || busyRef.current) return false;
+      if (saving.current || (current?.revision.dirty && current.revision.checkpoint() !== consent)) continue;
+      break;
+    }
+    if (sessionRef.current !== current) return false;
     sequence.current += 1;
     setSession(null);
     sessionRef.current = null;
@@ -255,10 +390,10 @@ export function App() {
         else if (command === "save" || command === "saveAs")
           void save(command === "saveAs");
         else if (command === "undo" || command === "redo") {
-          api.current?.focus();
+          sessionRef.current?.api?.focus();
           dispatchEditorShortcut("z", command === "redo");
         } else if (command === "find") dispatchEditorShortcut("f");
-        else if (command === "print") api.current?.print();
+        else if (command === "print") sessionRef.current?.api?.print();
       },
     };
     if (isNative()) void invoke({ type: "ready" }).catch(report);
@@ -294,15 +429,16 @@ export function App() {
 
   const switchRoom = async (nextRoom: Room | null) => {
     const current = sessionRef.current;
-    if (!current || !api.current || busyRef.current) return;
+    const editor = current?.api;
+    if (!current || !editor || busyRef.current || saving.current) return;
     try {
       setBusy(true);
       busyRef.current = true;
-      const bytes = await api.current.serialize();
+      const bytes = await editor.serialize();
       const { prepareFile } = await import("./Editor");
       const prepared = await prepareFile(bytes, current.prepared.format);
       if (sessionRef.current !== current) return;
-      const next = { ...current, prepared };
+      const next = { ...current, prepared, api: room?.id === nextRoom?.id ? current.api : null };
       sessionRef.current = next;
       setSession(next);
       setRoom(nextRoom);
@@ -376,14 +512,14 @@ export function App() {
             <button
               className="quiet-button"
               onClick={() => void open()}
-              disabled={busy}
+              disabled={busy && !openingDocx}
             >
               Open…
             </button>
             <button
               className="quiet-button"
               onClick={() => void save()}
-              disabled={busy}
+              disabled={busy && !openingDocx}
             >
               Save
             </button>
@@ -447,22 +583,28 @@ export function App() {
           <p>Open the same file and enter the same room ID to edit together.</p>
         </form>
       )}
-      {session ? (
-        <main className="editor-stage" inert={busy}>
-          <Suspense fallback={<p className="loading">Opening editor…</p>}>
-            <Editor
-              key={`${session.file.id}:${room?.id ?? ""}`}
-              file={session.prepared}
-              name={session.file.name}
-              room={room}
-              onSave={(bytes) => void save(false, bytes)}
-              onChange={changed}
-              onError={report}
-              onReady={ready}
-              onOpen={openBrowserFile}
-              onStatus={setStatus}
-            />
-          </Suspense>
+      {session || pending ? (
+        <main className="editor-stage" inert={busy && !openingDocx}>
+          {[session, pending?.session].filter((current): current is Session => !!current).map((current) => (
+            <div key={current.key} className="editor-layer"
+              style={{ visibility: current === session ? "visible" : "hidden" }}
+              inert={current !== session} aria-hidden={current !== session}>
+              <Suspense fallback={<p className="loading">Opening editor…</p>}>
+                <Editor
+                  key={`${current.key}:${current === session ? room?.id ?? "" : ""}`}
+                  file={current.prepared}
+                  name={current.file.name}
+                  room={current === session ? room : null}
+                  onSave={(bytes) => { if (sessionRef.current === current) void save(false, bytes, current); }}
+                  onChange={() => { if (sessionRef.current === current) changed(); }}
+                  onError={(cause) => editorError(current, cause)}
+                  onReady={(value) => editorReady(current, value)}
+                  onOpen={openBrowserFile}
+                  onStatus={(value) => { if (sessionRef.current === current) setStatus(value); }}
+                />
+              </Suspense>
+            </div>
+          ))}
         </main>
       ) : (
         <StartScreen

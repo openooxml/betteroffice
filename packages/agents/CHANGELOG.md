@@ -1,0 +1,283 @@
+# @betteroffice/agents
+
+## 0.3.0
+
+### Minor Changes
+
+- e5718f5: Adds opt-in `protectedSheets: "allow"` to agent cell writes, formatting, sorting and find/replace. Protection is kept, and `protectedCells` reports edits through protection. The default remains `"refuse"`.
+- d9c0a82: Adds opt-in `width: "copy"` to `insert_table_column` and `insertTableColumn` to preserve existing column widths and refit the table frame. Omitting `width` or choosing `"split"` keeps the current behavior.
+
+### Patch Changes
+
+- c8c5d64: Preserves authored font slots and language when edits rewrite or split DOCX runs. Inserted paragraphs that copy a neighbour's formatting retain its authored fonts without adding resolved theme fonts or inherited script slots.
+- b2fa7b8: Uses Selawik for upright Segoe UI families by default, preserving their weights; italic Segoe UI keeps a real italic fallback face. Adds Office-aware `resolveGlyphFallback` and `resolveGlyphFallbackFace` coverage for characters absent from Selawik in Word and PowerPoint previews.
+- Updated dependencies [e5718f5]
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [eb6df55]
+- Updated dependencies [673dea7]
+- Updated dependencies [c3eaf80]
+- Updated dependencies [d211451]
+- Updated dependencies [f9f560c]
+- Updated dependencies [3fe4c80]
+- Updated dependencies [cc9f38c]
+- Updated dependencies [03591d5]
+- Updated dependencies [c8c5d64]
+- Updated dependencies [e4cf080]
+- Updated dependencies [8c056d3]
+- Updated dependencies [5f4a899]
+- Updated dependencies [27590d9]
+- Updated dependencies [d9c0a82]
+- Updated dependencies [70e3441]
+- Updated dependencies [375cbc3]
+- Updated dependencies [4eaba8b]
+- Updated dependencies [59deeda]
+- Updated dependencies [02818de]
+- Updated dependencies [b2fa7b8]
+- Updated dependencies [23018b6]
+- Updated dependencies [f694c05]
+- Updated dependencies [ef5eaa7]
+- Updated dependencies [d8f4d03]
+- Updated dependencies [361b113]
+- Updated dependencies [ae3902a]
+- Updated dependencies [f0f9ffe]
+- Updated dependencies [3b3af14]
+  - @betteroffice/xlsx@0.5.1
+  - @betteroffice/pptx@0.5.1
+  - @betteroffice/docx@0.5.1
+  - @betteroffice/fonts@0.4.2
+
+## 0.2.0
+
+### Minor Changes
+
+- 38016d1: `docx_edit` can merge table cells: `merge_cells` takes paragraph refs from two corner cells and merges the rectangle between them, keeping every paragraph in reading order. DOCX outline and read results give `rowSpan` and `colSpan` for merged cells.
+- 67c7645: Adds `add_comment`, `reply_comment`, and `resolve_comment` to `pptx_edit`. PPTX discussions are available through `office_outline` with `story: 'comments'` and `office_read`; duplicated slides include independent discussions. Resolving requires modern comments.
+- 24f4c8b: Makes PPTX shape targets infer slides and improves operation errors. Read tools clamp page sizes and `date` accepts calendar dates. Breaking: `set_slide_layout` receipts rename `mapping` to `placeholders`. Adds optional `sheet` defaults to `xlsx_write_range` and `shape` scopes to PPTX `find_replace`.
+- fefa072: Adds `insertTableRow`, `deleteTableRow`, `insertTableColumn` and `deleteTableColumn`, plus matching `pptx_edit` operations. Edits keep formatting, refresh refs and undo. They are refused in collaborative sessions, on merged tables and for cells with text fields. New cells take one line.
+- d72abd4: Adds chart discovery and atomic title and series edits, available by default. Use `charts` and `editCharts`, or the agents tools `xlsx_list_charts`, `xlsx_read_chart_text` and `xlsx_edit_charts`, to replace or remove titles, rename series and change category or value references on unshared chart parts.
+
+### Patch Changes
+
+- 22f572a: PPTX reads distinguish soft line breaks (`\u000b`) from paragraphs (`\n`). `replace_text` keeps matching run formatting, including when removing trailing soft breaks, and otherwise uses the paragraph's first run format. Use `find_replace` or `office_propose` for partial edits.
+- 85a699f: Updates Zod to fix a memory exhaustion vulnerability when validating oversized MCP tool inputs.
+- 4c020da: Conditional formats keep italic text: opening, saving and recovery preserve `<i/>` in differential formats, `DifferentialFormatInput` and `ConditionalFormatInfo.format` gain `italic`, and the agent conditional format tools accept and list it. Recovery data from earlier releases still restores.
+- Updated dependencies [43f168f]
+- Updated dependencies [43f168f]
+- Updated dependencies [632b42e]
+- Updated dependencies [9d18c7b]
+- Updated dependencies [f18a42d]
+- Updated dependencies [165a4e1]
+- Updated dependencies [efa2982]
+- Updated dependencies [a83a9ba]
+- Updated dependencies [6690097]
+- Updated dependencies [814b976]
+- Updated dependencies [d31f5ae]
+- Updated dependencies [5c2d4a0]
+- Updated dependencies [1af18ef]
+- Updated dependencies [a3d6f65]
+- Updated dependencies [072bff8]
+- Updated dependencies [b63a700]
+- Updated dependencies [c688743]
+- Updated dependencies [8275f83]
+- Updated dependencies [08c51da]
+- Updated dependencies [608a4b3]
+- Updated dependencies [4431638]
+- Updated dependencies [92cfe52]
+- Updated dependencies [dfad2a2]
+- Updated dependencies [d7027be]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [91287cd]
+- Updated dependencies [f0f4d5c]
+- Updated dependencies [9b4e48d]
+- Updated dependencies [2d6a44f]
+- Updated dependencies [7a78494]
+- Updated dependencies [c5f2b75]
+- Updated dependencies [1f6f8cc]
+- Updated dependencies [dc2ed15]
+- Updated dependencies [66a06e4]
+- Updated dependencies [b37ed64]
+- Updated dependencies [f07de43]
+- Updated dependencies [f2de9e9]
+- Updated dependencies [92cbda8]
+- Updated dependencies [308aae2]
+- Updated dependencies [c7bf7cb]
+- Updated dependencies [a7718b8]
+- Updated dependencies [d488ffd]
+- Updated dependencies [74e227b]
+- Updated dependencies [206292f]
+- Updated dependencies [4025978]
+- Updated dependencies [a5a589c]
+- Updated dependencies [5e3a968]
+- Updated dependencies [c46bf7f]
+- Updated dependencies [9d85535]
+- Updated dependencies [7c307be]
+- Updated dependencies [9a62f65]
+- Updated dependencies [c688743]
+- Updated dependencies [5455c30]
+- Updated dependencies [3690563]
+- Updated dependencies [c688743]
+- Updated dependencies [c7a0b66]
+- Updated dependencies [92cbda8]
+- Updated dependencies [5cf8c6d]
+- Updated dependencies [2bc343b]
+- Updated dependencies [67c7645]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [fefa072]
+- Updated dependencies [22f572a]
+- Updated dependencies [1002e7e]
+- Updated dependencies [5455c30]
+- Updated dependencies [136b29c]
+- Updated dependencies [258cbb4]
+- Updated dependencies [4858ff4]
+- Updated dependencies [fa13da2]
+- Updated dependencies [4bffe0d]
+- Updated dependencies [0158ba0]
+- Updated dependencies [0148a86]
+- Updated dependencies [0690b4a]
+- Updated dependencies [6b2d297]
+- Updated dependencies [00f3792]
+- Updated dependencies [7337b7c]
+- Updated dependencies [4131734]
+- Updated dependencies [31693d0]
+- Updated dependencies [4c020da]
+- Updated dependencies [d72abd4]
+- Updated dependencies [b0c4c69]
+- Updated dependencies [f9d9d72]
+- Updated dependencies [a5d5ad1]
+- Updated dependencies [74a65da]
+- Updated dependencies [fd516a7]
+- Updated dependencies [fd516a7]
+- Updated dependencies [7c7d619]
+- Updated dependencies [b32f72c]
+- Updated dependencies [c688743]
+- Updated dependencies [0197c5d]
+- Updated dependencies [e7bee5e]
+- Updated dependencies [cee61bc]
+- Updated dependencies [a9de3a6]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [d082b81]
+- Updated dependencies [56a6424]
+- Updated dependencies [c688743]
+- Updated dependencies [6e68827]
+- Updated dependencies [1b4e828]
+- Updated dependencies [94295ef]
+- Updated dependencies [6c2f9c3]
+- Updated dependencies [fd4922e]
+- Updated dependencies [60b97de]
+- Updated dependencies [c0a9c4b]
+- Updated dependencies [c688743]
+- Updated dependencies [8a3684c]
+- Updated dependencies [5455c30]
+- Updated dependencies [e8619ae]
+- Updated dependencies [87b5946]
+- Updated dependencies [6057fec]
+- Updated dependencies [60b801b]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/xlsx@0.5.0
+  - @betteroffice/pptx@0.5.0
+  - @betteroffice/fonts@0.4.1
+
+## 0.1.0
+
+### Minor Changes
+
+- 632b42e: Adds comment discovery through `office_outline` with `story: 'comments'` and `reply_comment` and `resolve_comment` operations in `docx_edit`. Adds `updateComment` to DOCX sessions for metadata edits.
+- 3b96e48: Adds an opt-in `add_comment` op to `docx_edit` and `DocxAgentDocument.edit`, which anchors a Word comment on one grep match. Each line of the comment text becomes a paragraph.
+- 4d0b2e2: Adds opt-in `runFormat: 'anchor'` to `docx_edit` `insert_paragraphs` to copy the anchor's first plain run formatting; style formatting remains the default.
+- 07709cb: `docx_edit` `insert_paragraphs` takes `list: 'continue'` to add items after a list item at the same level, with its numbering, style and paragraph formatting. DOCX outline entries of list paragraphs include a zero-based `list.level`.
+- 9d18c7b: Adds opt-in `insert_section_break` and `set_section` edits with section listings in `office_outline`. DOCX sessions add `insertSectionBreakAfter`, `setSectionProperties` and `listSections` for section starts, orientation, page size and margins.
+- c688743: First release: agents get bounded tools to outline, read, search and edit DOCX, XLSX and PPTX files, propose changes, render PNG previews, and verify saving and reopening. Includes `attachXlsx` and `attachPptx` live handles and a local stdio MCP server, `createOfficeMcpServer`.
+- 8348fa0: `pptx_edit` `move_slide` takes `after` or `before` a slide ID as an alternative to `index`, so a slide can be placed next to another without position arithmetic. Saved decks keep every slide's `p:sldId` across reorders, and inserted slides take IDs above all existing ones.
+- f18a42d: Adds opt-in `setSlideLayout` and the `pptx_edit` operation `set_slide_layout` to change a slide’s layout with explicit placeholder mappings. Layout inventories include placeholder IDs and names; unmapped shapes keep their data and geometry.
+- 165a4e1: Adds `xlsx_edit_defined_names` and `xlsx_list_defined_names` for workbook and sheet scoped names, including hidden flags. Adds typed defined name operations through `applyOps` and paginated `listDefinedNames` reads.
+- fd516a7: Adds conditional formatting: `conditionalFormats(sheet)` lists rules, and agents add or delete `cellIs` and `expression` rules with a differential format via `xlsx_list_conditional_formats` and `xlsx_edit_conditional_formats`. Structural edits that would invalidate session-authored rules are refused; source rules keep their geometry.
+
+### Patch Changes
+
+- 0a6af1f: DOCX proposal accepts replace only the changed middle of a match, so appending a word is a pure tracked insertion. PPTX `duplicate_slide` takes an optional `after` slide ID, exclusive with `index`.
+- 38d4a12: pptx_edit validation errors name the edit field that is missing or not allowed, including for add_image_file, instead of a bare "Invalid input".
+- 0158ba0: Adds `setAutoFilter` operations and `xlsx_set_auto_filter` to set, extend or remove worksheet filter buttons while preserving filter criteria. Sheet outlines include `autoFilter` by default; ranges overlapping tables are refused.
+- fd516a7: Bounds `xlsx_list_conditional_formats` text by default and adds `xlsx_read_conditional_format_formula` to read complete formulas with `nextStart` pagination. Batch edits report IDs for replacement rules.
+- Updated dependencies [632b42e]
+- Updated dependencies [9d18c7b]
+- Updated dependencies [f18a42d]
+- Updated dependencies [165a4e1]
+- Updated dependencies [efa2982]
+- Updated dependencies [a83a9ba]
+- Updated dependencies [6690097]
+- Updated dependencies [d31f5ae]
+- Updated dependencies [5c2d4a0]
+- Updated dependencies [1af18ef]
+- Updated dependencies [a3d6f65]
+- Updated dependencies [072bff8]
+- Updated dependencies [b63a700]
+- Updated dependencies [c688743]
+- Updated dependencies [08c51da]
+- Updated dependencies [608a4b3]
+- Updated dependencies [4431638]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [f0f4d5c]
+- Updated dependencies [9b4e48d]
+- Updated dependencies [c5f2b75]
+- Updated dependencies [dc2ed15]
+- Updated dependencies [66a06e4]
+- Updated dependencies [b37ed64]
+- Updated dependencies [f07de43]
+- Updated dependencies [f2de9e9]
+- Updated dependencies [92cbda8]
+- Updated dependencies [d488ffd]
+- Updated dependencies [4025978]
+- Updated dependencies [a5a589c]
+- Updated dependencies [c46bf7f]
+- Updated dependencies [9d85535]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [92cbda8]
+- Updated dependencies [2bc343b]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [258cbb4]
+- Updated dependencies [4858ff4]
+- Updated dependencies [fa13da2]
+- Updated dependencies [0158ba0]
+- Updated dependencies [0148a86]
+- Updated dependencies [0690b4a]
+- Updated dependencies [6b2d297]
+- Updated dependencies [00f3792]
+- Updated dependencies [b0c4c69]
+- Updated dependencies [f9d9d72]
+- Updated dependencies [a5d5ad1]
+- Updated dependencies [74a65da]
+- Updated dependencies [fd516a7]
+- Updated dependencies [fd516a7]
+- Updated dependencies [b32f72c]
+- Updated dependencies [c688743]
+- Updated dependencies [0197c5d]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [c688743]
+- Updated dependencies [6e68827]
+- Updated dependencies [1b4e828]
+- Updated dependencies [94295ef]
+- Updated dependencies [6c2f9c3]
+- Updated dependencies [fd4922e]
+- Updated dependencies [c0a9c4b]
+- Updated dependencies [c688743]
+- Updated dependencies [87b5946]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/pptx@0.3.0
+  - @betteroffice/xlsx@0.4.0
+  - @betteroffice/fonts@0.4.1

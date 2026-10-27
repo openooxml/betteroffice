@@ -1,6 +1,43 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, test } from 'bun:test';
 import { act, fireEvent } from '@testing-library/react';
 import { open } from './peerlessTestHarness';
+import * as wasm from '../../../pptx/src/wasm/loader';
+
+test('deleting every slide keeps document commands and history available', async () => {
+  const saved = mock((_bytes: Uint8Array) => {});
+  const value = await open({ onSave: saved });
+  const access = await value.api.handleAsync();
+  const slides = [...value.client.state.slides];
+  for (const slide of slides) {
+    await act(async () => { await access.deleteSlide(slide.id); });
+  }
+  expect(value.client.state.slides).toHaveLength(0);
+  expect(value.view.getByTestId('pptx-worker-status').textContent).toBe('No slides');
+  expect(value.view.queryByTestId('pptx-notes-textarea')).toBeNull();
+  for (const command of ['undo', 'insertSlide', 'save'] as const) {
+    expect(value.api.commands.getState(command).enabled).toBe(true);
+  }
+  for (const command of ['insertImage', 'exportPng', 'slideshow'] as const) {
+    expect(value.api.commands.getState(command)).toMatchObject({ enabled: false, disabledReason: { code: 'slide-required' } });
+  }
+  await act(async () => { expect(await value.api.commands.execute('save', null)).toMatchObject({ ok: true }); });
+  expect(saved).toHaveBeenCalledTimes(1);
+  const empty = wasm.openPresentation(saved.mock.calls[0]![0]);
+  try { expect(empty.snapshot().slides).toHaveLength(0); }
+  finally { empty.dispose(); }
+  await act(async () => { expect(await value.api.commands.execute('undo', null)).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides.map((slide) => slide.id)).toEqual([slides[1]!.id]);
+  expect(value.api.commands.getState('redo').enabled).toBe(true);
+  await act(async () => { expect(await value.api.commands.execute('redo', null)).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides).toHaveLength(0);
+  await act(async () => { expect(await value.api.commands.execute('insertSlide', {})).toMatchObject({ ok: true }); });
+  expect(value.client.state.slides).toHaveLength(1);
+  expect(value.client.state.activeSlideId).toBe(value.client.state.slides[0]!.id);
+  expect(value.view.queryByTestId('pptx-worker-status')).toBeNull();
+  const recovered = wasm.openPresentation(await value.api.saveAsync());
+  try { expect(recovered.snapshot().slides).toHaveLength(1); }
+  finally { recovered.dispose(); }
+});
 
 test('object_slide_history', async () => {
   const value = await open();
@@ -44,4 +81,28 @@ test('object_slide_history', async () => {
   await act(async () => { value.view.rerender(value.ui(true)); await value.api.flushPendingInput(); });
   await expect(access.deleteSlide(value.client.state.slides[0]!.id)).rejects.toThrow();
   expect(value.view.queryByRole('button', { name: 'Delete slide' })).toBeNull();
+});
+
+test('hover cursor follows the confirmed geometry under the pointer', async () => {
+  const value = await open();
+  const line = value.box.lines[0]!;
+  const word = { x: line.caretStops[2]!.x, y: line.y + line.height / 2 };
+  const move = (x: number, y: number, buttons = 0, pointerId = 7) => {
+    act(() => { fireEvent.pointerMove(value.stage, { clientX: x, clientY: y, pointerId, isPrimary: true, buttons }); });
+    return value.canvas.style.cursor;
+  };
+  expect(value.canvas.style.cursor).toBe('default');
+  expect(move(word.x, word.y)).toBe('text');
+  expect(move(value.box.x + 1, value.box.y + value.box.h / 2)).toBe('move');
+  expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
+  expect(move(word.x, word.y, 1)).toBe('default');
+  const last = value.box.lines[value.box.lines.length - 1]!;
+  expect(move(word.x, (last.y + last.height + value.box.y + value.box.h) / 2)).toBe('move');
+  act(() => { fireEvent.pointerDown(value.canvas, value.point()); });
+  expect(move(word.x, word.y, 0, 8)).toBe('move');
+  act(() => { fireEvent.pointerUp(value.stage, value.point()); });
+  expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
+  await act(async () => { await value.api.commands!.execute('tool', { value: 'shape:rect' }); });
+  expect(value.canvas.style.cursor).toBe('crosshair');
+  expect(move(word.x, word.y)).toBe('crosshair');
 });

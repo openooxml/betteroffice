@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from 'playwright/test';
+import { pinnedEvaluate } from './pinned-evaluate';
 import JSZip from 'jszip';
 import { readFileSync } from 'node:fs';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
@@ -8,14 +9,16 @@ import type {
   DocxCommandFrame,
 } from '../../packages/docx/src/yrs/residentCommandProtocol';
 import type {
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '../../packages/docx/src/yrs/residentEngineWorkerProtocol';
 
-type HeldMessage = { worker: Worker; message: ResidentEngineWorkerResponse };
+type HeldMessage = { worker: Worker; message: DocxEngineWorkerResponse };
+type CommandConfirmation = Pick<DocxCommandAck, 'session' | 'incarnation' | 'epoch' | 'throughSeq' | 'version'>;
 
 interface InputProbe {
   commands: DocxCommandEnvelope[];
+  confirmedAtSend: Record<number, CommandConfirmation>;
   acks: DocxCommandAck[];
   frames: DocxCommandFrame[];
   initial: DocxCommandAck | null;
@@ -64,13 +67,19 @@ test.use({ launchOptions: { executablePath: process.env.CHROME || undefined } })
 async function installProbe(page: Page) {
   await page.addInitScript(() => {
     const replayed = new WeakSet<Event>();
+    let confirmation: CommandConfirmation | undefined;
+    const confirm = ({ session, incarnation, epoch, throughSeq, version }: DocxCommandAck) => {
+      confirmation = { session, incarnation, epoch, throughSeq, version };
+    };
     const dispatch = ({ worker, message }: HeldMessage) => {
+      if (message.ok && message.commandAck) confirm(message.commandAck);
       const event = new MessageEvent('message', { data: message });
       replayed.add(event);
       worker.dispatchEvent(event);
     };
     const probe: InputProbe = {
       commands: [],
+      confirmedAtSend: {},
       acks: [],
       frames: [],
       initial: null,
@@ -92,20 +101,22 @@ async function installProbe(page: Page) {
       },
     };
     window.__docxPeerlessInput = probe;
+    const counted = (result: WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource) => {
+      const instance = result instanceof WebAssembly.Instance ? result : result.instance;
+      if ('editsession_new' in instance.exports) probe.mainInstances += 1;
+      return result;
+    };
     const instantiate = WebAssembly.instantiate;
     WebAssembly.instantiate = function (...args: Parameters<typeof instantiate>) {
-      probe.mainInstances += 1;
-      return Reflect.apply(instantiate, WebAssembly, args);
+      return Reflect.apply(instantiate, WebAssembly, args).then(counted);
     } as typeof instantiate;
     const streaming = WebAssembly.instantiateStreaming;
     WebAssembly.instantiateStreaming = function (...args: Parameters<typeof streaming>) {
-      probe.mainInstances += 1;
-      return Reflect.apply(streaming, WebAssembly, args);
+      return Reflect.apply(streaming, WebAssembly, args).then(counted);
     } as typeof streaming;
     WebAssembly.Instance = new Proxy(WebAssembly.Instance, {
       construct(target, args, newTarget) {
-        probe.mainInstances += 1;
-        return Reflect.construct(target, args, newTarget);
+        return counted(Reflect.construct(target, args, newTarget));
       },
     });
     const adjustContext = (frame: DocxCommandFrame | undefined) => {
@@ -118,7 +129,7 @@ async function installProbe(page: Page) {
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
         super(url, options);
-        this.addEventListener('message', (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        this.addEventListener('message', (event: MessageEvent<DocxEngineWorkerResponse>) => {
           if (replayed.has(event)) return;
           const message = event.data;
           if (!message.ok) return;
@@ -141,6 +152,9 @@ async function installProbe(page: Page) {
           if (ack && probe.holdAcks) {
             event.stopImmediatePropagation();
             probe.heldAcks.push({ worker: this, message });
+          } else if (message.commandFrame && probe.holdAcks) {
+            event.stopImmediatePropagation();
+            probe.heldAcks.push({ worker: this, message });
           } else if (ack?.frame && probe.holdFrames) {
             event.stopImmediatePropagation();
             const { frame, ...bareAck } = ack;
@@ -161,13 +175,13 @@ async function installProbe(page: Page) {
           } else if (message.commandFrame && probe.holdFrames) {
             event.stopImmediatePropagation();
             probe.heldFrames.push({ worker: this, message });
-          }
+          } else if (ack) confirm(ack);
         }, true);
       }
 
       postMessage(message: unknown, transferOrOptions?: Transferable[] | StructuredSerializeOptions) {
         let outgoing = message;
-        const request = message as ResidentEngineWorkerRequest;
+        const request = message as DocxEngineWorkerRequest;
         if (request.type === 'edit') {
           if (probe.refuseNext) {
             probe.refuseNext = false;
@@ -180,7 +194,9 @@ async function installProbe(page: Page) {
               },
             };
           }
-          probe.commands.push(structuredClone((outgoing as typeof request).command));
+          const command = structuredClone((outgoing as typeof request).command);
+          probe.commands.push(command);
+          if (confirmation) probe.confirmedAtSend[command.seq] = confirmation;
         }
         const post = () => {
           if (Array.isArray(transferOrOptions)) super.postMessage(outgoing, transferOrOptions);
@@ -241,12 +257,12 @@ async function openHarness(page: Page, pageCount = 1, buffer?: Buffer) {
   await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial), { timeout: 60_000 }).toBe(true);
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
   expect(await page.evaluate(() => window.__docxPeerlessHarness!.capabilities.export)).toBe(true);
-  await expect(page.locator('[data-peerless-docx] [data-page-id] canvas').first()).toBeVisible();
+  await expect(page.locator('[data-docx-worker-editor] [data-page-id] canvas').first()).toBeVisible();
 }
 
 async function focusHarness(page: Page) {
-  await page.locator('[data-peerless-docx] [data-page-id] canvas').first().click({ position: { x: 150, y: 150 } });
-  const input = page.locator('[data-peerless-docx] textarea');
+  await page.locator('[data-docx-worker-editor] [data-page-id] canvas').first().click({ position: { x: 150, y: 150 } });
+  const input = page.locator('[data-docx-worker-editor] textarea');
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   await settled(page);
@@ -283,7 +299,7 @@ test('font picker prepares the selected family and retains shaped glyph widths',
 });
 
 async function harnessText(page: Page) {
-  const bytes = await page.evaluate(() => window.__docxPeerlessHarness!.exportBytes());
+  const bytes = await pinnedEvaluate(page, () => window.__docxPeerlessHarness!.exportBytes());
   const zip = await JSZip.loadAsync(Buffer.from(bytes));
   const xml = await zip.file('word/document.xml')!.async('string');
   return page.evaluate((xml) => Array.from(
@@ -293,7 +309,7 @@ async function harnessText(page: Page) {
 
 async function open(page: Page, peerless = true, contextBytes: number | null = null, pageCount = 1, buffer?: Buffer) {
   await installProbe(page);
-  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx');
+  await page.goto(peerless ? '/?format=docx&peerless=1' : '/?format=docx&peerless=0');
   await page.evaluate((bytes) => { window.__docxPeerlessInput.contextBytes = bytes; }, contextBytes);
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'peerless-input.docx',
@@ -301,7 +317,7 @@ async function open(page: Page, peerless = true, contextBytes: number | null = n
     buffer: buffer ?? await documentBytes(pageCount),
   });
   if (peerless) {
-    const root = page.locator('[data-peerless-docx]');
+    const root = page.locator('[data-docx-worker-editor]');
     await expect(root).toBeVisible({ timeout: 60_000 });
     await expect(root.locator('[data-page-id] canvas').first()).toBeVisible({ timeout: 60_000 });
     await expect.poll(() => page.evaluate(() => !!window.__docxPeerlessInput.initial)).toBe(true);
@@ -313,7 +329,7 @@ async function open(page: Page, peerless = true, contextBytes: number | null = n
 
 function documentCanvas(page: Page, peerless = true) {
   return page.locator(peerless
-    ? '[data-peerless-docx] [data-page-id] canvas'
+    ? '[data-docx-worker-editor] [data-page-id] canvas'
     : '.canvas-page canvas').first();
 }
 
@@ -347,7 +363,7 @@ async function settled(page: Page) {
 }
 
 async function paintTurns(page: Page) {
-  await page.evaluate(() => new Promise<void>((resolve) => {
+  await pinnedEvaluate(page, () => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
 }
@@ -360,10 +376,20 @@ async function commandCount(page: Page) {
   return page.evaluate(() => window.__docxPeerlessInput.commands.length);
 }
 
-function expectChain(commands: DocxCommandEnvelope[]) {
+function expectChain(commands: DocxCommandEnvelope[], confirmedAtSend?: Record<number, CommandConfirmation>) {
   expect(commands.length).toBeGreaterThan(0);
   for (let index = 1; index < commands.length; index += 1) {
-    expect(commands[index]!.afterSeq).toBe(commands[index - 1]!.seq);
+    const command = commands[index]!;
+    const previous = commands[index - 1]!;
+    if (command.afterSeq === undefined && confirmedAtSend) {
+      expect(confirmedAtSend[command.seq]).toEqual({
+        session: command.session,
+        incarnation: command.incarnation,
+        epoch: command.basis.epoch,
+        throughSeq: previous.seq,
+        version: command.basis.version,
+      });
+    } else expect(command.afterSeq).toBe(previous.seq);
   }
   for (const command of commands) {
     if (command.kind !== 'select') expect(command.payload).not.toHaveProperty('selection');
@@ -406,11 +432,38 @@ async function savedText(page: Page) {
   ).map((node) => node.textContent ?? '').join(''), xml);
 }
 
-const steadyCaret = '[data-peerless-docx] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
+const steadyCaret = '[data-docx-worker-editor] div[aria-hidden="true"][style*="currentcolor" i] { opacity: 1 !important; }';
 
 async function pixels(page: Page, peerless = true) {
   return documentCanvas(page, peerless).screenshot({ animations: 'disabled', style: steadyCaret });
 }
+
+test('peerless Shift+Enter saves a soft break within one paragraph', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:r><w:t>abcd</w:t></w:r>', ''));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  await input.pressSequentially('a');
+  await input.press('Shift+Enter');
+  await input.pressSequentially('b');
+  await settled(page);
+  const commands = await commandsSince(page, start);
+  expect(commands.map(command => command.kind)).toEqual(['insertText', 'lineBreak', 'insertText']);
+  expectChain(commands, await page.evaluate(() => window.__docxPeerlessInput.confirmedAtSend));
+  const xml = await savedXml(page);
+  const paragraphs = await page.evaluate(xml => {
+    const document = new DOMParser().parseFromString(xml, 'application/xml');
+    return Array.from(document.getElementsByTagNameNS('*', 'p')).map(paragraph =>
+      Array.from(paragraph.getElementsByTagNameNS('*', '*')).map(node =>
+        node.localName === 't' ? node.textContent ?? '' : node.localName === 'br' ? '\n' : ''
+      ).join('')
+    );
+  }, xml);
+  expect(paragraphs).toEqual(['a\nb']);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:br(?: w:type="textWrapping")?\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+});
 
 test('d2d_pending_insert_click_arrow_backspace_order', async ({ page }) => {
   await open(page);
@@ -504,7 +557,7 @@ test('keyboard_and_drag_ranges_have_visible_highlights', async ({ page }) => {
   const input = await focusDocument(page);
   await input.press('Shift+ArrowRight');
   await settled(page);
-  const overlay = page.locator('[data-peerless-docx] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
+  const overlay = page.locator('[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
   await expect(overlay.first()).toBeVisible();
   await input.press('ArrowRight');
   await settled(page);
@@ -644,7 +697,7 @@ test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page);
   const input = await focusHarness(page);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
   await page.evaluate(() => { window.__docxPeerlessInput.holdFrames = true; });
   await beforeinput(input, 'A');
@@ -723,7 +776,7 @@ test('handoff_installs_A_then_redraws_pending_B', async ({ page }) => {
   expect(await harnessText(page)).toBe('ABabcd');
   await expect(canvas).toBeVisible();
   expect(await canvas.evaluate((element) => {
-    const root = element.closest('[data-peerless-docx]');
+    const root = element.closest('[data-docx-worker-editor]');
     const stage = element.closest('.editor-stage');
     const caret = root?.querySelector<HTMLElement>('div[aria-hidden="true"][style*="currentcolor" i]');
     if (!root || !stage || !caret) return false;
@@ -750,6 +803,64 @@ async function echoDocumentBytes() {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
+async function expectEchoMatchesReply(page: Page, canvas: Locator, label: string, press: () => Promise<void>) {
+  await settled(page);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+    `${label}: the caret line must carry an echo context`).toBeDefined();
+  const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  const start = await page.evaluate(() => {
+    window.__docxPeerlessInput.holdAcks = true;
+    window.__docxPeerlessInput.holdFrames = true;
+    return window.__docxPeerlessInput.commands.length;
+  });
+  await press();
+  await paintTurns(page);
+  await expect.poll(() => page.evaluate((start) => {
+    const probe = window.__docxPeerlessInput;
+    const seq = probe.commands[start]?.seq;
+    return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
+      (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
+  }, start)).toBe(true);
+  const comparison = await canvas.evaluate((element, start) => {
+    const probe = window.__docxPeerlessInput;
+    const seq = probe.commands[start]!.seq;
+    const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
+      .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
+    const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
+    const target = element as HTMLCanvasElement;
+    const reply = document.createElement('canvas');
+    reply.width = item.bitmap.width;
+    reply.height = item.bitmap.height;
+    const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
+    replyContext.drawImage(item.bitmap, 0, 0);
+    if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
+    const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
+    const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
+    let differing = 0;
+    let max = 0;
+    let bbox: number[] | null = null;
+    for (let index = 0; index < echo.length; index += 4) {
+      let delta = 0;
+      for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
+      if (!delta) continue;
+      differing += 1;
+      max = Math.max(max, delta);
+      const x = (index / 4) % target.width;
+      const y = Math.floor(index / 4 / target.width);
+      bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
+    }
+    return { size: true, differing, max, bbox };
+  }, start);
+  const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
+  expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
+  await page.evaluate(() => {
+    window.__docxPeerlessInput.releaseAcks();
+    window.__docxPeerlessInput.releaseFrames();
+  });
+  await settled(page);
+}
+
 test('echo paints the caret line of a wrapped paragraph before the reply and reconciles to the reply', async ({ page }) => {
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page, 1, await echoDocumentBytes());
@@ -759,7 +870,7 @@ test('echo paints the caret line of a wrapped paragraph before the reply and rec
   const context = await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext);
   expect(context, 'the caret line must carry an echo context').toBeDefined();
   expect(ECHO_WRAPPED.endsWith(context!.text) && context!.text.length < ECHO_WRAPPED.length).toBe(true);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const canvasPixels = () => canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
   const key = async (press: () => Promise<void>) => {
     const before = await canvasPixels();
@@ -813,64 +924,8 @@ test('echo paints exactly the pixels of the reply for inserts and backspaces', a
   test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
   await openHarness(page, 1, await echoDocumentBytes());
   const input = await focusHarness(page);
-  const canvas = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
-  const key = async (label: string, press: () => Promise<void>) => {
-    await settled(page);
-    expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
-      `${label}: the caret line must carry an echo context`).toBeDefined();
-    const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-    const start = await page.evaluate(() => {
-      window.__docxPeerlessInput.holdAcks = true;
-      window.__docxPeerlessInput.holdFrames = true;
-      return window.__docxPeerlessInput.commands.length;
-    });
-    await press();
-    await paintTurns(page);
-    await expect.poll(() => page.evaluate((start) => {
-      const probe = window.__docxPeerlessInput;
-      const seq = probe.commands[start]?.seq;
-      return seq !== undefined && probe.heldAcks.some(({ message }) => message.ok &&
-        (message.commandAck?.throughSeq ?? -1) >= seq && !!message.commandAck?.frame);
-    }, start)).toBe(true);
-    const comparison = await canvas.evaluate((element, start) => {
-      const probe = window.__docxPeerlessInput;
-      const seq = probe.commands[start]!.seq;
-      const frame = probe.heldAcks.map(({ message }) => message.ok ? message.commandAck : undefined)
-        .find((ack) => ack?.frame && ack.throughSeq >= seq)!.frame!;
-      const item = frame.payload.stagedPresentation!.pages.find(({ page }) => page.pageIndex === 0)!;
-      const target = element as HTMLCanvasElement;
-      const reply = document.createElement('canvas');
-      reply.width = item.bitmap.width;
-      reply.height = item.bitmap.height;
-      const replyContext = reply.getContext('2d', { willReadFrequently: true })!;
-      replyContext.drawImage(item.bitmap, 0, 0);
-      if (reply.width !== target.width || reply.height !== target.height) return { size: false, differing: -1, max: 0, bbox: null };
-      const echo = target.getContext('2d')!.getImageData(0, 0, target.width, target.height).data;
-      const expected = replyContext.getImageData(0, 0, reply.width, reply.height).data;
-      let differing = 0;
-      let max = 0;
-      let bbox: number[] | null = null;
-      for (let index = 0; index < echo.length; index += 4) {
-        let delta = 0;
-        for (let channel = 0; channel < 4; channel += 1) delta = Math.max(delta, Math.abs(echo[index + channel]! - expected[index + channel]!));
-        if (!delta) continue;
-        differing += 1;
-        max = Math.max(max, delta);
-        const x = (index / 4) % target.width;
-        const y = Math.floor(index / 4 / target.width);
-        bbox = bbox ? [Math.min(bbox[0]!, x), Math.min(bbox[1]!, y), Math.max(bbox[2]!, x), Math.max(bbox[3]!, y)] : [x, y, x, y];
-      }
-      return { size: true, differing, max, bbox };
-    }, start);
-    const early = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-    expect(early, `${label}: the echo paints before the reply`).not.toEqual(before);
-    expect(comparison, `${label}: the echo paints exactly the reply's pixels`).toEqual({ size: true, differing: 0, max: 0, bbox: null });
-    await page.evaluate(() => {
-      window.__docxPeerlessInput.releaseAcks();
-      window.__docxPeerlessInput.releaseFrames();
-    });
-    await settled(page);
-  };
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
+  const key = (label: string, press: () => Promise<void>) => expectEchoMatchesReply(page, canvas, label, press);
   for (const press of ['ArrowDown', 'ArrowDown', ...Array<string>(8).fill('ArrowRight')]) await input.press(press);
   await key('wrapped insert', () => beforeinput(input, 'x'));
   await key('wrapped backspace', () => input.press('Backspace'));
@@ -879,6 +934,64 @@ test('echo paints exactly the pixels of the reply for inserts and backspaces', a
   await key('single-line insert', () => beforeinput(input, 'x'));
   await key('single-line backspace', () => input.press('Backspace'));
   expect(await harnessText(page)).toBe(ECHO_PARAGRAPHS.join(''));
+});
+
+async function expectEchoDeclines(page: Page, canvas: Locator, label: string, press: () => Promise<void>) {
+  await settled(page);
+  const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
+  await page.evaluate(() => { window.__docxPeerlessInput.holdAcks = true; window.__docxPeerlessInput.holdFrames = true; });
+  await press();
+  await paintTurns(page);
+  expect(await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL()),
+    `${label}: a declined key leaves the pixels to the reply`).toEqual(before);
+  await page.evaluate(() => { window.__docxPeerlessInput.releaseAcks(); window.__docxPeerlessInput.releaseFrames(); });
+  await settled(page);
+}
+
+// ligature-free text: a ligature declines the echo for its whole paragraph
+const ALIGNED_TITLE = 'Centered heading';
+const ALIGNED_JUSTIFIED = 'Wrapped' + ' echo words'.repeat(12);
+const ALIGNED_PARAGRAPHS = [ALIGNED_TITLE, ALIGNED_JUSTIFIED, ...Array.from({ length: 20 }, (_, index) => `Seed paragraph ${index}`)];
+
+async function alignedDocumentBytes() {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const jc = ['center', 'both'];
+  const body = ALIGNED_PARAGRAPHS.map((text, index) => `<w:p>${jc[index] ? `<w:pPr><w:jc w:val="${jc[index]}"/></w:pPr>` : ''}` +
+    `<w:r><w:t>${text}</w:t></w:r></w:p>`).join('');
+  zip.file('word/document.xml', xml.replace(/<w:body>.*?<w:sectPr>/, `<w:body>${body}<w:sectPr>`));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+test('echo paints exactly the pixels of the reply on centered and justified closing lines, never on stretched ones', async ({ page }) => {
+  test.skip(process.env.DOCX_PEERLESS_HARNESS !== '1', 'Presentation checkpoints require DOCX_PEERLESS_HARNESS=1');
+  await openHarness(page, 1, await alignedDocumentBytes());
+  const input = await focusHarness(page);
+  const canvas = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
+  const key = (label: string, press: () => Promise<void>) => expectEchoMatchesReply(page, canvas, label, press);
+  await input.press('End');
+  await key('centered insert', () => beforeinput(input, 'x'));
+  await key('centered backspace', () => input.press('Backspace'));
+  await key('centered insert t', () => beforeinput(input, 't'));
+  await expectEchoDeclines(page, canvas, 'ligature insert', () => beforeinput(input, 'i'));
+  await input.press('Backspace');
+  await input.press('Backspace');
+  await settled(page);
+  await input.press('Home');
+  await key('centered insert at the start', () => beforeinput(input, 'x'));
+  await input.press('ArrowLeft');
+  await key('centered delete at the start', () => input.press('Delete'));
+  for (const press of ['ArrowDown', 'Home', 'ArrowRight', 'ArrowRight', 'ArrowRight']) await input.press(press);
+  await settled(page);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.frames.at(-1)?.payload.echoContext),
+    'a stretched justified line carries no echo context').toBeUndefined();
+  await expectEchoDeclines(page, canvas, 'stretched insert', () => beforeinput(input, 'x'));
+  await input.press('Backspace');
+  await settled(page);
+  for (const press of ['ArrowDown', 'End']) await input.press(press);
+  await key('justified closing insert', () => beforeinput(input, 'x'));
+  await key('justified closing backspace', () => input.press('Backspace'));
+  expect(await harnessText(page)).toBe(ALIGNED_PARAGRAPHS.join(''));
 });
 
 test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {
@@ -912,12 +1025,12 @@ test('viewing_refuses_typing_then_editing_applies', async ({ page }) => {
 test('evicted_page_repaints_after_scroll_back', async ({ page }) => {
   await open(page, true, null, 40);
   const input = await focusDocument(page);
-  const first = page.locator('[data-peerless-docx] [data-page-id] canvas').first();
+  const first = page.locator('[data-docx-worker-editor] [data-page-id] canvas').first();
   const original = await first.evaluate((canvas) => {
     window.__docxEvictedCanvas = canvas as HTMLCanvasElement;
     return { pageId: canvas.parentElement!.dataset.pageId!, pixels: (canvas as HTMLCanvasElement).toDataURL() };
   });
-  const pageCanvas = page.locator(`[data-peerless-docx] [data-page-id="${original.pageId}"] canvas`);
+  const pageCanvas = page.locator(`[data-docx-worker-editor] [data-page-id="${original.pageId}"] canvas`);
   const ink = async () => pageCanvas.evaluate((element) => {
     const canvas = element as HTMLCanvasElement;
     const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -949,18 +1062,49 @@ test('evicted_page_repaints_after_scroll_back', async ({ page }) => {
   expect(await pageCanvas.evaluate((canvas) => (canvas as HTMLCanvasElement).toDataURL())).toBe(original.pixels);
 });
 
+test('peerless_shift_page_down_selects_text_across_the_viewport', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>abcd</w:t></w:r></w:p>',
+    Array.from({ length: 180 }, (_, index) => `<w:p><w:r><w:t>Line ${index + 1} has text to select.</w:t></w:r></w:p>`).join('')));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
+  const initial = await page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)!.selection!);
+  const before = await input.boundingBox();
+  const height = await scroller.evaluate(element => element.clientHeight);
+  const scrollTop = await scroller.evaluate(element => element.scrollTop);
+  const start = await commandCount(page);
+  await input.press('Shift+PageDown');
+  await expect.poll(() => commandCount(page)).toBeGreaterThan(start);
+  await settled(page);
+  const selected = await page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)!.selection!);
+  expect(selected.anchor).toMatchObject({ story: initial.anchor.story, paraId: initial.anchor.paraId, offset: initial.anchor.offset });
+  expect(selected.focus.paraId).not.toBe(initial.focus.paraId);
+  const after = await input.boundingBox();
+  const distance = after!.y - before!.y + await scroller.evaluate(element => element.scrollTop) - scrollTop;
+  expect(distance).toBeGreaterThan(height * 0.8);
+  expect(distance).toBeLessThan(height * 1.2);
+  await expect(input).toBeFocused();
+  await input.press('Backspace');
+  await settled(page);
+  const text = await savedText(page);
+  expect(text).not.toContain('Line 1 has text to select.');
+  expect(text).toContain('Line 180 has text to select.');
+});
+
 test('peerless_document_scrolls_with_wheel_and_page_down', async ({ page }) => {
   await open(page, true, null, 40);
   const input = await focusDocument(page);
   const scroller = page.locator('.editor-stage .docx-editor__scroll-container');
   await expect(scroller).toHaveCount(1);
   expect(await scroller.evaluate((element) => getComputedStyle(element).overflowY)).toBe('auto');
-  const later = await page.locator('[data-peerless-docx] [data-page-id] canvas').nth(1).evaluate((canvas) => {
+  const later = await page.locator('[data-docx-worker-editor] [data-page-id] canvas').nth(1).evaluate((canvas) => {
     const container = canvas.closest('.docx-editor__scroll-container')!;
     return { pageId: canvas.parentElement!.dataset.pageId!,
       top: canvas.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop };
   });
-  const laterCanvas = page.locator(`[data-peerless-docx] [data-page-id="${later.pageId}"] canvas`);
+  const laterCanvas = page.locator(`[data-docx-worker-editor] [data-page-id="${later.pageId}"] canvas`);
   await expect(laterCanvas).not.toBeInViewport();
   const before = await scroller.evaluate((element) => element.scrollTop);
   await scroller.hover({ position: { x: 150, y: 150 } });
@@ -976,8 +1120,8 @@ test('peerless_document_scrolls_with_wheel_and_page_down', async ({ page }) => {
   await page.keyboard.press('PageDown');
   await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(afterWheel);
   await paintTurns(page);
-  await expect(input).toBeFocused();
   await expect(laterCanvas).toBeInViewport();
+  await expect(input).toBeFocused();
   const afterPageDown = await scroller.evaluate((element) => element.scrollTop);
   await page.keyboard.press('PageUp');
   await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeLessThan(afterPageDown);
@@ -1016,7 +1160,7 @@ test('d2d_peerless_mount_creates_no_main_document', async ({ page }) => {
   await settled(page);
   expect(await savedText(page)).toBe('workerabcd');
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
-  expect(workers.some((url) => url.includes('residentEngineWorker'))).toBe(true);
+  expect(workers.some((url) => url.includes('docxWorker'))).toBe(true);
   expect(await page.evaluate(() => window.__docxPeerlessInput.commands.some((command) => command.kind === 'insertText'))).toBe(true);
 });
 
@@ -1030,6 +1174,7 @@ test('d2d_legacy_input_regression', async ({ page }) => {
   expect(await savedText(page)).toBe('legaPyabcd');
   expect(await page.evaluate(() => window.__docxPeerlessInput.initial)).toBeNull();
   expect(await commandCount(page)).toBe(0);
+  expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBeGreaterThan(0);
 });
 
 test('d2d_composition_event_orders_commit_once', async ({ page }) => {
@@ -1118,6 +1263,127 @@ test('package_image_pixels_survive_authoritative_edit_frame', async ({ page }) =
   expect(await page.evaluate(() => window.__docxPeerlessInput.mainInstances)).toBe(0);
 });
 
+test('Escape then Tab leaves document input in either direction', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press('Escape');
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+  await input.focus();
+  await input.press('Shift+Tab');
+  await expect(input).not.toBeFocused();
+  expect(await commandsSince(page, start)).toEqual([]);
+});
+
+test('read-only Tab leaves document input in either direction', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await setMode(page, 'Editing', 'Viewing');
+  await expect(input).not.toBeEditable();
+  await settled(page);
+  const start = await commandCount(page);
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+  expect(await commandsSince(page, start)).toEqual([]);
+});
+
+test('list Tab preserves selected text and Shift Tab preserves level-zero numbering', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:p><w:r>', '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r>'));
+  zip.file('word/numbering.xml',
+    '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:abstractNum w:abstractNumId="0">' + [0, 1].map(level =>
+      `<w:lvl w:ilvl="${level}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%${level + 1}."/></w:lvl>`
+    ).join('') + '</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>');
+  zip.file('word/_rels/document.xml.rels',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>');
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string'))
+    .replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.initial?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 0 });
+  const start = await commandCount(page);
+  await input.press('Shift+Tab');
+  await settled(page);
+  expect(await commandsSince(page, start)).toEqual([]);
+  expect(await savedXml(page)).toMatch(/<w:numId w:val="1"\s*\/>/);
+  await input.press('Shift+ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await input.press('Tab');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 1 });
+  await input.press('Shift+Tab');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.toolbar?.paragraphProperties.numPr))
+    .toEqual({ numId: 1, ilvl: 0 });
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await input.focus();
+    await input.press('Escape');
+    await input.press(key);
+    await expect(input).not.toBeFocused();
+  }
+});
+
+test('body Tab saves a tab between typed text with acknowledgements withheld', async ({ page }) => {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+    .replace('<w:r><w:t>abcd</w:t></w:r>', ''));
+  await open(page, true, null, 1, await zip.generateAsync({ type: 'nodebuffer' }));
+  const input = await focusDocument(page);
+  const start = await commandCount(page);
+  await page.evaluate(() => { window.__docxPeerlessInput.holdAcks = true; });
+  await beforeinput(input, 'a');
+  await input.press('Tab');
+  await expect(input).toBeFocused();
+  await beforeinput(input, 'b');
+  await page.evaluate(() => window.__docxPeerlessInput.releaseAcks());
+  await expect.poll(async () => (await commandsSince(page, start)).length).toBe(3);
+  await settled(page);
+  const commands = await commandsSince(page, start);
+  expect(commands.map(({ kind, payload }) => ({ kind, payload }))).toEqual([
+    { kind: 'insertText', payload: { text: 'a' } },
+    { kind: 'insertText', payload: { text: '\t' } },
+    { kind: 'insertText', payload: { text: 'b' } },
+  ]);
+  expectChain(commands);
+  const xml = await savedXml(page);
+  expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>b<\/w:t>/);
+});
+
+test('body Tab replaces selected text and supports undo and redo', async ({ page }) => {
+  await open(page);
+  const input = await focusDocument(page);
+  await input.press('ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await input.press('Shift+ArrowRight');
+  await settled(page);
+  await input.press('Tab');
+  await expect(input).toBeFocused();
+  await settled(page);
+  const xml = await savedXml(page);
+  expect(xml).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>d<\/w:t>/);
+  await input.press('ControlOrMeta+z');
+  await settled(page);
+  expect(await savedText(page)).toBe('abcd');
+  await input.press('ControlOrMeta+Shift+z');
+  await settled(page);
+  expect(await savedXml(page)).toMatch(/<w:t[^>]*>a<\/w:t>[\s\S]*<w:tab\s*\/>[\s\S]*<w:t[^>]*>d<\/w:t>/);
+});
+
 test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page }) => {
   const zip = await JSZip.loadAsync(await documentBytes());
   const cell = (text: string) => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
@@ -1138,7 +1404,7 @@ test('table_tab_and_shift_tab_preserve_typing_with_acks_withheld', async ({ page
   await settled(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessInput.acks.at(-1)?.editState?.tableContext))
     .toMatchObject({ rowIndex: 0, columnIndex: 0 });
-  const input = page.locator('[data-peerless-docx] textarea');
+  const input = page.locator('[data-docx-worker-editor] textarea');
   await input.press('Home');
   await settled(page);
   const start = await commandCount(page);
@@ -1212,8 +1478,8 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await releaseCertifiedGeometry(page);
   await expect.poll(() => page.evaluate(() => window.__docxPeerlessHarness?.capabilities)).toMatchObject({ presentation: true });
   await page.evaluate(() => window.__docxPeerlessHarness!.registerWorker(window.__docxPeerlessInput.worker!));
-  await page.evaluate(async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
-  const later = page.locator('[data-peerless-docx] [data-page-index="40"] canvas');
+  await pinnedEvaluate(page, async () => { await window.__docxPeerlessHarness!.setViewport!([40, 41, 42]); });
+  const later = page.locator('[data-docx-worker-editor] [data-page-index="40"] canvas');
   await expect(later).toBeAttached();
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
 });

@@ -1,7 +1,9 @@
 //! Paragraph properties and inline-content serialization.
 
 use crate::borders::Borders;
-use crate::formatting::{NumberingProperties, ParagraphFormatting, ParagraphFrame};
+use crate::formatting::{
+    NumberingProperties, ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame,
+};
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
     RunContent, SdtProperties, SimpleField,
@@ -41,10 +43,12 @@ pub fn serialize_paragraph(
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let result = serialize_paragraph_inner(paragraph, context);
     context.leave_paragraph();
-    if let Ok(xml) = &result {
-        context.record_paragraph(paragraph.source_ordinal, xml);
-    }
-    result
+    result.map(
+        |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
+            Some(token) => token + &xml,
+            None => xml,
+        },
+    )
 }
 
 /// The prefix a paragraph's Word 2010 attributes take: `w14`, unless the
@@ -201,16 +205,18 @@ pub fn serialize_paragraph_formatting(
         );
         on_off(&mut body, "w:autoSpaceDE", formatting.auto_space_de);
         on_off(&mut body, "w:autoSpaceDN", formatting.auto_space_dn);
+        on_off(&mut body, "w:bidi", formatting.bidi);
+        on_off(&mut body, "w:adjustRightInd", formatting.adjust_right_ind);
+        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         write_spacing(&mut body, formatting);
         write_indentation(&mut body, formatting);
-        on_off(&mut body, "w:bidi", formatting.bidi);
-        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         if let Some(value) = nonempty(formatting.alignment.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
         }
         if let Some(value) = formatting.outline_level {
             empty_attr(&mut body, "w:outlineLvl", "w:val", &js_number(value));
         }
+        write_paragraph_cnf_style(&mut body, formatting.cnf_style.as_ref());
     }
 
     if !base_only {
@@ -978,11 +984,43 @@ fn optional_int(writer: &mut XmlWriter, name: &'static str, value: Option<f64>) 
     }
 }
 
-fn empty_attr(writer: &mut XmlWriter, element: &'static str, name: &'static str, value: &str) {
+pub(crate) fn empty_attr(
+    writer: &mut XmlWriter,
+    element: &'static str,
+    name: &'static str,
+    value: &str,
+) {
     writer
         .start_element(element)
         .attribute(name, value)
         .end_element();
+}
+
+fn write_paragraph_cnf_style(writer: &mut XmlWriter, style: Option<&ParagraphCnfStyle>) {
+    let Some(style) = style else {
+        return;
+    };
+    writer.start_element("w:cnfStyle");
+    for (name, value) in [
+        ("w:val", &style.val),
+        ("w:firstRow", &style.first_row),
+        ("w:lastRow", &style.last_row),
+        ("w:firstColumn", &style.first_column),
+        ("w:lastColumn", &style.last_column),
+        ("w:oddVBand", &style.odd_v_band),
+        ("w:evenVBand", &style.even_v_band),
+        ("w:oddHBand", &style.odd_h_band),
+        ("w:evenHBand", &style.even_h_band),
+        ("w:firstRowFirstColumn", &style.first_row_first_column),
+        ("w:firstRowLastColumn", &style.first_row_last_column),
+        ("w:lastRowFirstColumn", &style.last_row_first_column),
+        ("w:lastRowLastColumn", &style.last_row_last_column),
+    ] {
+        if let Some(value) = value {
+            writer.attribute(name, value);
+        }
+    }
+    writer.end_element();
 }
 
 fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {

@@ -74,6 +74,7 @@ pub mod paragraph_spacing;
 pub mod place;
 pub mod placement;
 pub mod prescan;
+pub mod progress;
 pub mod regions;
 pub mod resolve_lines;
 mod transcode;
@@ -327,6 +328,28 @@ pub fn build_resident_display_pages(
     })
 }
 
+#[doc(hidden)]
+pub fn build_resident_display_pages_with_fingerprints(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    list: &mut display_list::DisplayList,
+    pages: &[usize],
+    fingerprints: &[u128],
+) -> Result<Vec<usize>, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_with_fonts_and_fingerprints(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            list,
+            pages,
+            Some(fingerprints),
+        )
+    })
+}
+
 /// Incremental resident display build. Only the pagination-dirtied page range
 /// is recompiled; converged suffix pages are retained with body positions
 /// patched from stable block-id deltas.
@@ -490,6 +513,39 @@ pub fn update_resident_display_list_incremental_partial_shifts_observed(
             position_deltas,
             build,
             observe_phase,
+        )
+    })
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_cached_shifts_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+    fingerprints: &[u128],
+) -> Result<Option<display_list::IncrementalDisplayShifts>, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_cached(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
+            observe_phase,
+            Some(fingerprints),
         )
     })
 }
@@ -844,7 +900,9 @@ pub fn measure_fonts_generation() -> (u64, usize) {
 pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64, u64) {
     let (store, fonts) = measure_fonts_generation();
     let mut missing = Vec::new();
+    let mut all_chains_empty = true;
     for &id in chains.values().flatten() {
+        all_chains_empty = false;
         if id as usize >= fonts {
             missing.push(id);
         }
@@ -853,6 +911,7 @@ pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64,
     missing.dedup();
     let mut hash = std::hash::DefaultHasher::new();
     (fonts == 0).hash(&mut hash);
+    all_chains_empty.hash(&mut hash);
     missing.hash(&mut hash);
     (store, hash.finish())
 }
@@ -974,6 +1033,30 @@ mod tests {
     // metric-compatible Arial stand-in) to exercise the outline wasm surface.
     const LIBERATION_SANS: &[u8] =
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn plain_faces_and_segoe_substitute_views_keep_separate_advance_scales() {
+        clear_measure_fonts();
+        let base = register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        for (family, expected) in [("Segoe UI Light", 0.949), ("Segoe UI Semilight", 0.976)] {
+            let view = register_substitute_measure_font(base, family).unwrap();
+            assert_ne!(view, base);
+            with_measure_fonts(|store| {
+                let store = store.borrow();
+                assert_eq!(
+                    store
+                        .advance_scale(ooxml_text::FontId::from_u32(base))
+                        .unwrap(),
+                    1.0
+                );
+                let scale = store
+                    .advance_scale(ooxml_text::FontId::from_u32(view))
+                    .unwrap();
+                assert!((scale - expected).abs() < 1e-6);
+            });
+        }
+        clear_measure_fonts();
+    }
 
     #[test]
     fn outline_glyph_json_round_trips_through_the_font_store() {

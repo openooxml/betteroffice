@@ -32,6 +32,21 @@ describe('PPTX command gate', () => {
     expect(gate('alignment', { value: 'ctr' }, { text: null })).toBe('text-selection-required');
   });
 
+  test('text toggle commands report false active state without a text environment', () => {
+    for (const id of ['bold', 'italic', 'underline'] as const) {
+      const readOnly = evaluatePptxCommand(id, undefined, testEnvironment({ readOnly: true }));
+      expect(readOnly.enabled).toBe(false);
+      expect(readOnly.active).toBe(false);
+      expect(evaluatePptxCommand(id, undefined, testEnvironment({ text: null })).active).toBe(
+        false
+      );
+    }
+    const text = { ...(testEnvironment().text as object), bold: true, italic: 'mixed' } as never;
+    const env = testEnvironment({ text });
+    expect(evaluatePptxCommand('bold', undefined, env).active).toBe(true);
+    expect(evaluatePptxCommand('italic', undefined, env).active).toBe('mixed');
+  });
+
   test('mixed selections report mixed marks and no common value', () => {
     const state = evaluatePptxCommand(
       'italic',
@@ -77,7 +92,10 @@ describe('PPTX command gate', () => {
     expect(gate('fontSize', { points: Number.NaN })).toBe('invalid-arguments');
     expect(gate('fontSize', { points: 400 })).toBeNull();
     expect(gate('textColor', { color: 'red' })).toBe('invalid-arguments');
-    expect(gate('zoom', { scale: 5 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 5.01 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 0.09 })).toBe('invalid-arguments');
+    expect(gate('zoom', { scale: 5 })).toBeNull();
+    expect(gate('zoom', { scale: 0.1 })).toBeNull();
     expect(gate('zoom', { scale: 'fit' })).toBeNull();
     expect(gate('tool', { value: 'shape:blob' as never })).toBe('invalid-arguments');
     expect(gate('shapeStrokeWidth', { points: 0 })).toBe('invalid-arguments');

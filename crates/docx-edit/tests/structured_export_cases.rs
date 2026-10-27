@@ -2066,3 +2066,47 @@ fn shared_ids_leave_cell_and_comment_anchors_without_a_location() {
     ));
     assert!(count(&content, DiagnosticCode::AmbiguousIdentity) >= 3);
 }
+
+#[test]
+fn removing_a_materialized_unanchored_source_comment_removes_its_export() {
+    let comments = format!(
+        r#"<w:comments {}><w:comment w:id="1" w:author="Ann">{}</w:comment></w:comments>"#,
+        fixture::namespaces(),
+        para("60000012", &run("Reply"))
+    );
+    let doc = open(
+        &Package::new(&para("60000011", &run("Body")))
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    let options = with_stories(RevisionView::Accepted, &[StorySelection::Comments]);
+    assert_eq!(
+        comment_metadata(&doc.export_structured(&options).unwrap().content).id,
+        "1"
+    );
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::SetComment {
+            id: "1".to_owned(),
+            ranges: vec![(0, 1)],
+            author: "Ann".to_owned(),
+            date: String::new(),
+            body: yrs::Any::Null,
+        }],
+        &EditCtx::local("", ""),
+    )
+    .unwrap();
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::RemoveComment { id: "1".to_owned() }],
+        &EditCtx::local("", ""),
+    )
+    .unwrap();
+    assert!(
+        doc.export_structured(&options)
+            .unwrap()
+            .content
+            .stories
+            .is_empty()
+    );
+}

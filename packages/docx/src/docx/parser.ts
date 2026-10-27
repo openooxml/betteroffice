@@ -48,7 +48,9 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
     if (message.startsWith('Failed to parse DOCX: ')) throw error;
     const mapped = mapRustParseError(message);
     const publicMessage =
-      mapped.code === 'Container' ? message.replace(/^container error: /, '') : message;
+      mapped.code === 'Container' || mapped.code === 'NotAWordDocument'
+        ? message.replace(/^container error: /, '')
+        : message;
     const wrapped = new Error(`Failed to parse DOCX: ${publicMessage}`, { cause: error });
     Object.assign(wrapped, mapped);
     throw wrapped;
@@ -148,9 +150,23 @@ async function loadDocumentFonts(
   }
 }
 
-function mapRustParseError(message: string): { code: string; part?: string; offset?: number } {
+type RustParseErrorCode =
+  | 'NotAWordDocument'
+  | 'UnsafeXml'
+  | 'ResourceLimit'
+  | 'MalformedXml'
+  | 'Relationship'
+  | 'Container'
+  | 'Wire'
+  | 'Parse';
+
+function mapRustParseError(message: string): {
+  code: RustParseErrorCode;
+  part?: string;
+  offset?: number;
+} {
   const part =
-    /(?:unsafe XML|resource limit .* exceeded|malformed XML|invalid relationship) in ([^:]+)(?::| at)/.exec(
+    /(?:unsafe XML|resource limit .* exceeded|malformed XML|invalid relationship) in (.+?)(?: at byte \d+)?(?::|$)/.exec(
       message
     )?.[1];
   const offset = / at byte (\d+):/.exec(message)?.[1];
@@ -162,11 +178,13 @@ function mapRustParseError(message: string): { code: string; part?: string; offs
         ? 'MalformedXml'
         : message.startsWith('invalid relationship')
           ? 'Relationship'
-          : message.startsWith('container error')
-            ? 'Container'
-            : message.startsWith('wire.')
-              ? 'Wire'
-              : 'Parse';
+          : message.startsWith('container error: not a Word document')
+            ? 'NotAWordDocument'
+            : message.startsWith('container error')
+              ? 'Container'
+              : message.startsWith('wire.')
+                ? 'Wire'
+                : 'Parse';
   return {
     code,
     ...(part ? { part } : {}),

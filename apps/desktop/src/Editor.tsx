@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DocxEditor, type DocxEditorRef } from "@betteroffice/docx-react";
+import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChangesOptions } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
 import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collaboration";
-import {
-  CollaborationProvider as PptxProvider,
-  type PptxFontFace,
-  type AsyncCollaborationReplica,
-} from "@betteroffice/pptx/editor";
+import { CollaborationProvider as PptxProvider, type AsyncCollaborationReplica } from "@betteroffice/pptx/collaboration";
+import type { PptxFontFace } from "@betteroffice/pptx";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -29,10 +26,30 @@ const PRESENTATION_DISPOSED = "The presentation editor was disposed.";
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
 
-function peerlessDocx() {
+function legacyDocx() {
   if (typeof location === "undefined") return false;
   const query = new URLSearchParams(location.search);
-  return query.get("format") === "docx" && query.get("peerless") === "1";
+  return query.get("peerless") === "0";
+}
+
+function trackedChanges(): TrackedChangesOptions | undefined {
+  if (typeof location === "undefined") return undefined;
+  const query = new URLSearchParams(location.search);
+  const agents = new Set(query.get("agents")?.split(",").filter(Boolean));
+  if (query.get("review") !== "dots" && !agents.size) return undefined;
+  return {
+    ...(query.get("review") === "dots" ? { display: "dots" as const } : {}),
+    ...(agents.size
+      ? { getAuthorAppearance: ({ name }: { name: string }) => (agents.has(name) ? { kind: "agent" as const } : undefined) }
+      : {}),
+  };
+}
+
+const TRACKED_CHANGES = trackedChanges();
+
+function colorMode(): "light" | "dark" {
+  if (typeof location === "undefined") return "light";
+  return new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
 }
 
 export interface PreparedFile {
@@ -46,7 +63,9 @@ export async function prepareFile(
   format: Format
 ): Promise<PreparedFile> {
   if (format === "docx") {
-    if (peerlessDocx()) return { bytes, format };
+    if (!legacyDocx()) {
+      return { bytes, format };
+    }
     const { parseDocx } = await import("@betteroffice/docx/docx");
     await parseDocx(bytes);
     return { bytes, format };
@@ -63,7 +82,7 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const fonts = await Promise.all(
+  const results = await Promise.allSettled(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
         const face =
@@ -78,12 +97,15 @@ export async function prepareFile(
       })
     )
   );
+  const fonts = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const failed = results.length - fonts.length;
+  if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);
   if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
-    const { openPresentationSession } = await import("@betteroffice/pptx/editor");
+    const { openPresentationSession } = await import("@betteroffice/pptx/worker");
     const session = await openPresentationSession(bytes, { fonts });
     await session.dispose();
   } else {
-    const { initWasm, openPresentation } = await import("@betteroffice/pptx/editor");
+    const { initWasm, openPresentation } = await import("@betteroffice/pptx");
     await initWasm();
     openPresentation(bytes, { fonts }).dispose();
   }
@@ -91,6 +113,7 @@ export async function prepareFile(
 }
 
 export interface EditorApi {
+  flushPendingInput?(): Promise<void>;
   serialize(): Promise<Uint8Array>;
   focus(): void;
   print(): void;
@@ -129,7 +152,7 @@ export default function Editor({
   const apiWaiter = useRef<{ resolve(): void; reject(error: Error): void } | null>(null);
   const apiFailure = useRef<Error | null>(null);
   const harness = (globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__
-    && file.format === "docx" && peerlessDocx();
+    && file.format === "docx" && !legacyDocx() && !room;
   const [harnessMode, setHarnessMode] = useState<"editing" | "viewing">("editing");
   useEffect(() => {
     if (!(globalThis as typeof globalThis & { __DOCX_PEERLESS_HARNESS__?: boolean }).__DOCX_PEERLESS_HARNESS__) return;
@@ -149,6 +172,10 @@ export default function Editor({
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
   >(null);
+  const [painted, setPainted] = useState(false);
+  const firstPainted = useCallback(() => {
+    if (!legacyDocx()) setPainted(true);
+  }, []);
   const presentationPresence = provider instanceof PptxProvider ? provider : undefined;
   const presentationCollaboration = useMemo(() => room ? {
     roomId: room.id,
@@ -156,8 +183,8 @@ export default function Editor({
     onReplica: setPresentationReplica,
     presence: presentationPresence,
   } : undefined, [room?.id, clientId, presentationPresence]);
-  const callbacks = useRef({ onSave, onChange, onError, onStatus });
-  callbacks.current = { onSave, onChange, onError, onStatus };
+  const callbacks = useRef({ onSave, onChange, onError, onStatus, onReady });
+  callbacks.current = { onSave, onChange, onError, onStatus, onReady };
 
   useEffect(() => {
     if (!room || (file.format === "pptx" ? !presentationReplica : !replica)) return;
@@ -204,6 +231,10 @@ export default function Editor({
       apiUnavailable(error);
     callbacks.current.onError(error);
   }, [file.format, apiUnavailable]);
+  const docxError = useCallback((cause: Error, info?: DocxErrorInfo) => {
+    if (info?.recoverable) console.warn(cause);
+    else error(cause);
+  }, [error]);
   const apiReady = useCallback(
     <Api,>(ref: { current: Api | null }, api: Api, disposed: string) => {
       ref.current = api;
@@ -234,6 +265,7 @@ export default function Editor({
   };
 
   useEffect(() => {
+    if (file.format === "docx" && !legacyDocx() && !painted) return;
     let active = true;
     const disposed = new Error(
       file.format === "xlsx" ? WORKBOOK_DISPOSED : PRESENTATION_DISPOSED
@@ -259,7 +291,13 @@ export default function Editor({
       if (!active || !api || ref.current !== api) throw disposed;
       return api;
     };
-    onReady({
+    callbacks.current.onReady({
+      ...(file.format === "docx" ? {
+        async flushPendingInput() {
+          if (!active || !docx.current) throw new Error("The document editor was disposed.");
+          await docx.current.flushPendingInput();
+        },
+      } : {}),
       print() {
         if (file.format === "docx") docx.current?.print();
         else window.print();
@@ -296,9 +334,9 @@ export default function Editor({
     return () => {
       active = false;
       if (file.format !== "docx") apiUnavailable(disposed);
-      onReady(null);
+      callbacks.current.onReady(null);
     };
-  }, [file.format, onReady, apiUnavailable]);
+  }, [file.format, painted, apiUnavailable]);
 
   if (file.format === "docx")
     return (
@@ -309,7 +347,8 @@ export default function Editor({
       </div>}
       <DocxEditor
         ref={docx}
-        experimentalPeerless={peerlessDocx()}
+        {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
+        trackedChanges={TRACKED_CHANGES}
         mode={harness ? harnessMode : undefined}
         readOnly={harness ? harnessMode === "viewing" : undefined}
         documentBuffer={file.bytes}
@@ -318,14 +357,14 @@ export default function Editor({
           if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
         documentName={name}
-        onChange={peerlessDocx() ? undefined : changed}
-        onDocumentChange={peerlessDocx() ? changed : undefined}
-        onError={error}
+        onDocumentChange={changed}
+        onFirstPagePainted={firstPainted}
+        onError={docxError}
         onOpen={onOpen}
         showToolbar
         showRuler
         showZoomControl
-        colorMode="light"
+        colorMode={colorMode()}
         onPrint={() => undefined}
         collaboration={
           room

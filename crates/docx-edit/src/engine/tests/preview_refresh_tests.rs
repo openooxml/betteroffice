@@ -220,6 +220,58 @@ fn preview_refresh_plain_edits_match_recorded_region_outputs() {
     preview_refresh_edit_oracle(&preview_fixture::plain(), font);
 }
 
+fn table_led_document() -> Vec<u8> {
+    preview_fixture::document(&format!(
+        "{}{}{}",
+        preview_fixture::paragraph(1, &preview_fixture::run("Before")),
+        preview_fixture::table(&preview_fixture::paragraph(
+            2,
+            &preview_fixture::run("cell")
+        )),
+        preview_fixture::paragraph(3, &preview_fixture::run("After")),
+    ))
+}
+
+fn table_led_start(engine: &EngineSession) -> u32 {
+    engine
+        .doc()
+        .paragraph_index("body")
+        .unwrap()
+        .para_span("00000003")
+        .unwrap()
+        .0
+}
+
+#[test]
+fn resident_text_at_a_paragraph_led_by_a_table_patches_locally() {
+    let (engine, request) = local_patch_laid_out(&table_led_document(), 9701, true);
+    let start = table_led_start(&engine);
+    local_patch_step(&engine, &request, "body", (start, start, Some("x")), true);
+}
+
+#[test]
+fn preview_refresh_text_at_a_paragraph_led_by_a_table_matches_recorded_outputs() {
+    let _open = OpenSwitch::new(Some(false));
+    let _preview = PreviewSwitch::new(Some(false));
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+    let (engine, oracle, request) = preview_refresh_sessions(&table_led_document(), font);
+    let paragraphs = engine.doc().paragraph_index("body").unwrap();
+    let start = paragraphs.para_span("00000003").unwrap().0;
+    assert!(start < paragraphs.para_at(start).unwrap().node_start);
+    for session in [&engine, &oracle] {
+        session
+            .edit_resident_text(
+                crate::StoryRange::new("body", start, start),
+                Some("x"),
+                false,
+            )
+            .unwrap();
+    }
+    assert_preview_refresh_outputs(&engine, &oracle, &request, RelayoutTrigger::Interactive);
+}
+
 fn preview_refresh_revision_document(kind: &str) -> Vec<u8> {
     preview_fixture::document(&format!(
         "{}{}{}{}",

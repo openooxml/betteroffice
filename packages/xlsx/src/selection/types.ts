@@ -13,13 +13,14 @@ export interface CellAddr {
 }
 
 /**
- * An active selection as an anchor/focus pair. `anchor` is the fixed corner
- * (where the selection started); `focus` is the moving corner. A collapsed
- * selection has `anchor` equal to `focus`.
+ * `anchor` is the fixed starting cell; `focus` is the active cell.
+ * `range` overrides their bounds for region selection.
  */
 export interface Selection {
   anchor: CellAddr;
   focus: CellAddr;
+  /** Explicit bounds when the active cell is inside a selected region. */
+  range?: CellRange;
 }
 
 /**
@@ -39,11 +40,7 @@ export interface CellRange {
  */
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
-/**
- * Grid bounds a move must stay inside: the used range is `[0, rows)` × `[0,
- * cols)`, and `rowsPerPage` is the viewport height in whole rows for
- * PageUp/PageDown steps.
- */
+/** Sheet bounds and the viewport height in whole rows. */
 export interface SelectionLimits {
   rows: number;
   cols: number;
@@ -58,6 +55,8 @@ export interface MoveOpts {
   extend?: boolean;
   step?: number;
   limits: SelectionLimits;
+  hidden?: SelectionHidden;
+  merges?: SelectionMerges;
 }
 
 /**
@@ -83,3 +82,21 @@ export type SelectionAction =
   | { type: 'startEdit'; initialInput?: string }
   | { type: 'clear' }
   | { type: 'none' };
+
+/** Precomputed model answers for one keyboard navigation request. */
+export interface SelectionData {
+  merge?: CellRange | null;
+  edge?: CellAddr | null;
+  region?: CellRange | null;
+  usedRange?: CellRange | null;
+}
+
+export interface SelectionHidden {
+  isRowHidden(row: number): boolean;
+  isColHidden(col: number): boolean;
+}
+
+/** Merged areas, so navigation treats each one as a single cell. */
+export interface SelectionMerges {
+  mergeAt(row: number, col: number): CellRange | null;
+}

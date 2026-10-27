@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use pptx_edit::{
@@ -208,6 +209,423 @@ fn undo_reverts_only_local_origin_and_preserves_remote_text() {
             .plain_text()
             .contains("LOCAL")
     );
+}
+
+fn undo_deletion_preserves_concurrent_edits(delete_slide: bool) {
+    let context = EditCtx::local("local");
+    for editor_syncs_first in [false, true] {
+        let left = DeckSession::open(FIXTURE, 407).unwrap();
+        let right = DeckSession::open(FIXTURE, 408).unwrap();
+        let initial = left.snapshot().unwrap();
+        let (slide, shape) = initial
+            .slides
+            .iter()
+            .find_map(|slide| {
+                slide
+                    .shapes
+                    .iter()
+                    .find(|shape| !shape.text_stories.is_empty())
+                    .map(|shape| (slide, shape))
+            })
+            .unwrap();
+        let story_id = &shape.text_stories[0].id;
+        let index = right.story(story_id).unwrap().length - 1;
+
+        if delete_slide {
+            left.delete_slide(&context, &slide.id).unwrap();
+        } else {
+            left.remove_shape(&context, &slide.id, &shape.id).unwrap();
+        }
+        left.add_undo_barrier();
+        right
+            .insert_text(&context, story_id, index, " REMOTE", &TextStyle::default())
+            .unwrap();
+        right
+            .move_shape(&context, &slide.id, &shape.id, 1_234_567, 2_345_678)
+            .unwrap();
+        if delete_slide {
+            right
+                .set_slide_notes(&context, &slide.id, "Remote notes")
+                .unwrap();
+            right
+                .add_text_box(
+                    &context,
+                    &slide.id,
+                    &ShapeDraft {
+                        name: "Remote shape".to_owned(),
+                        rect: ShapeRect {
+                            x: 0,
+                            y: 0,
+                            width: 1_000_000,
+                            height: 500_000,
+                        },
+                        text: "Remote shape".to_owned(),
+                        style: TextStyle::default(),
+                    },
+                )
+                .unwrap();
+            right
+                .add_comment(
+                    &context,
+                    &slide.id,
+                    "Author",
+                    "A",
+                    "Remote comment",
+                    "2026-09-01T10:00:00.000",
+                    0,
+                    0,
+                )
+                .unwrap();
+        }
+        let expected = right.snapshot().unwrap();
+        let peers = if editor_syncs_first {
+            [&right, &left]
+        } else {
+            [&left, &right]
+        };
+        exchange(&peers);
+        assert_converged(&peers);
+        for peer in peers {
+            let deleted = peer.snapshot().unwrap();
+            assert!(deleted.slides.iter().all(|entry| {
+                if delete_slide {
+                    entry.id != slide.id
+                } else {
+                    entry.shapes.iter().all(|entry| entry.id != shape.id)
+                }
+            }));
+        }
+        let joiner = DeckSession::open_from_update_with_source(
+            &left.encode_state_as_update_v1(),
+            FIXTURE,
+            410,
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            assert!(left.undo());
+            exchange(&peers);
+            sync(&left, &joiner);
+            assert_converged(&[&left, &right, &joiner]);
+            for peer in [&left, &right, &joiner] {
+                assert!(
+                    peer.story(story_id)
+                        .unwrap()
+                        .plain_text()
+                        .contains("REMOTE")
+                );
+                assert_eq!(peer.snapshot().unwrap(), expected);
+                let saved = DeckSession::open(&peer.save().unwrap(), 409).unwrap();
+                let restored = saved.snapshot().unwrap();
+                let slide_index = initial
+                    .slides
+                    .iter()
+                    .position(|entry| entry.id == slide.id)
+                    .unwrap();
+                let shape_index = slide
+                    .shapes
+                    .iter()
+                    .position(|entry| entry.id == shape.id)
+                    .unwrap();
+                let restored_shape = &restored.slides[slide_index].shapes[shape_index];
+                assert!(
+                    restored_shape.text_stories[0]
+                        .plain_text()
+                        .contains("REMOTE")
+                );
+                assert_eq!((restored_shape.x, restored_shape.y), (1_234_567, 2_345_678));
+            }
+            assert!(left.redo());
+            exchange(&peers);
+            sync(&left, &joiner);
+            assert_converged(&[&left, &right, &joiner]);
+        }
+    }
+}
+
+#[test]
+fn undo_slide_deletion_preserves_concurrent_text_and_geometry() {
+    undo_deletion_preserves_concurrent_edits(true);
+}
+
+#[test]
+fn undo_shape_deletion_preserves_concurrent_text_and_geometry() {
+    undo_deletion_preserves_concurrent_edits(false);
+}
+
+#[test]
+fn deleting_a_paragraph_boundary_keeps_first_properties_and_run_styles() {
+    let session = DeckSession::open(FIXTURE, 409).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let context = EditCtx::local("local");
+    let original = session.story(&story_id).unwrap();
+    let boundary = original.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum::<u32>();
+    session
+        .set_paragraph_alignment(&context, &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+    session
+        .set_paragraph_alignment(&context, &story_id, boundary + 1, boundary + 1, Some("r"))
+        .unwrap();
+    session
+        .format_text(
+            &context,
+            &story_id,
+            0,
+            boundary,
+            &TextStylePatch {
+                bold: Some(true),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let second_end = boundary
+        + 1
+        + original.paragraphs[1]
+            .runs
+            .iter()
+            .map(|run| run.text.encode_utf16().count() as u32)
+            .sum::<u32>();
+    session
+        .format_text(
+            &context,
+            &story_id,
+            boundary + 1,
+            second_end,
+            &TextStylePatch {
+                bold: Some(false),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let before = session.story(&story_id).unwrap();
+    session.add_undo_barrier();
+    let receipt = session
+        .delete_text_joining_paragraphs(&context, &story_id, boundary, boundary + 1)
+        .unwrap();
+    assert_eq!(receipt.text, "\n");
+    let mut expected = before.clone();
+    let second = expected.paragraphs.remove(1);
+    expected.paragraphs[0].source_paragraphs = session.story(&story_id).unwrap().paragraphs[0]
+        .source_paragraphs
+        .clone();
+    assert_eq!(expected.paragraphs[0].source_paragraphs.len(), 2);
+    assert_eq!(
+        expected.paragraphs[0].source_paragraphs[0].id,
+        before.paragraphs[0].id
+    );
+    assert_eq!(
+        expected.paragraphs[0].source_paragraphs[1].id,
+        before.paragraphs[1].id
+    );
+    expected.paragraphs[0].runs.extend(second.runs);
+    expected.length -= 1;
+    assert_eq!(session.story(&story_id).unwrap(), expected);
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(session.redo());
+    assert_eq!(session.story(&story_id).unwrap(), expected);
+    let reopened = DeckSession::open(&session.save().unwrap(), 410).unwrap();
+    let saved = reopened.story(&story_id).unwrap();
+    assert_eq!(saved.plain_text(), expected.plain_text());
+    assert_eq!(saved.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(saved.paragraphs[0].level, expected.paragraphs[0].level);
+    assert_eq!(
+        saved.paragraphs[0].bullet_json,
+        expected.paragraphs[0].bullet_json
+    );
+    assert_eq!(saved.paragraphs[0].runs, expected.paragraphs[0].runs);
+}
+
+#[test]
+fn deleting_the_final_paragraph_marker_is_rejected_without_mutation() {
+    let session = DeckSession::open(FIXTURE, 411).unwrap();
+    let story_id = first_text_story(&session);
+    let before = session.story(&story_id).unwrap();
+    assert!(
+        session
+            .delete_text(&EditCtx::local("local"), &story_id, 0, before.length)
+            .is_err()
+    );
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+fn join_peers() -> (DeckSession, DeckSession, String, u32) {
+    let seed = DeckSession::open(FIXTURE, 412).unwrap();
+    let story_id = first_multi_paragraph_story(&seed);
+    let story = seed.story(&story_id).unwrap();
+    let boundary = story.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum();
+    seed.set_paragraph_alignment(&EditCtx::local("seed"), &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+    seed.set_paragraph_alignment(
+        &EditCtx::local("seed"),
+        &story_id,
+        boundary + 1,
+        boundary + 1,
+        Some("r"),
+    )
+    .unwrap();
+    let update = seed.encode_state_as_update_v1();
+    (
+        DeckSession::open_from_update(&update, 413).unwrap(),
+        DeckSession::open_from_update(&update, 414).unwrap(),
+        story_id,
+        boundary,
+    )
+}
+
+fn exchange_join_updates(
+    left: &DeckSession,
+    right: &DeckSession,
+    baseline: &[u8],
+    story: &str,
+) -> pptx_edit::StorySnapshot {
+    let left_update = left.encode_diff_v1(baseline).unwrap();
+    let right_update = right.encode_diff_v1(baseline).unwrap();
+    left.apply_update_v1(&right_update).unwrap();
+    right.apply_update_v1(&left_update).unwrap();
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    assert_eq!(
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1()
+    );
+    left.story(story).unwrap()
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_typing_at_either_side() {
+    for at_start_of_second in [false, true] {
+        let (left, right, story, boundary) = join_peers();
+        let baseline = left.encode_state_vector_v1();
+        let before = left.story(&story).unwrap();
+        left.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+        right
+            .insert_text(
+                &EditCtx::local("peer"),
+                &story,
+                boundary + u32::from(at_start_of_second),
+                "PEER",
+                &TextStyle::default(),
+            )
+            .unwrap();
+        let joined = exchange_join_updates(&left, &right, &baseline, &story);
+        let expected = before.plain_text().replacen('\n', "PEER", 1);
+        assert_eq!(joined.plain_text(), expected);
+        assert_eq!(joined.paragraphs.len(), before.paragraphs.len() - 1);
+        assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    }
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_split_of_second_paragraph() {
+    let (left, right, story, boundary) = join_peers();
+    let baseline = left.encode_state_vector_v1();
+    let before = left.story(&story).unwrap();
+    left.delete_text_joining_paragraphs(&EditCtx::local("join"), &story, boundary, boundary + 1)
+        .unwrap();
+    right
+        .insert_paragraph_break(&EditCtx::local("peer"), &story, boundary + 3)
+        .unwrap();
+    let joined = exchange_join_updates(&left, &right, &baseline, &story);
+    let mut expected = before.plain_text();
+    expected.remove(boundary as usize);
+    expected.insert(boundary as usize + 2, '\n');
+    assert_eq!(joined.plain_text(), expected);
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len());
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    assert_eq!(joined.paragraphs[1].alignment.as_deref(), Some("r"));
+    assert_eq!(joined.paragraphs[1].id, before.paragraphs[1].id);
+    left.set_paragraph_alignment(&EditCtx::local("after"), &story, 0, 0, Some("just"))
+        .unwrap();
+    assert_eq!(
+        left.story(&story).unwrap().paragraphs[0]
+            .alignment
+            .as_deref(),
+        Some("just")
+    );
+    assert_eq!(
+        left.story(&story).unwrap().paragraphs[1]
+            .alignment
+            .as_deref(),
+        Some("r")
+    );
+}
+
+#[test]
+fn paragraph_join_converges_with_peer_properties_on_second_paragraph() {
+    for join_client_is_higher in [false, true] {
+        let (left, right, story, boundary) = join_peers();
+        let (left, right) = if join_client_is_higher {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        let baseline = left.encode_state_vector_v1();
+        let before = left.story(&story).unwrap();
+        left.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+        right
+            .set_paragraph_alignment(
+                &EditCtx::local("peer"),
+                &story,
+                boundary + 1,
+                boundary + 1,
+                Some("just"),
+            )
+            .unwrap();
+        let joined = exchange_join_updates(&left, &right, &baseline, &story);
+        assert_eq!(
+            joined.plain_text(),
+            before.plain_text().replacen('\n', "", 1)
+        );
+        assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+        assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    }
+}
+
+#[test]
+fn paragraph_join_converges_when_both_peers_join_the_same_boundary() {
+    let (left, right, story, boundary) = join_peers();
+    let baseline = left.encode_state_vector_v1();
+    let before = left.story(&story).unwrap();
+    for peer in [&left, &right] {
+        peer.delete_text_joining_paragraphs(
+            &EditCtx::local("join"),
+            &story,
+            boundary,
+            boundary + 1,
+        )
+        .unwrap();
+    }
+    let joined = exchange_join_updates(&left, &right, &baseline, &story);
+    assert_eq!(
+        joined.plain_text(),
+        before.plain_text().replacen('\n', "", 1)
+    );
+    assert_eq!(joined.paragraphs.len(), before.paragraphs.len() - 1);
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("ctr"));
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
 }
 
 #[test]
@@ -532,4 +950,433 @@ fn manual_capture_groups_text_and_comment_edits_until_a_boundary() {
     session.set_undo_capture_mode(UndoCaptureMode::Auto);
     assert_eq!(session.undo_capture_mode(), UndoCaptureMode::Auto);
     assert!(session.can_redo());
+}
+
+fn sync(from: &DeckSession, to: &DeckSession) {
+    to.apply_update_v1(&from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap())
+        .unwrap();
+}
+
+fn exchange(peers: &[&DeckSession]) {
+    for from in peers {
+        for to in peers {
+            if !std::ptr::eq(*from, *to) {
+                sync(from, to);
+            }
+        }
+    }
+}
+
+fn assert_converged(peers: &[&DeckSession]) -> Vec<String> {
+    let first = peers[0];
+    let snapshot = first.snapshot().unwrap();
+    let ids = first.slide_ids().unwrap();
+    assert_eq!(
+        snapshot
+            .slides
+            .iter()
+            .map(|slide| slide.id.clone())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+    for (index, slide) in snapshot.slides.iter().enumerate() {
+        assert_eq!(&first.slide_scope(index).unwrap().slide, slide);
+    }
+    assert!(matches!(
+        first.slide_scope(ids.len()),
+        Err(EditError::OutOfBounds { .. })
+    ));
+    let saved = DeckSession::open(&first.save().unwrap(), 9).unwrap();
+    assert_eq!(saved.slide_ids().unwrap().len(), ids.len());
+    for peer in &peers[1..] {
+        assert_eq!(
+            peer.encode_state_vector_v1(),
+            first.encode_state_vector_v1()
+        );
+        assert_eq!(peer.slide_ids().unwrap(), ids);
+        assert_eq!(peer.snapshot().unwrap(), snapshot);
+    }
+    ids
+}
+
+fn slide_ids(session: &DeckSession) -> [String; 3] {
+    session.slide_ids().unwrap().try_into().unwrap()
+}
+
+#[test]
+fn concurrent_move_and_delete_of_one_slide_converge_in_either_delivery_order() {
+    let context = EditCtx::local("local");
+    for move_first in [true, false] {
+        let mover = DeckSession::open(FIXTURE, 601).unwrap();
+        let deleter = DeckSession::open(FIXTURE, 602).unwrap();
+        let observer = DeckSession::open(FIXTURE, 603).unwrap();
+        let [first, second, third] = slide_ids(&mover);
+        mover.move_slide(&context, &first, 1).unwrap();
+        deleter.delete_slide(&context, &first).unwrap();
+        let updates = [
+            mover.encode_state_as_update_v1(),
+            deleter.encode_state_as_update_v1(),
+        ];
+        let order = if move_first { [0, 1] } else { [1, 0] };
+        for index in order {
+            observer.apply_update_v1(&updates[index]).unwrap();
+        }
+        deleter.apply_update_v1(&updates[0]).unwrap();
+        mover.apply_update_v1(&updates[1]).unwrap();
+        assert_eq!(
+            assert_converged(&[&mover, &deleter, &observer]),
+            [second.clone(), third.clone()]
+        );
+    }
+}
+
+#[test]
+fn three_peers_converge_after_move_delete_and_move_of_one_slide_in_any_order() {
+    let context = EditCtx::local("local");
+    let peers = [601, 602, 603].map(|client| DeckSession::open(FIXTURE, client).unwrap());
+    let [first, second, third] = slide_ids(&peers[0]);
+    peers[0].move_slide(&context, &second, 0).unwrap();
+    peers[1].delete_slide(&context, &second).unwrap();
+    peers[2].move_slide(&context, &second, 2).unwrap();
+    let updates = peers
+        .each_ref()
+        .map(|peer| peer.encode_state_as_update_v1());
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let observers: Vec<DeckSession> = orders
+        .iter()
+        .enumerate()
+        .map(|(client, order)| {
+            let observer = DeckSession::open(FIXTURE, 700 + client as u64).unwrap();
+            for index in order {
+                observer.apply_update_v1(&updates[*index]).unwrap();
+            }
+            observer
+        })
+        .collect();
+    exchange(&peers.each_ref());
+    let mut all: Vec<&DeckSession> = peers.iter().collect();
+    all.extend(observers.iter());
+    assert_eq!(assert_converged(&all), [first, third]);
+}
+
+#[test]
+fn slide_indices_follow_the_visible_order_after_concurrent_moves_of_one_slide() {
+    let context = EditCtx::local("local");
+    let left = DeckSession::open(FIXTURE, 611).unwrap();
+    let right = DeckSession::open(FIXTURE, 612).unwrap();
+    let [first, second, third] = slide_ids(&left);
+    left.move_slide(&context, &third, 0).unwrap();
+    right.move_slide(&context, &third, 1).unwrap();
+    exchange(&[&left, &right]);
+    assert_eq!(
+        assert_converged(&[&left, &right]),
+        [third.clone(), first.clone(), second.clone()]
+    );
+
+    let moved = left.move_slide(&context, &first, 2).unwrap();
+    assert_eq!((moved.from_index, moved.to_index), (Some(1), Some(2)));
+    assert_eq!(
+        left.slide_ids().unwrap(),
+        [third.clone(), second.clone(), first.clone()]
+    );
+    assert_eq!(left.slide_scope(2).unwrap().slide.id, first);
+
+    let moved = right.move_slide(&context, &third, 2).unwrap();
+    assert_eq!((moved.from_index, moved.to_index), (Some(0), Some(2)));
+    assert_eq!(
+        right.slide_ids().unwrap(),
+        [first.clone(), second.clone(), third.clone()]
+    );
+    assert!(matches!(
+        right.move_slide(&context, &second, 3),
+        Err(EditError::OutOfBounds {
+            index: 3,
+            length: 3
+        })
+    ));
+    assert!(matches!(
+        right.insert_slide(&context, 4, None),
+        Err(EditError::OutOfBounds {
+            index: 4,
+            length: 3
+        })
+    ));
+    let inserted = right.insert_slide(&context, 3, None).unwrap();
+    assert_eq!(inserted.to_index, Some(3));
+    assert_eq!(right.slide_ids().unwrap()[3], inserted.slide_id);
+    let duplicated = right.duplicate_slide(&context, &first, 1).unwrap();
+    assert_eq!(right.slide_ids().unwrap()[1], duplicated.slide_id);
+    let deleted = right.delete_slide(&context, &third).unwrap();
+    assert_eq!(deleted.from_index, Some(3));
+
+    exchange(&[&left, &right]);
+    let ids = assert_converged(&[&left, &right]);
+    assert_eq!(ids.len(), 4);
+    assert!(!ids.contains(&third));
+}
+
+#[test]
+fn deleting_a_slide_converges_with_concurrent_edits_inserts_and_moves_around_it() {
+    let context = EditCtx::local("local");
+    let peers = [621, 622, 623].map(|client| DeckSession::open(FIXTURE, client).unwrap());
+    let initial = peers[0].snapshot().unwrap();
+    let (deleted_index, story_id) = initial
+        .slides
+        .iter()
+        .enumerate()
+        .find_map(|(index, slide)| {
+            slide
+                .shapes
+                .iter()
+                .find_map(|shape| shape.text_stories.first())
+                .map(|story| (index, story.id.clone()))
+        })
+        .unwrap();
+    let deleted = initial.slides[deleted_index].id.clone();
+    let other = initial
+        .slides
+        .iter()
+        .rev()
+        .find(|slide| slide.id != deleted)
+        .unwrap()
+        .id
+        .clone();
+
+    peers[0].delete_slide(&context, &deleted).unwrap();
+
+    let editor = &peers[1];
+    editor
+        .add_text_box(
+            &context,
+            &deleted,
+            &ShapeDraft {
+                name: "Concurrent note".to_owned(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 200_000,
+                    width: 3_000_000,
+                    height: 800_000,
+                },
+                text: "added while deleted".to_owned(),
+                style: TextStyle::default(),
+            },
+        )
+        .unwrap();
+    let length = editor.story(&story_id).unwrap().length;
+    editor
+        .insert_text(
+            &context,
+            &story_id,
+            length - 1,
+            " edited",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    editor
+        .set_slide_notes(&context, &deleted, "notes while deleted")
+        .unwrap();
+    editor
+        .add_comment(
+            &context,
+            &deleted,
+            "Ada Lovelace",
+            "AL",
+            "Still needed?",
+            "2026-09-01T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+
+    let arranger = &peers[2];
+    let inserted = arranger
+        .insert_slide(&context, deleted_index as u32 + 1, None)
+        .unwrap();
+    arranger.move_slide(&context, &other, 0).unwrap();
+    let mut expected = arranger.slide_ids().unwrap();
+    expected.retain(|id| id != &deleted);
+
+    exchange(&peers.each_ref());
+    assert_eq!(assert_converged(&peers.each_ref()), expected);
+    assert!(expected.contains(&inserted.slide_id));
+    let snapshot = peers[0].snapshot().unwrap();
+    assert!(
+        snapshot
+            .comments
+            .iter()
+            .all(|comment| comment.slide_id != deleted)
+    );
+}
+
+#[test]
+fn undo_after_a_merged_move_and_delete_converges_on_every_peer() {
+    let context = EditCtx::local("local");
+    for mover_undoes_first in [true, false] {
+        let mover = DeckSession::open(FIXTURE, 631).unwrap();
+        let deleter = DeckSession::open(FIXTURE, 632).unwrap();
+        let initial = mover.snapshot().unwrap();
+        let [first, second, third] = slide_ids(&mover);
+        mover.move_slide(&context, &first, 1).unwrap();
+        mover.add_undo_barrier();
+        deleter.delete_slide(&context, &first).unwrap();
+        deleter.add_undo_barrier();
+        exchange(&[&mover, &deleter]);
+        assert_eq!(
+            assert_converged(&[&mover, &deleter]),
+            [second.clone(), third.clone()]
+        );
+
+        let undoers = if mover_undoes_first {
+            [&mover, &deleter]
+        } else {
+            [&deleter, &mover]
+        };
+        for undoer in undoers {
+            assert!(undoer.undo());
+            exchange(&[&mover, &deleter]);
+            assert_converged(&[&mover, &deleter]);
+        }
+        assert_eq!(
+            assert_converged(&[&mover, &deleter]),
+            [first.clone(), second.clone(), third.clone()]
+        );
+        assert_eq!(mover.snapshot().unwrap().slides[0], initial.slides[0]);
+    }
+}
+
+#[test]
+fn undo_after_concurrent_deletes_of_one_slide_restores_it_everywhere() {
+    let context = EditCtx::local("local");
+    let left = DeckSession::open(FIXTURE, 641).unwrap();
+    let right = DeckSession::open(FIXTURE, 642).unwrap();
+    let initial = left.snapshot().unwrap();
+    let [first, second, third] = slide_ids(&left);
+    left.delete_slide(&context, &first).unwrap();
+    left.add_undo_barrier();
+    right.delete_slide(&context, &first).unwrap();
+    exchange(&[&left, &right]);
+    assert_eq!(
+        assert_converged(&[&left, &right]),
+        [second.clone(), third.clone()]
+    );
+    assert!(left.undo());
+    exchange(&[&left, &right]);
+    assert_eq!(assert_converged(&[&left, &right]), [first, second, third]);
+    assert_eq!(right.snapshot().unwrap().slides[0], initial.slides[0]);
+}
+
+fn diff_since(session: &DeckSession, state_vector: &mut Vec<u8>) -> Vec<u8> {
+    let update = session.encode_diff_v1(state_vector).unwrap();
+    *state_vector = session.encode_state_vector_v1();
+    update
+}
+
+fn undo_and_redo_over_merged_concurrent_moves(delete: bool) {
+    let context = EditCtx::local("local");
+    for reverse in [false, true] {
+        let peers = [651, 652, 653].map(|client| DeckSession::open(FIXTURE, client).unwrap());
+        let [left, right, merger] = &peers;
+        let [first, second, third] = slide_ids(left);
+        left.move_slide(&context, &first, 1).unwrap();
+        right.move_slide(&context, &first, 2).unwrap();
+        let moves = [
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1(),
+        ];
+        sync(left, merger);
+        sync(right, merger);
+        let before = merger.snapshot().unwrap();
+        assert_eq!(
+            merger.slide_ids().unwrap(),
+            [second.clone(), first.clone(), third.clone()]
+        );
+
+        let mut state_vector = merger.encode_state_vector_v1();
+        let expected = if delete {
+            merger.delete_slide(&context, &first).unwrap();
+            vec![second.clone(), third.clone()]
+        } else {
+            merger.move_slide(&context, &first, 0).unwrap();
+            vec![first.clone(), second.clone(), third.clone()]
+        };
+        let after = merger.snapshot().unwrap();
+        assert_eq!(merger.slide_ids().unwrap(), expected);
+        let mut updates = vec![diff_since(merger, &mut state_vector)];
+        assert!(merger.undo());
+        assert_eq!(merger.snapshot().unwrap(), before);
+        updates.push(diff_since(merger, &mut state_vector));
+        assert!(merger.redo());
+        assert_eq!(merger.snapshot().unwrap(), after);
+        updates.push(diff_since(merger, &mut state_vector));
+
+        for (peer, other) in [(left, &moves[1]), (right, &moves[0])] {
+            let mut delivery: Vec<&Vec<u8>> = std::iter::once(other).chain(&updates).collect();
+            if reverse {
+                delivery.reverse();
+            }
+            for update in delivery {
+                peer.apply_update_v1(update).unwrap();
+            }
+        }
+        assert_eq!(assert_converged(&peers.each_ref()), expected);
+    }
+}
+
+#[test]
+fn undo_and_redo_of_a_move_over_merged_concurrent_moves_restore_the_visible_order() {
+    undo_and_redo_over_merged_concurrent_moves(false);
+}
+
+#[test]
+fn undo_and_redo_of_a_delete_over_merged_concurrent_moves_restore_the_visible_order() {
+    undo_and_redo_over_merged_concurrent_moves(true);
+}
+
+#[test]
+fn a_peer_can_apply_what_the_loser_of_a_concurrent_move_publishes_before_the_winning_move() {
+    let context = EditCtx::local("local");
+    let peer = DeckSession::open(FIXTURE, 201).unwrap();
+    let loser = DeckSession::open(FIXTURE, 202).unwrap();
+    let winner = DeckSession::open(FIXTURE, 203).unwrap();
+    let baseline = loser.encode_state_vector_v1();
+    let initial = loser.snapshot().unwrap();
+    let (slide, shape) = (&initial.slides[0].id, &initial.slides[0].shapes[0].id);
+    loser
+        .move_shape(&context, slide, shape, 1_111_111, 2_222_222)
+        .unwrap();
+    winner
+        .move_shape(&context, slide, shape, 3_333_333, 4_444_444)
+        .unwrap();
+    let lost = loser.encode_diff_v1(&baseline).unwrap();
+    let won = winner.encode_diff_v1(&baseline).unwrap();
+    let seen = loser.snapshot().unwrap();
+
+    let published = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&published);
+    let _subscription = loser
+        .observe_update_v1(move |event| {
+            if event.origin == UpdateOrigin::Local {
+                sink.lock().unwrap().push(event.update);
+            }
+        })
+        .unwrap();
+    loser.apply_update_v1(&won).unwrap();
+
+    peer.apply_update_v1(&lost).unwrap();
+    for update in published.lock().unwrap().iter() {
+        peer.apply_update_v1(update).unwrap();
+    }
+    assert_eq!(peer.snapshot().unwrap(), seen);
+
+    peer.apply_update_v1(&won).unwrap();
+    winner.apply_update_v1(&lost).unwrap();
+    assert_converged(&[&loser, &winner, &peer]);
 }

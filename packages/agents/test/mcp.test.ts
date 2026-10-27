@@ -65,7 +65,7 @@ test('stdio MCP supports discovery through verified export and confines file acc
     expect((await client.callTool({ name: 'office_open', arguments: { path: join(outside, 'secret.docx') } })).isError).toBe(true);
     expect((await client.callTool({ name: 'office_open', arguments: { path: 'escape/secret.docx' } })).isError).toBe(true);
     expect((await client.callTool({ name: 'office_export', arguments: { document, path: 'escape/leak.docx' } })).isError).toBe(true);
-    expect((await client.callTool({ name: 'office_grep', arguments: { document, query: 'risk', limit: 100000 } })).isError).toBe(true);
+    expect((await call('office_grep', { document, query: 'risk', limit: 100000 })).clamping).toContain('limit clamped to 100; follow pagination cursors for remaining content.');
     for (const [name, args] of [
       ['office_open', { path: 'x'.repeat(4097) }],
       ['office_read', { document: 'x'.repeat(129), ref: hit.ref }],

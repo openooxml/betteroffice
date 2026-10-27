@@ -1,17 +1,17 @@
 import type { YrsCellLoc, YrsLoc, YrsTableLoc, YrsTableRange } from './index';
-import { createYrsPositionProjection } from './yrsPositionProjection';
 import { tableAnchors, type TableCellAnchor, type TablePayload } from './storyPlainText';
 import type {
   DocxCommandIntent,
   DocxCommandSelection,
-  ResidentDocxCommandEngine,
-  ResidentDocxCommandState,
+  DocxWorkerCommandEngine,
+  DocxWorkerCommandState,
 } from './residentCommandProtocol';
+import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
 
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
   | 'deleteTableRow' | 'deleteTableColumn' | 'deleteTable'
-  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading';
+  | 'mergeTableCells' | 'splitTableCell' | 'setTableCellShading' | 'setTableBorders' | 'setTableProperties';
 
 export type TableCommandIntent = Extract<DocxCommandIntent, { kind: TableCommandKind }>;
 
@@ -24,62 +24,32 @@ export interface DocxTableCommandTarget {
 
 const TABLE_COMMANDS = {
   insertTableRow: true, insertTableColumn: true, deleteTableRow: true, deleteTableColumn: true,
-  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true,
+  deleteTable: true, mergeTableCells: true, splitTableCell: true, setTableCellShading: true, setTableBorders: true, setTableProperties: true,
 } satisfies Record<TableCommandKind, true>;
 
 export function isTableCommandKind(kind: string): kind is TableCommandKind {
   return Object.hasOwn(TABLE_COMMANDS, kind);
 }
 
-function rootOf(story: string): string {
-  return story === 'body' || story.startsWith('body:') ? 'body'
-    : story.split(':').slice(0, 2).join(':');
-}
-
-function sameGridCell(left: YrsCellLoc, right: YrsCellLoc): boolean {
-  return left.row === right.row && left.column === right.column;
-}
-
-function liveCell(engine: ResidentDocxCommandEngine, story: string): YrsCellLoc | null {
-  if (story === rootOf(story)) return null;
-  const projection = createYrsPositionProjection(engine.geometryReader, rootOf(story));
-  if (!projection) return null;
-  let best: YrsCellLoc | null = null;
-  for (const table of projection.allTables()) {
-    const cell = table.cells.find((candidate) => candidate.story === story);
-    if (!cell) continue;
-    if (!best || table.story.length > best.story.length) {
-      best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
-    }
-  }
-  return best;
-}
-
-function readCellSelection(engine: ResidentDocxCommandEngine): YrsTableRange | null {
-  try {
-    return engine.cellSelection();
-  } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
-    return null;
-  }
-}
-
 function resolveTableTarget(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   selection: DocxCommandSelection
 ): { focused: YrsCellLoc; range: YrsTableRange; table: YrsTableLoc } | null {
-  const focused = liveCell(engine, selection.focus.story);
+  const focused = resolveLiveCell(engine, selection.focus.story);
   if (!focused) return null;
   const table = { story: focused.story, tableIndex: focused.tableIndex };
   const selected = readCellSelection(engine);
   const range = selected && [selected.anchor, selected.head].every((end) =>
     end.story === focused.story && end.tableIndex === focused.tableIndex) &&
-    (sameGridCell(selected.anchor, focused) || sameGridCell(selected.head, focused))
+    Math.min(selected.anchor.row, selected.head.row) <= focused.row &&
+    focused.row <= Math.max(selected.anchor.row, selected.head.row) &&
+    Math.min(selected.anchor.column, selected.head.column) <= focused.column &&
+    focused.column <= Math.max(selected.anchor.column, selected.head.column)
     ? selected : { anchor: focused, head: focused };
   return { focused, range, table };
 }
 
-export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc): YrsLoc | null {
+export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {
   const segments = engine.geometryReader.storySegments(table.story);
   let ordinal = 0;
   let target = -1;
@@ -102,16 +72,16 @@ export function nearTable(engine: ResidentDocxCommandEngine, table: YrsTableLoc)
 }
 
 /** Live tables holding a story, innermost first; empty outside tables. */
-export function liveTableAncestors(engine: ResidentDocxCommandEngine, story: string): YrsTableLoc[] {
+export function liveTableAncestors(engine: DocxWorkerCommandEngine, story: string): YrsTableLoc[] {
   const tables: YrsTableLoc[] = [];
-  for (let cell = liveCell(engine, story); cell; cell = liveCell(engine, cell.story)) {
+  for (let cell = resolveLiveCell(engine, story); cell; cell = resolveLiveCell(engine, cell.story)) {
     tables.push({ story: cell.story, tableIndex: cell.tableIndex });
   }
   return tables;
 }
 
 export function preflightTableCommand(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   command: TableCommandIntent,
   selection: DocxCommandSelection
 ): { target: DocxTableCommandTarget } | { reason: string } {
@@ -134,11 +104,15 @@ export function preflightTableCommand(
       return { reason: 'invalid-table-size' };
     }
   }
+  if (command.kind === 'setTableProperties' && command.payload.expectVersion !== undefined &&
+    command.payload.expectVersion !== engine.proposalEngine.version()) {
+    return { reason: 'stale-version' };
+  }
   const removes = command.kind === 'deleteTable' || command.kind === 'deleteTableRow' || command.kind === 'deleteTableColumn';
   return { target: { ...resolved, near: removes ? nearTable(engine, resolved.table) : null } };
 }
 
-function liveAnchors(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+function liveAnchors(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
   return payload && Array.isArray(payload.rows) ? tableAnchors(payload).anchors : null;
 }
@@ -150,7 +124,7 @@ function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): Ta
 }
 
 function expandedRangeAnchorCount(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   at: YrsCellLoc,
   range: YrsTableRange
 ): number {
@@ -181,12 +155,12 @@ function expandedRangeAnchorCount(
     anchor.column >= left && anchor.column + anchor.colspan <= right).length;
 }
 
-function liveAnchor(engine: ResidentDocxCommandEngine, at: YrsCellLoc) {
+function liveAnchor(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const anchors = liveAnchors(engine, at);
   return anchors ? coveringAnchor(anchors, at) : null;
 }
 
-function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): string | null {
+function nearestCellStory(engine: DocxWorkerCommandEngine, at: YrsCellLoc): string | null {
   const anchors = liveAnchors(engine, at);
   if (!anchors) return null;
   const covering = coveringAnchor(anchors, at);
@@ -200,8 +174,8 @@ function nearestCellStory(engine: ResidentDocxCommandEngine, at: YrsCellLoc): st
   return (column[0] ?? ordered[0])?.story ?? null;
 }
 
-export function syncCellSelectionWithCaret(engine: ResidentDocxCommandEngine, story: string): void {
-  const cell = liveCell(engine, story);
+export function syncCellSelectionWithCaret(engine: DocxWorkerCommandEngine, story: string): void {
+  const cell = resolveLiveCell(engine, story);
   if (cell) engine.setCellSelection({ anchor: cell, head: cell });
   else engine.clearCellSelection();
 }
@@ -212,7 +186,7 @@ export interface TableCommandSink {
 }
 
 function caretInCellStory(
-  engine: ResidentDocxCommandEngine,
+  engine: DocxWorkerCommandEngine,
   story: string | null,
   keep: YrsLoc
 ): YrsLoc | null {
@@ -228,8 +202,8 @@ function caretInCellStory(
 
 /** Runs inside the caller's discrete undo group. */
 export function applyTableCommand(
-  engine: ResidentDocxCommandEngine,
-  state: ResidentDocxCommandState,
+  engine: DocxWorkerCommandEngine,
+  state: DocxWorkerCommandState,
   command: TableCommandIntent,
   target: DocxTableCommandTarget,
   keep: YrsLoc,
@@ -286,6 +260,12 @@ export function applyTableCommand(
     }
     case 'setTableCellShading':
       engine.setCellShading(target.range, command.payload.color);
+      break;
+    case 'setTableBorders':
+      engine.setCellBorders(target.range, command.payload.borders);
+      break;
+    case 'setTableProperties':
+      engine.setTableProperties(target.table, command.payload.patch);
       break;
   }
   if (engine.proposalEngine.version() !== version) state.storedMarks = null;

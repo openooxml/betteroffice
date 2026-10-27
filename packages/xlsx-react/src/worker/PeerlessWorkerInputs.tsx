@@ -1,13 +1,13 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { commandForEvent } from '../commands/descriptors';
-import { FormulaBarContext, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
+import { FormulaBarContext, presentInputValue, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import type { WorkerDraftController } from './WorkerDraftController';
 import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerPresentationStore } from './WorkerPresentationStore';
 
 export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ controller, presentation, run, active,
-  selectedChart, error, readOnly, navigation, children }: {
+  selectedChart, error, readOnly, navigation, onNavigate, children }: {
   controller: WorkerDraftController;
   presentation: WorkerPresentationStore;
   run: PeerlessWorkbookSession | null;
@@ -16,49 +16,54 @@ export const PeerlessWorkerInputs = memo(function PeerlessWorkerInputs({ control
   error: boolean;
   readOnly: boolean;
   navigation: { current: number };
+  onNavigate(cell: { row: number; col: number }): void;
   children: ReactNode;
 }) {
   const { selection, view, painted } = useSyncExternalStore(presentation.subscribe, presentation.getSnapshot);
-  const [focusedInput, setFocusedInput] = useState('');
+  const [focusedInput, setFocusedInput] = useState<{ at: string; value: string } | null>(null);
   const inputRevision = painted?.coversThroughSeq ?? 0;
   const unavailable = usePeerlessReadOnly(run, readOnly);
   useEffect(() => {
     if (!run?.current || run.failure || !selection || selectedChart) return;
     const identity = `${run.generation}:${run.session.confirmedBasis.epoch}`;
     const at = navigation.current;
-    const draftIdentity = controller.prefillIdentity;
+    const draftIdentity = controller.focusedCellIdentity;
+    const cell = `${active}:${cellAddress(selection.anchor)}`;
     let cancelled = false;
-    void run.session.call.cellInputs(active, cellAddress(selection.focus)).then((result) => {
+    void run.session.call.cellInputs(active, cellAddress(selection.anchor)).then((result) => {
       if (!cancelled && run.current && !run.failure && identity === `${run.generation}:${run.session.confirmedBasis.epoch}` &&
-        navigation.current === at && controller.prefillIdentity === draftIdentity) {
-        setFocusedInput(result.cells[0]?.[0]?.input ?? '');
+        navigation.current === at && controller.focusedCellIdentity === draftIdentity) {
+        const value = result.cells[0]?.[0]?.input ?? '';
+        controller.focusedCellInput = { identity: draftIdentity, value };
+        setFocusedInput({ at: cell, value });
         controller.presented(inputRevision);
       }
     }).catch((failure) => { if (!cancelled && run.current) run.fail(failure); });
     return () => { cancelled = true; };
   }, [run, active, selection, selectedChart, painted, inputRevision, controller, navigation]);
-  useLayoutEffect(() => { setFocusedInput(''); }, [run]);
+  useLayoutEffect(() => { setFocusedInput(null); }, [run]);
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const handlers = useMemo<Omit<FormulaBarBinding, 'a1' | 'value' | 'disabled' | 'readOnly'>>(() => ({
     native: true,
+    onNavigate,
     inputRef: (input) => { controller.formulaInput = input; },
     isComposing: () => controller.isComposing('formula'),
     onChange: (value) => controller.change('formula', value, controller.formulaInput),
     onCommit: (move) => controller.commit('formula', move), onCancel: controller.cancel,
     onBlur: () => controller.commit('formula'),
-    onCompositionStart: () => controller.start('formula'), onCompositionEnd: () => controller.end(),
+    onCompositionStart: () => controller.start('formula'), onCompositionEnd: () => controller.end(undefined, controller.formulaInput?.value),
     onKeyDown: (event) => {
       const consumed = controller.key('formula', event);
       if (consumed) { event.stopPropagation(); return true; }
       return false;
     },
     onKeyUp: () => controller.keyUp(),
-  }), [controller]);
-  const a1 = selection ? cellAddress(selection.focus) : '';
-  const value = state.formula ?? focusedInput;
+  }), [controller, onNavigate]);
+  const a1 = selection ? cellAddress(selection.anchor) : '';
+  const value = state.formula ?? (focusedInput?.at === `${active}:${a1}` ? focusedInput.value : '');
   useLayoutEffect(() => {
     const input = controller.formulaInput;
-    if (input && !controller.isComposing('formula') && input.value !== value) input.value = value;
+    if (input && !controller.isComposing('formula') && input.value !== value) presentInputValue(input, value);
   }, [controller, state, value]);
   const disabled = !view || !selection || error;
   const formula = useMemo<FormulaBarBinding>(() => ({ ...handlers, a1, value, disabled, readOnly: unavailable || selectedChart }),
@@ -93,8 +98,13 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     const beforeInput = (event: InputEvent) => {
       if (controller.holdCellBeforeInput(event)) event.preventDefault();
     };
+    const select = () => controller.captureCellSelection();
     input.addEventListener('beforeinput', beforeInput);
-    return () => input.removeEventListener('beforeinput', beforeInput);
+    input.addEventListener('select', select);
+    return () => {
+      input.removeEventListener('beforeinput', beforeInput);
+      input.removeEventListener('select', select);
+    };
   }, [controller, draft !== null, bounds !== null]);
   useLayoutEffect(() => {
     const input = controller.cellInput;
@@ -118,7 +128,7 @@ export const PeerlessWorkerCellInput = memo(function PeerlessWorkerCellInput({ c
     defaultValue={draft.value} disabled={disabled} style={style}
     onChange={(event) => controller.change('cell', event.target.value, event.currentTarget)}
     onCompositionStart={() => controller.start('cell')}
-    onCompositionEnd={(event) => controller.end(event.nativeEvent.data)}
+    onCompositionEnd={(event) => controller.end(event.nativeEvent.data, event.currentTarget.value)}
     onKeyDown={(event) => {
       if (!commandForEvent(event)) event.stopPropagation();
       if (controller.key('cell', event)) return;

@@ -87,6 +87,8 @@ struct DeleteTextArgs {
     story_id: String,
     start: u32,
     end: u32,
+    #[serde(default)]
+    allow_paragraph_join: bool,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +193,15 @@ struct SetSlideNotesArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetSlideLayoutArgs {
+    slide_id: String,
+    layout_part_path: String,
+    #[serde(default)]
+    mapping: Vec<(String, u32)>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveSlideArgs {
     slide_id: String,
     to_index: u32,
@@ -226,6 +237,35 @@ struct AddPictureArgs {
     content_type: String,
     /// The image bytes, base64-encoded: JSON has no binary payload of its own.
     media_base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableCheckArgs {
+    edit: crate::TableEdit,
+    slide_id: String,
+    shape_id: String,
+    index: u32,
+    #[serde(default)]
+    position: Option<crate::TableInsertPosition>,
+    #[serde(default)]
+    cells: Vec<String>,
+    #[serde(default)]
+    width: crate::TableColumnWidth,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableArgs {
+    slide_id: String,
+    shape_id: String,
+    index: u32,
+    #[serde(default)]
+    position: Option<crate::TableInsertPosition>,
+    #[serde(default)]
+    cells: Vec<String>,
+    #[serde(default)]
+    width: crate::TableColumnWidth,
 }
 
 #[derive(Deserialize)]
@@ -427,6 +467,8 @@ impl PptxDocument {
         json(self.session.reject_proposal(&args.id))
     }
 
+    /// Opens a session that can exchange updates. It is not marked collaborative until
+    /// `setCollaborative` is called.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
@@ -524,7 +566,11 @@ impl PptxDocument {
         if request.len() > MAX_REQUEST_BYTES {
             return self.oversized();
         }
-        let request: EditRequest = parse_args(request)?;
+        let request: EditRequest = serde_json::from_str(request).map_err(|error| {
+            let exception = js_sys::Error::new(&error.to_string());
+            exception.set_name("PptxEditDecodeError");
+            JsValue::from(exception)
+        })?;
         outcome_json(&self.session.validate_edits(&request).map_err(js_error)?).map_err(js_error)
     }
 
@@ -642,6 +688,11 @@ impl PptxDocument {
         self.session
             .encode_diff_v1(remote_state_vector)
             .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setCollaborative)]
+    pub fn set_collaborative(&self) -> Result<(), JsValue> {
+        self.session.set_collaborative().map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = applyUpdateJson)]
@@ -852,6 +903,88 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = insertTableRowJson)]
+    pub fn insert_table_row_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .insert_table_row(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    args.index,
+                    args.position
+                        .ok_or_else(|| js_error("position must be before or after"))?,
+                    &args.cells,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = checkTableEditJson)]
+    pub fn check_table_edit_json(&self, args: &str) -> Result<(), JsValue> {
+        let args: TableCheckArgs = parse_args(args)?;
+        let insert = matches!(
+            args.edit,
+            crate::TableEdit::InsertRow | crate::TableEdit::InsertColumn
+        );
+        let position = match args.position {
+            Some(position) => position,
+            None if insert => return Err(js_error("position must be before or after")),
+            None => crate::TableInsertPosition::After,
+        };
+        self.session
+            .check_table_edit_with_width(
+                args.edit,
+                &args.slide_id,
+                &args.shape_id,
+                args.index,
+                position,
+                &args.cells,
+                args.width,
+            )
+            .map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteTableRowJson)]
+    pub fn delete_table_row_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .delete_table_row(&local_context(), &args.slide_id, &args.shape_id, args.index)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = insertTableColumnJson)]
+    pub fn insert_table_column_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .insert_table_column_with_width(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    args.index,
+                    args.position
+                        .ok_or_else(|| js_error("position must be before or after"))?,
+                    &args.cells,
+                    args.width,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = deleteTableColumnJson)]
+    pub fn delete_table_column_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: TableArgs = parse_args(args)?;
+        json(
+            self.session
+                .delete_table_column(&local_context(), &args.slide_id, &args.shape_id, args.index)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = insertSlideJson)]
     pub fn insert_slide_json(&self, args: &str) -> Result<String, JsValue> {
         json(self.insert_slide(parse_args(args)?)?)
@@ -880,6 +1013,20 @@ impl PptxDocument {
                 .delete_slide(&local_context(), &args.slide_id)
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = setSlideLayoutJson)]
+    pub fn set_slide_layout_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetSlideLayoutArgs = parse_args(args)?;
+        self.session
+            .set_slide_layout(
+                &local_context(),
+                &args.slide_id,
+                &args.layout_part_path,
+                &args.mapping,
+            )
+            .map_err(js_error)?;
+        json(())
     }
 
     #[wasm_bindgen(js_name = setSlideNotesJson)]
@@ -1186,6 +1333,17 @@ impl PptxDocument {
     }
 
     fn delete_text(&self, args: DeleteTextArgs) -> Result<TextReceipt, JsValue> {
+        if args.allow_paragraph_join {
+            return self
+                .session
+                .delete_text_joining_paragraphs(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                )
+                .map_err(js_error);
+        }
         self.session
             .delete_text(&local_context(), &args.story_id, args.start, args.end)
             .map_err(js_error)

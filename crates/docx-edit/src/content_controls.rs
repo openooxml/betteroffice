@@ -1024,7 +1024,11 @@ impl Inventory {
         let read = source.as_deref().map(crate::seed::SourceMetadata::read);
         let story_ids: Vec<String> = txn
             .get_map(crate::STORIES)
-            .map(|stories| stories.keys(txn).map(str::to_owned).collect())
+            .map(|stories| {
+                crate::live_stories(&stories, txn)
+                    .map(|(id, _)| id.to_owned())
+                    .collect()
+            })
             .unwrap_or_default();
         let known: HashSet<&str> = story_ids.iter().map(String::as_str).collect();
         let mut sources: HashMap<(&str, Option<usize>), Vec<usize>> = HashMap::new();
@@ -1485,7 +1489,7 @@ fn read_doc(
     let txn = doc.yrs_doc().transact();
     if txn
         .get_map(crate::STORIES)
-        .is_none_or(|stories| stories.len(&txn) == 0)
+        .is_none_or(|stories| crate::live_stories(&stories, &txn).next().is_none())
     {
         return Err(ExportFailure {
             code: ExportFailureCode::Unsupported,

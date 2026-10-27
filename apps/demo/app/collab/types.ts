@@ -44,7 +44,5 @@ export interface CollaborationProvider {
 
 export type CollaborationProviderFactory<
   Provider extends CollaborationProvider = CollaborationProvider,
-> = (
-  replica: CollaborationReplica,
-  transport: CollaborationTransport,
-) => Provider;
+  Replica = CollaborationReplica,
+> = (replica: Replica, transport: CollaborationTransport) => Provider;

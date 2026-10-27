@@ -132,7 +132,7 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashS
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return cells;
     };
-    for (story_id, value) in stories.iter(txn) {
+    for (story_id, value) in crate::live_stories(&stories, txn) {
         #[cfg(test)]
         crate::TABLE_MEMBERSHIP_STORIES_SCANNED.with(|scanned| scanned.set(scanned.get() + 1));
         let Out::YText(story) = value else {
@@ -396,7 +396,9 @@ impl EditingDoc {
             let Some(stories) = txn.get_map(crate::STORIES) else {
                 return Ok(Vec::new());
             };
-            let mut ids: Vec<String> = stories.keys(&txn).map(|key| key.to_string()).collect();
+            let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_owned())
+                .collect();
             ids.sort();
             ids
         };

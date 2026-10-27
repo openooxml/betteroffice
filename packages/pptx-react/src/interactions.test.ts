@@ -115,6 +115,36 @@ const frame: SlideDisplayList = {
 };
 
 describe('pptx interactions', () => {
+  it('text columns resolve a caret in the second column', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    const second = box.lines[1]!;
+    second.columnOffset = 150;
+    second.x += 150;
+    second.y = box.lines[0]!.y;
+    second.caretStops = second.caretStops.map((stop) => ({ ...stop, x: stop.x + 150 }));
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 260, y: 120 })).toEqual({ position: 5, lineIndex: 1 });
+  });
+
+  it('single-column hit testing keeps the row right of a short line', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    box.lines[0]!.width = 10;
+    box.lines[0]!.caretStops = [{ position: 0, x: 110 }, { position: 5, x: 120 }];
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 210, y: 120 })).toEqual({ position: 5, lineIndex: 0 });
+  });
+
+  it('single-column hit testing keeps the row in reversed vertical flow', () => {
+    const box = structuredClone(frame.primitives[2]) as TextBoxPrimitive;
+    box.lines[0]!.x = 210;
+    box.lines[0]!.y = 140;
+    box.lines[0]!.width = 10;
+    box.lines[0]!.caretStops = [{ position: 0, x: 210 }, { position: 5, x: 220 }];
+    box.lines[1]!.y = 110;
+    expect(textLocationAtPoint({ ...frame, primitives: [box] }, 'text', 'story',
+      { x: 110, y: 150 })).toEqual({ position: 0, lineIndex: 0 });
+  });
+
   it('maps client coordinates into slide coordinates', () => {
     expect(slidePoint({ left: 200, top: 100, width: 640, height: 360 }, frame, 520, 280)).toEqual({
       x: 640,
@@ -375,6 +405,49 @@ describe('pptx resize handles', () => {
     expect(box.height).toBe(picture.height + 685_800);
     expect(box.x).toBe(picture.x);
   });
+
+  it('preserves a locked picture aspect ratio on every corner drag', () => {
+    const locked = { ...picture, width: 3_000_000, height: 1_500_000, aspectRatioLocked: true };
+    for (const handle of ['nw', 'ne', 'sw', 'se'] as const) {
+      const box = resizedShapeBox(deck, frame, locked, handle, { x: 80, y: 10 })!;
+      expect(box.width / box.height).toBeCloseTo(2, 5);
+      expect(handle.includes('w') ? box.x + box.width : box.x)
+        .toBe(handle.includes('w') ? locked.x + locked.width : locked.x);
+      expect(handle.startsWith('n') ? box.y + box.height : box.y)
+        .toBe(handle.startsWith('n') ? locked.y + locked.height : locked.y);
+    }
+  });
+
+  for (const handle of ['nw', 'ne', 'sw', 'se'] as const) {
+    it(`scales a locked picture continuously across opposing deltas at ${handle}`, () => {
+      const locked = { ...picture, width: 2_400_000, height: 1_200_000, aspectRatioLocked: true };
+      for (const direction of [-1, 1]) {
+        const boxes = [-399_000, -400_000, -401_000].map((dy) => {
+          const delta = {
+            x: (direction * (handle.includes('w') ? -800_000 : 800_000) * frame.width) / deck.widthEmu,
+            y: (direction * (handle.startsWith('n') ? -dy : dy) * frame.height) / deck.heightEmu,
+          };
+          const box = resizedShapeBox(deck, frame, locked, handle, delta)!;
+          expect(box.width / box.height).toBeCloseTo(2, 5);
+          expect(handle.includes('w') ? box.x + box.width : box.x)
+            .toBe(handle.includes('w') ? locked.x + locked.width : locked.x);
+          expect(handle.startsWith('n') ? box.y + box.height : box.y)
+            .toBe(handle.startsWith('n') ? locked.y + locked.height : locked.y);
+          expect(resizedShapeBounds(deck, frame, locked, handle, delta)).toEqual({
+            x: (box.x * frame.width) / deck.widthEmu,
+            y: (box.y * frame.height) / deck.heightEmu,
+            width: (box.width * frame.width) / deck.widthEmu,
+            height: (box.height * frame.height) / deck.heightEmu,
+          });
+          return box;
+        });
+        for (let index = 1; index < boxes.length; index += 1) {
+          expect(Math.abs(boxes[index].width - boxes[index - 1].width)).toBeLessThan(2_000);
+          expect(Math.abs(boxes[index].height - boxes[index - 1].height)).toBeLessThan(2_000);
+        }
+      }
+    });
+  }
 
   it('uses the same EMU floor for preview and commit', () => {
     const box = resizedShapeBox(deck, frame, picture, 'e', { x: -1_000, y: 0 });

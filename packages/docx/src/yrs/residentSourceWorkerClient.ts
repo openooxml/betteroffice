@@ -1,33 +1,41 @@
-import { ResidentEngineWorkerClient, ResidentWorkerFailureError, takePreloadedResidentEngineWorker,
+import { ResidentEngineWorkerClient, ResidentWorkerCutKeptError, ResidentWorkerFailureError, takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerPort, type ResidentEngineWorkerFrame } from './residentEngineWorkerClient';
 import { isCommandAck } from '../../../../shared/office-session/commands/types';
-import { validateResidentSource, type ResidentSourceOpenRequest } from './residentSource';
-import type { ResidentFontEnvironmentEvent } from './residentFontEnvironment';
+import { validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
+import type { DocxFontEnvironmentEvent } from './residentFontEnvironment';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
-import type { ResidentEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
+import type { DocxSvgMedia } from './residentCommandProtocol';
 
-export interface ResidentEngineWorkerSourceOpened {
+export interface DocxEngineWorkerSourceOpened {
   document: Document;
   stateVector: Uint8Array;
   hostJson?: string;
   preview?: ResidentEngineWorkerFrame;
+  /** The client id the opened replica writes with: a fresh one when the pinned id would reuse its clocks. */
+  clientId?: number;
+  /** The opened state's clock for `clientId`. */
+  clientClock?: number;
+  /** Pictures shown as SVG, which the host decodes for the worker's `commandInit`. */
+  svgMedia?: DocxSvgMedia[];
 }
 
-export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
-  private fontListeners = new Set<(event: ResidentFontEnvironmentEvent) => void>();
+export class DocxSourceWorkerClient extends ResidentEngineWorkerClient {
+  private fontListeners = new Set<(event: DocxFontEnvironmentEvent) => void>();
   private memoryListeners = new Set<(samples: WasmModuleMemory[]) => void>();
   private presentedFontsRevision = 0;
+  private cutReservation: { bytes?: number } | null = null;
 
   constructor(worker?: ResidentEngineWorkerPort) {
     super(worker);
     this.observe();
   }
 
-  static adopt(client: ResidentEngineWorkerClient): ResidentSourceWorkerClient {
-    if (client instanceof ResidentSourceWorkerClient) return client;
-    Object.setPrototypeOf(client, ResidentSourceWorkerClient.prototype);
-    const source = client as ResidentSourceWorkerClient;
+  static adopt(client: ResidentEngineWorkerClient): DocxSourceWorkerClient {
+    if (client instanceof DocxSourceWorkerClient) return client;
+    Object.setPrototypeOf(client, DocxSourceWorkerClient.prototype);
+    const source = client as DocxSourceWorkerClient;
     source.fontListeners = new Set();
     source.memoryListeners = new Set();
     source.presentedFontsRevision = 0;
@@ -73,37 +81,86 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
     };
   }
 
-  async openSource(source: ResidentSourceOpenRequest): Promise<ResidentEngineWorkerSourceOpened> {
+  /** Opens a display-only cut of the first body blocks for a preview; null when the worker declines it. {@link openSource} replaces it. */
+  async openSourceCut(source: DocxSourceOpenRequest & { bytes: Uint8Array; cut: NonNullable<DocxSourceOpenRequest['cut']> }): Promise<Document | null> {
     validateResidentSource(source);
     if (this.openedHeapLimit || this.bootstrapped) {
-      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
     }
     const reservation = { bytes: source.heapLimitBytes };
     this.openedHeapLimit = reservation;
+    this.cutReservation = reservation;
     try {
-      const owned: ResidentSourceOpenRequest = source.bytes
-        ? { ...source, bytes: source.bytes.slice() } : source;
-      const response = await this.request({ type: 'openSource', source: owned }, owned.bytes ? [owned.bytes.buffer] : []);
-      if (!response.sourceDocument || !response.stateVector) {
-        throw new ResidentWorkerFailureError('Resident engine worker omitted the opened source');
+      const owned = { ...source, bytes: source.bytes.slice() };
+      const response = await this.request({ type: 'openSource', source: owned }, [owned.bytes.buffer]);
+      if (response.previewRefused) {
+        this.releaseCut(reservation);
+        return null;
       }
-      if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
-      return {
-        document: response.sourceDocument, hostJson: response.hostJson,
-        stateVector: new Uint8Array(response.stateVector),
-        ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
-      };
+      if (!response.sourceDocument) throw new ResidentWorkerFailureError('Document worker omitted the opened source');
+      return response.sourceDocument;
     } catch (error) {
-      if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+      this.releaseCut(reservation);
       throw error;
     }
+  }
+
+  private releaseCut(reservation: { bytes?: number }): void {
+    if (this.openedHeapLimit === reservation) this.openedHeapLimit = null;
+    if (this.cutReservation === reservation) this.cutReservation = null;
+  }
+
+  async openSource(source: DocxSourceOpenRequest): Promise<DocxEngineWorkerSourceOpened> {
+    validateResidentSource(source);
+    if (source.cut) throw new TypeError('A source cut opens through openSourceCut');
+    if ((this.openedHeapLimit && this.openedHeapLimit !== this.cutReservation) || this.bootstrapped) {
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
+    }
+    const cut = this.cutReservation;
+    const reservation = { bytes: source.heapLimitBytes };
+    this.openedHeapLimit = reservation;
+    try {
+      const owned: DocxSourceOpenRequest = source.bytes
+        ? { ...source, bytes: source.bytes.slice(), ...(source.state ? { state: source.state.slice() } : {}) } : source;
+      const initialUpdate = source.collaboration?.initialUpdate === undefined
+        ? undefined : new Uint8Array(source.collaboration.initialUpdate);
+      const requestSource = initialUpdate
+        ? { ...owned, collaboration: { ...owned.collaboration!, initialUpdate } } : owned;
+      const transfer: Transferable[] = owned.bytes ? [owned.bytes.buffer] : [];
+      if (owned.state) transfer.push(owned.state.buffer);
+      if (initialUpdate) transfer.push(initialUpdate.buffer);
+      const response = await this.request({ type: 'openSource', source: requestSource }, transfer);
+      if (!response.sourceDocument || !response.stateVector) {
+        throw new ResidentWorkerFailureError('Document worker omitted the opened source');
+      }
+      if (this.cutReservation === cut) this.cutReservation = null;
+      if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
+      return {
+        document: response.sourceDocument, hostJson: response.hostJson, clientId: response.clientId, clientClock: response.clientClock,
+        stateVector: new Uint8Array(response.stateVector),
+        ...(response.frame ? { preview: sourcePreviewFrame(response) } : {}),
+        ...(response.svgMedia ? { svgMedia: response.svgMedia } : {}),
+      };
+    } catch (error) {
+      const kept = error instanceof ResidentWorkerCutKeptError && this.cutReservation === cut ? cut : null;
+      if (this.openedHeapLimit === reservation) this.openedHeapLimit = kept;
+      if (this.cutReservation === cut) this.cutReservation = kept;
+      throw error;
+    }
+  }
+
+  /** A preview frame of the opened source's first pages, laid out with the fonts its command session will use. */
+  async previewSource(preview: DocxSourcePreviewOptions & { layoutInput: string }): Promise<ResidentEngineWorkerFrame> {
+    const response = await this.request({ type: 'previewSource', preview });
+    if (response.layoutRevision !== undefined) this.revision = response.layoutRevision;
+    return sourcePreviewFrame(response);
   }
 
   async prewarm(): Promise<void> {
     await this.warm();
   }
 
-  onFontEnvironment(listener: (event: ResidentFontEnvironmentEvent) => void): () => void {
+  onFontEnvironment(listener: (event: DocxFontEnvironmentEvent) => void): () => void {
     this.fontListeners.add(listener);
     return () => { this.fontListeners.delete(listener); };
   }
@@ -114,7 +171,7 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
   }
 
   override frameRequestPending(reads = true): boolean {
-    return [...this.pending.values()].some(({ type }) => type === 'openSource') || super.frameRequestPending(reads);
+    return [...this.pending.values()].some(({ type }) => type === 'openSource' || type === 'previewSource') || super.frameRequestPending(reads);
   }
 
   protected override request(...args: Parameters<ResidentEngineWorkerClient['request']>) {
@@ -134,20 +191,20 @@ export class ResidentSourceWorkerClient extends ResidentEngineWorkerClient {
   }
 }
 
-export function takePreloadedResidentSourceWorker(): ResidentSourceWorkerClient | null {
+export function takePreloadedDocxSourceWorker(): DocxSourceWorkerClient | null {
   const client = takePreloadedResidentEngineWorker();
-  return client ? ResidentSourceWorkerClient.adopt(client) : null;
+  return client ? DocxSourceWorkerClient.adopt(client) : null;
 }
 
 function sourcePreviewFrame(
-  response: ResidentEngineWorkerResponse & { ok: true }
+  response: DocxEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its FrameDelta');
+    throw new ResidentWorkerFailureError('Document worker response omitted its FrameDelta');
   if (!response.caret)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its caret snapshot');
+    throw new ResidentWorkerFailureError('Document worker response omitted its caret snapshot');
   if (response.selection === undefined) {
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its selection');
+    throw new ResidentWorkerFailureError('Document worker response omitted its selection');
   }
   return {
     frame: new Uint8Array(response.frame),

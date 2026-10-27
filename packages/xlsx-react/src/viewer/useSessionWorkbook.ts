@@ -1,3 +1,5 @@
+import type { NavigationContext, NavigationOptions } from '../selectionData';
+import { createSelectionDataNavigation, selectionFrameContains, selectionHidden, selectionMerges } from '../selectionData';
 import { openWorkbookSession, rangeRect, selectionAt } from '@betteroffice/xlsx';
 import type {
   Selection, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
@@ -6,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { XlsxInThreadEditorProps, XlsxPointPosition, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
-import { expandRangeToMergedCells } from './sessionGeometry';
+import { deriveLimits, expandRangeToMergedCells, nearestCellScroll } from './sessionGeometry';
 
 export const workbookSessionOpener = { open: openWorkbookSession };
 
@@ -44,6 +46,8 @@ function validSelection(selection: Selection): boolean {
 }
 
 export class ViewerSession {
+  readonly selectionNavigation = createSelectionDataNavigation();
+  private readonly emptySelection = selectionAt({ row: 0, col: 0 });
   alive = true;
   failed = false;
   active: number;
@@ -113,26 +117,69 @@ export class ViewerSession {
     }
   }
 
-  async selectCellsAsync(sheet: number, selection: Selection): Promise<boolean> {
+  selectionContext = (): NavigationContext | null => {
+    if (!this.current) return null;
+    const basis = this.session.confirmedBasis;
+    return { owner: this, sheet: this.active, selection: this.selection ?? this.emptySelection, navigation: this.navigation,
+      version: `${basis.epoch}:${basis.version}:${this.session.state.version}` };
+  };
+
+  selectionMerges = (context: NavigationContext | null = this.selectionContext()) => {
+    const painted = this.painted?.frame;
+    const visible = painted && context && painted.sheet === context.sheet && painted.version === this.session.confirmedBasis.version
+      ? selectionMerges(painted.mergedRanges) : undefined;
+    return context ? this.selectionNavigation.merges(context, visible) : { mergeAt: () => null };
+  };
+
+  selectionOptions = (): NavigationOptions => ({
+    context: this.selectionContext,
+    limits: () => deriveLimits(this.painted?.frame.displayList ?? null, this.surface?.capture()?.viewport.height ?? 0),
+    hidden: () => selectionHidden(this.painted?.frame.displayList.grid),
+    merges: this.selectionMerges,
+    known: (context: NavigationContext, cell: { row: number; col: number }) => {
+      const painted = this.painted?.frame;
+      return this.selectionNavigation.known(context, cell) || painted?.sheet === context.sheet && painted.version === this.session.confirmedBasis.version &&
+        selectionFrameContains(painted.displayList.grid, cell);
+    },
+    query: (context: { sheet: number; selection: Selection }, direction: import('@betteroffice/xlsx').Direction | 'usedRange' | 'rowEnd' | 'merge' | undefined) =>
+      this.session.call.selectionData(context.sheet, context.selection.focus.row, context.selection.focus.col, direction),
+    apply: (selection: Selection, sheet = this.active) => this.placeCellsAsync(sheet, selection, 'nearest', false),
+  });
+
+  selectCellsAsync(sheet: number, selection: Selection, align: 'start' | 'nearest' = 'start'): Promise<boolean> {
+    if (!this.current || !this.validSheet(sheet) || !validSelection(selection)) return Promise.resolve(false);
+    return this.selectionNavigation.select(selection, { ...this.selectionOptions(),
+      apply: (next) => this.placeCellsAsync(sheet, next, align) }, sheet);
+  }
+
+  private async placeCellsAsync(sheet: number, selection: Selection, align: 'start' | 'nearest' = 'start', waitForPaint = true): Promise<boolean> {
     if (!this.current || !this.validSheet(sheet) || !validSelection(selection)) return false;
-    const next = { anchor: { ...selection.anchor }, focus: { ...selection.focus } };
+    const next = structuredClone(selection);
     const navigation = this.beginNavigation();
     this.viewRequest += 1;
+    if (align === 'nearest' && sheet === this.active) {
+      this.selection = next;
+      this.changed();
+    }
     try {
       const [view, anchor, geometry] = await Promise.all([
         this.view?.sheet === sheet ? Promise.resolve(this.view) : this.session.call.sheetView(sheet),
-        this.session.call.cellGeometry(sheet, next.anchor.row, next.anchor.col),
+        next.anchor.row === next.focus.row && next.anchor.col === next.focus.col
+          ? Promise.resolve(null) : this.session.call.cellGeometry(sheet, next.anchor.row, next.anchor.col),
         this.session.call.cellGeometry(sheet, next.focus.row, next.focus.col),
       ]);
       if (!this.current || navigation !== this.navigation) return false;
       this.active = sheet;
       this.selection = next;
-      const painted = new Promise<boolean>((resolve) => this.waiters.add({ request: null, resolve }));
+      const painted = waitForPaint ? new Promise<boolean>((resolve) => this.waiters.add({ request: null, resolve })) : null;
+      const currentViewport = this.surface?.capture()?.viewport;
       this.presentView({
         ...view,
-        contentWidth: Math.max(view.contentWidth, anchor.rect.x + anchor.rect.w, geometry.rect.x + geometry.rect.w),
-        contentHeight: Math.max(view.contentHeight, anchor.rect.y + anchor.rect.h, geometry.rect.y + geometry.rect.h),
-      }, geometry.scrollPosition);
+        contentWidth: Math.max(view.contentWidth, anchor ? anchor.rect.x + anchor.rect.w : 0, geometry.rect.x + geometry.rect.w),
+        contentHeight: Math.max(view.contentHeight, anchor ? anchor.rect.y + anchor.rect.h : 0, geometry.rect.y + geometry.rect.h),
+      }, align === 'nearest' && currentViewport
+        ? nearestCellScroll(geometry.rect, next.focus, view, currentViewport) : geometry.scrollPosition);
+      if (!waitForPaint) return true;
       if (!await painted || !this.current || navigation !== this.navigation) return false;
       const paintedFrame = this.painted;
       if (!paintedFrame || !sameRequest(this.surface?.capture() ?? null, paintedFrame.request)) return false;
@@ -165,10 +212,14 @@ export class ViewerSession {
 
   setSelection(selection: Selection | null): void {
     if (!this.current) return;
-    this.beginNavigation();
-    this.selection = selection;
-    this.changed();
-    this.schedule();
+    if (!selection) { this.placeSelection(null); return; }
+    void this.selectionNavigation.select(selection, { ...this.selectionOptions(), apply: (next) => {
+      this.placeSelection(next); return true;
+    } }, undefined, true);
+  }
+
+  placeSelection(selection: Selection | null): void {
+    this.beginNavigation(); this.selection = selection; this.changed(); this.schedule();
   }
 
   afterPaint(): Promise<boolean> {
@@ -307,7 +358,7 @@ export class ViewerSession {
 }
 
 export function useSessionWorkbook(
-  props: XlsxWorkerViewerProps, commands: XlsxCommandStore, focus: () => void
+  props: Omit<XlsxWorkerViewerProps, 'file'> & { file?: Uint8Array }, commands: XlsxCommandStore, focus: () => void
 ) {
   const latest = useRef({ props, focus });
   latest.current = { props, focus };

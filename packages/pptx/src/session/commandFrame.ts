@@ -11,7 +11,7 @@ import { frameAssetIds } from './frame';
 type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
 
 export function buildCommandFrame(
-  handle: PresentationHandle, tags: FrameTags, sentMedia: Set<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList
+  handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList
 ): TransferResult<PresentationCommandFrame> {
   const list = cached ?? JSON.parse(presentationDisplayListJson(handle, tags.slideIndex)) as SlideDisplayList;
   function visit(primitives: SlidePrimitive[]): void {
@@ -52,7 +52,6 @@ export function buildCommandFrame(
     }
     media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
   }
-  for (const { assetId } of media) sentMedia.add(assetId);
   return transferable({ ...tags, displayList, media },
     [displayList, ...media.map(({ bytes }) => bytes)]);
 }

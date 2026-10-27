@@ -292,6 +292,23 @@ export type ParagraphAlignment =
  */
 export type SpacingExplicit = { before?: boolean; after?: boolean };
 
+/** A paragraph `w:cnfStyle` element, with every attribute kept as authored. */
+export interface ParagraphCnfStyle {
+  val?: string;
+  firstRow?: string;
+  lastRow?: string;
+  firstColumn?: string;
+  lastColumn?: string;
+  oddVBand?: string;
+  evenVBand?: string;
+  oddHBand?: string;
+  evenHBand?: string;
+  firstRowFirstColumn?: string;
+  firstRowLastColumn?: string;
+  lastRowFirstColumn?: string;
+  lastRowLastColumn?: string;
+}
+
 /**
  * Paragraph-level formatting (`w:pPr`) — alignment, indentation, spacing
  * (before/after, line height), pagination flags (keepNext, keepLines,
@@ -384,6 +401,10 @@ export interface ParagraphFormatting {
   autoSpaceDE?: boolean;
   /** Space between East Asian text and numbers (w:autoSpaceDN). Absent is the OOXML default (on). */
   autoSpaceDN?: boolean;
+  /** Adjust right indent for East Asian text (w:adjustRightInd). Absent is the default (on). */
+  adjustRightInd?: boolean;
+  /** Conditional table formatting authored on this paragraph (w:cnfStyle), kept as read. */
+  cnfStyle?: ParagraphCnfStyle;
 
   // Numbering/List
   /** Numbering properties (w:numPr) */
@@ -562,6 +583,8 @@ export interface FloatingTableProperties {
  * Table formatting properties (w:tblPr)
  */
 export interface TableFormatting {
+  caption?: string;
+  description?: string;
   /** Table width */
   width?: TableMeasurement;
   /** Table justification */

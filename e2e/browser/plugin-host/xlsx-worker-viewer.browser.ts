@@ -1,4 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
+import { pinnedEvaluate } from '../pinned-evaluate';
 import type { ViewerPixelComparison } from './xlsx-worker-viewer-probe';
 
 interface XlsxMainWasmProbe {
@@ -36,7 +37,7 @@ test.afterEach(async ({ page }) => {
 async function open(page: Page, fixture: string, workerOnly = false) {
   await page.goto(`/xlsx-worker-viewer.html?fixture=${fixture}${workerOnly ? '&arm=worker' : ''}`);
   await page.waitForFunction(() => '__xlsxWorkerViewer' in window, undefined, { timeout: 120_000 });
-  return page.evaluate(() => window.__xlsxWorkerViewer.ready);
+  return pinnedEvaluate(page, () => window.__xlsxWorkerViewer.ready);
 }
 
 function assertParity(result: ViewerPixelComparison, dpr: number, zoom: number, sheet: number) {
@@ -60,7 +61,7 @@ for (const dpr of [1, 2]) {
         await expect(page.locator('[data-arm]')).toHaveCount(2);
         for (const zoom of [1, 1.5]) {
           for (const position of ['origin', 'scrolled'] as const) {
-            const result = await page.evaluate(({ zoom, position }) =>
+            const result = await pinnedEvaluate(page, ({ zoom, position }) =>
               window.__xlsxWorkerViewer.show(zoom, position), { zoom, position });
             assertParity(result, dpr, zoom, 0);
             expect(result.scrollLeft).toBe(position === 'origin' ? 0 : 400 * zoom);
@@ -74,10 +75,10 @@ for (const dpr of [1, 2]) {
             await tabs.getByRole('tab').nth(1).click();
             await expect(tabs.getByRole('tab', { selected: true })).toHaveText('Summary');
           }
-          assertParity(await page.evaluate(() => window.__xlsxWorkerViewer.compareCurrent(1)), dpr, 1.5, 1);
+          assertParity(await pinnedEvaluate(page, () => window.__xlsxWorkerViewer.compareCurrent(1)), dpr, 1.5, 1);
           for (const zoom of [1, 1.5]) {
             for (const position of ['origin', 'scrolled'] as const) {
-              const result = await page.evaluate(({ zoom, position }) =>
+              const result = await pinnedEvaluate(page, ({ zoom, position }) =>
                 window.__xlsxWorkerViewer.show(zoom, position), { zoom, position });
               assertParity(result, dpr, zoom, 1);
               expect(result.scrollLeft).toBe(position === 'origin' ? 0 : 400 * zoom);
@@ -186,7 +187,7 @@ test('xlsx: worker onReady exposes async save and reveals selections before reso
   page.on('worker', (worker) => workers.push(worker.url()));
   await installMainWasmProbe(page);
   await open(page, 'sample', true);
-  const result = await page.evaluate(() => window.__xlsxWorkerViewer.contract());
+  const result = await pinnedEvaluate(page, () => window.__xlsxWorkerViewer.contract());
   expect(result.handleIsNull).toBe(true);
   expect(result.syncSaveIsNull).toBe(true);
   expect(result.syncSelection).toBe(false);

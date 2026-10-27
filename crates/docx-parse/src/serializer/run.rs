@@ -13,7 +13,7 @@ use super::context::SerializerContext;
 use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::xml_writer::{XmlWriter, int_attr, js_number};
 
-const VALID_HIGHLIGHT_COLORS: &[&str] = &[
+pub(crate) const VALID_HIGHLIGHT_COLORS: &[&str] = &[
     "black",
     "blue",
     "cyan",
@@ -69,7 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 "w:eastAsiaTheme",
                 fonts.east_asia_theme.as_deref(),
             );
-            optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:cstheme", fonts.cs_theme.as_deref());
             optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
@@ -138,6 +138,20 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
     on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
+    if let Some(language) = formatting.language.as_ref() {
+        let slots = [
+            ("w:val", language.latin.as_deref()),
+            ("w:eastAsia", language.east_asia.as_deref()),
+            ("w:bidi", language.bidi.as_deref()),
+        ];
+        if slots.iter().any(|(_, value)| nonempty(*value).is_some()) {
+            body.start_element("w:lang");
+            for (name, value) in slots {
+                optional_nonempty_attr(&mut body, name, value);
+            }
+            body.end_element();
+        }
+    }
 
     let body = body.finish();
     if body.is_empty() {
@@ -169,11 +183,11 @@ pub(crate) fn serialize_deleted_run(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let xml = serialize_run(run, context)?;
-    if run
-        .content
-        .iter()
-        .any(|content| matches!(content, RunContent::Drawing { .. }))
-    {
+    if run.content.iter().any(|content| match content {
+        RunContent::Drawing { .. } => true,
+        RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
+        _ => false,
+    }) {
         return Ok(xml);
     }
     Ok(xml
@@ -257,10 +271,12 @@ fn serialize_run_content(
                 Some("column") => {
                     writer.attribute("w:type", "column");
                 }
-                Some("textWrapping") => {
-                    writer.attribute("w:type", "textWrapping");
-                    if let Some(clear) = nonempty(clear.as_deref()).filter(|value| *value != "none")
-                    {
+                None | Some("textWrapping") => {
+                    let clear = nonempty(clear.as_deref()).filter(|value| *value != "none");
+                    if break_type.is_some() || clear.is_some() {
+                        writer.attribute("w:type", "textWrapping");
+                    }
+                    if let Some(clear) = clear {
                         writer.attribute("w:clear", clear);
                     }
                 }
@@ -462,14 +478,16 @@ pub fn serialize_drawing_content(
     }
     writer.end_element();
     writer.start_element("wp:cNvGraphicFramePr");
-    writer
-        .start_element("a:graphicFrameLocks")
-        .attribute(
-            "xmlns:a",
-            "http://schemas.openxmlformats.org/drawingml/2006/main",
-        )
-        .attribute("noChangeAspect", "1")
-        .end_element();
+    if image.no_change_aspect == Some(true) {
+        writer
+            .start_element("a:graphicFrameLocks")
+            .attribute(
+                "xmlns:a",
+                "http://schemas.openxmlformats.org/drawingml/2006/main",
+            )
+            .attribute("noChangeAspect", "1")
+            .end_element();
+    }
     writer.end_element();
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
@@ -1011,13 +1029,58 @@ fn write_drawing_color(writer: &mut XmlWriter, color: Option<&ColorValue>) {
     let Some(color) = color else {
         return;
     };
-    if let Some(rgb) = nonempty(color.rgb.as_deref()) {
+    let name = if let Some(rgb) = nonempty(color.rgb.as_deref()) {
         writer
             .start_element("a:srgbClr")
-            .attribute("val", &rgb.replacen('#', "", 1))
-            .end_element();
+            .attribute("val", &rgb.replacen('#', "", 1));
+        "a:srgbClr"
     } else if let Some(theme) = nonempty(color.theme_color.as_deref()) {
         writer.start_element("a:schemeClr").attribute("val", theme);
+        "a:schemeClr"
+    } else {
+        return;
+    };
+    if !color.transforms.is_empty() {
+        use ooxml_drawingml::ColorTransform::*;
+
+        for transform in color.drawingml_transforms() {
+            let name = match transform {
+                Tint(_) => "a:tint",
+                Shade(_) => "a:shade",
+                Hue(_) => "a:hue",
+                HueMod(_) => "a:hueMod",
+                HueOff(_) => "a:hueOff",
+                Sat(_) => "a:sat",
+                SatMod(_) => "a:satMod",
+                SatOff(_) => "a:satOff",
+                Lum(_) => "a:lum",
+                LumMod(_) => "a:lumMod",
+                LumOff(_) => "a:lumOff",
+                Red(_) => "a:red",
+                RedMod(_) => "a:redMod",
+                RedOff(_) => "a:redOff",
+                Green(_) => "a:green",
+                GreenMod(_) => "a:greenMod",
+                GreenOff(_) => "a:greenOff",
+                Blue(_) => "a:blue",
+                BlueMod(_) => "a:blueMod",
+                BlueOff(_) => "a:blueOff",
+                Alpha(_) => "a:alpha",
+                AlphaMod(_) => "a:alphaMod",
+                AlphaOff(_) => "a:alphaOff",
+                Comp => "a:comp",
+                Inv => "a:inv",
+                Gray => "a:gray",
+                Gamma => "a:gamma",
+                InvGamma => "a:invGamma",
+            };
+            writer.start_element(name);
+            if let Some(value) = transform.xml_value() {
+                writer.attribute("val", &value);
+            }
+            writer.end_element();
+        }
+    } else if name == "a:schemeClr" {
         if let Some(tint) = nonempty(color.theme_tint.as_deref()) {
             writer
                 .start_element("a:tint")
@@ -1029,8 +1092,8 @@ fn write_drawing_color(writer: &mut XmlWriter, color: Option<&ColorValue>) {
                 .attribute("val", shade)
                 .end_element();
         }
-        writer.end_element();
     }
+    writer.end_element();
 }
 
 pub(crate) fn write_shading(writer: &mut XmlWriter, shading: Option<&ShadingProperties>) {
@@ -1190,7 +1253,12 @@ fn optional_integer_element(writer: &mut XmlWriter, name: &'static str, value: O
     }
 }
 
-fn empty_attr(writer: &mut XmlWriter, element: &'static str, attr: &'static str, value: &str) {
+pub(crate) fn empty_attr(
+    writer: &mut XmlWriter,
+    element: &'static str,
+    attr: &'static str,
+    value: &str,
+) {
     writer
         .start_element(element)
         .attribute(attr, value)
@@ -1214,9 +1282,10 @@ fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::formatting::{FontFamily, TextFormatting};
+    use crate::formatting::{FontFamily, RunLanguage, TextFormatting, parse_run_properties};
     use crate::inline::{Run, RunType};
     use crate::serializer::s10::SerializerDeterminism;
+    use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
     use super::*;
 
@@ -1226,6 +1295,88 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn line_breaks_preserve_explicit_types_and_type_clearing_breaks() {
+        for break_type in [None, Some("textWrapping")] {
+            for clear in [None, Some("all")] {
+                let content = RunContent::Break {
+                    break_type: break_type.map(str::to_owned),
+                    clear: clear.map(str::to_owned),
+                };
+                let expected = if clear.is_some() {
+                    "<w:br w:type=\"textWrapping\" w:clear=\"all\"/>"
+                } else if break_type.is_some() {
+                    "<w:br w:type=\"textWrapping\"/>"
+                } else {
+                    "<w:br/>"
+                };
+                assert_eq!(
+                    serialize_run_content(&content, &mut context()).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drawing_color_serialization_preserves_order_and_exact_percentages() {
+        for source in [
+            r#"<a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/></a:srgbClr>"#,
+            r#"<a:schemeClr val="accent1"><a:shade val="50000"/><a:tint val="20000"/></a:schemeClr>"#,
+        ] {
+            let limits = ParseLimits::default();
+            let xml = format!("<a:solidFill>{source}</a:solidFill>");
+            let document = parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let color = crate::drawingml::parse_color_element(document.root()).unwrap();
+            let mut writer = XmlWriter::with_capacity(256);
+            write_drawing_color(&mut writer, Some(&color));
+            assert_eq!(writer.finish(), source);
+        }
+    }
+
+    #[test]
+    fn mixed_color_alpha_survives_serialization() {
+        use ooxml_drawingml::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        for step in [None, Some(ColorTransform::AlphaMod(0.5))] {
+            let color = ColorValue {
+                rgb: Some("112233".to_owned()),
+                theme_tint: Some("00".to_owned()),
+                alpha: Some(0.25),
+                transforms: std::iter::once(ColorTransform::Tint(1.0))
+                    .chain(step)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut writer = XmlWriter::with_capacity(256);
+            write_drawing_color(&mut writer, Some(&color));
+            let xml = format!("<a:solidFill>{}</a:solidFill>", writer.finish());
+            assert_eq!(xml.contains("<a:alpha "), step.is_none());
+            let limits = ParseLimits::default();
+            let document = parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let reopened = crate::drawingml::parse_color_element(document.root()).unwrap();
+            let expected = if step.is_none() {
+                "#11223340"
+            } else {
+                "#11223380"
+            };
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(&reopened), None).as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
@@ -1253,6 +1404,28 @@ mod tests {
                 serde_json::to_value(image).unwrap()["shapeType"].as_str(),
                 preset
             );
+        }
+    }
+
+    #[test]
+    fn drawing_aspect_lock_serializes_only_when_the_picture_is_locked() {
+        for (locks, locked) in [
+            ("", false),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="0"/></wp:cNvGraphicFramePr>"#,
+                false,
+            ),
+            (
+                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>"#,
+                true,
+            ),
+        ] {
+            let source = format!(
+                r#"<w:drawing><wp:inline><wp:extent cx="381000" cy="190500"/><wp:docPr id="1" name="Picture 1"/>{locks}<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+            );
+            let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert_eq!(xml.contains(r#"noChangeAspect="1""#), locked, "{xml}");
         }
     }
 
@@ -1370,6 +1543,47 @@ mod tests {
     }
 
     #[test]
+    fn run_language_follows_emphasis_in_schema_order() {
+        let formatting = TextFormatting {
+            font_size: Some(20.0),
+            emphasis_mark: Some("dot".to_owned()),
+            language: Some(RunLanguage {
+                latin: Some("en-US".to_owned()),
+                east_asia: Some("ja-JP".to_owned()),
+                bidi: Some("ar-SA".to_owned()),
+            }),
+            ..TextFormatting::default()
+        };
+        assert_eq!(
+            serialize_text_formatting(Some(&formatting)),
+            r#"<w:rPr><w:sz w:val="20"/><w:em w:val="dot"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr>"#
+        );
+    }
+
+    #[test]
+    fn run_language_survives_parse_and_serialize() {
+        for xml in [
+            r#"<w:rPr><w:b/><w:sz w:val="20"/><w:lang w:val="de-DE" w:eastAsia="zh-CN" w:bidi="he-IL"/></w:rPr>"#,
+            r#"<w:rPr><w:lang w:eastAsia="ko-KR"/></w:rPr>"#,
+        ] {
+            let limits = ParseLimits::default();
+            let parsed =
+                parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+            let formatting = parse_run_properties(parsed.root(), None);
+            assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
+        }
+    }
+
+    #[test]
+    fn theme_fonts_survive_parse_and_serialize() {
+        let xml = r#"<w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/></w:rPr>"#;
+        let limits = ParseLimits::default();
+        let parsed = parse_xml(xml.as_bytes(), "run.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let formatting = parse_run_properties(parsed.root(), None);
+        assert_eq!(serialize_text_formatting(formatting.as_ref()), xml);
+    }
+
+    #[test]
     fn generated_drawing_ids_consume_the_seeded_allocator() {
         let mut first = context();
         let mut second = context();
@@ -1378,6 +1592,26 @@ mod tests {
         let next_id = first.allocate_drawing_id();
         assert_eq!(next_id, second.allocate_drawing_id());
         assert_ne!(first_id, next_id);
+    }
+
+    #[test]
+    fn deleted_vml_group_replays_its_intact_textbox_xml() {
+        let xml = r#"<w:pict><v:group><v:shape><v:imagedata r:id="rId1"/></v:shape><v:rect><v:textbox><w:txbxContent><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></v:group></w:pict>"#;
+        let run = Run {
+            node_type: RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![RunContent::OpaqueDrawing {
+                kind: "pict".to_owned(),
+                xml: xml.to_owned(),
+                preview: None,
+                previews: vec![crate::image::placeholder_image("rId1")],
+                text_box: None,
+            }],
+        };
+        let saved = serialize_deleted_run(&run, &mut context()).unwrap();
+        assert!(saved.contains(xml));
+        assert!(!saved.contains("w:delText"));
     }
 
     #[test]

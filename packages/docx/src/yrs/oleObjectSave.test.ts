@@ -24,14 +24,14 @@ const WATERMARK =
 const DANGLING =
   '<w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id=""/></v:shape></w:pict>';
 
-function fixture(hiddenOle = false): Uint8Array<ArrayBuffer> {
+function fixture(hiddenOle = false, content = OBJECT_WITH_FALLBACK): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
   const set = (name: string, xml: string | Uint8Array) => parts.set(name, toBytes(xml));
   set('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="${OFFICE_DOC}.wordprocessingml.document.main+xml"/></Types>`);
   set('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   set('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${R}/image" Target="media/image.png"/></Relationships>`);
   set('word/media/image.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
-  set('word/document.xml', `<w:document ${NAMESPACES}><w:body><w:p><w:r>${hiddenOle ? '<w:rPr><w:vanish/></w:rPr>' : ''}${OBJECT_WITH_FALLBACK}</w:r></w:p><w:p><w:r>${WATERMARK}</w:r></w:p><w:p><w:r>${DANGLING}</w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`);
+  set('word/document.xml', `<w:document ${NAMESPACES}><w:body><w:p><w:r>${hiddenOle ? '<w:rPr><w:vanish/></w:rPr>' : ''}${content}</w:r></w:p><w:p><w:r>${WATERMARK}</w:r></w:p><w:p><w:r>${DANGLING}</w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -83,6 +83,33 @@ for (const seeder of ['native', 'projected']) {
       expect(documentXml).toContain(WATERMARK);
       expect(documentXml).toContain(DANGLING);
       expect(documentXml).toContain('Edited ');
+    } finally {
+      session.destroy();
+    }
+  });
+}
+
+for (const seeder of ['native', 'projected']) {
+  it(`${seeder} preserves a VML group when its paragraph text changes`, async () => {
+    const group = '<w:pict><v:group coordsize="1000,1000" style="width:100pt;height:100pt"><v:shape style="left:0;top:0;width:500;height:500"><v:imagedata r:id="rIdImage"/></v:shape><v:shape style="left:500;top:500;width:500;height:500"><v:imagedata r:id="rIdImage"/></v:shape></v:group></w:pict>';
+    const bytes = fixture(false, group);
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    expect(opaqueDrawings(parsed)[0]!.previews).toHaveLength(2);
+    const session = await createYrsSession({ clientId: 74315 });
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      expect(session.paragraphSpans('body')[0]!.length).toBe(1);
+      const paragraph = session.paragraphs('body')[0]!;
+      session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Edited ');
+      const projected = yrsToDocument(session, parsed);
+      expect(opaqueDrawings(projected)[0]!.previews).toHaveLength(2);
+      const saved = await repackDocx(projected);
+      const documentXml = readDocxContainer(saved).text('word/document.xml') ?? '';
+      expect(documentXml).toContain(group);
+      expect(documentXml).toContain('Edited ');
+      const reopened = await parseDocx(saved, { preloadFonts: false });
+      expect(opaqueDrawings(reopened)[0]!.previews).toHaveLength(2);
     } finally {
       session.destroy();
     }

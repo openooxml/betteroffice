@@ -1,11 +1,12 @@
-import type { YrsCellLoc, YrsLoc, YrsStickyPosition, YrsStorySegment } from './index';
+import type { YrsCellLoc, YrsLoc, YrsStickyPosition, YrsStorySegment, YrsTableRange } from './index';
 import type { ResidentEngineSession } from './residentEngineSession';
 import type { DocxCommandSelection } from './residentCommandProtocol';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
-import { deriveDisplayListSelectedCellRects, type DisplayListTableRegion } from '../layout/render/displayListTables';
+import { deriveDisplayListSelectedCellRects, type DisplayListSelectedCellSpec, type DisplayListTableRegion } from '../layout/render/displayListTables';
 import { findImagePrimitiveByDocPos } from '../layout/render/displayListImages';
+import { rootOf } from './residentCommandTableSelection';
 import type { DisplayPrimitive } from '../layout/render/displayList';
 
 export interface ResidentObjectRect {
@@ -22,6 +23,46 @@ export interface ResidentObjectGeometry {
   kind: 'text' | 'cell' | 'image';
   story: string;
   rects: ResidentObjectRect[];
+  /** Images only: anchored to the page rather than flowing with the text. */
+  floating?: boolean;
+  /** Floating images only: painted behind the text, so text over them takes the pointer. */
+  behindText?: boolean;
+  /** Images only: the picture's aspect ratio is locked. */
+  noChangeAspect?: boolean;
+  rotation?: number;
+  /** Images only: the worker selection covers exactly this picture's embed. */
+  selected?: boolean;
+  /** Image paint order within the page. */
+  paintOrder?: number;
+  /** Image anchored inside a cell or text box. */
+  nested?: boolean;
+}
+
+export function isFloatingImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || (typeof wrap === 'string' && wrap !== 'inline') || payload.position != null;
+}
+
+/** Whether layout positions the picture by its anchor; other wraps (Top and Bottom, for one) flow with the text and ignore the offsets. */
+export function isAnchoredImagePayload(payload: Record<string, unknown>): boolean {
+  const wrap = payload.wrapType ?? payload.wrap;
+  return payload.displayMode === 'float' || ['square', 'tight', 'through', 'behind', 'inFront'].includes(wrap as string);
+}
+
+/** Whether `selection` covers exactly the one embed at `at`. */
+export function embedSelected(selection: DocxCommandSelection | null, at: YrsLoc): boolean {
+  if (!selection) return false;
+  const { anchor, focus } = selection;
+  return anchor.story === at.story && focus.story === at.story && anchor.paraId === at.paraId && focus.paraId === at.paraId &&
+    Math.min(anchor.offset, focus.offset) === at.offset && Math.max(anchor.offset, focus.offset) === at.offset + 1;
+}
+
+export function imagePlacement(payload: Record<string, unknown>): Pick<ResidentObjectGeometry, 'floating' | 'behindText' | 'noChangeAspect' | 'rotation'> {
+  const rotation = typeof payload.transform === 'string' ? Number(payload.transform.match(/rotate\(([-\d.]+)deg\)/)?.[1] ?? 0) : 0;
+  const properties = { ...(payload.noChangeAspect === true ? { noChangeAspect: true } : {}), ...(rotation ? { rotation } : {}) };
+  if (!isFloatingImagePayload(payload)) return { floating: false, ...properties };
+  const position = payload.position as { behindDoc?: unknown } | null | undefined;
+  return { floating: true, behindText: (payload.wrapType ?? payload.wrap) === 'behind' || position?.behindDoc === true, ...properties };
 }
 
 export interface ResidentFrameGeometry {
@@ -70,7 +111,7 @@ function issue(engine: ResidentEngineSession, kind: ObjectTarget['kind'], at: Yr
 }
 
 function resolveCell(engine: ResidentEngineSession, story: string): { at: YrsLoc; cell: YrsCellLoc } | null {
-  const root = story === 'body' || story.startsWith('body:') ? 'body' : story.split(':').slice(0, 2).join(':');
+  const root = rootOf(story);
   const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
   for (const table of projection.allTables()) {
@@ -113,7 +154,7 @@ export function resolveResidentObject(engine: ResidentEngineSession, handle: str
   return { ...at, kind: target.kind };
 }
 
-type ResidentParagraphGeometry = ReturnType<ResidentEngineSession['residentGeometry']>['paragraphs'][number];
+type ResidentParagraphGeometry = ReturnType<ResidentEngineSession['storyGeometry']>['paragraphs'][number];
 
 /** Display position of story offset `offset` in `paragraph`, past the content of its inline controls. */
 function displayPosition(paragraph: ResidentParagraphGeometry, offset: number): number {
@@ -156,20 +197,82 @@ function builtStoryRanges(frame: RetainedFrame): Map<string, Array<[number, numb
   return roots;
 }
 
+/** Page-local boxes of a multi-cell range; null when no multi-cell range is active. */
+export function readResidentCellSelectionRects(
+  engine: ResidentEngineSession, frame: RetainedFrame, range: YrsTableRange | null
+): DisplayListRect[] | null {
+  if (!range || range.anchor.story !== range.head.story || range.anchor.tableIndex !== range.head.tableIndex ||
+    (range.anchor.row === range.head.row && range.anchor.column === range.head.column)) return null;
+  const root = rootOf(range.anchor.story);
+  if (root !== 'body' || !engine.geometryReader.hasStory(root)) return [];
+  const table = createYrsPositionProjection(engine.geometryReader, root)?.allTables()
+    .find((entry) => entry.story === range.anchor.story && entry.tableIndex === range.anchor.tableIndex);
+  const covering = (at: YrsCellLoc) => table?.cells.find((cell) => cell.row <= at.row && at.row < cell.row + cell.rowspan &&
+    cell.column <= at.column && at.column < cell.column + cell.colspan);
+  const anchorCell = covering(range.anchor);
+  const headCell = covering(range.head);
+  if (!anchorCell || !headCell) return [];
+  const ranges: Array<[number, number]> = [];
+  for (const page of frame.displayList.pages) {
+    if (page.unbuilt) continue;
+    let from = Infinity;
+    let to = -Infinity;
+    for (const primitive of page.primitives) {
+      from = Math.min(from, primitive.fragmentDocStart ?? primitive.docStart ?? Infinity);
+      to = Math.max(to, primitive.fragmentDocEnd ?? primitive.docEnd ?? primitive.docStart ?? -Infinity);
+    }
+    if (Number.isFinite(from) && Number.isFinite(to)) ranges.push([from, to]);
+  }
+  if (!ranges.length) return [];
+  const projected = engine.storyGeometry(root, ranges);
+  const display = projected.tables.find((entry) =>
+    entry.cells.some((cell) => cell.story === anchorCell.story) &&
+    entry.cells.some((cell) => cell.story === headCell.story));
+  if (!display) return [];
+  const top = Math.min(range.anchor.row, range.head.row);
+  const bottom = Math.max(range.anchor.row, range.head.row);
+  const left = Math.min(range.anchor.column, range.head.column);
+  const right = Math.max(range.anchor.column, range.head.column);
+  const specs: DisplayListSelectedCellSpec[] = (table?.cells ?? [])
+    .filter((cell) => cell.row <= bottom && cell.row + cell.rowspan - 1 >= top &&
+      cell.column <= right && cell.column + cell.colspan - 1 >= left)
+    .map((cell) => ({
+      tableKey: String(display.from), row: cell.row, col: cell.column, rowSpan: cell.rowspan, colSpan: cell.colspan,
+    }));
+  const tableKeyOf = (position: number | undefined) => position === undefined ? null
+    : projected.tables.find((entry) => entry.from <= position && position < entry.to)?.from.toString() ?? null;
+  return deriveDisplayListSelectedCellRects(frame.displayList, specs, tableKeyOf, { kind: 'body' })
+    .filter((box) => frame.pages[box.pageIndex] && !frame.pages[box.pageIndex]!.page.unbuilt)
+    .map((box) => ({ pageIndex: box.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h }));
+}
+
+export function residentImagePaintOrders(frame: RetainedFrame): Map<DisplayPrimitive, number> {
+  const orders = new Map<DisplayPrimitive, number>();
+  for (const page of frame.displayList.pages) {
+    const watermarkCount = Math.min(page.watermarkPrimitiveCount ?? 0, page.primitives.length);
+    let order = 0;
+    const add = (primitive: DisplayPrimitive) => { if (primitive.kind === 'image') orders.set(primitive, order++); };
+    page.primitives.slice(0, watermarkCount).forEach(add);
+    for (const region of [page.header, page.footer]) region?.primitives.forEach(add);
+    page.primitives.slice(watermarkCount).forEach(add);
+  }
+  return orders;
+}
+
 export async function readResidentFrameGeometry(
   engine: ResidentEngineSession, frame: RetainedFrame, selection: DocxCommandSelection | null, layoutRevision: number
 ): Promise<ResidentFrameGeometry> {
   const objects: ResidentObjectGeometry[] = [];
+  const paintOrders = residentImagePaintOrders(frame);
   let selected: ResidentObjectRect[] = [];
   const selectionRoot = selection && selection.anchor.story === selection.focus.story
-    ? selection.anchor.story === 'body' || selection.anchor.story.startsWith('body:') ? 'body'
-      : selection.anchor.story.split(':').slice(0, 2).join(':') : null;
+    ? rootOf(selection.anchor.story) : null;
   const located = (rects: DisplayListRect[]): ResidentObjectRect[] => rects
     .filter(rect => frame.pages[rect.pageIndex] && !frame.pages[rect.pageIndex]!.page.unbuilt)
     .map(rect => ({ ...rect, pageId: frame.pages[rect.pageIndex]!.pageId.toString() }));
   for (const [root, ranges] of [...builtStoryRanges(frame)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     if (!engine.geometryReader.hasStory(root)) continue;
-    const projected = engine.residentGeometry(root, ranges, selectionRoot === root && selection
+    const projected = engine.storyGeometry(root, ranges, selectionRoot === root && selection
       ? [selection.anchor, selection.focus] : undefined);
     const [prefix, id] = root.split(':');
     const spans: Array<[number, number]> = projected.paragraphs.map(paragraph => [paragraph.from, paragraph.to]);
@@ -178,7 +281,7 @@ export async function readResidentFrameGeometry(
     if (range) spans.push(range);
     const regions: Array<[DisplayListHitRegion, string]> = root === 'body' ? [['body', '']]
       : prefix === 'hf' ? [['header', id!], ['footer', id!]] : [[prefix === 'fn' ? 'footnote' : 'endnote', String(Number(id))]];
-    const answered = regions.map(([region, part]) => engine.residentRangeRects(region, part, spans));
+    const answered = regions.map(([region, part]) => engine.storyRangeRects(region, part, spans));
     const rects = (index: number) => located(answered.flatMap(batch => batch[index] ?? []));
     if (range) selected = rects(spans.length - 1);
     const tables = projected.tables;
@@ -241,7 +344,8 @@ export async function readResidentFrameGeometry(
             ?? (prefix === 'hf' ? findImagePrimitiveByDocPos(frame.displayList, position, 'footer', id) : null) : null;
         if (image) objects.push({ kind: 'image', story, handle: issue(engine, 'image', at),
           rects: [{ pageIndex: image.pageIndex, x: image.primitive.x, y: image.primitive.y, width: image.primitive.w,
-            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }] });
+            height: image.primitive.h, pageId: frame.pages[image.pageIndex]!.pageId.toString() }],
+          ...imagePlacement(segment.payload), ...(embedSelected(selection, at) ? { selected: true } : {}), paintOrder: paintOrders.get(image.primitive), ...(story !== root ? { nested: true } : {}) });
       }
       const boxes = rects(index);
       if (boxes.length) objects.push({ kind: 'text', story,

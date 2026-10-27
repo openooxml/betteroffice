@@ -25,6 +25,7 @@ pub(crate) const MAX_CHART_FIELD_BYTES: usize = 32_767;
 pub(crate) const MAX_CHART_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
 pub(crate) const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
+pub(crate) const MAX_HYPERLINK_VALUE_BYTES: usize = 4 * MAX_HYPERLINK_FIELD_BYTES * 6 + 512;
 /// upper bound on one sheet's encoded hyperlink state, sized the same way:
 /// [`MAX_HYPERLINKS_PER_SHEET`] at a realistic 256 bytes per link.
 pub(crate) const MAX_HYPERLINK_STATE_BYTES: usize = 16 * 1024 * 1024;
@@ -56,10 +57,14 @@ pub(crate) fn decode_hyperlinks(json: &str) -> Result<Vec<Hyperlink>, String> {
         return Err("sheet hyperlink state exceeds its size limit".to_string());
     }
     let mut deserializer = serde_json::Deserializer::from_str(json);
-    HyperlinksSeed
+    let hyperlinks = HyperlinksSeed
         .deserialize(&mut deserializer)
         .and_then(|hyperlinks| deserializer.end().map(|()| hyperlinks))
-        .map_err(|error| format!("sheet hyperlinks are invalid: {error}"))
+        .map_err(|error| format!("sheet hyperlinks are invalid: {error}"))?;
+    if serde_json::to_string(&hyperlinks).map_err(|error| error.to_string())? != json {
+        return Err("sheet hyperlinks are not canonical JSON".to_string());
+    }
+    Ok(hyperlinks)
 }
 
 struct BoundedString {
@@ -248,6 +253,7 @@ field_key!(
     "anchorIndex" => AnchorIndex,
     "anchor" => Anchor,
     "refs" => Refs,
+    "rawXml" => RawXml,
 );
 
 field_key!(
@@ -335,6 +341,7 @@ impl<'de> Visitor<'de> for ChartSeed {
         let mut anchor_index = None;
         let mut anchor = None;
         let mut refs = None;
+        let mut raw_xml = None;
         while let Some(field) = map.next_key::<ChartField>()? {
             match field {
                 ChartField::Part => {
@@ -373,6 +380,15 @@ impl<'de> Visitor<'de> for ChartSeed {
                     }
                     refs = Some(map.next_value_seed(ChartRefsSeed)?);
                 }
+                ChartField::RawXml => {
+                    if raw_xml.is_some() {
+                        return Err(A::Error::duplicate_field("rawXml"));
+                    }
+                    raw_xml = Some(map.next_value_seed(BoundedOptionString {
+                        limit: xlsx_parse::MAX_TREE_BYTES,
+                        message: CHART_TOO_LARGE,
+                    })?);
+                }
                 ChartField::Other => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -384,6 +400,7 @@ impl<'de> Visitor<'de> for ChartSeed {
             return Err(A::Error::custom(CHART_UNNAMED));
         }
         Ok(SheetChart {
+            raw_xml: raw_xml.flatten(),
             part,
             drawing,
             anchor_index: anchor_index.ok_or_else(|| A::Error::missing_field("anchorIndex"))?,
@@ -727,6 +744,7 @@ mod tests {
 
     fn chart(refs: usize) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_string(),
             drawing: "xl/drawings/drawing1.xml".to_string(),
             anchor_index: 0,
@@ -804,6 +822,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, anchor)| SheetChart {
+                raw_xml: None,
                 anchor,
                 anchor_index: index,
                 refs: kinds
@@ -834,6 +853,36 @@ mod tests {
         ];
         let json = serde_json::to_string(&hyperlinks).unwrap();
         assert_eq!(decode_hyperlinks(&json).unwrap(), hyperlinks);
+    }
+
+    #[test]
+    fn hyperlink_reader_accepts_legacy_fields_and_anchors_but_refuses_noncanonical_json() {
+        for field in 0..4 {
+            let mut link = hyperlink();
+            link.location = Some("Sheet2!A1".into());
+            match field {
+                0 => link.external_target = Some(String::new()),
+                1 => link.location = Some(String::new()),
+                2 => link.tooltip = Some(String::new()),
+                _ => link.display = Some(String::new()),
+            }
+            assert_eq!(
+                decode_hyperlinks(&serde_json::to_string(std::slice::from_ref(&link)).unwrap())
+                    .unwrap(),
+                vec![link]
+            );
+        }
+        let mut link = hyperlink();
+        link.range = CellRange::parse_a1("$A$1").unwrap();
+        assert_eq!(
+            decode_hyperlinks(&serde_json::to_string(std::slice::from_ref(&link)).unwrap())
+                .unwrap(),
+            vec![link]
+        );
+        let canonical = serde_json::to_string(&[hyperlink()]).unwrap();
+        for json in [format!(" {canonical}"), canonical.replace("null", " null")] {
+            assert!(decode_hyperlinks(&json).is_err());
+        }
     }
 
     #[test]
@@ -876,6 +925,7 @@ mod tests {
     fn oversized_fields_are_refused() {
         let long = "a".repeat(MAX_CHART_FIELD_BYTES + 1);
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: long.clone(),
             ..chart(0)
         }];
@@ -883,6 +933,7 @@ mod tests {
         assert!(decode_charts(&json).unwrap_err().contains(CHART_TOO_LARGE));
 
         let charts = vec![SheetChart {
+            raw_xml: None,
             refs: vec![ChartRef {
                 kind: ChartRefKind::Values,
                 formula: long.clone(),
@@ -911,6 +962,7 @@ mod tests {
     #[test]
     fn malformed_and_semantically_invalid_payloads_are_refused() {
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: String::new(),
             ..chart(0)
         }];

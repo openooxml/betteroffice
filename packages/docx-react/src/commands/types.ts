@@ -152,6 +152,7 @@ export interface DocxCommandArgs {
   reviewPrevious: null;
   reviewNext: null;
   commentsSidebar: null;
+  tableGridlines: null;
   open: null;
   save: null;
   print: null;
@@ -227,6 +228,7 @@ export interface DocxCommandValues {
   reviewPrevious: null;
   reviewNext: null;
   commentsSidebar: null;
+  tableGridlines: null;
   open: null;
   save: null;
   print: null;

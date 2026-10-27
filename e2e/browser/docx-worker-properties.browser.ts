@@ -13,7 +13,7 @@ async function open(page: Page, twoSections = false) {
   await page.goto('/?format=docx&peerless=1');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'worker-properties.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60000 });
-  const input = page.locator('.paged-editor__peerless-input');
+  const input = page.locator('.paged-editor__input');
   await input.focus();
   await input.press('ControlOrMeta+Home');
   return input;
@@ -107,7 +107,7 @@ test('worker hyperlink dialog edits the captured text range and preserves its di
   }
   const dialog = page.getByRole('dialog', { name: 'Insert Hyperlink', exact: true });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel('Display Text', { exact: true })).toHaveAttribute('readonly');
+  await expect(dialog.getByLabel('Display Text', { exact: true })).toBeEditable();
   await dialog.getByLabel('URL', { exact: true }).fill('https://example.com/link');
   await dialog.getByRole('button', { name: 'Insert', exact: true }).click();
   const downloading = page.waitForEvent('download');

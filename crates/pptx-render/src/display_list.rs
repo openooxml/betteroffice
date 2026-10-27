@@ -15,6 +15,27 @@ pub struct SurfaceDisplayList {
     pub primitives: Vec<Primitive>,
 }
 
+impl SurfaceDisplayList {
+    /// Reports glyph text at any depth in the display list.
+    pub fn has_glyphs(&self) -> bool {
+        fn has_glyphs(primitive: &Primitive) -> bool {
+            match primitive {
+                Primitive::TextBox { lines, .. } => lines
+                    .iter()
+                    .flat_map(|line| &line.runs)
+                    .any(|run| !run.glyphs.is_empty()),
+                Primitive::Chart { primitives, .. } | Primitive::Table { primitives, .. } => {
+                    primitives.iter().any(has_glyphs)
+                }
+                Primitive::Shape { .. }
+                | Primitive::Image { .. }
+                | Primitive::Placeholder { .. } => false,
+            }
+        }
+        self.primitives.iter().any(has_glyphs)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -191,6 +212,42 @@ impl ImageCrop {
     pub fn kept(&self) -> (f32, f32) {
         (1.0 - self.left - self.right, 1.0 - self.top - self.bottom)
     }
+
+    pub(crate) fn placement(
+        self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> (Self, Option<ImageDestination>) {
+        let (kept_x, kept_y) = self.kept();
+        let crop = Self {
+            left: self.left.max(0.0),
+            top: self.top.max(0.0),
+            right: self.right.max(0.0),
+            bottom: self.bottom.max(0.0),
+        };
+        if crop == self || kept_x <= 0.0 || kept_y <= 0.0 {
+            return (self, None);
+        }
+        let (cropped_x, cropped_y) = crop.kept();
+        let destination = ImageDestination {
+            x: x + (-self.left).max(0.0) * w / kept_x,
+            y: y + (-self.top).max(0.0) * h / kept_y,
+            w: w * cropped_x / kept_x,
+            h: h * cropped_y / kept_y,
+        };
+        (crop, Some(destination))
+    }
+}
+
+/// Bitmap destination within the picture frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ImageDestination {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 /// `a:blipFill/a:tile`, as the fractions the picture repeats at.
@@ -251,6 +308,8 @@ pub enum Primitive {
         effects: Vec<ImageEffect>,
         #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
         crop: ImageCrop,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<ImageDestination>,
         /// `a:tile`: repeat the picture at its own size instead of stretching
         /// it, scaled by these fractions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -380,6 +439,8 @@ pub struct TextRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionedTextLine {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub column_offset: f32,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -452,6 +513,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn glyph_detection_walks_tables_and_charts() {
+        let text: Primitive = serde_json::from_str(concat!(
+            r##"{"kind":"textBox","objectId":1,"x":0,"y":0,"w":10,"h":10,"anchor":"top","##,
+            r##""paragraphs":[],"lines":[{"x":0,"y":0,"width":10,"height":10,"baseline":8,"##,
+            r##""start":0,"end":1,"caretStops":[],"runs":[{"text":"a","start":0,"end":1,"##,
+            r##""x":0,"width":5,"fontId":0,"fontFamily":"Arial","fontSizePx":10,"bold":false,"##,
+            r##""italic":false,"underline":false,"color":"#000000","glyphs":[{"glyphId":1,"##,
+            r##""cluster":0,"x":0,"advance":5,"xOffset":0,"yOffset":0}]}]}]}"##
+        ))
+        .unwrap();
+        let container = |kind: &str, child: Primitive| -> Primitive {
+            serde_json::from_value(serde_json::json!({
+                "kind": kind, "objectId": 2, "name": "Container", "label": "Container",
+                "x": 0, "y": 0, "w": 10, "h": 10, "primitives": [child]
+            }))
+            .unwrap()
+        };
+        let mut list = SurfaceDisplayList {
+            contract_version: CONTRACT_VERSION,
+            width: 10.0,
+            height: 10.0,
+            background: None,
+            primitives: Vec::new(),
+        };
+        assert!(!list.has_glyphs());
+        for primitive in [
+            text.clone(),
+            container("table", text.clone()),
+            container("chart", text.clone()),
+            container("chart", container("table", text.clone())),
+        ] {
+            list.primitives = vec![primitive];
+            assert!(list.has_glyphs());
+        }
+        let mut empty = text;
+        if let Primitive::TextBox { lines, .. } = &mut empty {
+            lines[0].runs[0].glyphs.clear();
+        }
+        list.primitives = vec![container("table", container("chart", empty))];
+        assert!(!list.has_glyphs());
+    }
+
+    #[test]
     fn solid_stroke_keeps_legacy_json_and_reads_missing_paint() {
         let json = r##"{"color":"#123456","width":2.0,"dashed":true}"##;
         let stroke: Stroke = serde_json::from_str(json).unwrap();
@@ -512,6 +616,7 @@ mod tests {
     #[test]
     fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
         let mut image = Primitive::Image {
+            destination: None,
             geometry_fallback: false,
             tile: None,
             object_id: 90,

@@ -1,0 +1,22 @@
+[
+  { "text": "PURCHASE \nTARGET", "width": 20, "lines": ["PURCHASE", "TARGET"] },
+  { "text": "ab cd ef", "width": 5, "lines": ["ab cd", "ef"] },
+  { "text": "abc def", "width": 7, "lines": ["abc def"] },
+  { "text": "ab  cd", "width": 3, "lines": ["ab", "cd"] },
+  { "text": "abc   def", "width": 4, "lines": ["abc", "def"] },
+  { "text": "abcdefgh", "width": 3, "lines": ["abc", "def", "gh"] },
+  { "text": "ab abcdefg x", "width": 3, "lines": ["ab", "abc", "def", "g x"] },
+  { "text": "ab", "width": 0, "lines": ["a", "b"] },
+  { "text": "  lead", "width": 10, "lines": ["  lead"] },
+  { "text": "trail  ", "width": 10, "lines": ["trail  "] },
+  { "text": "a  \nb", "width": 10, "lines": ["a", "b"] },
+  { "text": "   \nx", "width": 10, "lines": ["", "x"] },
+  { "text": "", "width": 5, "lines": [""] },
+  { "text": "a\n\nb\n", "width": 5, "lines": ["a", "", "b"] },
+  { "text": "a\r\n", "width": 5, "lines": ["a"] },
+  { "text": "a\n\n", "width": 5, "lines": ["a", ""] },
+  { "text": "\n", "width": 5, "lines": [""] },
+  { "text": "x\r\ny", "width": 5, "lines": ["x", "y"] },
+  { "text": "ééé", "width": 2, "lines": ["éé", "é"] },
+  { "text": "👨‍👩‍👧👨‍👩‍👧", "width": 1, "lines": ["👨‍👩‍👧", "👨‍👩‍👧"] }
+]

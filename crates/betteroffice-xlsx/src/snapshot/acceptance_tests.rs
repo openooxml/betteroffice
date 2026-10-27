@@ -263,6 +263,111 @@ fn hydrate(workbook: &Workbook, budget: SnapshotBudget) -> Workbook {
     peer
 }
 
+fn rich_text_source() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/sharedStrings.xml" || path == "xl/worksheets/sheet1.xml" {
+            *bytes = String::from_utf8(std::mem::take(bytes))
+                .unwrap()
+                .replace("<t>duplicate</t>", "<r><rPr><b/></rPr><t>duplicate</t></r>")
+                .replace(
+                    "<is><t></t></is>",
+                    "<is><r><rPr><i/></rPr><t>inline</t></r></is>",
+                )
+                .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn snapshot_restores_initial_runs_and_refuses_content_edit_history() {
+    let bytes = rich_text_source();
+    for budget in budgets() {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let peer = hydrate(&workbook, budget);
+        for at in [CellRef::new(0, 2), CellRef::new(1, 2)] {
+            let original = workbook.cell_text_runs(SheetId(0), at).unwrap();
+            assert_eq!(peer.cell_text_runs(SheetId(0), at).unwrap(), original);
+        }
+        let at = CellRef::new(0, 2);
+        workbook
+            .edit_cell(SheetId(0), at, "changed", context())
+            .unwrap();
+        for undo in [false, true] {
+            if undo {
+                workbook.undo(context()).unwrap();
+                assert_eq!(
+                    workbook.model.sheets[0].cell(at).unwrap().value,
+                    CellValue::Text {
+                        value: "duplicate".into()
+                    }
+                );
+            }
+            assert!(workbook.cell_text_runs(SheetId(0), at).is_none());
+            let failure = WorkbookSnapshotEncoder::new(&workbook, None, budget)
+                .err()
+                .unwrap();
+            assert_eq!(failure.to_string(), "snapshot requires an initial workbook");
+        }
+    }
+}
+
+#[test]
+fn snapshot_with_adopted_committed_version_restores_without_runs() {
+    let bytes = rich_text_source();
+    for budget in budgets() {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let version = format!("{}-1", workbook.version_nonce);
+        workbook.adopt_peer_version(&version).unwrap();
+        assert!(!workbook.edited_since_open);
+        assert_eq!(workbook.committed_changes, 1);
+        let peer = hydrate(&workbook, budget);
+        assert_eq!(peer.version(), workbook.version());
+        assert!(peer.invalidated_text_sources.is_none());
+        for at in [CellRef::new(0, 2), CellRef::new(1, 2)] {
+            assert!(workbook.cell_text_runs(SheetId(0), at).is_some());
+            assert!(peer.cell_text_runs(SheetId(0), at).is_none());
+        }
+        assert!(peer.source_package_is_unmaterialized_for_test());
+    }
+}
+
+#[test]
+fn deferred_snapshot_run_queries_skip_non_strings_and_cells_without_sources() {
+    let workbook = Workbook::open(&rich_text_source()).unwrap();
+    let mut peer = hydrate(&workbook, budgets()[0]);
+    for (sheet, at) in [
+        (SheetId(0), CellRef::new(0, 0)),
+        (SheetId(0), CellRef::new(0, 1)),
+        (SheetId(0), CellRef::new(0, 25)),
+        (SheetId(99), CellRef::new(0, 0)),
+    ] {
+        assert!(peer.cell_text_runs(sheet, at).is_none());
+        assert!(peer.source_package_is_unmaterialized_for_test());
+    }
+    peer.model.shared_strings[0].push('!');
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+            .is_none()
+    );
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert_eq!(peer.model.shared_strings[0].pop(), Some('!'));
+    peer.edit_cell(SheetId(0), CellRef::new(0, 0), "new", context())
+        .unwrap();
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 0))
+            .is_none()
+    );
+    assert!(peer.source_package_is_unmaterialized_for_test());
+    assert!(
+        peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+            .is_some()
+    );
+    assert!(!peer.source_package_is_unmaterialized_for_test());
+}
+
 #[test]
 fn format_facets_bounded_snapshot_and_replay() {
     let expected = serde_json::json!({
@@ -831,6 +936,59 @@ fn decoded_snapshot(chunks: &[Vec<u8>]) -> Vec<(ChunkKind, u64, Vec<u8>)> {
     }
     assert!(logical.is_empty());
     records
+}
+
+#[test]
+fn snapshot_read_cells_reports_visibility_without_package_rebuild() {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    let workbook = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap();
+    workbook.1 = String::from_utf8(std::mem::take(&mut workbook.1))
+        .unwrap()
+        .replace(r#"name="Other""#, r#"name="Other" state="hidden""#)
+        .replace(r#"name="Empty""#, r#"name="Empty" state="veryHidden""#)
+        .into_bytes();
+    let worker = worker(&ooxml_opc::rezip_parts(&parts).unwrap());
+    for budget in budgets() {
+        let peer = hydrate(&worker, budget);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let rebuilds = crate::snapshot::package::rebuild_count();
+        let catalog = peer
+            .read_cells(&crate::ReadRequest::default())
+            .unwrap()
+            .unwrap();
+        let cells = peer
+            .read_cells(&crate::ReadRequest {
+                ranges: vec![RangeTarget {
+                    sheet_id: catalog.sheets[0].sheet_id.clone(),
+                    range: RangeAddress::A1 {
+                        a1: "A1".to_owned(),
+                    },
+                }],
+            })
+            .unwrap()
+            .unwrap();
+        for read in [catalog, cells] {
+            let read = serde_json::to_value(read).unwrap();
+            assert_eq!(
+                read["sheets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|sheet| sheet["visibility"].clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    serde_json::json!("visible"),
+                    serde_json::json!("hidden"),
+                    serde_json::json!("veryHidden"),
+                ]
+            );
+            assert_eq!(crate::snapshot::package::rebuild_count(), rebuilds);
+            assert!(peer.source_package_is_unmaterialized_for_test());
+        }
+    }
 }
 
 #[test]
@@ -2147,6 +2305,7 @@ fn snapshot_current_state_identity() {
                 None,
                 &[],
                 None,
+                &[],
             )
             .unwrap()
             .0;
@@ -2205,6 +2364,80 @@ fn snapshot_initial_save_identity() {
         let worker = worker(&bytes);
         let peer = hydrate(&worker, budget);
         assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+    }
+}
+
+#[test]
+fn source_conditional_formats_and_dxfs_use_binary_snapshots_losslessly() {
+    for (with_cf, with_dxf) in [(true, false), (false, true), (true, true)] {
+        let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+        let formats = format!(
+            r#"<conditionalFormatting sqref="A1 A3:A5"><cfRule type="expression" priority="1" {}><formula>A1&gt;0</formula></cfRule><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF123456"/></dataBar></cfRule></conditionalFormatting>"#,
+            if with_dxf { r#"dxfId="0""# } else { "" }
+        );
+        for (name, data) in &mut parts {
+            if with_cf && name == "xl/worksheets/sheet1.xml" {
+                *data = std::str::from_utf8(data)
+                    .unwrap()
+                    .replace("</worksheet>", &format!("{formats}</worksheet>"))
+                    .into_bytes();
+            }
+            if with_dxf && name == "xl/styles.xml" {
+                *data = std::str::from_utf8(data).unwrap()
+                    .replace("</styleSheet>", r#"<dxfs count="2"><dxf><font><b/><color rgb="FF123456"/></font></dxf><dxf><numFmt numFmtId="14" formatCode="0%"/></dxf></dxfs></styleSheet>"#)
+                    .into_bytes();
+            }
+        }
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        for budget in budgets() {
+            for mut worker in [
+                Workbook::open(&bytes).unwrap(),
+                Workbook::open_for_read(&bytes).unwrap(),
+                worker(&bytes),
+            ] {
+                let chunks = encode(&worker, budget);
+                let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+                let (mut peer, _) = builder.finish().unwrap().into_parts();
+                assert!(peer.source_package_is_unmaterialized_for_test());
+                assert_eq!(peer.model, worker.model);
+                assert_eq!(
+                    peer.authority.materialize().unwrap(),
+                    worker.authority.materialize().unwrap()
+                );
+                let projected = peer.authority.materialize().unwrap();
+                assert_eq!(peer.model.styles.dxfs, projected.styles.dxfs);
+                for (sheet, projected) in peer.model.sheets.iter().zip(&projected.sheets) {
+                    assert_eq!(sheet.conditional_formats, projected.conditional_formats);
+                }
+                assert_eq!(peer.save().unwrap(), worker.save().unwrap());
+                for workbook in [&mut worker, &mut peer] {
+                    // the edit recalculates the fixture's volatile RAND(); one seed draws alike.
+                    workbook.set_rand_seed(Some(7));
+                    workbook
+                        .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
+                        .unwrap();
+                }
+                let saved = peer.save().unwrap();
+                assert_eq!(saved, worker.save().unwrap());
+                let restored = ooxml_opc::unzip_parts(&saved).unwrap();
+                let style = |parts: &[(String, Vec<u8>)]| {
+                    parts
+                        .iter()
+                        .find(|(name, _)| name == "xl/styles.xml")
+                        .unwrap()
+                        .1
+                        .clone()
+                };
+                assert_eq!(style(&restored), style(&parts));
+                if with_cf {
+                    let (_, sheet) = restored
+                        .iter()
+                        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+                        .unwrap();
+                    assert!(std::str::from_utf8(sheet).unwrap().contains(&formats));
+                }
+            }
+        }
     }
 }
 
@@ -2512,6 +2745,7 @@ fn snapshot_calculation_lists_advance_one_address_at_a_time() {
         changed: vec![address(1, "$B$2"), address(0, "C$4"), address(1, "$B$2")],
         cycle_cells: vec![address(2, "A1"), address(0, "$D5")],
         limited_cells: vec![address(0, "E6")],
+        budget_exhausted: false,
     };
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
     let chunks = encode(&worker, budget);

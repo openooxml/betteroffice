@@ -137,7 +137,10 @@ fn application_versions_use_a_fixed_valid_value_in_both_masking_modes() {
                         source.as_bytes(),
                         &mut RedactionReport::default(),
                         &StyleMap::default(),
-                        &mut TextMasker::new(&RedactionOptions { random_characters }),
+                        &mut TextMasker::new(&RedactionOptions {
+                            random_characters,
+                            ..Default::default()
+                        }),
                     )
                     .unwrap();
                     let output = String::from_utf8(output).unwrap();
@@ -208,7 +211,10 @@ fn typed_custom_numbers_use_valid_neutral_values() {
                             source.as_bytes(),
                             &mut RedactionReport::default(),
                             &StyleMap::default(),
-                            &mut TextMasker::new(&RedactionOptions { random_characters }),
+                            &mut TextMasker::new(&RedactionOptions {
+                                random_characters,
+                                ..Default::default()
+                            }),
                         )
                         .unwrap();
                         let output = String::from_utf8(output).unwrap();
@@ -252,6 +258,7 @@ fn typed_custom_number_replacement_is_scoped_and_rejects_dtds() {
 fn random_characters_preserve_each_office_format() {
     let options = RedactionOptions {
         random_characters: true,
+        ..Default::default()
     };
     for (format, source, secrets, media, text_part) in [
         (
@@ -338,6 +345,7 @@ fn random_characters_redact_japanese_text_cdata_and_entities_without_changing_na
             &StyleMap::default(),
             &mut TextMasker::new(&RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -391,6 +399,7 @@ fn random_characters_keep_schema_numeric_date_and_formula_masks() {
             &StyleMap::default(),
             &mut TextMasker::new(&RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -433,6 +442,7 @@ fn random_characters_keep_schema_numeric_date_and_formula_masks() {
             &StyleMap::default(),
             &mut TextMasker::new(&RedactionOptions {
                 random_characters: true,
+                ..Default::default()
             }),
         )
         .unwrap();
@@ -1094,6 +1104,7 @@ fn random_masks_keep_pivot_and_slicer_names_consistent() {
     let source = ooxml_opc::rezip_parts(&patched).unwrap();
     let options = RedactionOptions {
         random_characters: true,
+        ..Default::default()
     };
     let (output, _) = redact_with_report_and_options(&source, Format::Xlsx, &options).unwrap();
     let out = ooxml_opc::unzip_parts(&output).unwrap();

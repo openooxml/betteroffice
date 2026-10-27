@@ -1,6 +1,6 @@
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
-import { graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
+import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
 
 export interface CommandRect { x: number; y: number; width: number; height: number }
 
@@ -11,19 +11,19 @@ export interface CommandGeometryLine {
 }
 
 export interface CommandGeometryIndex {
-  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[] }[];
+  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number }[];
   lines: Map<string, CommandGeometryLine[]>;
 }
 
 type GeometryBounds = Pick<SlidePrimitive, 'x' | 'y' | 'w' | 'h' | 'transform'>;
-type CaretLine = Pick<PositionedTextLine, 'x' | 'y' | 'height' | 'start' | 'end' | 'caretStops'>;
+type CaretLine = Pick<PositionedTextLine, 'columnOffset' | 'x' | 'y' | 'height' | 'start' | 'end' | 'caretStops'>;
 type HitPrimitive = GeometryBounds & { kind: SlidePrimitive['kind']; shapeId?: string; storyId?: string; lines?: CaretLine[] };
 interface NavigationLine { line: CaretLine }
 interface NavigationIndex { lines: Map<string, NavigationLine[]> }
 
 export interface CommandHitGeometryIndex extends NavigationIndex {
   size?: { width: number; height: number };
-  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[] }[];
+  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number }[];
 }
 
 const displayLists = new WeakMap<PresentationCommandFrame, SlideDisplayList>();
@@ -39,12 +39,18 @@ export function decodeCommandDisplayList(frame: PresentationCommandFrame): Slide
 
 function targetKey(shapeId: string, storyId?: string): string { return JSON.stringify([shapeId, storyId]); }
 
+function textBoxLength(box: TextBoxPrimitive): number {
+  return box.paragraphs.reduce((length, paragraph) =>
+    length + paragraph.runs.reduce((sum, run) => sum + run.text.length, 0), Math.max(0, box.paragraphs.length - 1));
+}
+
 export function indexGeometry(list: SlideDisplayList): CommandGeometryIndex {
   const index: CommandGeometryIndex = { hits: [], lines: new Map() };
   function visit(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], clips: readonly SlidePrimitive[]): void {
     for (const primitive of primitives) {
       const transforms = [...parents, primitive];
-      if (primitive.shapeId) index.hits.push({ primitive, transforms, clips });
+      if (primitive.shapeId) index.hits.push({ primitive, transforms, clips,
+        ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive) } : {}) });
       if (primitive.kind === 'textBox' && primitive.shapeId && primitive.storyId) {
         const key = targetKey(primitive.shapeId, primitive.storyId);
         const lines = index.lines.get(key) ?? [];
@@ -67,10 +73,11 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
         x: source.x, y: source.y, w: source.w, h: source.h,
         ...(source.transform ? { transform: { ...source.transform } } : {}) };
       const transforms = [...parents, primitive];
-      if (source.shapeId) index.hits.push({ primitive, transforms, clips });
+      if (source.shapeId) index.hits.push({ primitive, transforms, clips,
+        ...(source.kind === 'textBox' ? { textLength: textBoxLength(source) } : {}) });
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
-        primitive.lines = source.lines.map((line) => ({ x: line.x, y: line.y, height: line.height,
+        primitive.lines = source.lines.map((line) => ({ columnOffset: line.columnOffset, x: line.x, y: line.y, height: line.height,
           start: line.start, end: line.end, caretStops: line.caretStops.map((stop) => ({ position: stop.position, x: stop.x })) }));
         const key = targetKey(source.shapeId, source.storyId);
         const lines = index.lines.get(key) ?? [];
@@ -176,10 +183,30 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
       }
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
-      const line = target ? primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
-        const distance = (value: CaretLine) => Math.max(value.y - local.y, local.y - value.y - value.height, 0);
-        return !best || distance(candidate) < distance(best) ? candidate : best;
-      }, undefined) : primitive.lines?.find((candidate) => local.y >= candidate.y && local.y <= candidate.y + candidate.height);
+      const nearest = target || entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
+      const columns = primitive.lines?.some((line, index, lines) => index > 0 &&
+        (line.columnOffset ?? 0) !== (lines[index - 1].columnOffset ?? 0));
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      const line = primitive.lines?.reduce<CaretLine | undefined>((best, candidate) => {
+        if (!nearest && (local.y < candidate.y || local.y > candidate.y + candidate.height)) return best;
+        const distance = (value: CaretLine) => {
+          let left = value.x;
+          let right = value.x;
+          for (const stop of value.caretStops) {
+            left = Math.min(left, stop.x);
+            right = Math.max(right, stop.x);
+          }
+          const dx = Math.max(left - local.x, local.x - right, 0);
+          const dy = Math.max(value.y - local.y, local.y - value.y - value.height, 0);
+          return columns ? dx * dx + dy * dy : dy;
+        };
+        const candidateDistance = distance(candidate);
+        if (!best || candidateDistance < nearestDistance) {
+          nearestDistance = candidateDistance;
+          return candidate;
+        }
+        return best;
+      }, undefined);
       const first = line?.caretStops[0];
       if (line && first) {
         const stop = line.caretStops.reduce((best, candidate) =>
@@ -198,11 +225,42 @@ function contains(primitive: GeometryBounds, point: { x: number; y: number }): b
     point.y >= primitive.y && point.y <= primitive.y + primitive.h;
 }
 
+interface CellHit {
+  primitive: { kind: string; shapeId?: string; storyId?: string };
+  clips: readonly object[];
+  textLength?: number;
+}
+
+/** Tab and Shift+Tab inside a table: the whole text of the next or previous cell in reading order;
+ *  the selection stays put past the last or first cell, and null means it is not in a table cell. */
+function cellGeometry(hits: readonly CellHit[], selection: PresentationCommandSelected | null,
+  backward: boolean): PresentationCommandSelection | null {
+  if (!selection || selection.kind === 'object') return null;
+  const isTable = (clip: object) => 'kind' in clip && clip.kind === 'table';
+  const table = hits.find(({ primitive }) => primitive.kind === 'textBox' &&
+    primitive.shapeId === selection.shapeId && primitive.storyId === selection.storyId)?.clips.filter(isTable).pop();
+  if (!table) return null;
+  const cells: { storyId: string; end: number }[] = [];
+  for (const { primitive, clips, textLength } of hits) {
+    const storyId = primitive.storyId;
+    if (primitive.kind !== 'textBox' || !storyId || primitive.shapeId !== selection.shapeId ||
+      clips.filter(isTable).pop() !== table || cells.some((cell) => cell.storyId === storyId)) continue;
+    cells.push({ storyId, end: textLength ?? 0 });
+  }
+  const target = cells[cells.findIndex((cell) => cell.storyId === selection.storyId) + (backward ? -1 : 1)];
+  if (!target) return { ...selection };
+  return { slideId: selection.slideId, shapeId: selection.shapeId, storyId: target.storyId, anchor: 0,
+    focus: target.end, affinity: target.end > 0 ? 'upstream' : 'downstream' };
+}
+
 export function navigateGeometry(
-  index: NavigationIndex, selection: PresentationCommandSelected | null,
+  index: NavigationIndex & { hits?: readonly CellHit[] }, selection: PresentationCommandSelected | null,
   motion: PresentationCommandMotion, extend: boolean,
   text?: string,
 ): PresentationCommandSelection | null {
+  if (motion === 'nextCell' || motion === 'previousCell') {
+    return index.hits ? cellGeometry(index.hits, selection, motion === 'previousCell') : null;
+  }
   const entry = findLine(index, selection);
   if (!entry || !selection || selection.kind === 'object') return null;
   const lines = index.lines.get(targetKey(selection.shapeId, selection.storyId)) ?? [];
@@ -231,8 +289,9 @@ export function navigateGeometry(
     const candidates = stops.filter((stop) => motion === 'left' ? stop < position : stop > position);
     if (candidates.length) position = motion === 'left' ? Math.max(...candidates) : Math.min(...candidates);
   } else if (motion === 'up' || motion === 'down') {
-    goalX = selection.goalX ?? stopX(entry.line, position);
-    const moved = verticalCaretMove(lines.map(({ line }) => line),
+    const caretLines = lines.map(({ line }) => line);
+    goalX = selection.goalX ?? stopX(entry.line, position) - caretColumnOffset(caretLines, lines.indexOf(entry));
+    const moved = verticalCaretMove(caretLines,
       { position, lineIndex: lines.indexOf(entry) }, motion, goalX);
     destination = lines[moved.lineIndex]!;
     position = moved.position;

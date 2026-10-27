@@ -37,7 +37,7 @@ jobs:
       matrix:
         binding: [docx, pptx, xlsx]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -52,13 +52,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: ${{ matrix.binding }}-native.*
           path: bindings/${{ matrix.binding }}-native/artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.binding }}-native-loader
           path: bindings/${{ matrix.binding }}-native

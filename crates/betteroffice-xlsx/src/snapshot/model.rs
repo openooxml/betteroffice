@@ -12,7 +12,10 @@ use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, wri
 use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
-use crate::authority::snapshot::{Released, released};
+use crate::authority::snapshot::{
+    Codec, ConditionalFormatSnapshot, LegacyConditionalFormatSnapshot, Released, released,
+    released_conditional_formats, sets_italic, write_released_conditional_formats,
+};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -39,6 +42,19 @@ const ROW_STYLE: u8 = 24;
 /// A sheet record that also counts its row defaults; a sheet without any keeps
 /// the `SHEET` layout.
 const STYLED_SHEET: u8 = 25;
+const HIDDEN_COL_WIDTH: u8 = 26;
+const HIDDEN_ROW_HEIGHT: u8 = 27;
+const HIDDEN_SHEET: u8 = 28;
+const CONDITIONAL_HEADER: u8 = 29;
+const CONDITIONAL_FORMATS: u8 = 30;
+const AUTO_FILTER_HEADER: u8 = 31;
+const AUTO_FILTERS: u8 = 32;
+/// A conditional formats record laid out with italic; one tagged
+/// `CONDITIONAL_FORMATS` predates it.
+const CONDITIONAL_FORMATS_V2: u8 = 33;
+/// A chart record that also carries the edited part XML it saves; a chart
+/// without any keeps the `CHART` layout.
+const CHART_XML: u8 = 34;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -46,8 +62,11 @@ const BORDER_V2: u8 = 23;
 
 fn run_tag(tag: u8) -> u8 {
     match tag {
-        STYLED_SHEET => SHEET,
+        CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
+        STYLED_SHEET | HIDDEN_SHEET => SHEET,
+        CHART_XML => CHART,
         XF_V2 => XF,
+        CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
         FILL_V2 => FILL,
         BORDER_V2 => BORDER,
         tag => tag,
@@ -180,7 +199,20 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     ]
 }
 
-fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 9]> {
+fn has_auto_filters(model: &Workbook) -> bool {
+    model.sheets.iter().any(|sheet| sheet.auto_filter.is_some())
+}
+
+fn has_conditional_formats(model: &Workbook) -> bool {
+    has_auto_filters(model)
+        || !model.styles.dxfs.is_empty()
+        || model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.conditional_formats.is_empty())
+}
+
+fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 11]> {
     Ok([
         sheet.hyperlinks.len(),
         sheet.merges.len(),
@@ -191,6 +223,8 @@ fn sheet_counts(sheet: &Sheet) -> SnapshotResult<[usize; 9]> {
         exact_len(sheet.array_formulas())?,
         exact_len(sheet.iter_cells())?,
         sheet.row_styles.len(),
+        sheet.hidden_col_widths.len(),
+        sheet.hidden_row_heights.len(),
     ])
 }
 
@@ -211,7 +245,8 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         tables,
     } = model;
     let counts = global_counts(model);
-    let mut records = 13;
+    let mut records =
+        13 + usize::from(has_conditional_formats(model)) + usize::from(has_auto_filters(model));
     for count in counts {
         add_count(&mut records, count)?;
     }
@@ -224,13 +259,21 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
         for count in &counts[..7] {
             add_count(&mut records, *count)?;
         }
-        add_count(&mut records, counts[8])?;
+        for count in &counts[8..] {
+            add_count(&mut records, *count)?;
+        }
         add_count(&mut cells, counts[7])?;
         for chart in &sheet.charts {
             add_count(&mut records, chart.refs.len())?;
         }
     }
-    w.u8(HEADER);
+    w.u8(if has_auto_filters(model) {
+        AUTO_FILTER_HEADER
+    } else if has_conditional_formats(model) {
+        CONDITIONAL_HEADER
+    } else {
+        HEADER
+    });
     w.u8(match date_system {
         DateSystem::V1900 => 0,
         DateSystem::V1904 => 1,
@@ -257,7 +300,7 @@ struct MetadataCursor {
 impl Default for MetadataCursor {
     fn default() -> Self {
         Self {
-            phase: NAME,
+            phase: AUTO_FILTERS,
             index: 0,
             child: 0,
             sheet: 0,
@@ -271,6 +314,39 @@ impl Default for MetadataCursor {
 impl MetadataCursor {
     fn write_next(&mut self, w: &mut Writer, model: &Workbook) -> SnapshotResult<bool> {
         loop {
+            if self.phase == AUTO_FILTERS {
+                self.phase = CONDITIONAL_FORMATS;
+                if has_auto_filters(model) {
+                    w.u8(AUTO_FILTERS);
+                    w.var_usize(model.sheets.len());
+                    for sheet in &model.sheets {
+                        sheet.auto_filter.write(w);
+                    }
+                    return Ok(true);
+                }
+            }
+            if self.phase == CONDITIONAL_FORMATS {
+                self.phase = NAME;
+                if has_conditional_formats(model) {
+                    let formats = model.sheets.iter().map(|sheet| &sheet.conditional_formats);
+                    if !sets_italic(&model.styles.dxfs, formats.clone().flatten()) {
+                        w.u8(CONDITIONAL_FORMATS);
+                        write_released_conditional_formats(
+                            w,
+                            &model.styles.dxfs,
+                            formats.map(Vec::as_slice),
+                        );
+                        return Ok(true);
+                    }
+                    w.u8(CONDITIONAL_FORMATS_V2);
+                    model.styles.dxfs.write(w);
+                    w.var_usize(model.sheets.len());
+                    for sheet in &model.sheets {
+                        sheet.conditional_formats.write(w);
+                    }
+                    return Ok(true);
+                }
+            }
             if self.phase == SHEET {
                 let Some(sheet) = model.sheets.get(self.sheet) else {
                     return Ok(false);
@@ -359,6 +435,8 @@ impl MetadataCursor {
                 MERGE => sheet.merges.len(),
                 COL_WIDTH => sheet.col_widths.len(),
                 ROW_HEIGHT => sheet.row_heights.len(),
+                HIDDEN_COL_WIDTH => sheet.hidden_col_widths.len(),
+                HIDDEN_ROW_HEIGHT => sheet.hidden_row_heights.len(),
                 COL_STYLE => sheet.col_styles.len(),
                 CHART => sheet.charts.len(),
                 ARRAY => exact_len(sheet.array_formulas())?,
@@ -369,6 +447,7 @@ impl MetadataCursor {
                 self.sheet_phase = match self.sheet_phase {
                     CHART => ARRAY,
                     ARRAY => ROW_STYLE,
+                    ROW_STYLE => HIDDEN_COL_WIDTH,
                     phase => phase + 1,
                 };
                 self.index = 0;
@@ -378,6 +457,12 @@ impl MetadataCursor {
             }
             w.u8(if self.sheet_phase == CHART && self.child != 0 {
                 CHART_REF
+            } else if self.sheet_phase == CHART && sheet.charts[self.index].raw_xml.is_some() {
+                CHART_XML
+            } else if self.sheet_phase == SHEET
+                && (!sheet.hidden_col_widths.is_empty() || !sheet.hidden_row_heights.is_empty())
+            {
+                HIDDEN_SHEET
             } else if self.sheet_phase == SHEET && !sheet.row_styles.is_empty() {
                 STYLED_SHEET
             } else {
@@ -389,18 +474,27 @@ impl MetadataCursor {
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
                     let counts = sheet_counts(sheet)?;
-                    let count = if sheet.row_styles.is_empty() { 8 } else { 9 };
+                    let count = if !sheet.hidden_col_widths.is_empty()
+                        || !sheet.hidden_row_heights.is_empty()
+                    {
+                        11
+                    } else if sheet.row_styles.is_empty() {
+                        8
+                    } else {
+                        9
+                    };
                     for value in &counts[..count] {
                         w.var_usize(*value);
                     }
                 }
                 HYPERLINK => write_hyperlink(w, &sheet.hyperlinks[self.index]),
                 MERGE => write_range(w, &sheet.merges[self.index]),
-                COL_WIDTH | ROW_HEIGHT => {
-                    let map = if self.sheet_phase == COL_WIDTH {
-                        &sheet.col_widths
-                    } else {
-                        &sheet.row_heights
+                COL_WIDTH | ROW_HEIGHT | HIDDEN_COL_WIDTH | HIDDEN_ROW_HEIGHT => {
+                    let map = match self.sheet_phase {
+                        COL_WIDTH => &sheet.col_widths,
+                        ROW_HEIGHT => &sheet.row_heights,
+                        HIDDEN_COL_WIDTH => &sheet.hidden_col_widths,
+                        _ => &sheet.hidden_row_heights,
                     };
                     let lower = self.map_key.map_or(Unbounded, Excluded);
                     let (&key, &value) = map
@@ -464,6 +558,8 @@ impl MetadataCursor {
 
 pub(crate) struct ModelSnapshotBuilder {
     model: Workbook,
+    conditional_formats: std::vec::IntoIter<Vec<xlsx_model::ConditionalFormatting>>,
+    auto_filters: std::vec::IntoIter<Option<xlsx_model::AutoFilter>>,
     ordinal: u64,
     started: bool,
     failed: bool,
@@ -493,6 +589,8 @@ impl ModelSnapshotBuilder {
     pub(crate) fn new() -> Self {
         Self {
             model: Workbook::default(),
+            conditional_formats: Vec::new().into_iter(),
+            auto_filters: Vec::new().into_iter(),
             ordinal: 0,
             started: false,
             failed: false,
@@ -579,13 +677,25 @@ impl ModelSnapshotBuilder {
                     "snapshot model exceeds advance byte budget",
                 ));
             }
-            if decoding || extent > budget.max_bytes() {
+            if decoding
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
+                || extent > budget.max_bytes()
+            {
                 self.preflight_large_record(raw, budget)?;
             }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
-            if decoding || extent > budget.max_bytes() {
+            if decoding
+                || matches!(
+                    raw,
+                    CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2 | AUTO_FILTERS
+                )
+                || extent > budget.max_bytes()
+            {
                 let Some(consumed) = self.read_large_record(raw, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
@@ -607,7 +717,11 @@ impl ModelSnapshotBuilder {
             if tag != HEADER {
                 return Err(SnapshotError::new("snapshot model header is missing"));
             }
-            self.read_header(&mut r)?;
+            self.read_header(
+                &mut r,
+                matches!(raw, CONDITIONAL_HEADER | AUTO_FILTER_HEADER),
+                raw == AUTO_FILTER_HEADER,
+            )?;
         }
         let consumed = record.len() - r.clone().rest().len();
         if packed.is_some() {
@@ -644,11 +758,15 @@ impl ModelSnapshotBuilder {
             NUM_FMT => preflight!((u16, String)),
             HYPERLINK => preflight!(Hyperlink),
             CHART_REF => preflight!(ChartRef),
+            CONDITIONAL_FORMATS => preflight!(LegacyConditionalFormatSnapshot),
+            CONDITIONAL_FORMATS_V2 => preflight!(ConditionalFormatSnapshot),
+            AUTO_FILTERS => preflight!(Vec<Option<xlsx_model::AutoFilter>>),
             TABLE => preflight!((
                 String,
                 (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
             )),
             CHART => preflight!((String, (String, (usize, (ChartAnchor, usize))))),
+            CHART_XML => preflight!((String, (String, (usize, (ChartAnchor, (usize, String)))))),
             _ => Err(SnapshotError::new(
                 "snapshot model exceeds advance byte budget",
             )),
@@ -676,6 +794,21 @@ impl ModelSnapshotBuilder {
             };
         }
         let consumed = match tag {
+            AUTO_FILTERS => {
+                let (value, end) = decoded!(Vec<Option<xlsx_model::AutoFilter>>);
+                self.adopt_auto_filters(value)?;
+                end
+            }
+            CONDITIONAL_FORMATS => {
+                let (value, end) = decoded!(LegacyConditionalFormatSnapshot);
+                self.adopt_conditional_formats(released_conditional_formats(value))?;
+                end
+            }
+            CONDITIONAL_FORMATS_V2 => {
+                let (value, end) = decoded!(ConditionalFormatSnapshot);
+                self.adopt_conditional_formats(value)?;
+                end
+            }
             NAME => {
                 let (value, end) = decoded!(DefinedName);
                 self.model.defined_names.push(value);
@@ -787,15 +920,28 @@ impl ModelSnapshotBuilder {
                 }
                 end
             }
-            CHART => {
-                let ((part, (drawing, (anchor_index, (anchor, refs)))), end) =
-                    decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+            CHART | CHART_XML => {
+                let ((part, (drawing, (anchor_index, (anchor, refs)))), raw_xml, end) = if tag
+                    == CHART_XML
+                {
+                    let ((part, (drawing, (anchor_index, (anchor, (refs, xml))))), end) =
+                        decoded!((String, (String, (usize, (ChartAnchor, (usize, String))))));
+                    (
+                        (part, (drawing, (anchor_index, (anchor, refs)))),
+                        Some(chart_xml(xml)?),
+                        end,
+                    )
+                } else {
+                    let (value, end) = decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+                    (value, None, end)
+                };
                 self.model
                     .sheets
                     .last_mut()
                     .ok_or_else(|| SnapshotError::new("snapshot sheet metadata has no sheet"))?
                     .charts
                     .push(SheetChart {
+                        raw_xml,
                         part,
                         drawing,
                         anchor_index,
@@ -813,8 +959,12 @@ impl ModelSnapshotBuilder {
                 ));
             }
         };
-        let index = if matches!(tag, TABLE | CHART) {
-            usize::from(self.runs.front().is_some_and(|&(next, _)| next != tag))
+        let index = if matches!(tag, TABLE | CHART | CHART_XML) {
+            usize::from(
+                self.runs
+                    .front()
+                    .is_some_and(|&(next, _)| next != run_tag(tag)),
+            )
         } else {
             0
         };
@@ -862,7 +1012,7 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET | STYLED_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            SHEET | STYLED_SHEET | HIDDEN_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
             HYPERLINK => g.ensure(
                 m,
                 |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
@@ -929,10 +1079,14 @@ impl ModelSnapshotBuilder {
                     }
                     let tag = r.u8()?;
                     if !self.started {
-                        if tag != HEADER {
+                        if run_tag(tag) != HEADER {
                             return Err(SnapshotError::new("snapshot model header is missing"));
                         }
-                        self.read_header(&mut r)?;
+                        self.read_header(
+                            &mut r,
+                            matches!(tag, CONDITIONAL_HEADER | AUTO_FILTER_HEADER),
+                            tag == AUTO_FILTER_HEADER,
+                        )?;
                     } else {
                         self.read_record(tag, &mut r)?;
                     }
@@ -955,7 +1109,12 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_header(&mut self, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_header(
+        &mut self,
+        r: &mut Reader<'_>,
+        conditional: bool,
+        auto_filters: bool,
+    ) -> SnapshotResult<()> {
         self.model.date_system = match r.u8()? {
             0 => DateSystem::V1900,
             1 => DateSystem::V1904,
@@ -971,6 +1130,12 @@ impl ModelSnapshotBuilder {
             *count = r.var_usize()?;
         }
         self.expected_sheets = counts[9];
+        if auto_filters {
+            self.runs.push_back((AUTO_FILTERS, 1));
+        }
+        if conditional {
+            self.runs.push_back((CONDITIONAL_FORMATS, 1));
+        }
         for (tag, count) in [
             (NAME, counts[0]),
             (STRING, counts[1]),
@@ -993,6 +1158,33 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
+    fn adopt_auto_filters(
+        &mut self,
+        filters: Vec<Option<xlsx_model::AutoFilter>>,
+    ) -> SnapshotResult<()> {
+        if filters.len() != self.expected_sheets {
+            return Err(SnapshotError::new(
+                "snapshot auto filter sheet count differs",
+            ));
+        }
+        self.auto_filters = filters.into_iter();
+        Ok(())
+    }
+
+    fn adopt_conditional_formats(
+        &mut self,
+        (dxfs, formats): ConditionalFormatSnapshot,
+    ) -> SnapshotResult<()> {
+        if formats.len() != self.expected_sheets {
+            return Err(SnapshotError::new(
+                "snapshot conditional format sheet count differs",
+            ));
+        }
+        self.model.styles.dxfs = dxfs;
+        self.conditional_formats = formats.into_iter();
+        Ok(())
+    }
+
     fn read_record(&mut self, raw: u8, r: &mut Reader<'_>) -> SnapshotResult<()> {
         let tag = run_tag(raw);
         let Some((expected, remaining)) = self.runs.front_mut() else {
@@ -1009,6 +1201,11 @@ impl ModelSnapshotBuilder {
         }
         self.remaining_records -= 1;
         match raw {
+            AUTO_FILTERS => self.adopt_auto_filters(Codec::read(r)?)?,
+            CONDITIONAL_FORMATS => self.adopt_conditional_formats(released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(r)?,
+            ))?,
+            CONDITIONAL_FORMATS_V2 => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
             FONT => self.model.styles.fonts.push(read_font(r)?),
@@ -1042,7 +1239,8 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET => self.read_sheet(r, raw == STYLED_SHEET)?,
+            SHEET | STYLED_SHEET | HIDDEN_SHEET => self.read_sheet(r, raw)?,
+            CHART_XML => self.read_sheet_record(raw, r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
         self.validate_counts()?;
@@ -1061,12 +1259,19 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_sheet(&mut self, r: &mut Reader<'_>, styled: bool) -> SnapshotResult<()> {
+    fn read_sheet(&mut self, r: &mut Reader<'_>, tag: u8) -> SnapshotResult<()> {
         let mut sheet = Sheet::new(r.str()?);
+        sheet.conditional_formats = self.conditional_formats.next().unwrap_or_default();
+        sheet.auto_filter = self.auto_filters.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
-        let mut counts = [0; 9];
-        for count in &mut counts[..if styled { 9 } else { 8 }] {
+        let mut counts = [0; 11];
+        let count = match tag {
+            HIDDEN_SHEET => 11,
+            STYLED_SHEET => 9,
+            _ => 8,
+        };
+        for count in &mut counts[..count] {
             *count = r.var_usize()?;
         }
         add_count(&mut self.declared_cells, counts[7])?;
@@ -1082,6 +1287,8 @@ impl ModelSnapshotBuilder {
         self.model.sheets.push(sheet);
         self.array_key = None;
         for (tag, count) in [
+            (HIDDEN_ROW_HEIGHT, counts[10]),
+            (HIDDEN_COL_WIDTH, counts[9]),
             (ROW_STYLE, counts[8]),
             (ARRAY, counts[6]),
             (CHART, counts[5]),
@@ -1107,13 +1314,14 @@ impl ModelSnapshotBuilder {
         match tag {
             HYPERLINK => sheet.hyperlinks.push(read_hyperlink(r)?),
             MERGE => sheet.merges.push(read_range(r)?),
-            COL_WIDTH | ROW_HEIGHT => {
+            COL_WIDTH | ROW_HEIGHT | HIDDEN_COL_WIDTH | HIDDEN_ROW_HEIGHT => {
                 let key = r.var_u32()?;
                 let value = r.f64()?;
-                let map = if tag == COL_WIDTH {
-                    &mut sheet.col_widths
-                } else {
-                    &mut sheet.row_heights
+                let map = match tag {
+                    COL_WIDTH => &mut sheet.col_widths,
+                    ROW_HEIGHT => &mut sheet.row_heights,
+                    HIDDEN_COL_WIDTH => &mut sheet.hidden_col_widths,
+                    _ => &mut sheet.hidden_row_heights,
                 };
                 if map
                     .last_key_value()
@@ -1144,8 +1352,8 @@ impl ModelSnapshotBuilder {
                 }
                 sheet.row_styles.insert(row, xf);
             }
-            CHART => {
-                let (chart, refs) = read_chart(r)?;
+            CHART | CHART_XML => {
+                let (chart, refs) = read_chart(r, tag == CHART_XML)?;
                 sheet.charts.push(chart);
                 if refs != 0 {
                     self.runs.push_front((CHART_REF, refs));
@@ -1814,10 +2022,26 @@ fn read_xf(r: &mut Reader<'_>) -> SnapshotResult<Xf> {
     })
 }
 
-/// `record` as releases before format facets wrote it: an `XF` record holding
-/// such a release's reading moves to their layout, any other stays as it is.
+/// `record` as releases before format facets wrote it: an `XF` or conditional
+/// formats record holding such a release's reading moves to their layout, any
+/// other stays as it is.
 #[cfg(test)]
 pub(crate) fn released_layout(record: &[u8]) -> Vec<u8> {
+    if record.first() == Some(&CONDITIONAL_FORMATS_V2) {
+        let (dxfs, formats) =
+            ConditionalFormatSnapshot::read(&mut Reader::new(&record[1..])).unwrap();
+        let mut w = Writer::new();
+        w.u8(CONDITIONAL_FORMATS);
+        write_released_conditional_formats(&mut w, &dxfs, formats.iter().map(Vec::as_slice));
+        let released = w.into_bytes();
+        assert_eq!(
+            released_conditional_formats(
+                LegacyConditionalFormatSnapshot::read(&mut Reader::new(&released[1..])).unwrap()
+            ),
+            (dxfs, formats)
+        );
+        return released;
+    }
     if record.first() != Some(&XF_V2) {
         return record.to_vec();
     }
@@ -1915,6 +2139,7 @@ fn read_anchor(r: &mut Reader<'_>) -> SnapshotResult<ChartAnchor> {
 
 fn write_chart(w: &mut Writer, value: &SheetChart) {
     let SheetChart {
+        raw_xml,
         part,
         drawing,
         anchor_index,
@@ -1926,17 +2151,35 @@ fn write_chart(w: &mut Writer, value: &SheetChart) {
     w.var_usize(*anchor_index);
     write_anchor(w, anchor);
     w.var_usize(refs.len());
+    if let Some(xml) = raw_xml {
+        w.str(xml);
+    }
 }
 
-fn read_chart(r: &mut Reader<'_>) -> SnapshotResult<(SheetChart, usize)> {
-    let chart = SheetChart {
+/// `edited` reads the part XML a `CHART_XML` record carries after the chart.
+fn read_chart(r: &mut Reader<'_>, edited: bool) -> SnapshotResult<(SheetChart, usize)> {
+    let mut chart = SheetChart {
+        raw_xml: None,
         part: r.str()?.to_owned(),
         drawing: r.str()?.to_owned(),
         anchor_index: r.var_usize()?,
         anchor: read_anchor(r)?,
         refs: Vec::new(),
     };
-    Ok((chart, r.var_usize()?))
+    let refs = r.var_usize()?;
+    if edited {
+        chart.raw_xml = Some(chart_xml(r.str()?.to_owned())?);
+    }
+    Ok((chart, refs))
+}
+
+fn chart_xml(xml: String) -> SnapshotResult<String> {
+    if xml.len() > xlsx_parse::MAX_TREE_BYTES {
+        return Err(SnapshotError::new(
+            "snapshot chart XML exceeds its size limit",
+        ));
+    }
+    Ok(xml)
 }
 
 fn write_chart_ref(w: &mut Writer, value: &ChartRef) {
@@ -1957,6 +2200,121 @@ mod tests {
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
+
+    #[test]
+    fn binary_model_decodes_conditional_formats_without_italic() {
+        let mut model = Workbook::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            bold: Some(true),
+            ..Default::default()
+        });
+        let mut chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+        let chunk = chunks
+            .iter_mut()
+            .find(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                kind == ChunkKind::Model && matches!(payload[0], 30 | 33)
+            })
+            .unwrap();
+        let (kind, ordinal, _) = unframe(chunk).unwrap();
+        *chunk = frame(kind, ordinal, &[30, 1, 0, 1, 1, 0, 1, 0]);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+    }
+
+    #[test]
+    fn binary_model_writes_italic_conditional_formats_only_when_set() {
+        for italic in [None, Some(false)] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+                bold: Some(true),
+                italic,
+                ..Default::default()
+            });
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            let tags = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .filter(|tag| matches!(*tag, CONDITIONAL_FORMATS | CONDITIONAL_FORMATS_V2))
+                .collect::<Vec<_>>();
+            let expected = if italic.is_some() {
+                CONDITIONAL_FORMATS_V2
+            } else {
+                CONDITIONAL_FORMATS
+            };
+            assert_eq!(tags, [expected]);
+            assert_eq!(decode(&chunks), model);
+        }
+    }
+
+    #[test]
+    fn binary_model_conditional_formats_preserve_italic() {
+        for italic in [true, false] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            model.styles.dxfs.push(
+                serde_json::from_value(serde_json::json!({
+                    "bold": true, "italic": italic
+                }))
+                .unwrap(),
+            );
+            model.sheets[0].conditional_formats = serde_json::from_value(serde_json::json!([{
+                "sqref": "A1", "rules": [{"id": "cf1", "type": "expression",
+                    "formulas": ["A1>0"], "priority": 1, "format": {"italic": italic}}]
+            }]))
+            .unwrap();
+            let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+            for restored in [
+                decode(&chunks),
+                advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            ] {
+                let format = serde_json::to_value(&restored.styles.dxfs[0]).unwrap();
+                assert_eq!(format["italic"], italic);
+                let format = serde_json::to_value(
+                    &restored.sheets[0].conditional_formats[0].rules[0].format,
+                )
+                .unwrap();
+                assert_eq!(format["italic"], italic);
+            }
+        }
+    }
+
+    #[test]
+    fn binary_model_preserves_conditional_formats_and_dxfs() {
+        for with_dxf in [false, true] {
+            let mut model = Workbook::default();
+            model.sheets.push(Sheet::new("Data"));
+            if with_dxf {
+                model
+                    .styles
+                    .dxfs
+                    .push(xlsx_model::DifferentialFormat::default());
+            } else {
+                xlsx_ops::apply(
+                    &mut model,
+                    &xlsx_ops::Op::AddConditionalFormat {
+                        sheet: SheetId(0),
+                        range: CellRange::parse_a1("A1:A5").unwrap(),
+                        kind: "expression".into(),
+                        operator: None,
+                        formulas: vec!["A1>0".into()],
+                        format: xlsx_model::DifferentialFormat::default(),
+                    },
+                )
+                .unwrap();
+            }
+            let restored = decode(&encode(&model, SnapshotBudget::new(7, 16384).unwrap()));
+            assert_eq!(restored, model);
+        }
+    }
 
     #[test]
     fn pattern_border_snapshot_round_trip() {
@@ -2146,10 +2504,150 @@ mod tests {
         builder.finish().unwrap()
     }
 
+    /// Italic formats (33) and edited charts (34) ride tags a release before
+    /// them does not read, so it refuses such a model through the same arm
+    /// that refuses any unknown tag here; a model with neither keeps the
+    /// released tags.
+    #[test]
+    fn italic_and_edited_chart_records_coexist_and_unknown_tags_fail_loud() {
+        let mut sheet = Sheet::new("Charts");
+        sheet.charts.push(SheetChart {
+            raw_xml: Some("<c:chartSpace/>".into()),
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "drawing.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell::default(),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        });
+        let mut model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        model.styles.dxfs.push(xlsx_model::DifferentialFormat {
+            italic: Some(true),
+            ..Default::default()
+        });
+        let budget = SnapshotBudget::new(1, 16384).unwrap();
+        let tags = |chunks: &[Vec<u8>]| {
+            chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        let chunks = encode(&model, budget);
+        let written = tags(&chunks);
+        assert!(written.contains(&CONDITIONAL_FORMATS_V2), "{written:?}");
+        assert!(written.contains(&CHART_XML), "{written:?}");
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(
+            advance_all(&chunks, SnapshotBudget::new(1, 1024).unwrap()).unwrap(),
+            model
+        );
+
+        let mut released = model.clone();
+        released.sheets[0].charts[0].raw_xml = None;
+        released.styles.dxfs[0].italic = None;
+        released.styles.dxfs[0].bold = Some(true);
+        let released_chunks = encode(&released, budget);
+        let written = tags(&released_chunks);
+        assert!(
+            written.iter().all(|tag| *tag < CONDITIONAL_FORMATS_V2),
+            "{written:?}"
+        );
+        assert_eq!(decode(&released_chunks), released);
+
+        for tag in [CONDITIONAL_FORMATS_V2, CHART_XML] {
+            let mut unknown = chunks.clone();
+            let chunk = unknown
+                .iter_mut()
+                .find(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    kind == ChunkKind::Model && payload[0] == tag
+                })
+                .unwrap();
+            let (kind, ordinal, payload) = unframe(chunk).unwrap();
+            let mut payload = payload.to_vec();
+            payload[0] = 35;
+            *chunk = frame(kind, ordinal, &payload);
+            let mut builder = ModelSnapshotBuilder::new();
+            let refused = unknown
+                .iter()
+                .try_for_each(|chunk| builder.push(chunk).map(|_| ()))
+                .is_err();
+            assert!(refused || builder.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn model_snapshots_carry_edited_chart_xml() {
+        let mut sheet = Sheet::new("Charts");
+        for (index, raw_xml) in [
+            None,
+            Some(format!("<c:chartSpace>{}</c:chartSpace>", "y".repeat(3000))),
+            Some("<c:chartSpace/>".to_owned()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.charts.push(SheetChart {
+                raw_xml,
+                part: format!("xl/charts/chart{index}.xml"),
+                drawing: "drawing.xml".into(),
+                anchor_index: index,
+                anchor: ChartAnchor::TwoCell {
+                    from: AnchorCell::default(),
+                    to: AnchorCell::default(),
+                    edit_as: AnchorEditAs::TwoCell,
+                },
+                refs: (0..index)
+                    .map(|row| ChartRef {
+                        kind: ChartRefKind::Values,
+                        formula: format!("Charts!$A${}", row + 1),
+                    })
+                    .collect(),
+            });
+        }
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        let whole_budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let bounded_budget = SnapshotBudget::new(1, 1024).unwrap();
+        let chunks = encode(&model, whole_budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, bounded_budget).unwrap(), model);
+        let unedited = Workbook {
+            sheets: vec![{
+                let mut sheet = model.sheets[0].clone();
+                sheet
+                    .charts
+                    .iter_mut()
+                    .for_each(|chart| chart.raw_xml = None);
+                sheet
+            }],
+            ..Workbook::default()
+        };
+        let released = encode(&unedited, whole_budget);
+        assert!(
+            released
+                .iter()
+                .all(|chunk| !chunk.windows(5).any(|window| window == b"<c:ch"))
+        );
+        assert_eq!(decode(&released), unedited);
+    }
+
     #[test]
     fn model_rejects_unknown_chart_anchor_tags_in_bounded_decoding() {
         let mut sheet = Sheet::new("Charts");
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "p".repeat(2048),
             drawing: "drawing.xml".into(),
             anchor_index: 0,
@@ -2210,6 +2708,24 @@ mod tests {
     }
 
     #[test]
+    fn hidden_sizes_roundtrip_with_bounded_snapshot_decoding() {
+        let mut sheet = Sheet::new("Hidden");
+        sheet.col_widths.insert(1, 0.0);
+        sheet.row_heights.insert(2, 0.0);
+        sheet.hidden_col_widths.insert(1, 20.0);
+        sheet.hidden_row_heights.insert(2, 30.0);
+        sheet.row_styles.insert(3, 0);
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Default::default()
+        };
+        let budget = SnapshotBudget::new(1, 1024).unwrap();
+        let chunks = encode(&model, budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, budget).unwrap(), model);
+    }
+
+    #[test]
     fn sparse_row_styles_roundtrip_with_small_snapshot_budgets() {
         let mut sheet = Sheet::new("Rows");
         sheet.row_styles = (0..4000).map(|row| (row * 2, row % 2)).collect();
@@ -2232,6 +2748,191 @@ mod tests {
             }
         }
         assert_eq!(builder.finish().unwrap(), model);
+    }
+
+    fn zero_height_model() -> Workbook {
+        let mut sheet = Sheet::new("Rows");
+        sheet.format.zero_height = true;
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.row_heights.extend([(0, 15.0), (3, 0.0)]);
+        sheet.row_styles.insert(4, 0);
+        sheet.set_cell(
+            CellRef::new(1, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "visible".into(),
+                },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                style: Some(0),
+                ..Cell::default()
+            },
+        );
+        let mut styles = Stylesheet::default();
+        styles.cell_xfs = vec![Xf::default()];
+        Workbook {
+            sheets: vec![sheet],
+            styles,
+            ..Workbook::default()
+        }
+    }
+
+    fn old_zero_height_snapshot() -> Vec<Vec<u8>> {
+        let globals = Workbook {
+            styles: zero_height_model().styles,
+            ..Workbook::default()
+        };
+        let mut cursor = MetadataCursor::default();
+        let mut records = Vec::new();
+        loop {
+            let mut record = Writer::new();
+            if !cursor.write_next(&mut record, &globals).unwrap() {
+                break;
+            }
+            records.push(record.into_bytes());
+        }
+        let mut sheet = Writer::new();
+        sheet.u8(25);
+        sheet.str("Rows");
+        sheet.bool(false);
+        sheet.bool(true);
+        sheet.f64(12.75);
+        sheet.bool(false);
+        sheet.bool(true);
+        for count in [0, 0, 0, 2, 0, 0, 0, 2, 1] {
+            sheet.var_usize(count);
+        }
+        records.push(sheet.into_bytes());
+        for (row, height) in [(0, 15.0), (3, 0.0)] {
+            let mut record = Writer::new();
+            record.u8(16);
+            record.var_u32(row);
+            record.f64(height);
+            records.push(record.into_bytes());
+        }
+        let mut style = Writer::new();
+        style.u8(24);
+        style.var_u32(4);
+        style.var_u32(0);
+        records.push(style.into_bytes());
+
+        let mut counts = global_counts(&globals);
+        counts[9] = 1;
+        let mut header = Writer::new();
+        header.u8(0);
+        header.u8(0);
+        header.var_usize(records.len() + 1);
+        header.var_usize(2);
+        for count in counts {
+            header.var_usize(count);
+        }
+        let mut chunks = vec![frame(ChunkKind::Model, 0, &header.into_bytes())];
+        for record in records {
+            chunks.push(frame(ChunkKind::Model, chunks.len() as u64, &record));
+        }
+        let mut cells = Writer::new();
+        for value in [0, 0, 0, 2, 1, 0] {
+            cells.var_u32(value);
+        }
+        cells.u8(2);
+        cells.str("visible");
+        cells.bool(false);
+        cells.bool(false);
+        cells.var_u32(1);
+        cells.var_u32(0);
+        cells.u8(0);
+        cells.bool(false);
+        cells.bool(true);
+        cells.var_u32(0);
+        chunks.push(frame(
+            ChunkKind::Cells,
+            chunks.len() as u64,
+            &cells.into_bytes(),
+        ));
+        chunks
+    }
+
+    #[test]
+    fn zero_height_snapshots_use_only_preexisting_record_tags() {
+        for styled in [false, true] {
+            let mut model = zero_height_model();
+            if !styled {
+                model.sheets[0].row_styles.clear();
+            }
+            let budget = SnapshotBudget::new(1, 1024).unwrap();
+            let chunks = encode(&model, budget);
+            let tags = chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model).then_some(payload[0])
+                })
+                .collect::<Vec<_>>();
+            assert!(tags.iter().all(|&tag| tag <= 25), "{tags:?}");
+            assert!(tags.contains(&if styled { 25 } else { 12 }));
+            assert_eq!(decode(&chunks), model);
+            assert_eq!(advance_all(&chunks, budget).unwrap(), model);
+        }
+    }
+
+    #[test]
+    fn zero_height_old_snapshot_decodes_content_rows_visible() {
+        let chunks = old_zero_height_snapshot();
+        let budget = SnapshotBudget::new(3, 1024).unwrap();
+        for restored in [decode(&chunks), advance_all(&chunks, budget).unwrap()] {
+            assert_eq!(restored, zero_height_model());
+            let sheet = &restored.sheets[0];
+            for row in [0, 1, 2, 4] {
+                assert!(!sheet.row_hidden(row), "row {row}");
+            }
+            assert!(sheet.row_hidden(3));
+            assert!(sheet.row_hidden(5));
+            let workbook = crate::Workbook::from_model(restored).unwrap();
+            let frame = workbook
+                .display_list_for(
+                    SheetId(0),
+                    &crate::Viewport {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1600.0,
+                        height: 1000.0,
+                    },
+                )
+                .unwrap();
+            assert!(frame.commands.iter().any(|command| {
+                matches!(command, crate::DrawCmd::Text { text, .. } if text.as_ref() == "visible")
+            }));
+            let geometry = crate::GridGeometry::new(
+                workbook.sheet(SheetId(0)).unwrap(),
+                &workbook.model().styles,
+            );
+            assert_eq!(geometry.row_y(3) - geometry.row_y(2), 17.0);
+            assert_eq!(geometry.row_y(5) - geometry.row_y(4), 17.0);
+            assert_eq!(geometry.row_y(6), geometry.row_y(5));
+        }
+    }
+
+    #[test]
+    fn zero_height_old_snapshot_reencode_preserves_cells_heights_and_row_styles() {
+        let original = decode(&old_zero_height_snapshot());
+        let budget = SnapshotBudget::new(3, 1024).unwrap();
+        let chunks = encode(&original, budget);
+        for restored in [decode(&chunks), advance_all(&chunks, budget).unwrap()] {
+            assert_eq!(
+                restored.sheets[0].iter_cells().collect::<Vec<_>>(),
+                original.sheets[0].iter_cells().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                restored.sheets[0].row_heights,
+                original.sheets[0].row_heights
+            );
+            assert_eq!(restored.sheets[0].row_styles, original.sheets[0].row_styles);
+            assert_eq!(restored, original);
+        }
     }
 
     fn declared_header(records: usize, counts: [usize; 10]) -> Vec<u8> {
@@ -2626,6 +3327,7 @@ mod tests {
         ];
         for (anchor_index, anchor) in anchors.into_iter().enumerate() {
             sheet.charts.push(SheetChart {
+                raw_xml: None,
                 part: String::new(),
                 drawing: "drawing".into(),
                 anchor_index,

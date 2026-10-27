@@ -22,6 +22,7 @@ use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved,
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
     current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
+    written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -457,7 +458,7 @@ impl Claims {
 
 enum Effect {
     /// The cells whose content changes, with their new state.
-    Content(Vec<(CellRef, CellState)>),
+    Content(Vec<(CellRef, CellState, Option<Op>)>),
     NumberFormat(NumberFormatMutation),
     /// `None` for a patch that writes nothing.
     Style(Option<StylePatch>),
@@ -590,9 +591,11 @@ impl Workbook {
         step: &EditStep,
         keys: &[String],
         planned: &[Planned],
-        visits: &mut u64,
-        units: &mut u64,
+        budget: (&mut u64, &mut u64),
+        policy: (Option<f64>, bool),
     ) -> std::result::Result<Planned, EditFailure> {
+        let (visits, units) = budget;
+        let (now_serial, allow_protected) = policy;
         let requested = step.operation.target();
         let at = |code, message: String| failure(code, message, Some(requested.clone()));
         let resolved = self.resolve_target(keys, requested)?;
@@ -608,7 +611,9 @@ impl Workbook {
                 format!("a batch addresses at most {MAX_CELL_VISITS} target and guard cells"),
             ));
         }
-        if let Some((code, message)) = self.sheet_write_refusal(resolved.sheet) {
+        if let Some((code, message)) =
+            self.step_write_refusal(&step.operation, resolved, allow_protected)
+        {
             return Err(at(code, message));
         }
         let mut text = step
@@ -746,18 +751,21 @@ impl Workbook {
             EditOperation::SetCellInputs { inputs, .. } => {
                 let mut states = Vec::new();
                 for (cell, input) in resolved.iter().zip(inputs.iter().flatten()) {
-                    let state = edit_cell_state(&self.model, resolved.sheet, cell, input);
+                    let (state, format) =
+                        edit_cell_state(&self.model, resolved.sheet, cell, input, now_serial);
                     validate_cell_state(&state).map_err(|error| {
                         at(
                             EditFailureCode::InvalidStep,
                             format!("the input for {}: {error}", cell.to_a1()),
                         )
                     })?;
-                    if !cell_states_semantically_equal(
-                        &current_cell_state(&self.model, resolved.sheet, cell),
-                        &state,
-                    ) {
-                        states.push((cell, state));
+                    if format.is_some()
+                        || !cell_states_semantically_equal(
+                            &current_cell_state(&self.model, resolved.sheet, cell),
+                            &state,
+                        )
+                    {
+                        states.push((cell, state, format));
                     }
                 }
                 Effect::Content(states)
@@ -769,7 +777,12 @@ impl Workbook {
                     let state = CellState {
                         value: value.clone(),
                         formula: None,
-                        style: current.style,
+                        style: written_cell_style(
+                            &self.model,
+                            resolved.sheet,
+                            cell,
+                            matches!(value, CellValue::Empty),
+                        ),
                     };
                     validate_cell_state(&state).map_err(|error| {
                         at(
@@ -778,7 +791,7 @@ impl Workbook {
                         )
                     })?;
                     if !cell_states_semantically_equal(&current, &state) {
-                        states.push((cell, state));
+                        states.push((cell, state, None));
                     }
                 }
                 Effect::Content(states)
@@ -790,10 +803,10 @@ impl Workbook {
                     let state = CellState {
                         value: CellValue::Empty,
                         formula: Some(source.clone()),
-                        style: current.style,
+                        style: written_cell_style(&self.model, resolved.sheet, cell, false),
                     };
                     if !cell_states_semantically_equal(&current, &state) {
-                        states.push((cell, state));
+                        states.push((cell, state, None));
                     }
                 }
                 Effect::Content(states)
@@ -813,7 +826,11 @@ impl Workbook {
     }
 
     /// Resolves, stages and rehearses a batch without adopting it. `Err` is an internal failure.
-    fn plan(&self, request: &EditRequest) -> Result<std::result::Result<Plan, EditRefusal>> {
+    fn plan(
+        &self,
+        request: &EditRequest,
+        allow_protected: bool,
+    ) -> Result<std::result::Result<Plan, EditRefusal>> {
         let version = self.version();
         let refuse = |failure: EditFailure| Ok(Err(refusal(version.clone(), failure)));
         if request.expect_version != version {
@@ -843,7 +860,14 @@ impl Workbook {
         let mut steps: Vec<Planned> = Vec::with_capacity(request.steps.len());
         for (index, step) in request.steps.iter().enumerate() {
             let index = index as u32;
-            match self.plan_step(index, step, &keys, &steps, &mut visits, &mut units) {
+            match self.plan_step(
+                index,
+                step,
+                &keys,
+                &steps,
+                (&mut visits, &mut units),
+                (request.calculation.now_serial, allow_protected),
+            ) {
                 Ok(planned) => steps.push(planned),
                 Err(failure) => return refuse(failure.at(index)),
             }
@@ -851,16 +875,19 @@ impl Workbook {
         let mut ops = Vec::new();
         for planned in &steps {
             if let Effect::Content(states) = &planned.effect {
-                ops.extend(states.iter().map(|(at, state)| {
-                    (
+                for (at, state, format) in states {
+                    ops.push((
                         planned.index,
                         Op::SetCell {
                             sheet: planned.resolved.sheet,
                             at: *at,
                             cell: state.clone(),
                         },
-                    )
-                }));
+                    ));
+                    if let Some(format) = format {
+                        ops.push((planned.index, format.clone()));
+                    }
+                }
             }
         }
         for planned in &steps {
@@ -1010,7 +1037,15 @@ impl Workbook {
     /// Resolves, stages and rehearses a batch like [`Workbook::apply_edits`], then discards it.
     /// Nothing changes. `Err` is an internal failure.
     pub fn validate_edits(&self, request: &EditRequest) -> Result<ValidationOutcome> {
-        let plan = match self.plan(request)? {
+        self.validate_edits_with_policy(request, false)
+    }
+
+    fn validate_edits_with_policy(
+        &self,
+        request: &EditRequest,
+        allow_protected: bool,
+    ) -> Result<ValidationOutcome> {
+        let plan = match self.plan(request, allow_protected)? {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -1037,7 +1072,15 @@ impl Workbook {
     /// An applied batch is one committed change, recalculated before the update is published:
     /// one undo step for [`EditHistory::Separate`], none for [`EditHistory::None`].
     pub fn apply_edits(&mut self, request: &EditRequest) -> Result<EditOutcome> {
-        let plan = match self.plan(request)? {
+        self.apply_edits_with_policy(request, false)
+    }
+
+    fn apply_edits_with_policy(
+        &mut self,
+        request: &EditRequest,
+        allow_protected: bool,
+    ) -> Result<EditOutcome> {
+        let plan = match self.plan(request, allow_protected)? {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -1080,6 +1123,9 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let mut graph = DepGraph::build(&prepared.model);
+        // the staged values were computed before the batch, so a batch that
+        // changes the currency evidence recalculates every formula
+        graph.computed_with_currency_of(&self.model);
         let recalculated = recalc_after_with_seed(
             &mut prepared.model,
             &mut graph,
@@ -1159,7 +1205,8 @@ impl Workbook {
         if let Some(refused) = self.oversized_request(request) {
             return Ok(refused);
         }
-        self.bounded_json(&self.validate_edits(&decode::<EditRequest>(request)?)?)
+        let (request, allow_protected) = self.decode_agent_edits(request)?;
+        self.bounded_json(&self.validate_edits_with_policy(&request, allow_protected)?)
     }
 
     /// [`Workbook::apply_edits`] over JSON; the result is bounded before the batch commits.
@@ -1167,7 +1214,8 @@ impl Workbook {
         if let Some(refused) = self.oversized_request(request) {
             return Ok(refused);
         }
-        let outcome = self.apply_edits(&decode::<EditRequest>(request)?)?;
+        let (request, allow_protected) = self.decode_agent_edits(request)?;
+        let outcome = self.apply_edits_with_policy(&request, allow_protected)?;
         encode(&outcome)
     }
 
@@ -1183,6 +1231,34 @@ impl Workbook {
         decoded.calculation.now_serial = decoded.calculation.now_serial.or(calculation.now_serial);
         let outcome = self.apply_edits(&decoded)?;
         encode(&outcome)
+    }
+
+    fn decode_agent_edits(&self, request: &str) -> Result<(EditRequest, bool)> {
+        if !request.contains("\"protectedSheets\"") {
+            return Ok((decode::<EditRequest>(request)?, false));
+        }
+        let mut value = decode::<Value>(request)?;
+        let protection = value
+            .as_object_mut()
+            .and_then(|object| object.remove("protectedSheets"));
+        let allow = match protection.as_ref().and_then(Value::as_str) {
+            Some("allow") => true,
+            Some("refuse") => false,
+            None if protection.is_none() => false,
+            _ => {
+                return Err(Error::InvalidRequest(
+                    "protectedSheets must be refuse or allow".to_owned(),
+                ));
+            }
+        };
+        let request: EditRequest = serde_json::from_value(value)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        if allow && (request.source != EditSource::Agent || self.is_collaborative()) {
+            return Err(Error::InvalidRequest(
+                "protectedSheets allow requires a standalone agent workbook".to_owned(),
+            ));
+        }
+        Ok((request, allow))
     }
 
     fn oversized_request(&self, request: &str) -> Option<String> {

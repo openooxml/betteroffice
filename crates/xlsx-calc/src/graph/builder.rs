@@ -86,6 +86,7 @@ impl DepGraphBuilder {
                 }
                 Phase::Cells => {
                     let Some(sheet) = model.sheets.get(self.index) else {
+                        self.graph.computed_with_currency_of(model);
                         self.phase = Phase::Done;
                         continue;
                     };

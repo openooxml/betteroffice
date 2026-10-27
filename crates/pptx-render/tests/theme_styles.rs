@@ -81,8 +81,8 @@ fn theme_matrix_renders_reference_colours_indices_and_explicit_line_defaults() {
     }
 
     for (name, color) in [
-        ("FillRef3", "#474747"),
-        ("FillRef1001", "#4A4A4A"),
+        ("FillRef3", "#464646"),
+        ("FillRef1001", "#494949"),
         ("FillRef1002", "#556677"),
         ("ExplicitFill", "#112233"),
     ] {
@@ -109,14 +109,14 @@ fn theme_matrix_renders_reference_colours_indices_and_explicit_line_defaults() {
             .iter()
             .map(|s| (s.position, s.color.as_str()))
             .collect::<Vec<_>>(),
-        [(0.0, "#474747"), (0.5, "#123456"), (1.0, "#4A4A4A")]
+        [(0.0, "#464646"), (0.5, "#123456"), (1.0, "#494949")]
     );
     for (name, expected) in [
         ("LnRef3", matrix_stroke("#0F9ED5")),
         (
             "WidthOnly",
             Stroke {
-                color: "#474747".to_owned(),
+                color: "#464646".to_owned(),
                 width: 4.0,
                 dashed: false,
                 paint: None,
@@ -187,7 +187,7 @@ fn master_shapes_render_theme_fills() {
     assert_eq!(
         shape(&list, "Oval 3").1,
         Some(&Stroke {
-            color: "#030E13".to_owned(),
+            color: "#042433".to_owned(),
             width: 2.0,
             dashed: false,
             paint: None,
@@ -290,11 +290,11 @@ fn theme_reference_and_style_alpha_reach_fills_gradients_and_outlines() {
         let list = render(&DeckSession::open(&bytes, 8015).unwrap());
         assert_eq!(
             shape(&list, "FillRef3").0,
-            solid(&format!("#474747{suffix}")).as_ref()
+            solid(&format!("#464646{suffix}")).as_ref()
         );
         assert_eq!(
             shape(&list, "WidthOnly").1.unwrap().color,
-            format!("#474747{suffix}")
+            format!("#464646{suffix}")
         );
         let Some(Paint::Gradient { stops, .. }) = shape(&list, "Gradient2").0 else {
             panic!("missing gradient")
@@ -305,9 +305,9 @@ fn theme_reference_and_style_alpha_reach_fills_gradients_and_outlines() {
                 .map(|stop| stop.color.clone())
                 .collect::<Vec<_>>(),
             [
-                format!("#474747{suffix}"),
+                format!("#464646{suffix}"),
                 "#123456".to_owned(),
-                format!("#4A4A4A{suffix}")
+                format!("#494949{suffix}")
             ]
         );
     }

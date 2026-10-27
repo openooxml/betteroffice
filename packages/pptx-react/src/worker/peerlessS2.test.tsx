@@ -3,15 +3,17 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PeerlessSession, PresentationCommandAck, PresentationCommandClient,
-  PresentationCommandEvents, PresentationCommandMethods } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandAck, PresentationCommandClient, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createSharedPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PeerlessViewSnapshot } from './peerlessViewStore';
 
@@ -19,7 +21,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
-let owner: PeerlessSession;
+let owner: PptxWorkerSession;
 let client: PresentationCommandClient;
 let handle: wasm.PresentationHandle;
 let hold = false;
@@ -123,7 +125,7 @@ afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function surface(onError?: (error: Error) => void) {
   const ready = mock(() => {});
-  const view = render(<PptxEditor fonts={[]} file={await deck()} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} onError={onError} />);
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={onError} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   return { ...view, items: Array.from(view.container.querySelectorAll('aside button')) as HTMLButtonElement[] };
 }
@@ -284,7 +286,8 @@ for (const target of ['edited_active', 'unloaded_inactive'] as const) {
     const restored = await act(async () => client.dispatch({ kind: 'undo', payload: { inputTime: 2, undoGroup: 'history' } }));
     expect(restored.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
     for (let turn = 0; turn < 5; turn += 1) await drainIdle();
-    expect(thumbnail.mock.calls.filter(([slideId]) => slideId === removedId).length).toBeGreaterThan(1);
+    expect(client.state.activeSlideId).toBe(removedId);
+    await waitFor(() => expect(paints[paints.length - 1]?.confirmed?.frame.slideId).toBe(removedId));
     expect(previews).toContain(removedId);
     expect(errors).not.toHaveBeenCalled();
   });

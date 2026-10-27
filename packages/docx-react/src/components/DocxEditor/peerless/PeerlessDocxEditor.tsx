@@ -1,72 +1,112 @@
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedResidentSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/peerless';
+import { DocxSourceWorkerClient as ResidentEngineWorkerClient, takePreloadedDocxSourceWorker as takePreloadedResidentEngineWorker } from '@betteroffice/docx/worker';
 import { useWorkerHeaderFooterEditing } from '../hooks/useHeaderFooterEditing';
 import { InlineHeaderFooterEditor } from '../../InlineHeaderFooterEditor';
 import { WorkerContentControls } from './WorkerContentControls';
 import { useWorkerRulerControls } from './workerPropertyControls';
 import { useWorkerPropertyDialogs } from './useWorkerPropertyDialogs';
 import { useWorkerQuery } from './useWorkerQuery';
+import { bodyEdgeY } from './pagePoint';
 import { useCommentSidebarItems } from '../../../hooks/useCommentSidebarItems';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   applyFrameDelta,
   decodeFrameDelta,
+  findDisplayListHyperlinkAtPoint,
+  yrsIdToNumericId,
   type RetainedFrame,
 } from '@betteroffice/docx/layout/render';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
 import { createRustMeasureSource, type ResidentFontRequirement } from '@betteroffice/docx/layout';
-import { extractEmbeddedFontFaces, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { extractEmbeddedFontFaces, sanitizeHref, toArrayBuffer, type DocxInput } from '@betteroffice/docx/utils';
+import { HyperlinkPopup, type HyperlinkPopupData } from '../../ui/HyperlinkPopup';
+import { Toaster, toast } from 'sonner';
 import {
   residentCaretSnapshotForFrame,
   type DocxCommandFrame,
   type DocxCommandPageIdentity,
-  type ResidentCommandConnection,
+  type DocxCommandConnection,
   type YrsResidentFontRegistration,
 } from '@betteroffice/docx/yrs';
-import { createResidentCommandConnection, discardCommandPresentation } from '@betteroffice/docx/peerless';
+import { createDocxCommandConnection, discardCommandPresentation, SessionFailure, type DocxCommandCheckpoint } from '@betteroffice/docx/worker';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import { createPeerlessShellController } from './shellController';
+import { registerTableActionExecutor } from './browserHarness';
 import { commandPageGeometry } from './commandPageGeometry';
-import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { usePluginReservations } from '../../../plugins/reservations';
 import { DocxCommandProvider } from '../../../commands/DocxCommandProvider';
 import { DocxEditorShell } from '../DocxEditorShell';
 import { DocxEditorToolbar } from '../DocxEditorToolbar';
 import { EditorChromeContext } from '../../EditorToolbarContext';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from '../../DocxEditorHelpers';
+import { clampZoom } from '../../../commands/evaluate';
 import { PluginOverlays } from '../../../plugins/PluginOverlays';
 import { managedSidebarItems, mergeSidebarItems } from '../../../plugins/PluginSidebarItems';
 import { UnifiedSidebar } from '../../UnifiedSidebar';
-import { createWorkerPluginGeometry } from './workerPluginGeometry';
+import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
+import { workerReviewRects } from './workerReviewRects';
+import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
-import { copyWorkerSelection, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import { admitInputIntents } from './inputAdmission';
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { yrsSelectionState } from '../hooks/useSelectionTracker';
 import type { PagedEditorRef } from '../PagedEditor';
 import { openPrintWindow } from '@betteroffice/docx';
 import { createWorkerPrintCapture, printBitmap } from './printPages';
+import { openReportIssue } from '../../reportIssue';
 import { decodeCommandFrameDeltas } from './frameDeltas';
+import { decodeSvgMedia, type SvgMediaDecode } from './svgMedia';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+import { useWorkerComments, WorkerCommentButton } from './useWorkerComments';
+import { useControllableBoolean } from '../hooks/useControllableBoolean';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createWorkerSearch } from './workerSearch';
 import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
 import { WorkerDocumentReader } from './WorkerDocumentReader';
-import { DEFAULT_PAGE_WIDTH } from '../internals/styles';
+import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from '../../DocumentOutline';
-import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
+import { REVIEW_CARD_WIDTH, SIDEBAR_PAGE_GAP, SIDEBAR_WIDTH } from '../../sidebar/constants';
+import { TrackedChangesReview } from '../../sidebar/TrackedChangesReview';
+import type { TrackedChangeEntry } from '../../sidebar/cardUtils';
+import { reviewRevisionIds, type ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { PeerlessDocumentSource, PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
-import { WorkerDocumentPreview, type WorkerPreviewJob } from './WorkerDocumentPreview';
+import { peerlessPreviewPaint, releaseWorkerPreview, WorkerDocumentPreview, workerPreviewPages, type WorkerPreviewJob } from './WorkerDocumentPreview';
 import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment } from './workerFonts';
 import type { Document } from '@betteroffice/docx/types/document';
-import type { ResidentFontEnvironment } from '@betteroffice/docx/yrs';
+import type { DocxFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
-import type { PeerlessFrameGeometry, PeerlessViewIdentity } from './viewStore';
+import type { PeerlessPropertyIntent } from './inputEvents';
+import { useWorkerCollaboration } from './useWorkerCollaboration';
+import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewIdentity } from './viewStore';
+import { useTranslation } from '../../../i18n';
+
+const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
+const SIDEBAR_EDGE = 16;
+const EMPTY_COMMENTS: NonNullable<DocxEditorProps['comments']> = [];
+const EMPTY_CHANGES: TrackedChangeEntry[] = [];
+const EMPTY_PAGES: NonNullable<PeerlessFrameGeometry['pages']> = [];
+type ResidentResume = Parameters<NonNullable<UsePeerlessEditSessionOptions['recovery']>['reopen']>[0];
 
 /** @internal */
+/** Events that would type into the document; while it opens they are answered with the typing-paused notice. */
+const typingEvents = ['paste', 'beforeinput', 'compositionstart'] as const;
+const isDocumentInput = (target: EventTarget | null) => target instanceof HTMLTextAreaElement && target.classList.contains('paged-editor__input');
+/** Keys that type or edit text, AltGr and Option characters included; other shortcuts, navigation and Tab keep working. */
+function typingKey({ key, ctrlKey, metaKey, altKey }: React.KeyboardEvent): boolean {
+  if ((ctrlKey || metaKey) && !(ctrlKey && altKey)) return /^[vx]$/i.test(key);
+  return key.length === 1 || key === 'Enter' || key === 'Backspace' || key === 'Delete' || key === 'Process' || key === 'Dead';
+}
+
 export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function PeerlessDocxEditor(props, ref) {
+  const errorHandler = useRef(props.onError);
+  errorHandler.current = props.onError;
+  const reportRecoverableError = useCallback((error: Error) => { errorHandler.current?.(error, { recoverable: true }); }, []);
+  const recoverableProps = { ...props, onError: reportRecoverableError };
   const {
   initialZoom = 1,
   readOnly = false,
@@ -76,41 +116,70 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   loadingIndicator,
   memoryBudget,
   measurementFontProvider,
-  onError,
   } = props;
-  const [replacement, setReplacement] = useState<{ input: DocxInput; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
+  type ParsedDocument = NonNullable<DocxEditorProps['document']>;
+  const [replacement, setReplacement] = useState<{ input: DocxInput | null; parsed: ParsedDocument | null; prop: DocxEditorProps['documentBuffer']; document: DocxEditorProps['document'] } | null>(null);
   const replaced = replacement && replacement.prop === props.documentBuffer && replacement.document === props.document;
   const documentBuffer = replaced ? replacement.input : props.documentBuffer;
-  const parsedDocument = documentBuffer ? null : props.document;
+  const parsedDocument = documentBuffer ? null : replaced ? replacement.parsed : props.document;
   const hasSource = !!(documentBuffer || parsedDocument);
-  const loadRequest = useRef<{ input: DocxInput; resolve(): void; reject(error: Error): void } | null>(null);
-  const loadBuffer = useCallback((input: DocxInput) => {
+  const workerCollaboration = useWorkerCollaboration(props.collaboration, documentBuffer ?? parsedDocument);
+  const sourceKey = useMemo(() => crypto.randomUUID(), [documentBuffer, parsedDocument]);
+  const openedSource = useRef(sourceKey);
+  const loadRequest = useRef<{ input: DocxInput | ParsedDocument; resolve(): void; reject(error: Error): void } | null>(null);
+  const load = useCallback((input: DocxInput | null, parsed: ParsedDocument | null) => {
     loadRequest.current?.reject(new Error('Document was replaced'));
     return new Promise<void>((resolve, reject) => {
-      loadRequest.current = { input, resolve, reject };
-      setReplacement({ input, prop: props.documentBuffer, document: props.document });
+      loadRequest.current = { input: (input ?? parsed)!, resolve, reject };
+      setReplacement({ input, parsed, prop: props.documentBuffer, document: props.document });
     });
   }, [props.documentBuffer, props.document]);
+  const loadBuffer = useCallback((input: DocxInput) => load(input, null), [load]);
+  const loadDocument = useCallback((document: ParsedDocument) => load(null, document), [load]);
   const host = useRef<HTMLDivElement>(null);
   const container = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const [hostWidth, setHostWidth] = useState(0);
+  const hostObserver = useRef<ResizeObserver | null>(null);
+  const attachHost = useCallback((element: HTMLDivElement | null) => {
+    host.current = element;
+    hostObserver.current?.disconnect();
+    hostObserver.current = null;
+    if (!element) return;
+    setHostWidth(element.clientWidth);
+    hostObserver.current = new ResizeObserver(() => setHostWidth(element.clientWidth));
+    hostObserver.current.observe(element);
+  }, []);
   const content = useRef<HTMLDivElement>(null);
   const isDark = useIsDark(props.colorMode ?? 'light');
   const worker = useRef<ResidentEngineWorkerClient | null>(null);
+  const releaseResident = useRef<(() => void) | null>(null);
+  const openContext = useRef<{ signal: AbortSignal; getRasterScale?: () => number } | null>(null);
   const sourceComments = useRef<NonNullable<DocxEditorProps['comments']>>([]);
-  const [zoom, setZoom] = useState(initialZoom);
-  const focus = useCallback(() => host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__peerless-input')?.focus({ preventScroll: true }), []);
+  const [zoom, setZoom] = useState(() => clampZoom(initialZoom));
+  const { t } = useTranslation();
+  const [tableGridlines, setTableGridlines] = useState(props.showTableGridlines === true);
+  const [dragSelecting, setDragSelecting] = useState(false);
+  const [gridlinesProp, setGridlinesProp] = useState(props.showTableGridlines);
+  if (gridlinesProp !== props.showTableGridlines) {
+    setGridlinesProp(props.showTableGridlines);
+    setTableGridlines(props.showTableGridlines === true);
+  }
+  const [hyperlinkPopup, setHyperlinkPopup] = useState<HyperlinkPopupData | null>(null);
+  const linkGesture = useRef(0);
+  // Until the document input exists, the scroll container takes focus so keys reach the editor's typing-paused notice.
+  const focus = useCallback(() => (host.current?.querySelector<HTMLTextAreaElement>('.paged-editor__input') ?? scroller.current)?.focus({ preventScroll: true }), []);
   const read = useCallback<ResidentEngineWorkerClient['documentRead']>((request) => {
-    if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
+    if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentRead(request);
   }, []);
   const readAt = useCallback<ResidentEngineWorkerClient['documentReadAt']>((request, token) => {
-    if (!worker.current) return Promise.reject(new Error('Peer-less worker is not ready'));
+    if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentReadAt(request, token);
   }, []);
   const save = useCallback(async () => {
-    if (!worker.current) throw new Error('Peer-less worker is not ready');
-    return (await worker.current.save({ comments: [...(props.comments ?? sourceComments.current)] })).bytes;
+    if (!worker.current) throw new Error('The document worker is not ready');
+    return (await worker.current.save(props.comments ? { comments: [...props.comments], commentsSource: 'host' } : { comments: [...sourceComments.current] })).bytes;
   }, [props.comments]);
   const printCaptures = useRef(new Set<ReturnType<typeof createWorkerPrintCapture>>());
   const print = useCallback(async (preview = false) => {
@@ -120,7 +189,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (!popup) throw new Error('Print window was blocked');
       const current = active.current;
       const client = worker.current;
-      if (!current || !client) throw new Error('Peer-less worker is not ready');
+      if (!current || !client) throw new Error('The document worker is not ready');
       capture = createWorkerPrintCapture(current.binding, printBitmap, () => active.current === current && !popup.closed);
       printCaptures.current.add(capture);
       const pages = await capture.collect(
@@ -139,12 +208,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       } else perform();
     } catch (error) {
       popup?.close();
-      props.onError?.(error instanceof Error ? error : new Error(String(error)));
+      reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
       throw error;
     } finally { if (capture) printCaptures.current.delete(capture); }
-  }, [props.onPrint, props.onError]);
-  const prepareFontFamily = useRef<(family: string) => Promise<ResidentFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
-  const controllerOptions = { ...props, zoom, focus, read, readAt, save, loadBuffer, print, onZoom: setZoom, isDark,
+  }, [props.onPrint, reportRecoverableError]);
+  const prepareFontFamily = useRef<(family: string) => Promise<DocxFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
+  const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
+  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
+  const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
+    comments: () => props.comments ?? sourceComments.current, hostComments: props.comments,
+    commentsSidebar: { open: commentsOpen, control: props.commentsSidebarOpen === undefined ? 'internal' as const : props.onCommentsSidebarOpenChange ? 'host' as const : 'fixed' as const,
+      toggle: () => { setCommentsOpen(open => !open); setExpandedSidebarItem(null); } },
+    tableGridlines, onTableGridlines: setTableGridlines,
+    layoutRequest: () => {
+      const opened = fontSource.current;
+      const current = active.current;
+      if (!opened || !current) return null;
+      const layout = JSON.parse(opened.layoutInput);
+      return JSON.stringify({ ...layout, renderEnv: { ...layout.renderEnv, ...JSON.parse(current.requestedRenderEnvironment || '{}') } });
+    },
     prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
@@ -152,50 +234,69 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (element) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + rect.y * controller.ref.getZoom() - element.clientHeight / 2;
   }));
   const searchState = useSyncExternalStore(search.subscribe, search.getSnapshot, search.getSnapshot);
-  const fileIO = useWorkerFileIO(props, controller.ref, loadBuffer, () => active.current?.binding ?? null);
+  const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
-  const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, props);
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, search: search.host, pickImage: fileIO.pickImage, perform: async (id) => {
+  const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'watermark') return propertyDialogs.openWatermark();
     if (id === 'insertLink') return propertyDialogs.openLink();
     if (id === 'imageProperties') return propertyDialogs.openImage();
     if (id === 'find' || id === 'replace') { search.open(id === 'replace'); return { ok: true, status: 'opened' }; }
     if (id === 'print') { await print(); return { ok: true, status: 'executed' }; }
+    if (id === 'reportIssue') { openReportIssue(); return { ok: true, status: 'opened' }; }
     return fileIO.perform(id);
   }, readPositionAtPoint: async (x, y) => { await pluginGeometry.update(); return pluginGeometry.geometry()?.readPositionAtPoint(x, y) ?? null; },
-    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph }));
-  useImperativeHandle(ref, () => controller.ref, [controller]);
+    currentPage: navigation.readCurrentPage, scrollToPage: navigation.scrollToPage, scrollToParagraph: navigation.scrollToParagraph,
+    scrollToReviewTarget: navigation.scrollToReviewTarget }));
   const shellState = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  useEffect(() => registerTableActionExecutor((action) =>
+    controller.commands.store.execute('tableAction', action as never)), [controller]);
+  const documentReady = shellState.status === 'ready' && openedSource.current === sourceKey;
   useEffect(() => {
     let current = true;
     if (shellState.status === 'ready' && (props.plugins?.length || props.showHostProposalsInSidebar) && shellState.view?.geometry && shellState.view.editState?.review) {
-      void controller.review().catch(error => { if (current) props.onError?.(error instanceof Error ? error : new Error(String(error))); });
+      void controller.review().catch(error => { if (current) reportRecoverableError(error instanceof Error ? error : new Error(String(error))); });
     }
     return () => { current = false; };
-  }, [controller, shellState.status, shellState.view, props.plugins?.length, props.showHostProposalsInSidebar, props.onError]);
+  }, [controller, shellState.status, shellState.view, props.plugins?.length, props.showHostProposalsInSidebar, reportRecoverableError]);
   const effectiveReadOnly = readOnly || (props.mode ?? shellState.mode) === 'viewing';
-  const parts = useWorkerHeaderFooterEditing(controller, props.onError);
-  const propertyDialogs = useWorkerPropertyDialogs(controller, props);
-  const rulers = useWorkerRulerControls(controller, props.onError, props.showRuler === true);
+  const opening = hasSource && !shellState.error && shellState.status !== 'ready';
+  const [typingPaused, setTypingPaused] = useState(false);
+  useEffect(() => { if (!opening) setTypingPaused(false); }, [opening]);
+  useEffect(() => {
+    const active = scroller.current?.ownerDocument.activeElement;
+    if (opening && !effectiveReadOnly && (!active || active === scroller.current?.ownerDocument.body)) scroller.current?.focus({ preventScroll: true });
+  }, [opening, sourceKey, effectiveReadOnly]);
+  useEffect(() => {
+    const element = scroller.current;
+    if (!opening || effectiveReadOnly || !element) return;
+    const pause = (event: Event) => {
+      if (isDocumentInput(event.target)) return;
+      event.preventDefault();
+      setTypingPaused(true);
+    };
+    for (const type of typingEvents) element.addEventListener(type, pause);
+    return () => { for (const type of typingEvents) element.removeEventListener(type, pause); };
+  }, [opening, effectiveReadOnly]);
+  const parts = useWorkerHeaderFooterEditing(controller, reportRecoverableError);
+  const propertyDialogs = useWorkerPropertyDialogs(controller, recoverableProps);
+  const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true);
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
     disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false });
-  useEffect(() => {
-    const request = loadRequest.current;
-    if (!request) return;
-    if (request.input !== documentBuffer) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
-    else if (shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
-    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
-  }, [shellState, documentBuffer, controller]);
   const [overlayLayer, setOverlayLayer] = useState<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
+  const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
   const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus) => navigation.revealParagraph(target.paraId, target.story, focus)));
+    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current()));
+  const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
+  const showWindow = useCallback((next: readonly [number, number]) =>
+    setDisplayWindow((current) => current[0] === next[0] && current[1] === next[1] ? current : next), []);
+  useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
-  const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
-  const [pluginHost] = useState(() => createDocxPluginHost({
+  const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
     pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
     commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
     subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry, subscribeGeometry: pluginGeometry.subscribe, translate: (key) => controller.environment().translate(key),
@@ -206,10 +307,28 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       listStories: () => controller.read({ kind: 'listStories' }),
       readStories: (request) => controller.read({ kind: 'readStories', request }),
     },
-    workerEdits: { applyEdits: (request, authorize) => controller.applyEdits(request, authorize) },
+    workerEdits: { applyEdits: (request, authorize, commit) => controller.applyEdits(request, authorize,
+      (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
     workerNavigation: pluginGeometry.navigation,
+    workerRefusal: (error) => workerReadRefusal(controller, error),
   }));
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
+  const reservations = usePluginReservations(pluginHost, activations);
+  const reservationsRef = useRef<{ payload: DocxReservationsPayload | null; sent: boolean; source: DocxReservationsPayload | string | null;
+    keyed: DocxReservationsPayload | null; serial: number }>({ payload: reservations, sent: false, source: null, keyed: null, serial: 0 });
+  reservationsRef.current.payload = reservations;
+  /** The set the editor sends, keyed so a frame names the set it was laid out with; once sent, none is an empty set. */
+  const sentReservations = useCallback((): DocxReservationsPayload | null => {
+    const reserved = reservationsRef.current;
+    const source = reserved.payload ?? (reserved.sent ? pluginHost.version() : null);
+    if (source === null) return null;
+    if (reserved.source !== source) {
+      reserved.source = source;
+      reserved.keyed = { ...(typeof source === 'string' ? { version: source, sets: [] } : source), key: String(++reserved.serial) };
+    }
+    return reserved.keyed;
+  }, [pluginHost]);
+  sentReservationsRef.current = sentReservations;
   useEffect(() => {
     pluginHost.setReporter(props.onPluginError);
     pluginHost.setGrants(props.pluginGrants);
@@ -217,12 +336,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return pluginHost.subscribe(() => pluginHost.syncCommands());
   }, [pluginHost, props.plugins, props.pluginGrants, props.onPluginError]);
   useEffect(() => {
-    if (shellState.status === 'ready') {
-      if (pluginHost.generation() === null) pluginHost.openWorker(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
-      else pluginHost.workerChanged(shellState.view?.editState?.documentVersion ?? shellState.view?.geometry?.documentVersion ?? String(shellState.view?.version ?? 0));
+    if (documentReady) {
+      pluginHost.modeChanged(shellState.mode, effectiveReadOnly);
+      if (pluginHost.generation() === null) pluginHost.openWorker(workerDocumentVersion(shellState.view));
+      else pluginHost.workerChanged(workerDocumentVersion(shellState.view));
       const review = controller.reviewSnapshot();
       if (review) pluginHost.workerProposalsChanged(review.proposals);
-      pluginHost.modeChanged(shellState.mode, readOnly);
       const layout = pluginGeometry.layout();
       pluginHost.layoutChanged(layout);
       const toolbar = shellState.view?.editState?.toolbar;
@@ -231,17 +350,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (layout) pluginHost.geometryPresented(layout);
       pluginHost.syncCommands();
     } else { pluginHost.close('document-replaced'); setExpandedSidebarItem(null); }
-  }, [shellState, pluginHost, props.mode, readOnly, pluginGeometry, overlayLayer, geometryRevision]);
-  useLayoutEffect(() => { if (activations.length || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
-    [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);
+  }, [shellState, documentReady, pluginHost, props.mode, effectiveReadOnly, pluginGeometry, overlayLayer, geometryRevision, displayWindow]);
+  const pluginSidebarItemCount = props.pluginSidebarItems?.length ?? 0;
+  useLayoutEffect(() => { if (activations.length || pluginSidebarItemCount || props.onRenderedDomContextReady || props.showHostProposalsInSidebar) void pluginGeometry.update().catch(() => {}); },
+    [shellState.view, zoom, overlayLayer, pluginGeometry, activations.length, pluginSidebarItemCount, props.onRenderedDomContextReady, props.showHostProposalsInSidebar]);
   useLayoutEffect(() => {
     const scrollerElement = scroller.current;
     const refresh = () => pluginHost.geometryChanged();
-    scrollerElement?.addEventListener('scroll', refresh, { passive: true });
+    let frame: number | null = null;
+    const scroll = () => { if (frame === null) frame = requestAnimationFrame(() => { frame = null; refresh(); }); };
+    scrollerElement?.addEventListener('scroll', scroll, { passive: true });
     window.addEventListener('resize', refresh);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(refresh);
     for (const element of [scrollerElement, host.current, overlayRef.current]) if (element) observer?.observe(element);
-    return () => { observer?.disconnect(); scrollerElement?.removeEventListener('scroll', refresh); window.removeEventListener('resize', refresh); };
+    return () => {
+      observer?.disconnect(); if (frame !== null) cancelAnimationFrame(frame);
+      scrollerElement?.removeEventListener('scroll', scroll); window.removeEventListener('resize', refresh);
+    };
   }, [pluginHost, overlayLayer]);
   useEffect(() => () => { loadRequest.current?.reject(new Error('Editor was closed')); loadRequest.current = null;
     pluginHost.close('unmounted'); pluginGeometry.dispose(); search.dispose(); controller.dispose(); }, [controller, pluginHost, search]);
@@ -249,57 +374,61 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const retained = useRef<RetainedFrame | null>(null);
   const pageIndexes = useRef(new Map<string, number>());
   const prepared = useRef(new WeakMap<DocxCommandFrame, PeerlessFrameGeometry>());
-  const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
-  useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const renderEnvironment = useRef({ theme: null as DocxEditorProps['theme'], requested: '' });
-  const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: ResidentFontEnvironment;
+  const fontSource = useRef<{ document: Document; layoutInput: string; families: string[]; initial: DocxFontEnvironment;
     signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-    theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
+    theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
   useLayoutEffect(() => {
     settings.current = { readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-      theme: props.theme, showHiddenText: props.showHiddenText ?? false, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
-  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
+      theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
+  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, tableGridlines, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
   type Ticket = ReturnType<PeerlessEditSessionBinding['session']['submit']>;
   const active = useRef<{
     binding: PeerlessEditSessionBinding;
     requestedReadOnly: boolean;
     requestedRenderEnvironment: string;
     barrier?: Ticket;
+    clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
-  const [loaded, setLoaded] = useState<{ input: DocxInput; source: Uint8Array } | null>(null);
-  const errorHandler = useRef(onError);
-  errorHandler.current = onError;
-  const reportError = useCallback((error: Error) => { controller.fail(error); errorHandler.current?.(error); }, [controller]);
+  const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
+  const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
+  const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
     controller.previewPresented(frame);
     if (applyFrameDelta(null, decodeFrameDelta(frame.frame)).pages.some(({ page }) => !page.unbuilt)) controller.painted();
   }, [controller]);
   const source = useMemo(() => {
-    if (parsedDocument) return parsedDocument;
+    if (parsedDocument) return { ...parsedDocument };
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
-    return loaded && loaded.input === documentBuffer ? loaded.source : null;
-  }, [documentBuffer, parsedDocument, loaded]);
+    return loaded?.generation === sourceGeneration ? new Uint8Array(loaded.source) : null;
+  }, [documentBuffer, parsedDocument, sourceGeneration, loaded, workerCollaboration.reopenKey]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
     let current = true;
     void toArrayBuffer(documentBuffer).then((buffer) => {
-      if (current) setLoaded({ input: documentBuffer, source: new Uint8Array(buffer) });
+      if (current) setLoaded({ generation: sourceGeneration, source: new Uint8Array(buffer) });
     }, (error: unknown) => {
       if (current) reportError(error instanceof Error ? error : new Error(String(error)));
     });
     return () => { current = false; };
-  }, [documentBuffer, reportError]);
+  }, [documentBuffer, sourceGeneration, reportError]);
 
-  const openConnection = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<ResidentCommandConnection> => {
+  const openResident = useCallback(async (input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number,
+    resume?: ResidentResume): Promise<DocxCommandConnection> => {
     signal.throwIfAborted();
-    active.current = null;
-    const client = takePreloadedResidentEngineWorker() ?? new ResidentEngineWorkerClient();
+    const checkpoint = resume?.checkpoint as DocxCommandCheckpoint | undefined;
+    if (checkpoint && !checkpoint.recoveryState) {
+      throw new SessionFailure('message', 'Cannot restore DOCX checkpoint command-local state and proposals');
+    }
+    releaseResident.current?.();
+    const client = (resume ? null : takePreloadedResidentEngineWorker()) ?? new ResidentEngineWorkerClient();
+    const collaboration = workerCollaboration.begin(client);
     worker.current = client;
     const stopFonts = client.onFontEnvironment(event => {
       if (worker.current === client && !signal.aborted) controller.fontEnvironment(event);
@@ -312,6 +441,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     let nextFontId = 0;
     let measurement: ReturnType<typeof createRustMeasureSource> | undefined;
     let initialFrame: DocxCommandFrame | undefined;
+    let svgImages: SvgMediaDecode | undefined;
     let disposed = false;
     const disposeFonts = () => {
       if (disposed) return;
@@ -326,7 +456,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       if (disposed) throw new Error('DOCX command fonts are disposed');
       return fonts.push(font instanceof Uint8Array ? font.slice() : font) - 1;
     };
+    let released = false;
     const abort = () => {
+      if (released) return;
+      released = true;
+      signal.removeEventListener('abort', abort);
+      if (releaseResident.current === abort) releaseResident.current = null;
+      svgImages?.close();
       stopFonts(); stopMemory(); disposeFonts(); client.destroy();
       if (worker.current === client) { worker.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }
     };
@@ -334,73 +470,158 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     try {
       await client.prewarm();
       signal.throwIfAborted();
-      const opened = await client.openSource({ ...(input instanceof Uint8Array ? { bytes: input } : { document: input }),
-        heapLimitBytes: settings.current.workerLimitBytes, preview: settings.current.previewFirstPage === true,
-        deferPreview: true,
-        mediaTokens: settings.current.mediaTokens === true });
-      signal.throwIfAborted();
-      if (opened.preview) {
-        controller.preview(opened.preview);
-        await new Promise<void>((resolve, reject) => {
-          const cancel = () => reject(signal.reason);
-          signal.addEventListener('abort', cancel, { once: true });
-          const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
-          setPreviewJob({ client, frame: opened.preview!, signal,
-            resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) });
-        });
+      const measure = async (metadata: Document) => {
+        const theme = settings.current.theme ?? metadata.package.theme;
+        const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+        const environment = { themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines };
+        const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
+          defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
+        const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
         signal.throwIfAborted();
+        measurement ??= createRustMeasureSource({
+          engine: {
+            registerFont: (data) => {
+              const slot = appendFont(data);
+              fontIds[slot] = nextFontId++;
+              return slot;
+            },
+            registerSubstituteFont: (substituteOf, family) => {
+              const slot = appendFont({ substituteOf, family });
+              fontIds[slot] = fontIds[substituteOf];
+              return slot;
+            },
+            clearFonts: disposeFonts,
+          },
+          bundled: settings.current.measurementFontProvider,
+        });
+        measurement.setCompat(metadata.package.settings?.compatibilityFlags);
+        const embeddedFaces = await extractEmbeddedFontFaces(metadata);
+        signal.throwIfAborted();
+        measurement.setEmbeddedFaces(embeddedFaces);
+        await measurement.prepareFontRequirements(requirements);
+        signal.throwIfAborted();
+        const config = measurement.measurementConfigForRequirements(requirements);
+        if (!config) throw new Error('DOCX command fonts are not ready');
+        layout.measurement = {
+          ...config,
+          fontChains: Object.fromEntries(Object.entries(config.fontChains).map(([key, ids]) =>
+            [key, [...new Set(ids.map((id) => fontIds[id]))]])),
+        };
+        return { environment, layout, requirements, config };
+      };
+      let measuring: Promise<unknown> = Promise.resolve();
+      const measured = (metadata: Document) => {
+        const turn = measuring.then(() => measure(metadata));
+        measuring = turn.catch(() => {});
+        return turn;
+      };
+      let painted = false;
+      let dropPreview = () => {};
+      const showPreview = async ({ layout, config }: Awaited<ReturnType<typeof measure>>, live: () => boolean) => {
+        if (!live()) return false;
+        const preview = await client.previewSource({ fonts: fonts.slice(), fontRegistrationSlots: { fontChains: config.fontChains },
+          layoutInput: JSON.stringify({ ...layout, cachedPageTotals: true }), extras: JSON.stringify({ fontChains: config.fontChains }) });
+        signal.throwIfAborted();
+        const pages = workerPreviewPages(preview);
+        if (!live() || pages.presented.length === 0) return false;
+        controller.preview(preview);
+        return await new Promise<boolean>((resolve, reject) => {
+          const settle = (operation: () => void) => { signal.removeEventListener('abort', cancel); operation(); };
+          const cancel = () => settle(() => reject(signal.reason));
+          signal.addEventListener('abort', cancel, { once: true });
+          const job: WorkerPreviewJob = { client, frame: preview, pages, live: () => live() && !signal.aborted,
+            resolve: () => settle(() => { painted = true; resolve(true); }), reject: (error) => settle(() => reject(error)) };
+          dropPreview = () => settle(() => {
+            setPreviewJob(current => current === job ? null : current);
+            releaseWorkerPreview(client);
+            resolve(false);
+          });
+          setPreviewJob(job);
+        });
+      };
+      const withinPreviewBudget = async (attempt: (live: () => boolean) => Promise<boolean>): Promise<boolean | null> => {
+        let live = true;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([attempt(() => live),
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), peerlessPreviewPaint.timeoutMs); })]);
+        } finally {
+          live = false;
+          clearTimeout(timer);
+          if (!painted) dropPreview();
+        }
+      };
+      const previewFailed = (error: unknown) => {
+        signal.throwIfAborted();
+        reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
+      };
+      let previewed = false;
+      if (!resume && settings.current.previewFirstPage === true && input instanceof Uint8Array && settings.current.mediaTokens !== true &&
+        !workerCollaboration.openOptions?.initialUpdate) {
+        try {
+          previewed = await withinPreviewBudget(async (live) => {
+            const cut = await client.openSourceCut({ bytes: input, cut: PREVIEW_CUT, heapLimitBytes: settings.current.workerLimitBytes });
+            signal.throwIfAborted();
+            return cut !== null && live() && await showPreview(await measured(cut), live);
+          }) !== false;
+        } catch (error) { previewed = true; previewFailed(error); }
       }
+      let opened: Awaited<ReturnType<typeof client.openSource>>;
+      try {
+        opened = await client.openSource({ ...(input instanceof Uint8Array
+          ? { bytes: input, ...(resume?.checkpoint ? { state: resume.checkpoint.state } : {}) } : { document: input }),
+          heapLimitBytes: settings.current.workerLimitBytes, mediaTokens: settings.current.mediaTokens === true,
+          collaboration });
+      } catch (error) {
+        if (!painted) throw error;
+        signal.throwIfAborted();
+        const failure = error instanceof Error ? error : new Error(String(error));
+        controller.failOpening(failure);
+        errorHandler.current?.(failure);
+        return await new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      }
+      signal.throwIfAborted();
+      svgImages = decodeSvgMedia(opened.svgMedia);
+      if (collaboration) workerCollaboration.opened(client, opened);
       const metadata = opened.document;
       sourceComments.current = metadata.package.document.comments ?? [];
-      const theme = settings.current.theme ?? metadata.package.theme;
-      const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-      const environment = { themeColors, showHiddenText: settings.current.showHiddenText };
+      const opening = await measured(metadata);
+      const { environment, layout, requirements, config } = opening;
       renderEnvironment.current = { theme: metadata.package.theme, requested: JSON.stringify(environment) };
-      const layout = buildResidentRegionLayoutRequest(metadata, 24, { ...environment,
-        defaultTabStopTwips: metadata.package.settings?.defaultTabStop ?? null, mediaTokens: settings.current.mediaTokens === true });
-      const requirements = JSON.parse(await client.fontRequirements(JSON.stringify(layout))) as ResidentFontRequirement[];
-      signal.throwIfAborted();
-      measurement = createRustMeasureSource({
-        engine: {
-          registerFont: (data) => {
-            const slot = appendFont(data);
-            fontIds[slot] = nextFontId++;
-            return slot;
-          },
-          registerSubstituteFont: (substituteOf, family) => {
-            const slot = appendFont({ substituteOf, family });
-            fontIds[slot] = fontIds[substituteOf];
-            return slot;
-          },
-          clearFonts: disposeFonts,
-        },
-        bundled: settings.current.measurementFontProvider,
-      });
-      measurement.setCompat(metadata.package.settings?.compatibilityFlags);
-      const embeddedFaces = await extractEmbeddedFontFaces(metadata);
-      signal.throwIfAborted();
-      measurement.setEmbeddedFaces(embeddedFaces);
-      await measurement.prepareFontRequirements(requirements);
-      signal.throwIfAborted();
-      const config = measurement.measurementConfigForRequirements(requirements);
-      if (!config) throw new Error('DOCX command fonts are not ready');
-      layout.measurement = {
-        ...config,
-        fontChains: Object.fromEntries(Object.entries(config.fontChains).map(([key, ids]) =>
-          [key, [...new Set(ids.map((id) => fontIds[id]))]])),
-      };
+      if (!resume && settings.current.previewFirstPage === true && !previewed) {
+        try { await withinPreviewBudget((live) => showPreview(opening, live)); } catch (error) { previewFailed(error); }
+      }
+      // Pictures still decoding follow the first frame, so they never hold the document back.
+      const hostImages = svgImages.take();
       const initial = await client.commandInit({
-        session: crypto.randomUUID(), incarnation: 1, epoch: 1, readOnly: settings.current.readOnly,
+        session: resume?.session ?? crypto.randomUUID(), incarnation: resume?.incarnation ?? 1, epoch: resume?.epoch ?? 1,
+        ...(resume ? { version: resume.checkpoint?.version ?? 0, throughSeq: resume.checkpoint?.throughSeq ?? 0,
+          refusedSeqs: resume.refusedSeqs, replayAppliedSeqs: resume.replayAppliedSeqs,
+          recoveryState: checkpoint?.recoveryState } : {}),
+        readOnly: settings.current.readOnly,
         fonts: fonts.slice(),
         rasterScale: getRasterScale?.() ?? 1,
         fontRegistrationSlots: { fontChains: config.fontChains },
         layoutInput: JSON.stringify(layout),
         layoutWithRegions: true, layoutRevision: 1, extras: JSON.stringify({ fontChains: config.fontChains }),
         displayWindow: [0, 3], provisionalPages: 3,
+        ...(hostImages.length ? { hostImages } : {}),
       });
       initialFrame = initial.frame;
-      const connection = await createResidentCommandConnection(client, initial);
+      const connection = await createDocxCommandConnection(client, initial);
       signal.throwIfAborted();
+      const decoding = svgImages;
+      svgImages = undefined;
+      signal.addEventListener('abort', () => decoding.close(), { once: true });
+      decoding.flushTo((late) => {
+        if (signal.aborted) {
+          for (const { image } of late) image.close();
+          return;
+        }
+        client.provideHostImages(late).catch(() => {
+          for (const { image } of late) image.close();
+        });
+      });
       const families = [...new Set([...requirements.map(item => item.family),
         ...(metadata.package.fontTable?.fonts ?? []).map(font => font.name)])];
       fontSource.current = { document: metadata, layoutInput: JSON.stringify(layout), families,
@@ -416,16 +637,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       retained.current = null;
       pageIndexes.current = new Map();
       prepared.current = new WeakMap();
+      releaseResident.current = abort;
       return connection;
     } catch (error) {
-      signal.removeEventListener('abort', abort);
       discardCommandPresentation(initialFrame);
       abort();
       throw error;
     } finally {
+      svgImages?.close();
       disposeFonts();
     }
-  }, [controller]);
+  }, [controller, workerCollaboration.openOptions, workerCollaboration.begin, workerCollaboration.opened]);
+  const openConnection = useCallback((input: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number) => {
+    signal.throwIfAborted();
+    active.current = null;
+    openContext.current = { signal, getRasterScale };
+    return openResident(input, signal, getRasterScale);
+  }, [openResident]);
 
   const updateReadOnly = useCallback((): void => {
     const current = active.current;
@@ -439,21 +667,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       current.barrier = undefined;
       if (outcome.status === 'refused' || outcome.status === 'cancelled') {
         current.requestedReadOnly = current.binding.session.state.editState?.readOnly ?? !value;
-        errorHandler.current?.(new Error('DOCX read-only transition was rejected'));
+        reportRecoverableError(new Error('DOCX read-only transition was rejected'));
       }
     }, (error: unknown) => {
       if (active.current !== current || current.barrier !== ticket) return;
       current.barrier = undefined;
       current.requestedReadOnly = current.binding.session.state.editState?.readOnly ?? !value;
-      errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
+      reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
     });
-  }, []);
+  }, [reportRecoverableError]);
   const updateRenderEnvironment = useCallback(() => {
     const current = active.current;
     if (!current) return;
     const theme = settings.current.theme ?? renderEnvironment.current.theme;
     const themeColors = Object.fromEntries(Object.entries(theme?.colorScheme ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-    const payload = { themeColors, showHiddenText: settings.current.showHiddenText };
+    const reserved = reservationsRef.current;
+    const reservations = sentReservations();
+    const payload = {
+      themeColors, showHiddenText: settings.current.showHiddenText, showTableGridlines: settings.current.showTableGridlines, ...(reservations ? { reservations } : {}),
+    };
     const requested = JSON.stringify(payload);
     if (current.requestedRenderEnvironment === requested) return;
     const result = current.binding.commands.submit({ kind: 'setRenderEnvironment', payload }, { fence: true, onSubmitted: (ticket) => {
@@ -461,16 +693,19 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         if (active.current !== current || current.requestedRenderEnvironment !== requested) return;
         if (outcome.status === 'refused' || outcome.status === 'cancelled') {
           current.requestedRenderEnvironment = '';
-          errorHandler.current?.(new Error(`DOCX render environment was rejected: ${outcome.reason}`));
+          reportRecoverableError(new Error(`DOCX render environment was rejected: ${outcome.reason}`));
         }
       }, (error: unknown) => {
         if (active.current !== current) return;
         current.requestedRenderEnvironment = '';
-        errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
+        reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
       });
     } });
-    if (result.status !== 'ignored') current.requestedRenderEnvironment = requested;
-  }, []);
+    if (result.status !== 'ignored') {
+      current.requestedRenderEnvironment = requested;
+      reserved.sent = reserved.payload !== null;
+    }
+  }, [sentReservations, reportRecoverableError]);
   const updateFontEnvironment = useCallback(() => {
     const current = active.current;
     const client = worker.current;
@@ -491,7 +726,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       await current.binding.admission.whenCompositionSettled?.();
       await current.binding.session.flush();
       if (!isCurrent()) return;
-      let payload: ResidentFontEnvironment;
+      let payload: DocxFontEnvironment;
       if (opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
         const requirements = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
@@ -505,21 +740,21 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           payload.faces.length = 0;
           if (!isCurrent()) return;
           if (outcome.status === 'refused' || outcome.status === 'cancelled') {
-            errorHandler.current?.(new Error(`DOCX font environment was rejected: ${outcome.reason}`));
+            reportRecoverableError(new Error(`DOCX font environment was rejected: ${outcome.reason}`));
           } else { opened.signature = signature; opened.provider = provider; opened.initial.faces.length = 0; }
           if (fontJob.current === job) fontJob.current = null;
         }, (error: unknown) => {
           payload.faces.length = 0;
-          if (isCurrent()) errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
+          if (isCurrent()) reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
           if (fontJob.current === job) fontJob.current = null;
         });
       } });
       if (result.status === 'ignored') throw new Error('DOCX font environment was not admitted');
     })().catch((error: unknown) => {
-      if (isCurrent()) errorHandler.current?.(error instanceof Error ? error : new Error(String(error)));
+      if (isCurrent()) reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
       if (fontJob.current === job) fontJob.current = null;
     });
-  }, []);
+  }, [reportRecoverableError]);
   prepareFontFamily.current = async family => {
     const current = active.current;
     const client = worker.current;
@@ -547,20 +782,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   };
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
     controller.attach(binding);
+    workerCollaboration.ready(worker.current, binding);
     if (active.current?.binding !== binding) {
+      active.current?.clipboard?.dispose();
       active.current = {
         binding, requestedReadOnly: binding.session.state.editState?.readOnly ?? settings.current.readOnly,
         requestedRenderEnvironment: renderEnvironment.current.requested,
       };
+      active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
+        readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
+        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) });
     }
     updateReadOnly();
     updateRenderEnvironment();
     updateFontEnvironment();
-  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller]);
+  }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller, workerCollaboration.ready]);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
-  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, updateRenderEnvironment]);
+  useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, tableGridlines, reservations, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
-  useLayoutEffect(() => () => { active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
+  useLayoutEffect(() => () => { active.current?.clipboard?.dispose(); active.current = null; fontAbort.current?.abort(); fontJob.current = null; fontSource.current = null; }, []);
 
   const canvasForPage = useCallback((page: DocxCommandPageIdentity) => {
     if (!/^[1-9]\d*$/.test(page.pageId) || !Number.isSafeInteger(page.pageIndex) || page.pageIndex < 0) return null;
@@ -571,7 +811,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const index = pageIndexes.current.get(page.pageId);
     if (index === undefined) return null;
     return host.current?.querySelector<HTMLCanvasElement>(
-      `[data-page-index="${index}"]:not([data-page-id]):not([data-page-key]) canvas`
+      `[data-page-index="${index}"]:not([data-page-id]):not([data-page-key]) canvas:not([data-preview-page-id])`
     ) ?? null;
   }, []);
 
@@ -592,13 +832,18 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         coversThroughSeq: frame.coversThroughSeq,
         frameEpoch: next.frameEpoch,
         layoutRevision: frame.payload.layoutRevision,
+        layoutEpoch: next.layoutEpoch,
         documentVersion: frame.payload.documentVersion,
         objects: frame.payload.geometry,
         documentWidth: frame.payload.documentWidth,
         layoutProvisional: frame.payload.layoutProvisional,
+        ...(frame.payload.reservations ? { reservations: frame.payload.reservations } : {}),
         pages,
         caret: caret.caretRect ? { ...caret.caretRect,
           x: caret.caretRect.x + (pages[caret.caretRect.pageIndex]?.bounds.x ?? 0), y: caret.caretRect.y + (pages[caret.caretRect.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
+        selectionFocus: frame.payload.selectionFocus ? { ...frame.payload.selectionFocus,
+          x: frame.payload.selectionFocus.x + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.x ?? 0),
+          y: frame.payload.selectionFocus.y + (pages[frame.payload.selectionFocus.pageIndex]?.bounds.y ?? 0), width: 1 } : null,
         parts: frame.payload.parts,
         selectionRects: (frame.payload.selectionRects ?? []).map(({ pageIndex, x, y, width, height }) => ({
           x: x + (pages[pageIndex]?.bounds.x ?? 0), y: y + (pages[pageIndex]?.bounds.y ?? 0), width, height,
@@ -613,33 +858,63 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }
   }, []);
 
+  const recovery = useMemo<UsePeerlessEditSessionOptions['recovery']>(() => ({
+    checkpoint: source instanceof Uint8Array ? (resident) => resident.client.call.checkpoint() : undefined,
+    reopen: async (resume) => {
+      const context = openContext.current;
+      if (!context) throw new Error('Editor was closed');
+      return await openResident(resume.source, context.signal, context.getRasterScale, resume);
+    },
+    onRecovery: (event) => {
+      if (event.phase === 'recovered') {
+        updateReadOnly(); updateRenderEnvironment(); updateFontEnvironment();
+      }
+    },
+  }), [source, openResident, updateReadOnly, updateRenderEnvironment, updateFontEnvironment]);
   const sessionOptions = useMemo<UsePeerlessEditSessionOptions | null>(() => source ? {
-    source, openConnection, canvasForPage, prepareGeometry, onError: reportError,
-    onRecoverableError: error => errorHandler.current?.(error),
-  } : null, [source, openConnection, canvasForPage, prepareGeometry, reportError]);
-  const onClipboard = useCallback(async (cut: boolean) => {
+    source, openConnection, recovery: workerCollaboration.openOptions ? undefined : recovery, canvasForPage, prepareGeometry, onError: reportError,
+    onRecoverableError: error => { controller.stalled(error); reportRecoverableError(error); },
+  } : null, [source, openConnection, recovery, workerCollaboration.openOptions, canvasForPage, prepareGeometry, reportError, reportRecoverableError, controller]);
+  useEffect(() => {
+    if (shellState.status !== 'ready' || !previewJob) return;
+    setPreviewJob(null);
+    releaseWorkerPreview(previewJob.client);
+  }, [shellState.status, previewJob]);
+  const clipboardReplay = useRef<{ capture: ClipboardCapture; written: boolean } | null>(null);
+  const onClipboard = useCallback(async (cut: boolean, data?: DataTransfer | null) => {
     const current = active.current;
     if (!current) return;
+    if (data && clipboardReplay.current) {
+      try { clipboardReplay.current.written = writeClipboardCapture(data, clipboardReplay.current.capture); } catch {}
+      return;
+    }
     try {
-      const copied = await copyWorkerSelection({ binding: current.binding, cut,
+      const copied = await copyWorkerSelection({ binding: current.binding, cut, data, prefetched: current.clipboard?.take(),
         isCurrent: () => active.current === current,
+        readCapture: () => current.clipboard!.read(),
+        writeNative: (capture) => {
+          const input = host.current?.querySelector('.paged-editor__input');
+          if (!data || active.current !== current || document.activeElement !== input || !navigator.userActivation?.isActive ||
+            current.clipboard?.take() !== capture) return false;
+          const replay = { capture, written: false };
+          clipboardReplay.current = replay;
+          let completed = false;
+          try { completed = document.execCommand('copy'); } catch {} finally { clipboardReplay.current = null; }
+          return completed && replay.written;
+        },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
         readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
-          try {
-            if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
-            await navigator.clipboard.write([new ClipboardItem({
-              'text/plain': new Blob([text], { type: 'text/plain' }),
-              'text/html': new Blob([html], { type: 'text/html' }),
-            })]);
-          } catch {
-            await navigator.clipboard.writeText(text);
-          }
+          if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
+          await navigator.clipboard.write([new ClipboardItem({
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+            'text/html': new Blob([html], { type: 'text/html' }),
+          })]);
         } });
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
-    } catch (error) { errorHandler.current?.(error instanceof Error ? error : new Error(String(error))); }
-  }, [controller, props.onCopy, props.onCut]);
+    } catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); }
+  }, [controller, props.onCopy, props.onCut, reportRecoverableError]);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
     if (!current) return false;
@@ -649,16 +924,58 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     props.onPaste?.();
     return true;
   }, [controller, props.onPaste]);
+  const selectionAnchor = useCallback(() => {
+    const frame = controller.getSnapshot().view?.geometry;
+    const rect = frame?.selectionRects[0];
+    const page = rect && frame.pages.find(({ bounds }) => rect.y >= bounds.y && rect.y < bounds.y + bounds.height);
+    if (!rect || !page) return null;
+    const bounds = pluginGeometry.geometry()?.dom.getPageBounds(page.page.pageIndex);
+    return { y: (bounds?.y ?? page.bounds.y + 48 / zoom) + rect.y - page.bounds.y, right: bounds ? bounds.x + bounds.width : page.bounds.x + page.bounds.width };
+  }, [controller, pluginGeometry, zoom]);
+  const workerComments = useWorkerComments({ controller, documentKey: shellState.view?.identity.session, readOnly: effectiveReadOnly, setOpen: setCommentsOpen,
+    setExpanded: setExpandedSidebarItem, selectionAnchor, focus, onError: reportRecoverableError });
+  const pictureMoves = useMemo(() => ({
+    canMove: () => { const environment = controller.environment(); return !environment.readOnly && environment.mode === 'editing'; },
+    canMoveInline: () => { const environment = controller.environment(); return !props.collaboration && !environment.readOnly && environment.mode === 'editing'; },
+    move: (intent: PeerlessPropertyIntent) => {
+      const environment = controller.environment();
+      if (environment.readOnly || environment.mode !== 'editing' || intent.kind === 'moveEmbed' && props.collaboration) return;
+      void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
+        error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    },
+    resize: (intent: PeerlessPropertyIntent) => {
+      const environment = controller.environment();
+      if (environment.readOnly || environment.mode !== 'editing') return;
+      void controller.submit(intent).then(result => { if (!result.ok) reportRecoverableError(new Error(result.failure.message)); },
+        error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    },
+  }), [controller, reportRecoverableError, props.collaboration]);
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
-    submit: controller.submit, onPaste: props.onPaste, onError: props.onError });
+    submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
+    onPaste: props.onPaste, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment });
   useLayoutEffect(() => {
+    active.current?.clipboard?.dispose();
     active.current = null;
     setPreviewJob(null);
-    if (hasSource) controller.opening(); else controller.empty();
-  }, [controller, source, documentBuffer, hasSource]);
+    setHyperlinkPopup(null);
+    linkGesture.current += 1;
+    openedSource.current = sourceKey;
+    pluginGeometry.clear();
+    if (hasSource) controller.opening(sourceGeneration); else controller.empty();
+  }, [controller, sourceGeneration, source, sourceKey, hasSource, pluginGeometry]);
+  useEffect(() => {
+    const request = loadRequest.current;
+    if (!request) return;
+    if (request.input !== (documentBuffer ?? parsedDocument)) { request.reject(new Error('Document was replaced')); loadRequest.current = null; }
+    else if (shellState.error && controller.getSnapshot().error === shellState.error) { request.reject(shellState.error); loadRequest.current = null; }
+    else if (shellState.status === 'ready' && controller.getSnapshot().status === 'ready') { request.resolve(); loadRequest.current = null; }
+  }, [shellState, documentBuffer, parsedDocument, controller]);
+  useImperativeHandle(ref, () => controller.ref, [controller]);
 
   const onPartPoint: NonNullable<React.ComponentProps<typeof PeerlessPagedEditor>['onPartPoint']> = ({ page, x, y, clickCount, intent }) => {
+    const gesture = ++linkGesture.current;
+    setHyperlinkPopup(null);
     const geometry = controller.getSnapshot().view?.geometry;
     const section = 'final';
     const targets = geometry?.parts?.filter(part => part.pageId === page.page.pageId &&
@@ -672,16 +989,39 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       (y < body.y ? 'header' : y > body.y + body.height ? 'footer' : null));
     if (band === 'header' || band === 'footer') {
       const activePart = controller.getSnapshot().view?.editState?.activePart;
-      if (activePart?.kind === band && activePart.page === page.page.pageIndex) return false;
-      if (clickCount === 2) {
-        const target = { kind: band, section, page: page.page.pageIndex };
-        void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+      if (activePart?.kind !== band || activePart.page !== page.page.pageIndex) {
+        if (clickCount === 2) {
+          const target = { kind: band, section, page: page.page.pageIndex };
+          void (effectiveReadOnly ? parts.open(target, page.displayPage?.sectionIndex) : parts.ensure(target, page.displayPage?.sectionIndex));
+        }
+        const bodyY = clickCount === 1 && !activePart && page.displayPage ? bodyEdgeY(page.displayPage, band) : null;
+        if (bodyY !== null) return { bodyY };
+        return true;
       }
-      return true;
     }
-    return false;
+    const region = band === 'header' || band === 'footer' ? { kind: band } : { kind: 'body' as const };
+    const hit = clickCount === 1 && page.displayPage ? findDisplayListHyperlinkAtPoint({ pages: [page.displayPage] }, 0, x, y, region) : null;
+    const href = sanitizeHref(hit?.href ?? '');
+    const bounds = host.current?.querySelector('[data-docx-pages-host]')?.getBoundingClientRect();
+    const hostBounds = host.current?.getBoundingClientRect();
+    if (!hit || !href || !bounds || !hostBounds) return false;
+    const data = { href, displayText: hit.displayText, tooltip: hit.tooltip, position: {
+      left: bounds.left - hostBounds.left + (page.bounds.x + hit.rect.x) * zoom,
+      top: bounds.top - hostBounds.top + (page.bounds.y + hit.rect.y + hit.rect.h) * zoom + 4,
+    } };
+    void controller.submit({ kind: 'selectPoint', payload: intent }).then(async result => {
+      if (!result.ok || gesture !== linkGesture.current) return;
+      const selection = controller.getSnapshot().view?.workerSelection;
+      if (!selection || selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) return;
+      focus();
+      if (href.startsWith('#')) {
+        const story = region.kind === 'body' ? 'body' : selection.focus.story;
+        await navigation.scrollToBookmark(href.slice(1), story);
+      } else setHyperlinkPopup(data);
+    }).catch(error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
+    return true;
   };
-  const activeBox = shellState.view?.geometry && parts.activePart && shellState.view.geometry.coversThroughSeq === shellState.view.throughSeq ?
+  const activeBox = shellState.view?.geometry && parts.activePart && geometryMatchesDocument(shellState.view) ?
     shellState.view.geometry.parts?.find(part => part.story === parts.activePart?.story && part.pageIndex === parts.activePart.page) : undefined;
   const activePage = activeBox && shellState.view?.geometry?.pages.find(page => page.page.pageId === activeBox.pageId);
   const partChrome = activeBox && activePage && (activeBox.kind === 'header' || activeBox.kind === 'footer') ?
@@ -689,10 +1029,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       left: activePage.bounds.x + activeBox.x, width: activeBox.width, height: activeBox.height }}
       onClose={() => { void parts.close(); }} onRemove={effectiveReadOnly ? undefined : () => { void parts.remove(); }} /> :
     activeBox && activePage ? <div data-docx-escape-layer style={{ position: 'absolute', left: activePage.bounds.x + activeBox.x,
-      top: activePage.bounds.y + activeBox.y - 24, zIndex: 10 }}><button type="button" onClick={() => { void parts.close(); }}>Close note</button>{!effectiveReadOnly && <button type="button" onClick={() => { void propertyDialogs.openNotes(); }}>Note properties</button>}</div> : null;
+      top: activePage.bounds.y + activeBox.y - 24, zIndex: 10 }}><button type="button" onClick={() => { void parts.close(); }}>{t('editor.closeNote')}</button>{!effectiveReadOnly && <button type="button" onClick={() => { void propertyDialogs.openNotes(); }}>{t('editor.noteProperties')}</button>}</div> : null;
   const ignore = () => {};
   const horizontalRulerProps = {
-    sectionProps: rulers.sectionProps, zoom, unit: 'inch' as const, editable: rulers.editable,
+    sectionProps: rulers.sectionProps, zoom, unit: props.rulerUnit ?? 'inch', editable: rulers.editable,
     paragraphEditable: rulers.paragraphEditable,
     onLeftMarginChange: rulers.handleLeftMarginChange, onRightMarginChange: rulers.handleRightMarginChange,
     indentLeft: rulers.indentLeft, indentRight: rulers.indentRight,
@@ -706,97 +1046,218 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     <DocxEditorToolbar renderLogo={props.renderLogo} documentName={props.documentName}
       onDocumentNameChange={props.onDocumentNameChange} documentNameEditable={props.documentNameEditable}
       renderTitleBarRight={props.renderTitleBarRight} />;
-  const geometry = pluginGeometry.geometry();
-  const managedItems = managedSidebarItems(pluginHost, activations, anchor => {
+  const geometry = documentReady && pluginGeometry.layout() ? pluginGeometry.geometry() : null;
+  const managedItems = useMemo(() => managedSidebarItems(pluginHost, activations, anchor => {
     const at = { paraId: anchor.paraId, offset: 0 };
     const target = { kind: 'range' as const, version: anchor.version, range: { story: anchor.story, start: at, end: at, view: 'accepted' as const } };
-    if (anchor.version !== pluginHost.version()) return null;
+    if (!geometry || anchor.version !== pluginHost.version()) return null;
     pluginGeometry.requestTarget(target);
     const placed = geometry?.getAnchorGeometry(target);
     if (!placed?.ok) return null;
     const origin = overlayRef.current?.getBoundingClientRect();
     const parent = host.current?.getBoundingClientRect();
     return { position: 0, y: placed.anchor.y / zoom + ((origin?.top ?? 0) - (parent?.top ?? 0)) / zoom };
-  });
+  }), [pluginHost, activations, geometry, pluginGeometry, zoom, shellState, geometryRevision, activations.length ? displayWindow : null]);
   const commentReview = useWorkerQuery<'reviewSnapshot'>(controller, { kind: 'reviewSnapshot' });
   const currentReview = controller.reviewSnapshot();
   const review = currentReview ?? commentReview?.value;
   const toolbarMetadata = useWorkerQuery<'toolbarMetadata'>(controller, { kind: 'toolbarMetadata' });
   useLayoutEffect(() => controller.toolbarMetadata(toolbarMetadata), [controller, toolbarMetadata]);
-  const comments = review?.uiComments ?? props.comments ?? sourceComments.current;
-  const commentItems = useCommentSidebarItems({ comments: props.commentsSidebarOpen === false ? [] : comments, trackedChanges: [], callbacks: {} });
-  const positionedComments = commentItems.map(item => {
+  const revisionRead = useWorkerQuery<'sidebar'>(controller, workerRevisionRequest(commentReview));
+  useLayoutEffect(() => controller.revisions(commentReview, revisionRead), [controller, commentReview, revisionRead]);
+  const trackedChanges = controller.trackedChanges();
+  const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
+  const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
+  const documentKey = shellState.view?.identity.session;
+  const dotsMode = props.trackedChanges?.display === 'dots';
+  const hasComments = comments.some(comment => comment.parentId == null);
+  const hasCards = (dotsMode ? hasComments : comments.length > 0) || (!dotsMode && !!trackedChanges?.entries.length);
+  const autoOpened = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!hasCards || documentKey === undefined || autoOpened.current === documentKey) return;
+    autoOpened.current = documentKey;
+    setCommentsOpen(true);
+  }, [hasCards, documentKey, setCommentsOpen]);
+  const commentCallbacks = useMemo(() => ({ ...revisionCallbacks, ...workerComments.callbacks }), [revisionCallbacks, workerComments.callbacks]);
+  const visibleComments = useMemo(() => commentsOpen ? comments : dotsMode ? comments.filter(comment => comment.parentId != null) : EMPTY_COMMENTS,
+    [comments, commentsOpen, dotsMode]);
+  const commentItems = useCommentSidebarItems({ comments: visibleComments, trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? EMPTY_CHANGES : EMPTY_CHANGES,
+    callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
+  const positionedComments = useMemo(() => commentItems.map(item => {
+    if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
-    const rect = nativeId ? review?.commentGeometry[nativeId]?.[0] : undefined;
+    const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
+    const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
+      (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
     return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
-  });
-  const commentsOpen = props.commentsSidebarOpen === true || (props.commentsSidebarOpen !== false && !!comments.length);
-  const hostProposalItems = workerProposalSidebarItems(controller, currentReview, geometry,
-    props.allowHostProposals === true && props.showHostProposalsInSidebar === true && commentsOpen, props.onError);
-  const sidebarItems = mergeSidebarItems([...positionedComments, ...hostProposalItems], props.pluginSidebarItems ?? [], managedItems);
-  const sidebarOpen = commentsOpen || sidebarItems.some((item) => !item.hidden);
-  const sidebarWidth = sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0;
-  const pages = shellState.view?.geometry?.pages;
-  const pageWidth = shellState.view?.geometry?.documentWidth ??
-    (pages?.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH);
+  }), [commentItems, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, review != null, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+  const selected = shellState.view?.workerSelection;
+  const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !dragSelecting && !!selected &&
+    (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&
+    (selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset) &&
+    !!shellState.view && geometryMatchesDocument(shellState.view) ? selectionAnchor() : null;
+  const hostProposalsEnabled = documentReady && props.allowHostProposals === true && props.showHostProposalsInSidebar === true && (commentsOpen || dotsMode);
+  const hostProposalItems = useMemo(() => workerProposalSidebarItems(controller, currentReview, geometry, hostProposalsEnabled, reportRecoverableError),
+    [controller, currentReview, geometry, hostProposalsEnabled, reportRecoverableError, shellState.view?.geometry, zoom, geometryRevision, hostProposalsEnabled ? displayWindow : null]);
+  const allCommentItems = useMemo(() => [...positionedComments, ...hostProposalItems], [positionedComments, hostProposalItems]);
+  const reviewItems = useMemo(() => allCommentItems.filter(item => item.review).sort((first, second) => first.review!.change.from - second.review!.change.from), [allCommentItems]);
+  const sidebarItems = useMemo(() => mergeSidebarItems(allCommentItems.filter(item => !dotsMode || !item.review), props.pluginSidebarItems ?? [], managedItems),
+    [allCommentItems, dotsMode, props.pluginSidebarItems, managedItems]);
+  const sidebarOpen = (commentsOpen && (!dotsMode || hasComments || workerComments.adding)) || sidebarItems.some((item) => !item.hidden);
+  const anchorPositions = useMemo(() => new Map(allCommentItems.flatMap(item =>
+    !item.hidden && item.anchorKey && item.fixedY != null ? [[item.anchorKey, item.fixedY] as const] : [])), [allCommentItems]);
+  const columnWidth = useMemo(() => sidebarItems.every(item => item.hidden || reviewItems.some(review => review.id === item.id)) ? REVIEW_CARD_WIDTH : SIDEBAR_WIDTH,
+    [sidebarItems, reviewItems]);
+  const sidebarWidth = sidebarOpen ? SIDEBAR_PAGE_GAP + columnWidth : 0;
+  const pages = shellState.view?.geometry?.pages ?? EMPTY_PAGES;
+  const pageWidth = useMemo(() => shellState.view?.geometry?.documentWidth ??
+    (pages.length ? pages.reduce((maximum, { bounds }) => Math.max(maximum, bounds.x + bounds.width), 0) : DEFAULT_PAGE_WIDTH), [shellState.view?.geometry?.documentWidth, pages]);
+  const documentShift = sidebarOpen ? Math.min(sidebarWidth / 2,
+    Math.max(0, Math.ceil((pageWidth * zoom) / 2 + sidebarWidth + SIDEBAR_EDGE - hostWidth / 2))) : 0;
+  const reviewRects = useMemo(() => workerReviewRects(reviewItems, review), [reviewItems, review?.revisionGeometry, review?.proposalHighlights]);
+  const reviewCollaboration = useMemo(() => props.collaboration && { ...props.collaboration,
+    clientId: workerCollaboration.connection?.replica.clientId ?? props.collaboration.clientId }, [props.collaboration, workerCollaboration.connection?.replica.clientId]);
+  const selectReviewItem = useCallback((item: ReviewSidebarItem) => {
+    const revisionId = review?.revisions.find(revision => yrsIdToNumericId(revision.revisionId) === item.review!.change.revisionId)?.revisionId;
+    const first = reviewRects.get(item.id)?.[0];
+    const element = scroller.current;
+    const page = first && pages?.find(page => page.page.pageIndex === first.pageIndex);
+    if (element && first && page) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + (page.bounds.y + first.y) * zoom - 80;
+    if (revisionId) void controller.revealReviewTarget({ kind: 'revision', revisionId }).catch(reportRecoverableError);
+  }, [review?.revisions, reviewRects, pages, zoom, controller, reportRecoverableError]);
+  const selectionKey = JSON.stringify(selected);
+  const lastReviewSelection = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!review || (review.revisions.length > 0 && reviewItems.length === 0)) return;
+    const key = `${sourceKey}:${documentKey}:${selectionKey}`;
+    if (lastReviewSelection.current === key) return;
+    if (!selected) { lastReviewSelection.current = key; return; }
+    const point = selected.focus;
+    const revisions = review.revisions.filter(revision => {
+      const range = revision.range;
+      return range.story === point.story && ((range.start.paraId === point.paraId && point.offset >= range.start.offset &&
+        (range.end.paraId !== point.paraId || point.offset <= range.end.offset)) ||
+        (range.end.paraId === point.paraId && range.start.paraId !== point.paraId && point.offset <= range.end.offset));
+    });
+    const matches = reviewItems.filter(item => revisions.some(revision => reviewRevisionIds(item.review!.change).includes(yrsIdToNumericId(revision.revisionId))));
+    if (revisions.length > 0 && matches.length === 0) return;
+    lastReviewSelection.current = key;
+    const item = matches.find(item => item.id === expandedSidebarItem) ?? matches[0];
+    if (item) setExpandedSidebarItem(item.id);
+    else setExpandedSidebarItem(current => current && reviewItems.some(item => item.id === current) ? null : current);
+  }, [sourceKey, documentKey, selectionKey, selected, review, reviewItems, expandedSidebarItem]);
+  const acceptAllReviewItems = useCallback(() => {
+    const shown = [...reviewItems];
+    void (async () => {
+      const snapshot = controller.reviewSnapshot() ?? (await controller.query<'reviewSnapshot'>({ kind: 'reviewSnapshot' })).value;
+      const nativeIds = new Map(snapshot?.revisions.map(revision => [yrsIdToNumericId(revision.revisionId), revision.revisionId]));
+      const revisions = shown.filter(item => !item.review!.proposalId);
+      const unresolved = revisions.filter(item => !reviewRevisionIds(item.review!.change).some(id => nativeIds.has(id)));
+      for (const id of new Set(revisions.flatMap(item => reviewRevisionIds(item.review!.change)))) {
+        const revisionId = nativeIds.get(id);
+        if (revisionId) {
+          const result = await controller.commands.store.execute('reviewAccept', { revisionId });
+          if (!result.ok) throw new Error(result.failure.message);
+        }
+      }
+      const proposals = [...new Set(shown.flatMap(item => item.review!.proposalId ? [item.review!.proposalId] : []))];
+      if (proposals.length) {
+        const current = await controller.ref.getProposals();
+        const result = await controller.ref.setProposalStates({ expectVersion: current.version, expectPreviewVersion: current.previewVersion,
+          changes: proposals.map(id => ({ id, state: 'accepted' as const })) });
+        if (!result.ok) throw new Error(result.failure.message ?? result.failure.code);
+      }
+      if (unresolved.length) throw new Error(`Accept all could not resolve revisions ${unresolved.map(item => item.review!.change.revisionId).join(', ')}`);
+    })().catch(reportRecoverableError);
+  }, [reviewItems, controller, reportRecoverableError]);
   const outlineWidth = navigation.showOutline ? OUTLINE_RESERVED_SPACE : props.showOutlineButton !== false ? OUTLINE_BUTTON_RESERVED_SPACE : 20;
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
-  useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, sidebarWidth, outlineWidth, zoom]);
+  useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, documentShift, outlineWidth, zoom]);
   return <DocxCommandProvider commands={controller.commands.store}>
     <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportError}
       containerRef={container} scrollContainerRef={scroller} editorContentRef={content}
       className={className} containerStyle={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', minHeight: 0, minWidth: 0, backgroundColor: 'var(--doc-bg)', ...style }}
       mainContentStyle={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}
-      editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
+      editorContainerStyle={{ flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto', overflowY: 'auto', overscrollBehavior: 'contain', position: 'relative', overflowAnchor: 'none' }}
       showRuler={props.showRuler ?? false} readOnlyProp={readOnly} showOutline={navigation.showOutline} showOutlineButton={props.showOutlineButton ?? true}
-      sidebarOpen={sidebarOpen} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
-      trackedChanges={[]} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {
+      sidebarOpen={sidebarOpen} documentShift={documentShift} minLayoutWidth={minLayoutWidth} editorScrollLeft={navigation.pageInfo.scrollLeft} expandedSidebarItem={expandedSidebarItem}
+      trackedChanges={trackedChanges?.entries ?? []} onScrollContainerMouseDown={ignore} onEditorBgMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
         event.preventDefault(); focus();
       }} onEditorContextMenu={contextMenu.open}
       horizontalRulerProps={horizontalRulerProps}
-      verticalRulerProps={{ sectionProps: rulers.sectionProps, zoom, unit: 'inch', editable: rulers.editable,
+      verticalRulerProps={{ sectionProps: rulers.sectionProps, zoom, unit: props.rulerUnit ?? 'inch', editable: rulers.editable,
         onTopMarginChange: rulers.handleTopMarginChange, onBottomMarginChange: rulers.handleBottomMarginChange,
         onDragStart: rulers.startDrag, onDragEnd: () => { void rulers.endDrag(); } }}
       outlineProps={{ headings: navigation.headings.map((heading) => ({ text: heading.text, level: heading.level, pmPos: heading.position })),
         onHeadingClick: (position) => { const heading = navigation.headings.find((heading) => heading.position === position);
-          if (heading) void navigation.scrollToParagraph(heading.paraId).catch((error) => props.onError?.(error)); },
+          if (heading) void navigation.scrollToParagraph(heading.paraId).catch((error) => reportRecoverableError(error)); },
         onClose: () => navigation.setShowOutline(false), scrollLeft: navigation.pageInfo.scrollLeft }}
       onToggleOutline={() => navigation.setShowOutline(!navigation.showOutline)} scrollPageInfo={navigation.pageInfo}
       toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra }}>{chrome}</EditorChromeContext.Provider>}
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}
-        layerRef={setPluginLayer} heldGeometry={geometry} /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
-        onClose={() => search.close()} currentResult={searchState.result}
-        onFind={(text, options) => { void search.find(text, options).catch((error) => props.onError?.(error)); return null; }}
+        layerRef={setPluginLayer} heldGeometry={documentReady ? pluginGeometry.geometry() : null} /><Toaster position="bottom-right" /></>} dialogs={<>{propertyDialogs.element}<FindReplaceDialog isOpen={searchState.isOpen} replaceMode={searchState.replaceMode}
+        onClose={(text, options) => { search.close(text, options); focus(); }} currentResult={searchState.result}
+        onFind={(text, options) => { void search.find(text, options).catch((error) => reportRecoverableError(error)); return null; }}
         onFindNext={() => { search.host.searchNext(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
         onFindPrevious={() => { search.host.searchPrevious(); return search.getSnapshot().result?.matches[search.getSnapshot().result!.currentIndex] ?? null; }}
-        onReplace={(text) => search.replace(text).then(count => count > 0).catch((error) => { props.onError?.(error); return false; })}
+        onReplace={(text) => search.replace(text).then(count => count > 0).catch((error) => { reportRecoverableError(error); return false; })}
         onReplaceAll={async (query, text, options) => { try { await search.find(query, options); return await search.replace(text, true); }
-          catch (error) { props.onError?.(error instanceof Error ? error : new Error(String(error))); return 0; } }} /></>} fileInputs={<><input ref={fileIO.imageInput} type="file" accept="image/*" hidden data-testid="docx-image-input" onChange={fileIO.imageChange} /><input ref={fileIO.input} type="file" accept=".docx" hidden data-testid="docx-file-input" onChange={fileIO.change} /></>}
-      loadingIndicator={hasSource && !shellState.error && shellState.status !== 'ready' && !shellState.previewPainted ? loadingIndicator ?? <DefaultLoadingIndicator /> : null}
+          catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); return 0; } }} /></>} fileInputs={<><input ref={fileIO.imageInput} type="file" accept="image/*" hidden data-testid="docx-image-input" onChange={fileIO.imageChange} /><input ref={fileIO.input} type="file" accept=".docx" hidden data-testid="docx-file-input" onChange={fileIO.change} /></>}
+      loadingIndicator={opening && (!shellState.previewPainted || typingPaused) ? <>
+        {!shellState.previewPainted && (loadingIndicator ?? <DefaultLoadingIndicator />)}
+        {typingPaused && <div style={{ position: 'absolute', top: 64, left: 0, right: 0, display: 'flex', justifyContent: 'center' }}>
+          <div role="status" aria-live="polite" data-testid="docx-typing-paused" style={{ padding: '8px 14px', borderRadius: 6, fontSize: 14,
+            background: '#fff7e0', color: '#4a3500', border: '1px solid #e8c15a', boxShadow: '0 1px 3px #0002' }}>{t('errors.stillOpening')}</div>
+        </div>}
+      </> : null}
       scrollContainerProps={{ tabIndex: 0, onKeyDown: (event) => {
+        if (opening && !effectiveReadOnly && !isDocumentInput(event.target) && typingKey(event)) {
+          event.preventDefault();
+          setTypingPaused(true);
+          return;
+        }
         if ((event.key !== 'PageUp' && event.key !== 'PageDown') || event.defaultPrevented ||
           event.ctrlKey || event.metaKey || event.altKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 ||
-          !(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains('paged-editor__peerless-input')) return;
+          !(event.target instanceof HTMLTextAreaElement) || !event.target.classList.contains('paged-editor__input')) return;
         event.preventDefault();
         event.currentTarget.scrollTop += event.currentTarget.clientHeight * (event.key === 'PageDown' ? 0.9 : -0.9);
       } }}
-      pagedArea={<div ref={host} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: sidebarWidth }} onMouseDown={(event) => {
+      pagedArea={<div ref={attachHost} style={{ position: 'relative', paddingTop: 48, paddingBottom: 48, paddingRight: documentShift * 2 }} onMouseDown={(event) => {
         if (event.target === event.currentTarget) { event.preventDefault(); focus(); }
       }}>
-      {sidebarItems.length > 0 && <UnifiedSidebar key={pluginHost.generation()} items={sidebarItems} anchorPositions={new Map()} renderedDomContext={geometry?.dom ?? null}
-        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+      <TrackedChangesReview key={sourceKey} items={reviewItems} options={props.trackedChanges} collaboration={reviewCollaboration}
+        pages={pages} rects={reviewRects} zoom={zoom} pageWidth={pageWidth} sidebarOpen={sidebarOpen}
+        hostRef={host} scrollerRef={scroller} activeId={expandedSidebarItem} setActive={setExpandedSidebarItem} select={selectReviewItem}
+        readOnly={effectiveReadOnly} acceptAll={acceptAllReviewItems}>
+      {floating && <WorkerCommentButton top={floating.y * zoom} left={floating.right * zoom + 24} onAdd={() => { void workerComments.beginAddComment(); }} />}
+      {documentReady && sidebarItems.length > 0 && <UnifiedSidebar key={`${sourceKey}:${JSON.stringify(shellState.view?.identity)}`} items={sidebarItems} anchorPositions={anchorPositions} renderedDomContext={geometry?.dom ?? null}
+        pageWidth={pageWidth} zoom={zoom} editorContainerRef={scroller} documentShift={documentShift} width={columnWidth} activeItemId={expandedSidebarItem} onExpandedItemChange={setExpandedSidebarItem} />}
+      </TrackedChangesReview>
+      {documentReady && props.pluginOverlays && <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>{props.pluginOverlays}</div>}
       {shellState.status === 'ready' && <WorkerDocumentReader controller={controller} version={shellState.view?.version ?? 0} />}
-      {previewJob && shellState.preview === previewJob.frame && !shellState.error &&
+      {previewJob && shellState.preview === previewJob.frame &&
         <WorkerDocumentPreview job={previewJob} zoom={zoom} onPresented={onPreviewPresented} />}
-      {shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
+      <HyperlinkPopup data={hyperlinkPopup} readOnly={effectiveReadOnly} onClose={() => setHyperlinkPopup(null)}
+        onNavigate={href => { window.open(href, '_blank', 'noopener,noreferrer'); }}
+        onCopy={async href => {
+          try { await navigator.clipboard.writeText(href); } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = href; textarea.style.position = 'fixed'; textarea.style.opacity = '0';
+            document.body.appendChild(textarea); textarea.select(); document.execCommand('copy'); textarea.remove();
+          }
+        }}
+        onEdit={(displayText, href) => { void propertyDialogs.applyPopupLink(displayText, href, hyperlinkPopup?.tooltip).then(applied => { if (applied) setHyperlinkPopup(null); }); }}
+        onRemove={() => { void propertyDialogs.removeLinkAtCaret().then(applied => { if (applied) { setHyperlinkPopup(null); toast(t('editor.linkRemoved')); } }); }} />
+      {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
-          displayWindow={displayWindow} onDisplayWindowChange={setDisplayWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint}
-          pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={props.onError} /></>} />
+          overlay={workerCollaboration.overlay(displayWindow)}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={setDragSelecting} pictures={pictureMoves}
+          pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} />
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />
   </DocxCommandProvider>;

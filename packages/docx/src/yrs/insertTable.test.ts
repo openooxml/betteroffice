@@ -110,6 +110,7 @@ describe('a table inserted into a document without a bordered table style', () =
               width: 2 / 3,
               color: '#000000',
               style: 'solid',
+              ooxmlStyle: 'single',
             });
           }
         }

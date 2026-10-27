@@ -36,6 +36,11 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         number_format: None,
         ghost: false,
         chart: false,
+        rotation_deg: None,
+        rotation_box: None,
+        rotation_valign: None,
+        stacked: false,
+        wrap: None,
     }
 }
 
@@ -70,6 +75,11 @@ fn styled_text(
         number_format: None,
         ghost: false,
         chart: false,
+        rotation_deg: None,
+        rotation_box: None,
+        rotation_valign: None,
+        stacked: false,
+        wrap: None,
     }
 }
 
@@ -106,6 +116,7 @@ fn full(w: f32, h: f32) -> Rect {
 
 fn dl(width: f32, height: f32, commands: Vec<DrawCmd>) -> DisplayList {
     DisplayList {
+        truncated: false,
         width,
         height,
         commands,

@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test';
+import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validateWorkbookCommandPayload, WorkbookCommandRefusal, type WorkbookCommand } from './commandProtocol';
 
 function batch(steps: unknown): WorkbookCommand {
@@ -48,5 +49,55 @@ describe('bounded workbook batches', () => {
 
   test('accepts a bounded dense batch', () => {
     expect(() => validateWorkbookCommandPayload(batch([step([['one', 'two']])]))).not.toThrow();
+  });
+});
+
+describe('collaboration pipe payloads', () => {
+  const command = (payload: unknown) => ({ ...batch([]), kind: 'collabPipe', payload }) as WorkbookCommand;
+  const cursor = { sheet: 'Sheet', anchor: { row: 0, col: 0 }, head: { row: 1, col: 2 } };
+
+  test('accepts XLSX cursors and provider options', () => {
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [
+      { op: 'create', seq: 1, options: { maxFrameBytes: 1024, maxMessagesPerFrame: 16, user: { name: 'Ada' } } },
+      { op: 'cursor', seq: 2, cursor, broadcast: true },
+      { op: 'event', seq: 3, event: { type: 'message', data: new ArrayBuffer(4) } },
+    ] }))).not.toThrow();
+  });
+
+  test('accepts configured frame limits above the default across pipe commands', () => {
+    const maxFrameBytes = DEFAULT_MAX_FRAME_BYTES + 1024;
+    const event = { op: 'event', seq: 2, event: { type: 'message', data: new ArrayBuffer(maxFrameBytes) } };
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [
+      { op: 'create', seq: 1, options: { maxFrameBytes } }, event,
+    ] }))).not.toThrow();
+    const limits = new Map([[1, maxFrameBytes]]);
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [event] }), limits)).not.toThrow();
+    expect(() => validateWorkbookCommandPayload(command({ provider: 2, ops: [event] }), limits)).toThrow(WorkbookCommandRefusal);
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [event] }))).toThrow(WorkbookCommandRefusal);
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [
+      { op: 'destroy', seq: 1 }, event,
+    ] }), limits)).toThrow(WorkbookCommandRefusal);
+  });
+
+  test('refuses frames above the configured limit and ignores replacement create limits', () => {
+    const event = { op: 'event', seq: 2, event: { type: 'message', data: new ArrayBuffer(1025) } };
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [
+      { op: 'create', seq: 1, options: { maxFrameBytes: 1024 } }, event,
+    ] }))).toThrow(WorkbookCommandRefusal);
+    expect(() => validateWorkbookCommandPayload(command({ provider: 1, ops: [
+      { op: 'create', seq: 1, options: { maxFrameBytes: 2048 } }, event,
+    ] }), new Map([[1, 1024]]))).toThrow(WorkbookCommandRefusal);
+  });
+
+  test('refuses invalid cursors and options that belong on main or to DOCX', () => {
+    for (const options of [{ maxPendingBytes: 1024 }, { syncChunkBytes: 128 }, { maxSyncBytes: 1024 }]) {
+      expect(() => validateWorkbookCommandPayload(command({ provider: 1,
+        ops: [{ op: 'create', seq: 1, options }] }))).toThrow(WorkbookCommandRefusal);
+    }
+    for (const invalid of [{ ...cursor, sheet: '' }, { ...cursor, head: { row: -1, col: 0 } },
+      { story: 'body', anchor: Uint8Array.of(0), head: Uint8Array.of(0) }]) {
+      expect(() => validateWorkbookCommandPayload(command({ provider: 1,
+        ops: [{ op: 'cursor', seq: 1, cursor: invalid, broadcast: true }] }))).toThrow(WorkbookCommandRefusal);
+    }
   });
 });

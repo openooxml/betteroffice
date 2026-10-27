@@ -41,6 +41,7 @@ export function testEnvironment(
     sidebarOpen: false,
     sidebarControl: 'internal',
     zoom: 1,
+    tableGridlines: false,
     canOpen: true,
     canReportIssue: true,
     bodyStory: true,
@@ -105,6 +106,7 @@ export function testBinding(initial: Partial<DocxCommandEnvironment> = {}) {
   const immediate: ReadonlySet<DocxCommandId> = new Set<DocxCommandId>([
     'editingMode',
     'commentsSidebar',
+    'tableGridlines',
     'open',
     'save',
     'print',

@@ -8,7 +8,7 @@
 
 import type { ColorValue } from './drawingml';
 
-export type { ColorValue, ThemeColorSlot } from './drawingml';
+export type { ColorTransform, ColorValue, ThemeColorSlot } from './drawingml';
 
 /**
  * One side of a border — style, color, width, spacing. Used by paragraph

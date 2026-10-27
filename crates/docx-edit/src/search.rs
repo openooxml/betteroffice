@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use serde::Serialize;
-use yrs::{Any, Map, ReadTxn, Transact};
+use yrs::{Any, ReadTxn, Transact};
 
 use crate::{EditingDoc, SegmentContent, read_state::table_cell_stories};
 
@@ -179,7 +179,9 @@ impl EditingDoc {
             return Ok(Vec::new());
         };
         let cells = table_cell_stories(self, &txn);
-        let mut ids: Vec<String> = stories.keys(&txn).map(str::to_owned).collect();
+        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_owned())
+            .collect();
         ids.sort_by(|a, b| {
             (a != "body", cells.contains(a), a).cmp(&(b != "body", cells.contains(b), b))
         });

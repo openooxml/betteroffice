@@ -255,6 +255,12 @@ fn run_in(run: &Run) -> Option<RunIn> {
             Some(out)
         }
         Run::Image(image) => image_run(image),
+        Run::Reserved(reserved) => {
+            let mut out = bare_run("image");
+            out.width = finite(reserved.width);
+            out.height = finite(reserved.height);
+            Some(out)
+        }
         Run::Unsupported => Some(bare_run("unsupported")),
     }
 }

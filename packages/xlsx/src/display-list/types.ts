@@ -112,9 +112,19 @@ export interface PathCmd {
 }
 
 /**
- * Paint a single-line text run. Spreadsheet cell text is single-line and
- * clipped to the cell box, so `clip` is the cell rect and `align` places the
- * run within it. Text metrics are owned upstream in Rust.
+ * Wrapped cell text: the painter breaks the run into lines no wider than
+ * `width` and steps their baselines by `lineHeight`, the block anchored by
+ * `valign` on the single-line baseline `y`.
+ */
+export interface TextWrap {
+  width: number;
+  lineHeight: number;
+  valign: 'top' | 'center' | 'bottom';
+}
+
+/**
+ * Paint a text run clipped to the cell box: `clip` is the cell rect and
+ * `align` places the run within it. A run without `wrap` is one line.
  */
 export interface TextCmd {
   op: 'text';
@@ -147,6 +157,11 @@ export interface TextCmd {
    */
   ghost?: boolean;
   chart?: boolean;
+  rotationDeg?: number;
+  rotationBox?: Rect;
+  rotationValign?: 'top' | 'center' | 'bottom';
+  stacked?: boolean;
+  wrap?: TextWrap;
 }
 
 export interface NumberFormatLayout {
@@ -176,6 +191,8 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  hiddenRowSpans?: [number, number][];
+  hiddenColSpans?: [number, number][];
   rowIndices?: number[];
   colIndices?: number[];
   rowOffsets: number[];
@@ -235,4 +252,6 @@ export interface DisplayList {
   grid?: GridMeta;
   hyperlinks?: HyperlinkRegion[];
   charts?: ChartRegion[];
+  /** The cell budget omitted the bottom of this viewport. */
+  truncated?: boolean;
 }

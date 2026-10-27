@@ -287,3 +287,257 @@ fn integrity_categories_are_additive_to_existing_warnings() {
         "SmartArt diagram was skipped: no diagram data part was found."
     );
 }
+
+fn main_package(path: &str, content_type: &str, xml: &str, strict: bool) -> Vec<(String, Vec<u8>)> {
+    let relationship = if strict {
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"
+    } else {
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+    };
+    vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/{path}" ContentType="{content_type}"/></Types>"#).into_bytes(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="{relationship}" Target="{path}"/></Relationships>"#).into_bytes(),
+        ),
+        (path.to_owned(), xml.as_bytes().to_vec()),
+    ]
+}
+
+fn assert_not_word(parts: &[(String, Vec<u8>)]) {
+    use docx_parse::s9::{
+        media_table_parts, parse_docx_s9_preview_from_parts,
+        parse_docx_s9_preview_from_parts_full_dom, parse_docx_s9_preview_with_media_table,
+        parse_docx_s9_wire_with_media_table,
+    };
+    use docx_parse::{ParseError, ParseLimits};
+
+    let bytes: std::sync::Arc<[u8]> = ooxml_opc::rezip_parts(parts).unwrap().into();
+    let options = S9ParseOptions {
+        determinism_seed: Some("0".repeat(64)),
+        ..S9ParseOptions::default()
+    };
+    let limits = ParseLimits::default();
+    let (media_parts, media) = media_table_parts(&bytes).unwrap();
+    let results = [
+        parse_docx_s9_wire(&bytes, options.clone()).map(|_| ()),
+        parse_docx_s9_wire_with_media_table(bytes.clone(), options.clone(), &limits).map(|_| ()),
+        parse_docx_s9_preview_from_parts(parts, 1, options.clone(), &limits).map(|_| ()),
+        parse_docx_s9_preview_from_parts_full_dom(parts, 1, options.clone(), &limits).map(|_| ()),
+        parse_docx_s9_preview_with_media_table(&media_parts, &media, 1, options, &limits)
+            .map(|_| ()),
+    ];
+    for result in results {
+        let error = result.expect_err("invalid package must not open as a document");
+        assert!(
+            matches!(&error, ParseError::Container(message) if message.starts_with("not a Word document")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("document"), "{error}");
+    }
+}
+
+#[test]
+fn packages_without_a_main_document_are_rejected() {
+    assert_not_word(&[("readme.txt".to_owned(), b"Archive contents".to_vec())]);
+    let mut parts = main_package(
+        "word/document.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        "",
+        false,
+    );
+    parts.retain(|(path, _)| path != "word/document.xml");
+    assert_not_word(&parts);
+    parts.retain(|(path, _)| path != "_rels/.rels");
+    assert_not_word(&parts);
+}
+
+#[test]
+fn other_office_main_parts_are_rejected_even_with_a_default_word_part() {
+    for (path, content_type, xml) in [
+        (
+            "xl/workbook.xml",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>"#,
+        ),
+        (
+            "ppt/presentation.xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+            r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst/></p:presentation>"#,
+        ),
+    ] {
+        let mut parts = main_package(path, content_type, xml, false);
+        assert_not_word(&parts);
+        parts.push((
+            "word/document.xml".to_owned(),
+            story("document", "<w:body/>").into_bytes(),
+        ));
+        assert_not_word(&parts);
+        parts.retain(|(name, _)| name != path);
+        assert_not_word(&parts);
+    }
+}
+
+#[test]
+fn missing_or_unsupported_document_roots_are_rejected() {
+    for xml in [
+        "".to_owned(),
+        " \n<!-- empty -->".to_owned(),
+        "<document><body/></document>".to_owned(),
+        "<w:document><w:body/></w:document>".to_owned(),
+        r#"<w:document xmlns:w="urn:unsupported-ooxml:main"><w:body/></w:document>"#.to_owned(),
+        format!(
+            r#"<x:document xmlns="{W}" xmlns:x="urn:unsupported-ooxml:main"><body/></x:document>"#
+        ),
+        story("settings", ""),
+        story(
+            "document",
+            "<w:body><w:sectPr><w:cols w:num=\"2\"/></w:sectPr></w:body>",
+        )
+        .replace(W, "urn:unsupported-ooxml:main"),
+    ] {
+        assert_not_word(&main_package(
+            "word/document.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            &xml,
+            false,
+        ));
+    }
+}
+
+#[test]
+fn malformed_main_xml_is_rejected() {
+    let parts = main_package(
+        "word/document.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+        &format!(r#"<w:document xmlns:w="{W}"><w:body></w:document>"#),
+        false,
+    );
+    let error = parse_docx_s9_wire(
+        &ooxml_opc::rezip_parts(&parts).unwrap(),
+        S9ParseOptions::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, docx_parse::ParseError::MalformedXml { .. }));
+}
+
+#[test]
+fn streaming_refusals_validate_the_main_root() {
+    use docx_parse::s9::parse_docx_s9_preview_from_parts;
+    use docx_parse::{ParseError, ParseLimits};
+
+    let options = S9ParseOptions {
+        determinism_seed: Some("0".repeat(64)),
+        ..S9ParseOptions::default()
+    };
+    for namespace in [
+        W,
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+        "urn:foreign",
+    ] {
+        for prefix in ["w:", "text:", ""] {
+            let binding = if prefix.is_empty() {
+                format!(r#"xmlns="{namespace}" xmlns:decoy="{W}""#)
+            } else {
+                format!(
+                    r#"xmlns="urn:decoy" xmlns:{}="{namespace}""#,
+                    prefix.trim_end_matches(':')
+                )
+            };
+            for root in ["document", "settings"] {
+                let xml = format!(
+                    r#"<{prefix}{root} {binding}><{prefix}body><{prefix}sectPr><{prefix}cols num="2"/></{prefix}sectPr></{prefix}body></{prefix}{root}>"#
+                );
+                let parts = main_package("documents/main.xml", "application/xml", &xml, false);
+                let result = parse_docx_s9_preview_from_parts(
+                    &parts,
+                    1,
+                    options.clone(),
+                    &ParseLimits::default(),
+                );
+                if root == "document" && namespace != "urn:foreign" {
+                    assert!(result.unwrap().is_none());
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ParseError::Container(message)) if message.starts_with("not a Word document")
+                    ));
+                    assert!(matches!(
+                        parse_docx_s9_wire(
+                            &ooxml_opc::rezip_parts(&parts).unwrap(),
+                            S9ParseOptions::default(),
+                        ),
+                        Err(ParseError::Container(message)) if message.starts_with("not a Word document")
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn word_namespaces_and_main_content_types_accept_relocated_and_empty_documents() {
+    for namespace in [W, "http://purl.oclc.org/ooxml/wordprocessingml/main"] {
+        for content_type in [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            "application/vnd.ms-word.document.macroEnabled.main+xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
+            "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+        ] {
+            for prefix in ["w:", "text:", ""] {
+                let binding = if prefix.is_empty() {
+                    "xmlns".to_owned()
+                } else {
+                    format!("xmlns:{}", prefix.trim_end_matches(':'))
+                };
+                let paragraph = format!(
+                    "<{prefix}p><{prefix}r><{prefix}t>Kept text</{prefix}t></{prefix}r></{prefix}p>"
+                );
+                let document = format!(
+                    r#"<{prefix}document {binding}="{namespace}"><{prefix}body>{paragraph}</{prefix}body></{prefix}document>"#
+                );
+                for (xml, empty) in [
+                    (document.clone(), false),
+                    (document.replace(&paragraph, ""), true),
+                    (format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><!-- before root -->{document}"), false),
+                    (document.replacen(
+                        &format!(r#"{binding}="{namespace}""#),
+                        &format!(r#"{binding}="{namespace}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#),
+                        1,
+                    ), false),
+                    (format!(r#"<{prefix}document {binding}="{namespace}"><{prefix}body/></{prefix}document>"#), true),
+                    (format!(r#"<{prefix}document {binding}="{namespace}"/>"#), true),
+                    (format!(r#"<{prefix}document {binding}="{namespace}"></{prefix}document>"#), true),
+                ] {
+                    for (path, root_relationship) in [
+                        ("documents/main.xml", true),
+                        ("word/document.xml", false),
+                    ] {
+                        let mut parts = main_package(path, content_type, &xml, namespace != W);
+                        if !root_relationship {
+                            parts.retain(|(name, _)| name != "_rels/.rels");
+                        }
+                        let parsed = parse_docx_s9_wire(
+                            &ooxml_opc::rezip_parts(&parts).unwrap(),
+                            S9ParseOptions::default(),
+                        )
+                        .unwrap();
+                        let content = &parsed.document.package.document.content;
+                        if empty {
+                            assert!(content.is_empty());
+                        } else {
+                            assert_eq!(content.len(), 1);
+                            let docx_parse::BlockContent::Paragraph(paragraph) = &content[0] else {
+                                panic!("paragraph")
+                            };
+                            assert_eq!(docx_parse::get_paragraph_text(paragraph), "Kept text");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

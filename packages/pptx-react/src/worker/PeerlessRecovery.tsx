@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useTranslation } from '../i18n';
+import { presentationFailureAction } from '../components/PresentationFailure';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 
 export function PeerlessRecovery({ run, fileName }: { run: PeerlessPresentation; fileName?: string }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
-  return <button type="button" disabled={busy} onClick={() => {
+  return <button type="button" disabled={busy} style={presentationFailureAction} onClick={() => {
     setBusy(true);
     void run.recover().then((result) => {
       const url = URL.createObjectURL(new Blob([new Uint8Array(result.bytes)], { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }));

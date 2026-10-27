@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -7,9 +8,9 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as yrs from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { DocxEditor } from '../../DocxEditor';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
@@ -32,24 +33,24 @@ beforeEach(() => {
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  posted: (ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule)[] = [];
+  posted: (DocxEngineWorkerRequest | DocxEngineWorkerHostModule)[] = [];
   terminated = false;
   constructor() {
     FakeWorker.instances.push(this);
   }
-  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
+  postMessage(request: DocxEngineWorkerRequest | DocxEngineWorkerHostModule): void {
     this.posted.push(request);
   }
-  requestAt(index: number): ResidentEngineWorkerRequest {
+  requestAt(index: number): DocxEngineWorkerRequest {
     const message = this.posted.at(index)!;
     if (!('id' in message)) throw new Error('Expected a worker request');
     return message;
   }
-  reply(response: ResidentEngineWorkerResponse): void {
-    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  reply(response: DocxEngineWorkerResponse): void {
+    this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
   terminate(): void {
     this.terminated = true;
@@ -95,7 +96,7 @@ function installWorker(): void {
 
 test('DocxEditor leaves prewarming off by default', async () => {
   installWorker();
-  const editor = render(<DocxEditor showToolbar={false} />);
+  const editor = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} showToolbar={false} />);
   await act(async () => {});
   expect(FakeWorker.instances).toHaveLength(0);
   expect(yrs.takePreloadedResidentEngineWorker()).toBeNull();
@@ -106,7 +107,7 @@ test('an opted-in editor warms on mount once in StrictMode and releases an unuse
   installWorker();
   const editor = render(
     <StrictMode>
-      <DocxEditor experimentalPrewarm showToolbar={false} />
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} experimentalPrewarm showToolbar={false} />
     </StrictMode>
   );
   expect(FakeWorker.instances).toHaveLength(1);

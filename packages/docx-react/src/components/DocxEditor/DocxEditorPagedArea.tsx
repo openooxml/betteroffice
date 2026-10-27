@@ -14,7 +14,7 @@ import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxReservationsPayload, DocxResolvedReservations, YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
 import type {
   DisplayPageNavigation,
   FontRequirementsInWorker,
@@ -61,10 +61,13 @@ export function DocxEditorPagedArea({
   commandBridgeRef,
   scrollContainerRef,
   editorContentRef,
+  reviewOverlay,
   // Document + section
   document,
   yrsCore,
   pluginHostOpen,
+  reservations,
+  reservationSets,
   collaboration,
   theme,
   initialSectionProperties,
@@ -155,9 +158,13 @@ export function DocxEditorPagedArea({
   commandBridgeRef: React.MutableRefObject<PagedEditorCommandBridge | null>;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
+  /** Wraps the canvas-mode sidebar overlay with the tracked-change review layer, hosted in `hostRef`. */
+  reviewOverlay?: { hostRef: React.RefObject<HTMLDivElement | null>; wrap(node: React.ReactNode): React.ReactNode };
   document: Document | null;
   yrsCore: YrsCoreSession;
   pluginHostOpen?: boolean;
+  reservations?: DocxResolvedReservations | null;
+  reservationSets?: DocxReservationsPayload | null;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -456,6 +463,8 @@ export function DocxEditorPagedArea({
         document={document}
         yrsCore={yrsCore}
         pluginHostOpen={pluginHostOpen}
+        reservations={reservations}
+        reservationSets={reservationSets}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
@@ -536,6 +545,7 @@ export function DocxEditorPagedArea({
       {canvasOverlayTarget &&
         createPortal(
           <div
+            ref={reviewOverlay?.hostRef}
             style={{
               position: 'absolute',
               top: 0,
@@ -562,7 +572,7 @@ export function DocxEditorPagedArea({
                 }
               }}
             >
-              {sidebarOverlayNode}
+              {reviewOverlay ? reviewOverlay.wrap(sidebarOverlayNode) : sidebarOverlayNode}
               {floatingCommentButton}
             </div>
           </div>,

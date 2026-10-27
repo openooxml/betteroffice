@@ -15,12 +15,19 @@ export interface SessionHostOptions<M extends SessionMethods, C> {
   context: C;
   executor?: TaskExecutor;
   onDispose?(): void;
+  /** Names a trap's cause, raw or already wrapped by a handler; without one it fails the session as `trap`. */
+  trapFailure?(trap: SessionFailure): SessionFailure | undefined;
 }
 
 export interface SessionHost<E extends SessionEvents> {
   readonly scheduler: SessionScheduler;
   emit<K extends keyof E & string>(name: K, payload: E[K], transfer?: Transferable[]): void;
+  /** Tells the client the running call is still working; safe to call from a long synchronous engine call. */
+  progress(): void;
 }
+
+/** Least time between two progress notices for the same call. */
+const PROGRESS_INTERVAL_MS = 1_000;
 
 function replyError(error: unknown): ReplyError {
   const result: ReplyError = {
@@ -46,9 +53,15 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   transport: SessionTransport, options: SessionHostOptions<M, C>
 ): SessionHost<E> {
   let failure: SessionFailure | undefined;
+  const failureOf = (error: unknown): SessionFailure => {
+    const failure = classify(error);
+    return failure.code === 'trap' ? options.trapFailure?.(failure) ?? failure : failure;
+  };
   let disposed = false;
   let unlisten = () => {};
   let unerror = () => {};
+  let running: number | undefined;
+  let reported = 0;
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
   const tasks = new Set<{ cancel(): void }>();
   const ended = () => disposed || failure !== undefined;
@@ -107,7 +120,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     const reject = (error: unknown): T => {
       if (ended()) return fallback;
       if (!terminal(error)) throw error;
-      fail(classify(error));
+      fail(failureOf(error));
       return fallback;
     };
     try {
@@ -122,7 +135,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     const guard = <A>(hook: (value: A) => unknown) => (value: A) => {
       if (ended()) return undefined;
       try { return hook(value); } catch (error) {
-        fail(classify(error));
+        fail(failureOf(error));
         return undefined;
       }
     };
@@ -141,7 +154,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         return settled(executor.run<Input, Result>(job));
       },
     },
-    failed: (error) => fail(classify(error)),
+    failed: (error) => fail(failureOf(error)),
   });
   const scheduler: SessionScheduler = {
     schedule(task) {
@@ -176,7 +189,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
             tracked.end();
             if (ended()) return 'done';
             if (terminal(error)) {
-              fail(classify(error));
+              fail(failureOf(error));
               return 'done';
             }
             throw error;
@@ -213,7 +226,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
             tracked.end();
             if (ended()) return;
             if (terminal(error)) {
-              fail(classify(error));
+              fail(failureOf(error));
               return;
             }
             throw error;
@@ -235,11 +248,13 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     } else send({ protocol: 1, kind: 'reply', id, ok: true, value });
   }
   function reject(id: number, error: unknown): void {
-    if (terminal(error)) fail(classify(error));
+    if (terminal(error)) fail(failureOf(error));
     else send({ protocol: 1, kind: 'reply', id, ok: false, error: replyError(error) });
   }
   async function run(message: Extract<ClientMessage, { kind: 'call' }>): Promise<void> {
     if (ended()) return;
+    running = message.id;
+    reported = Date.now();
     try {
       const handler = options.handlers[message.method as keyof M] as
         (context: C, ...args: unknown[]) => unknown;
@@ -251,6 +266,8 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       } else resolve(message.id, value);
     } catch (error) {
       reject(message.id, error);
+    } finally {
+      if (running === message.id) running = undefined;
     }
   }
   unlisten = transport.listen((message) => {
@@ -283,9 +300,15 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       }) });
     }
   });
-  unerror = transport.onError((error) => fail(classify(error)));
+  unerror = transport.onError((error) => fail(failureOf(error)));
   return {
     scheduler,
     emit: (name, payload, transfer) => send({ protocol: 1, kind: 'event', name, payload }, transfer),
+    progress() {
+      const now = Date.now();
+      if (running === undefined || now - reported < PROGRESS_INTERVAL_MS) return;
+      reported = now;
+      send({ protocol: 1, kind: 'progress', id: running });
+    },
   };
 }

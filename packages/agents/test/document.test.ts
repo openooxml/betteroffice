@@ -4,12 +4,27 @@ import { attachDocx, openDocx, type DocxAgentDocument } from '../src';
 import { fixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
-async function open(extra = 0) {
-  const doc = await openDocx(await fixture(extra));
+async function open(extra: number | Uint8Array = 0) {
+  const doc = await openDocx(typeof extra === 'number' ? await fixture(extra) : extra);
   opened.push(doc);
   return doc;
 }
 afterEach(() => { opened.splice(0).forEach(doc => doc.close()); });
+
+const xmlText = (xml: string) => [...xml.matchAll(/<w:(?:t|delText)\b[^>]*>([^<]*)<\/w:(?:t|delText)>/g)].map(match => match[1]).join('');
+const revisions = (xml: string, kind: 'ins' | 'del') => (xml.match(new RegExp(`<w:${kind}\\b[\\s\\S]*?<\\/w:${kind}>`, 'g')) ?? []).map(xmlText);
+
+async function replacement(oldText: string, newText: string, tracked = true) {
+  const zip = await JSZip.loadAsync(await fixture());
+  const source = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', source.replace('Executive summary', oldText));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  const [hit] = doc.grep({ query: oldText }).matches;
+  const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText }] });
+  await doc.accept(proposal.id, tracked ? { tracked: true, date: '2026-09-27T12:00:00Z' } : {});
+  const saved = await JSZip.loadAsync(await doc.export());
+  return { doc, ref: hit.ref, xml: await saved.file('word/document.xml')!.async('string') };
+}
 
 describe('grep, read, propose, export', () => {
   test('paginates a large document and returns exact contextual references', async () => {
@@ -55,7 +70,7 @@ describe('grep, read, propose, export', () => {
   test('preserves offsets across embeds and surrogate pairs', async () => {
     const doc = await open();
     const target = doc.session.paragraphs('body').find(p => p.text.startsWith('Before'))!;
-    doc.session.insertPageBreak({ story: 'body', paraId: target.paraId, offset: 6 });
+    doc.session.insertImage({ story: 'body', paraId: target.paraId, offset: 6 }, { rId: 'rIdImage' });
     const [hit] = doc.grep({ query: 'After 😀' }).matches;
     expect(hit.start).toBe(7);
     const p = doc.read(hit.ref);
@@ -101,7 +116,7 @@ describe('grep, read, propose, export', () => {
     expect(() => doc.propose({ author: 'test', edits: [0, 1].map(() => ({ ...hit, oldText: 'draft', newText: 'final' })) })).toThrow('non-touching');
     const [embed] = doc.grep({ query: 'Before' }).matches;
     const target = doc.session.paragraphs('body').find(p => p.text.startsWith('Before'))!;
-    doc.session.insertPageBreak({ story: 'body', paraId: target.paraId, offset: 6 });
+    doc.session.insertImage({ story: 'body', paraId: target.paraId, offset: 6 }, { rId: 'rIdImage' });
     const updated = doc.read(embed.ref);
     expect(() => doc.propose({ author: 'test', edits: [{ ...updated, start: 0, oldText: 'Before\ufffcAfter', newText: 'Removed' }] })).toThrow('embed');
     expect(doc.read(hit.ref)).toEqual(before);
@@ -192,6 +207,50 @@ describe('grep, read, propose, export', () => {
     expect(xml).toContain('GPT 6 Astra');
     expect(xml).toContain('approved');
     expect(xml).toContain('w:del');
+  });
+
+  test('tracked accept inserts only appended text and preserves the original run text', async () => {
+    const { xml } = await replacement('X', 'X tail');
+    expect(revisions(xml, 'ins')).toEqual([' tail']);
+    expect(revisions(xml, 'del')).toEqual([]);
+    expect((xml.match(/<w:r\b[\s\S]*?<\/w:r>/g) ?? []).map(xmlText)).toContain('X');
+  });
+
+  test('tracked accept inserts only prepended text', async () => {
+    const { xml } = await replacement('X', 'tail X');
+    expect(revisions(xml, 'ins')).toEqual(['tail ']);
+    expect(revisions(xml, 'del')).toEqual([]);
+    expect((xml.match(/<w:r\b[\s\S]*?<\/w:r>/g) ?? []).map(xmlText)).toContain('X');
+  });
+
+  test('tracked accept replaces only the changed middle word', async () => {
+    const { xml } = await replacement('the red car', 'the blue car');
+    expect(revisions(xml, 'del')).toEqual(['red']);
+    expect(revisions(xml, 'ins')).toEqual(['blue']);
+  });
+
+  test('tracked accept trims shared text without splitting surrogate pairs or graphemes', async () => {
+    for (const [oldText, newText, deleted, inserted] of [
+      ['😀X', '😀X tail', '', ' tail'],
+      ['😀 car', '😁 car', '😀', '😁'],
+      ['X😀', 'Y🈀', 'X😀', 'Y🈀'],
+      ['e\u0301 car', 'e\u0300 car', 'e\u0301', 'e\u0300'],
+      ['👩\u200d💻 dev', '👩\u200d🔬 dev', '👩\u200d💻', '👩\u200d🔬'],
+    ]) {
+      const { xml } = await replacement(oldText, newText);
+      expect(revisions(xml, 'del')).toEqual(deleted ? [deleted] : []);
+      expect(revisions(xml, 'ins')).toEqual([inserted]);
+      expect(xml).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    }
+  });
+
+  test('direct accept trims shared text and exports the final text without revisions', async () => {
+    for (const [oldText, newText] of [['X', 'X tail'], ['X', 'tail X'], ['the red car', 'the blue car'], ['aaa', 'aaaa']]) {
+      const { doc, ref, xml } = await replacement(oldText, newText, false);
+      expect(doc.read(ref).text).toBe(newText);
+      expect(xmlText(xml.match(/<w:p\b[\s\S]*?<\/w:p>/)![0])).toBe(newText);
+      expect(xml).not.toMatch(/<w:(ins|del)\b/);
+    }
   });
 
   test('invalidates cursors after edits and releases attached sessions without destroying them', async () => {

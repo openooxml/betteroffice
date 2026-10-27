@@ -1,3 +1,6 @@
+import type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
+export { DocxSectionError } from './sections';
+export type { SectionInfo, SectionPropertyPatch, SectionStartKind } from './sections';
 /**
  * Typed facade over the Rust yrs editing core (`crates/docx-edit`).
  *
@@ -31,6 +34,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { requireUnreservedClientId } from '../collaboration/protocol';
 import type {
   DocxEditRefusal,
   DocxEditRequest,
@@ -46,6 +50,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import type { DocxListStoriesResult } from './stories';
+import type { DocxReservationsPayload, DocxResolvedReservations } from './reservations';
 import type { DocxTableFragment } from './clipboardFragment';
 import {
   type DocxProposalRegistryState,
@@ -81,6 +86,7 @@ export type {
   DocxCommandEchoContext,
   DocxCommandKind,
   DocxCommandFrame,
+  DocxFrameReservations,
   DocxCommandPageIdentity,
   DocxCommandPayloads,
   DocxCommandSelection,
@@ -92,14 +98,14 @@ export type {
   DocxNavigationIntent,
   DocxSelectionPointIntent,
   DocxWorkerEditSession,
-  ResidentCommandConnection,
-  ResidentCommandInitReply,
+  DocxCommandConnection,
+  DocxCommandInitReply,
 } from './residentCommandProtocol';
 /** @internal */
 export type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 
 export * from './layoutMeta';
@@ -108,17 +114,20 @@ export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
 export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
+export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
 export * from './storyPlainText';
+export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export * from './clipboardFragment';
 export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
-export type { ResidentRangeHighlights } from './residentRangeHighlights';
-export type { ResidentDocumentRead, ResidentDocumentReadValues } from './residentEngineWorkerProtocol';
-export type { DocxCommentPatch, ResidentReviewSnapshot } from './residentReview';
-export type { ResidentToolbarMetadata } from './residentToolbarMetadata';
+export type { DocxRangeHighlights } from './residentRangeHighlights';
+export type { DocxPresencePeer, DocxPresenceGeometry } from './residentCollaboration';
+export type { DocxDocumentRead, DocxDocumentReadValues } from './residentEngineWorkerProtocol';
+export type { DocxCommentPatch, DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
+export type { DocxToolbarMetadata } from './residentToolbarMetadata';
 export type {
   DocxDisplayRange,
   DocxDisplaySelectionInfo,
@@ -135,7 +144,7 @@ export type {
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   preloadResidentEngineWorker,
@@ -147,8 +156,8 @@ export {
   type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
-export type { ResidentSourceOpenRequest, ResidentSourcePreviewOptions } from './residentSource';
-export type { ResidentFontFace, ResidentFontEnvironment, ResidentFontEnvironmentEvent, ResidentFontEnvironmentSnapshot } from './residentFontEnvironment';
+export type { DocxSourceOpenRequest, DocxSourcePreviewOptions } from './residentSource';
+export type { DocxFontFace, DocxFontEnvironment, DocxFontEnvironmentEvent, DocxFontEnvironmentSnapshot } from './residentFontEnvironment';
 export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
@@ -208,6 +217,7 @@ export {
 export { editorSaveKeys } from './editorSaveKeys';
 export * from './yrsPositionProjection';
 export * from './proposalGeometry';
+export * from './reservations';
 
 export interface YrsDocxHost {
   document: Document;
@@ -622,8 +632,14 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Report borderless table cell edges as view-only guides on each display page. */
+  showTableGridlines?: boolean;
   /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
   revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /** View-only layout reservations; saves and paged exports leave them out. @internal */
+  reservations?: Readonly<DocxResolvedReservations>;
+  /** Unresolved viewer reservations for resident layout requests. @internal */
+  reservationSets?: DocxReservationsPayload;
   /**
    * Lay the opened package's images out as `media:{n}` tokens, which a
    * resolver given the session's `mediaSource` reads. @internal
@@ -941,6 +957,12 @@ export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
+export interface YrsTablePropertiesPatch {
+  width?: number | null;
+  widthType?: string | null;
+  justification?: 'left' | 'center' | 'right' | null;
+}
+
 /** Undo grouping for tracked local transactions. */
 export type YrsUndoCaptureMode = 'auto' | 'manual';
 
@@ -1205,8 +1227,16 @@ export interface YrsSession extends CollaborationReplica {
   encodeStateVector(): Uint8Array;
   /** Full state, or only the state missing from a peer vector. */
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  /**
+   * The state missing from a peer vector as ordered updates of at most `maxChunkBytes` each: one update when it fits,
+   * otherwise causally ordered structs and then the delete set alone. Only an update holding a single larger struct
+   * exceeds the limit.
+   */
+  encodeStateAsUpdateChunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Uint8Array[];
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
+  /** Applies one sync's ordered updates as a single remote change; refuses all if any is malformed or oversized. */
+  applyUpdateChunks(updates: readonly Uint8Array[]): void;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
   /** Adopt another replica's host batch outside undo history. @internal */
@@ -1305,8 +1335,10 @@ export interface YrsSession extends CollaborationReplica {
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
+  setTableProperties(table: YrsTableLoc, patch: YrsTablePropertiesPatch): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
+  insertLineBreak(at: YrsLoc, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
@@ -1359,10 +1391,17 @@ export interface YrsSession extends CollaborationReplica {
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
   /** Commits image geometry at a paragraph-keyed position; reaches images that share an id. */
   setImageGeometryAt(at: YrsLoc, geometry: YrsImageGeometry): void;
-  /** Inserts a native page-break embed at a paragraph-keyed location. */
-  insertPageBreak(at: YrsLoc): void;
-  /** Inserts a native section-break embed at a paragraph-keyed location. */
+  /**
+   * Inserts a native page-break embed at a paragraph-keyed location, past the
+   * paragraph's leading blocks; inside a paragraph it splits the paragraph
+   * first. Returns where the break landed.
+   */
+  insertPageBreak(at: YrsLoc): YrsLoc;
+  /** Splits the paragraph at a paragraph-keyed location into a section boundary that starts the next section with `type`. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
+  insertSectionBreakAfter(paraId: string, kind: SectionStartKind): void;
+  setSectionProperties(section: string | number, properties: SectionPropertyPatch): void;
+  listSections(): SectionInfo[];
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
   /**
@@ -1385,6 +1424,8 @@ export interface YrsSession extends CollaborationReplica {
     date: string,
     body: unknown
   ): YrsCommentReceipt;
+  /** Updates comment metadata with local undo capture. */
+  updateComment(id: string, patch: { done?: boolean; parentId?: string | null; body?: unknown; author?: string; date?: string }): void;
   /** Reanchors an existing comment with non-empty ranges; preserves metadata and joins local undo capture. */
   setCommentRanges(commentId: string, ranges: readonly YrsStoryRange[]): void;
   /**
@@ -1640,9 +1681,9 @@ export interface CreateYrsSessionOptions {
  * it lazily so non-editor consumers avoid the wasm startup cost.
  */
 export async function createYrsSession(options?: CreateYrsSessionOptions): Promise<YrsSession> {
-  const clientId = options?.clientId ?? randomClientId();
+  const clientId = requireUnreservedClientId(options?.clientId ?? randomClientId());
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
   return wrapSession(wasm.createEditSession(clientId), clientId);
 }
-export type { ResidentEngineWorkerSourceOpened } from './residentSourceWorkerClient';
+export type { DocxEngineWorkerSourceOpened } from './residentSourceWorkerClient';

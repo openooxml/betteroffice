@@ -232,8 +232,16 @@ fn collect_complex_field_instructions(
         match node {
             InlineNode::ComplexField(field) => {
                 output.push(parse_field_instruction(&field.instruction));
-                if let Some(tree) = field.field_tree.as_ref() {
-                    collect_tree_instructions(tree, output);
+                for content in [
+                    field.structured_code.as_ref(),
+                    field.structured_result.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if let Some(nodes) = content.inline.as_deref() {
+                        collect_complex_field_instructions(nodes, output);
+                    }
                 }
             }
             InlineNode::InlineSdt(sdt) => collect_complex_field_instructions(&sdt.content, output),
@@ -241,22 +249,6 @@ fn collect_complex_field_instructions(
                 collect_complex_field_instructions(&change.content, output)
             }
             _ => {}
-        }
-    }
-}
-
-fn collect_tree_instructions(
-    tree: &crate::inline::StructuredFieldTree,
-    output: &mut Vec<ParsedFieldInstruction>,
-) {
-    // Child trees intentionally carry no duplicate instruction string. The
-    // nested ComplexField node in code/result is the authoritative source.
-    for content in [tree.code.as_ref(), tree.result.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(nodes) = content.inline.as_deref() {
-            collect_complex_field_instructions(nodes, output);
         }
     }
 }

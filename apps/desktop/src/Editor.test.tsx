@@ -4,23 +4,41 @@ import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
 import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
 import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
+import type { DocxErrorInfo } from "@betteroffice/docx-react";
 import type { EditorApi } from "./Editor";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 interface DocxProps {
+  documentBuffer: Uint8Array;
+  onFirstPagePainted(): void;
   onSave(buffer: ArrayBuffer): void;
-  onError(error: Error): void;
+  onError(error: Error, info?: DocxErrorInfo): void;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
-  experimentalPeerless?: boolean;
+  legacySyncApi?: boolean;
   onChange?: () => void;
   onDocumentChange?: () => void;
 }
 let docxProps: DocxProps;
+const parseDocx = mock(async () => ({}));
+const flushDocxInput = mock(async () => {});
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
+const workerOpens: Uint8Array[] = [];
+let workerOpenFailure: Error | null = null;
+let workersDestroyed = 0;
+class ResidentEngineWorkerClient {
+  async openSource({ bytes }: { bytes: Uint8Array }) {
+    workerOpens.push(bytes);
+    if (workerOpenFailure) throw workerOpenFailure;
+    return {};
+  }
+  destroy() {
+    workersDestroyed += 1;
+  }
+}
 let workbookProps: XlsxAsyncEditorProps;
 let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
 let deferWorkbookReady = false;
@@ -92,28 +110,44 @@ class Provider {
 mock.module("@betteroffice/docx-react", () => ({
   DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
     docxProps = props;
-    useImperativeHandle(ref, () => ({ save: () => save(props) }));
+    useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
+    useEffect(() => {
+      if (props.legacySyncApi) return;
+      const client = new ResidentEngineWorkerClient();
+      let current = true;
+      void client.openSource({ bytes: props.documentBuffer }).then(() => {
+        if (current) props.onFirstPagePainted();
+      }, (cause: Error) => { if (current) props.onError(cause); });
+      return () => { current = false; client.destroy(); };
+    }, [props.documentBuffer]);
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
+const loadFont = mock(async (_face: unknown): Promise<Uint8Array> => Uint8Array.of(1));
+const openPresentationSession = mock(async (_bytes: Uint8Array, _options: unknown) => ({ dispose: async () => {} }));
+mock.module("@betteroffice/pptx/worker", () => ({ openPresentationSession }));
+
 for (const [specifier, exports] of Object.entries({
   "@betteroffice/docx-react/peerless-harness": { registerBrowserHarness: () => () => {} },
   "@betteroffice/docx-react/styles.css": {},
+  "@betteroffice/docx/docx": { parseDocx },
+  "@betteroffice/docx/yrs": { ResidentEngineWorkerClient },
   "@betteroffice/docx/layout": { configureDefaultFonts: () => {} },
   "@betteroffice/docx/utils": { setGoogleFontsEnabled: () => {} },
   "@betteroffice/docx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/xlsx/collaboration": { CollaborationProvider: Provider },
-  "@betteroffice/pptx/editor": { CollaborationProvider: Provider },
+  "@betteroffice/pptx/collaboration": { CollaborationProvider: Provider },
   "@betteroffice/fonts": {
-    loadBundledFontBytes: () => {},
+    loadBundledFontBytes: loadFont,
     resolveLastResortFace: () => {},
     resolveMetricCompatFace: () => {},
   },
 }))
   mock.module(specifier, () => exports);
 
-const { act, cleanup, fireEvent, render } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
 const { default: Editor, prepareFile } = await import("./Editor");
+const { App } = await import("./App");
 
 afterEach(() => {
   cleanup();
@@ -134,7 +168,7 @@ test("peerless harness mode controls commit the editor read-only prop", async ()
   const previousUrl = location.href;
   scope.__DOCX_PEERLESS_HARNESS__ = true;
   const browser = window as unknown as GlobalWindow;
-  browser.happyDOM.setURL("http://localhost/?format=docx&peerless=1");
+  browser.happyDOM.setURL("http://localhost/?format=docx");
   try {
     const view = render(<Editor
       file={{ bytes: new Uint8Array(), format: "docx" }} name="input.docx" room={null}
@@ -215,6 +249,35 @@ function readinessClock() {
   };
 }
 
+test("docx input flush reaches the mounted editor barrier", async () => {
+  flushDocxInput.mockClear();
+  const { api } = await mount();
+  expect(api.flushPendingInput).toBeDefined();
+  await api.flushPendingInput!();
+  expect(flushDocxInput).toHaveBeenCalledTimes(1);
+});
+
+test.each(["xlsx", "pptx"] as const)("%s does not provide an input flush barrier", async (format) => {
+  const { api } = await mount(format);
+  expect(api.flushPendingInput).toBeUndefined();
+});
+
+test.each(["", "&peerless=1", "&peerless=0"])("docx %s reports dirty state through document events", async (query) => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  try {
+    const changed = mock(() => {});
+    await mount("docx", false, changed);
+    expect(docxProps!.legacySyncApi).toBe(query === "&peerless=0");
+    expect(docxProps!.onChange).toBeUndefined();
+    docxProps!.onDocumentChange?.();
+    expect(changed).toHaveBeenCalledTimes(1);
+  } finally {
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
 test("peerless preview reports dirty state through worker document events", async () => {
   const previousUrl = location.href;
   const browser = window as unknown as GlobalWindow;
@@ -222,12 +285,97 @@ test("peerless preview reports dirty state through worker document events", asyn
   try {
     const changed = mock(() => {});
     await mount("docx", false, changed);
-    expect(docxProps!.experimentalPeerless).toBe(true);
+    expect(docxProps!.legacySyncApi).toBe(false);
     expect(docxProps!.onChange).toBeUndefined();
     docxProps!.onDocumentChange?.();
     expect(changed).toHaveBeenCalledTimes(1);
   } finally {
     browser.happyDOM.setURL(previousUrl);
+  }
+});
+
+test.each(["", "&peerless=1", "&peerless=0"])("docx %s prepares bytes for its selected runtime", async (query) => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  parseDocx.mockClear();
+  workerOpens.length = 0;
+  workersDestroyed = 0;
+  try {
+    const bytes = Uint8Array.of(1, 2);
+    expect(await prepareFile(bytes, "docx")).toEqual({ bytes, format: "docx" });
+    expect(parseDocx).toHaveBeenCalledTimes(query === "&peerless=0" ? 1 : 0);
+    expect(workerOpens).toEqual([]);
+    expect(workersDestroyed).toBe(0);
+  } finally {
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
+test("a docx the worker cannot open is refused before it replaces the open file", async () => {
+  const previousUrl = location.href;
+  const browser = window as unknown as GlobalWindow;
+  browser.happyDOM.setURL("http://localhost/?format=docx");
+  parseDocx.mockClear();
+  workerOpens.length = 0;
+  workersDestroyed = 0;
+  const fetching = mock(async () => new Response(Uint8Array.of(1, 2)));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(fetching, { preconnect: originalFetch.preconnect });
+  try {
+    const view = render(<App />);
+    await waitFor(() => expect(window.desktop).toBeDefined());
+    act(() => { void window.desktop!.open({ id: "old", name: "old.docx", url: "http://localhost/old" }); });
+    await waitFor(() => expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx"));
+    const old = view.getByTestId("docx-mode");
+    workerOpenFailure = new Error("Failed to parse DOCX: not a zip archive");
+    act(() => { void window.desktop!.open({ id: "bad", name: "bad.docx", url: "http://localhost/bad" }); });
+    expect((await view.findByRole("alert")).textContent).toContain("Failed to parse DOCX");
+    expect(view.getByTestId("docx-mode")).toBe(old);
+    expect(view.container.querySelector(".document-name")?.textContent).toBe("old.docx");
+    expect(workerOpens).toHaveLength(2);
+    await waitFor(() => expect(workersDestroyed).toBe(1));
+    expect(parseDocx).not.toHaveBeenCalled();
+  } finally {
+    workerOpenFailure = null;
+    globalThis.fetch = originalFetch;
+    browser.happyDOM.setURL(previousUrl);
+  }
+});
+
+test("recoverable DOCX errors preserve serialization and the mounted editor", async () => {
+  const { api, errors, saved, view } = await mount();
+  const editor = view.getByTestId("docx-mode");
+  const stall = new Error("Full frame responses did not satisfy requested coverage and revision");
+  act(() => docxProps.onError(stall, { recoverable: true }));
+  save = async ({ onError, onSave }) => {
+    onError(stall, { recoverable: true });
+    onSave(Uint8Array.of(6).buffer);
+    return Uint8Array.of(6).buffer;
+  };
+  expect(await api.serialize()).toEqual(Uint8Array.of(6));
+  save = async ({ onError }) => {
+    onError(stall, { recoverable: true });
+    return null;
+  };
+  await expect(api.serialize()).rejects.toThrow("The editor is still opening the file. Try again in a moment.");
+  expect(errors).toEqual([]);
+  expect(saved).toEqual([]);
+  expect(view.getByTestId("docx-mode")).toBe(editor);
+});
+
+test("recoverable DOCX errors are logged without reaching the host failure callback", async () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const { errors, view } = await mount();
+    const editor = view.getByTestId("docx-mode");
+    const failure = new Error("Open request failed");
+    act(() => docxProps.onError(failure, { recoverable: true }));
+    expect(warn.mock.calls).toEqual([[failure]]);
+    expect(errors).toEqual([]);
+    expect(view.getByTestId("docx-mode")).toBe(editor);
+  } finally {
+    warn.mockRestore();
   }
 });
 
@@ -472,4 +620,36 @@ test("presentation collaboration connects the async replica and presence provide
   const openingOptions = presentationOptions.filter((options) => options && !options.presence);
   expect(openingOptions.length).toBeGreaterThan(1);
   expect(new Set(openingOptions).size).toBe(1);
+});
+
+test.each([1, 4])("pptx preparation tolerates %i failed font faces", async (failed) => {
+  const descriptors = ["Worker", "OffscreenCanvas"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const warning = spyOn(console, "warn").mockImplementation(() => {});
+  let calls = 0;
+  loadFont.mockImplementation(async () => {
+    if (calls++ < failed) throw new Error("Font download failed");
+    return Uint8Array.of(1);
+  });
+  try {
+    for (const [key] of descriptors) Object.defineProperty(globalThis, key, { configurable: true, value: class {} });
+    const bytes = Uint8Array.of(1);
+    const prepared = await prepareFile(bytes, "pptx");
+    expect(prepared.fonts).toHaveLength(4 - failed);
+    if (failed === 4) expect(prepared.fonts).toEqual([]);
+    else expect(prepared.fonts).toEqual([
+      { family: "Arial", bold: false, italic: true, bytes: Uint8Array.of(1) },
+      { family: "Arial", bold: true, italic: false, bytes: Uint8Array.of(1) },
+      { family: "Arial", bold: true, italic: true, bytes: Uint8Array.of(1) },
+    ]);
+    expect(openPresentationSession).toHaveBeenLastCalledWith(bytes, { fonts: prepared.fonts });
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0]?.[0]).toContain(`${failed} font faces failed to load`);
+  } finally {
+    warning.mockRestore();
+    loadFont.mockImplementation(async () => Uint8Array.of(1));
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
 });

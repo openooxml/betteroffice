@@ -65,6 +65,37 @@ function session(executor?: TaskExecutor) {
 }
 
 describe('session host and cloned transport', () => {
+  it('reports progress for the running call at most once a second', async () => {
+    const s = session();
+    const seen: string[] = [];
+    s.pair.client.listen((message) => {
+      if (isHostMessage(message) && (message.kind === 'progress' || message.kind === 'reply')) {
+        seen.push(`${message.kind}:${message.id}`);
+      }
+    });
+    s.host.progress();
+    const slow = s.client.call.slow();
+    const queued = s.client.call.add(1, 2);
+    await s.started.promise;
+    s.host.progress();
+    const realNow = Date.now;
+    Date.now = () => realNow() + 1_000;
+    try {
+      s.host.progress();
+      s.host.progress();
+    } finally {
+      Date.now = realNow;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['progress:1']);
+    s.held.resolve('done');
+    expect([await slow, await queued]).toEqual(['done', 3]);
+    s.host.progress();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual(['progress:1', 'reply:1', 'reply:2']);
+    await s.client.dispose();
+  });
+
   it('round trips calls, serializes handlers and delivers events in order', async () => {
     const s = session();
     const ticks: number[] = [];
@@ -986,5 +1017,54 @@ describe('session host and cloned transport', () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(messages).toEqual([]);
     }
+  });
+});
+
+describe('session host trap causes', () => {
+  it('fails the session with the cause trapFailure names, and as trap when it names none', async () => {
+    type Methods = { trap(): string };
+    const thrown: Array<[string, () => Error, string]> = [
+      ['raw', () => new WebAssembly.RuntimeError('unreachable'), 'unreachable'],
+      ['wrapped', () => new SessionFailure('trap', 'Command failed', 'unreachable'), 'Command failed'],
+    ];
+    for (const [, error, message] of thrown) {
+      for (const named of [true, false]) {
+        const pair = createInProcessPair();
+        const traps: SessionFailure[] = [];
+        createSessionHost<Methods, {}, null>(pair.host, {
+          context: null,
+          policies: { trap: { lane: 'interactive' } },
+          handlers: { trap: () => { throw error(); } },
+          trapFailure: (trap) => {
+            traps.push(trap);
+            return named ? new SessionFailure('out-of-memory', 'Engine ran out of memory', 'diag') : undefined;
+          },
+        });
+        const client = createSessionClient<Methods, {}>(pair.client, { methods: { trap: true } });
+        const failure = await client.call.trap().catch((reason) => reason);
+        expect(failure).toBe(client.failure);
+        expect(traps).toEqual([expect.objectContaining({ code: 'trap', message })]);
+        expect(client.failure).toMatchObject(named
+          ? { code: 'out-of-memory', message: 'Engine ran out of memory', diagnostics: 'diag' }
+          : { code: 'trap', message });
+        await client.dispose();
+      }
+    }
+  });
+
+  it('leaves failures other than traps to their own code', async () => {
+    const pair = createInProcessPair();
+    let asked = 0;
+    createSessionHost<{ crash(): string }, {}, null>(pair.host, {
+      context: null,
+      policies: { crash: { lane: 'interactive' } },
+      handlers: { crash: () => { throw new SessionFailure('crash', 'Worker stopped'); } },
+      trapFailure: () => { asked += 1; return new SessionFailure('out-of-memory', 'never'); },
+    });
+    const client = createSessionClient<{ crash(): string }, {}>(pair.client, { methods: { crash: true } });
+    await client.call.crash().catch(() => {});
+    expect(asked).toBe(0);
+    expect(client.failure).toMatchObject({ code: 'crash', message: 'Worker stopped' });
+    await client.dispose();
   });
 });

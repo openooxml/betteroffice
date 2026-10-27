@@ -1,8 +1,11 @@
 /// <reference lib="webworker" />
 
-import { readResidentToolbarMetadata } from './residentToolbarMetadata';
+import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
+import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
-import { readResidentReviewSnapshot } from './residentReview';
+import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
+import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
+import { stateVectorClock } from '../collaboration/protocol';
 import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import { isCommandOutcomeUnknownError } from '../../../../shared/office-session/commands/types';
 import { isTransferResult, type TransferResult } from '../../../../shared/office-session/protocol';
@@ -10,35 +13,40 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { buildCommandFrame, exactFrameBuffer, packResidentFrame } from './residentCommandFrame';
 import { createResidentCommandHost } from './residentCommandHost';
 import { createResidentDocxCommandHooks } from './residentCommandActions';
-import { releaseResidentSelectionReads } from './residentCommandSelection';
-import { readCommandStickyPosition } from './residentCommandAnchors';
+import { readDocxSelectionFocus, releaseResidentSelectionReads } from './residentCommandSelection';
+import { currentSelectionRange, readCommandStickyPosition } from './residentCommandAnchors';
 import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
-import { residentSourceMetadata, validateResidentSource } from './residentSource';
+import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
-import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
+import { ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
+  DocxCommandAck,
   DocxCommandEnvelope,
   DocxCommandFramePayload,
   DocxCommandPageIdentity,
   DocxCommandSelection,
+  DocxFrameReservations,
   DocxNavigationIntent,
   DocxSelectionPointIntent,
-  ResidentCommandHooksFactory,
-  ResidentCommandHost,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandHooksFactory,
+  DocxCommandHost,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
+  DocxHostImage,
+  DocxSvgMedia,
   PreparedDocxCommand,
-  ResidentDocxCommandEngine,
+  DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
-import type { YrsLoc, YrsRegionLayoutProgress, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
+import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import { createDisplayListQueries } from '../layout/render/displayListQueries';
+import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import {
   createResidentEngineSession,
   type ResidentEngineSession,
@@ -70,9 +78,11 @@ import { readCommentInsertionRange } from './residentCommentProjection';
 import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
-import { readResidentFrameGeometry, resetResidentObjectHandles } from './residentObjectGeometry';
+import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
+import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
+  resolveBookmarkTarget,
   resolveCommentTarget,
   resolveParagraphTarget,
   resolveRevisionTarget,
@@ -80,7 +90,7 @@ import {
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
-import { readSidebar, readOutlineHeadings } from './sidebarReads';
+import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
 import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
@@ -108,9 +118,9 @@ import {
 } from '../layout/render/rustDisplayList';
 import {
   RESIDENT_HOST_MODULE_WAIT_MS,
-  type ResidentEngineWorkerHostModule,
-  type ResidentEngineWorkerRequest,
-  type ResidentEngineWorkerResponse,
+  type DocxEngineWorkerHostModule,
+  type DocxEngineWorkerRequest,
+  type DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -122,13 +132,43 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
-let commandHost: ResidentCommandHost | null = null;
+let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
+let commandHost: DocxCommandHost | null = null;
+const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
-let commandInit: ResidentCommandInitRequest | null = null;
+let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
+let commandInit: DocxCommandInitRequest | null = null;
+/** Pictures the host decoded because this worker cannot (SVG), by media token and by data URL. */
+const hostImages = new Map<string, ImageBitmap>();
+/** The opened document's SVG pictures: data URL by media token. */
+let svgMediaUrls = new Map<string, string>();
+
+function adoptHostImages(images: readonly DocxHostImage[] | undefined): void {
+  const displaced = new Set<ImageBitmap>();
+  // A document opened without media tokens names its pictures by data URL.
+  for (const { source, image } of images ?? []) {
+    for (const key of [source, svgMediaUrls.get(source)]) {
+      if (key === undefined) continue;
+      const previous = hostImages.get(key);
+      if (previous && previous !== image) displaced.add(previous);
+      hostImages.set(key, image);
+    }
+  }
+  const kept = new Set(hostImages.values());
+  for (const image of displaced) if (!kept.has(image)) image.close();
+}
+
+function closeHostImages(): void {
+  for (const image of new Set(hostImages.values())) image.close();
+  hostImages.clear();
+  svgMediaUrls = new Map();
+}
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
   /** Pages of the certified prefix the whole layout has not replaced yet, or null. */
   certifiedPages(): number | null;
+  /** The document version the certified prefix lays out, or null. */
+  certifiedVersion(): string | null;
   begin(): YrsRegionLayoutProgress;
   resume(blocks: number): YrsRegionLayoutProgress;
   /** Finishes a certified prefix's layout now; false when there is none. */
@@ -136,20 +176,29 @@ interface CommandLayout {
 }
 let commandLayout: CommandLayout | null = null;
 let sessionFonts: ResidentSessionFonts | null = null;
-let commandHooksFactory: ResidentCommandHooksFactory | null = null;
+let commandHooksFactory: DocxCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  /** Host-decoded pictures arrived: every displayed page rasterizes again. */
+  repaintPictures?: boolean;
+  causes?: Set<'selection' | 'other'>;
+  selectionFrames?: Uint8Array[];
+  publishedGeometry?: {
+    frameEpoch: number; docEpoch: number; layoutEpoch: number; documentVersion: string;
+    layoutRevision: number; layoutInput: string; extras: string; pixelRatio: number;
+    provisional: boolean; parts: ReturnType<ResidentEngineSession['partGeometry']>;
+  };
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
-  viewport?: ResidentCommandViewportRequest;
+  viewport?: DocxCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
   echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
-export function setResidentCommandHooksFactory(factory: ResidentCommandHooksFactory): void {
+export function setResidentCommandHooksFactory(factory: DocxCommandHooksFactory): void {
   commandHooksFactory = factory;
 }
 
@@ -165,14 +214,20 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
   });
 }
 
-function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
-  if (!session) throw new Error('Resident engine worker is not initialized');
-  if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
+function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
+  if (!session) throw new Error('Document worker is not initialized');
+  if (!commandHooksFactory) throw new Error('Worker command hooks are not installed');
   releaseCommandHost?.();
   releaseCommandHost = null;
   const engine = session;
   if (init.rasterScale !== undefined) setCommandRasterScale(init.rasterScale);
+  init.layoutInput = resolveLayoutReservationInput(engine, init.layoutInput, true);
   const input = JSON.parse(init.layoutInput || '{}');
+  const recoveredReservations = init.recoveryState?.layoutReservations;
+  if (recoveredReservations) {
+    input.renderEnv = { ...input.renderEnv, reservations: recoveredReservations.values };
+    init.layoutInput = JSON.stringify(input);
+  }
   let layoutInput = init.layoutWithRegions ? init.layoutInput : JSON.stringify({
     ...input, measured: [], retainOnly: true,
     workerOwned: { bodyStory: 'body', renderEnv: input.renderEnv, measurement: input.measurement },
@@ -180,13 +235,15 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   });
   if (!init.layoutWithRegions) engine.layoutDocumentJson(layoutInput);
   let layoutDirty = !init.layoutWithRegions;
+  let appliedReservations: DocxFrameReservations | undefined = recoveredReservations?.set;
+  let laidOutReservations: DocxFrameReservations | undefined;
   sessionFonts?.dispose();
   const fonts = new ResidentSessionFonts(engine, scope.fonts);
   sessionFonts = fonts;
   const preparedFonts = new WeakMap<PreparedDocxCommand, Awaited<ReturnType<ResidentSessionFonts['prepare']>>>();
   const registry = proposals ??= createProposalRegistry(engine.proposalEngine);
   let layoutPreviewVersion = registry.snapshot().previewVersion;
-  let prefix: { pages: number; documentWidth?: number } | null = null;
+  let prefix: { pages: number; documentWidth?: number; version: string } | null = null;
   let certify = false;
   const dropPrefix = () => {
     prefix = null;
@@ -195,14 +252,15 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     selectionLayout = undefined;
   };
   const layoutWithPreview = () => {
+    laidOutReservations = appliedReservations;
     const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
+    const owner = init.layoutWithRegions ? input : input.workerOwned;
     const snapshot = registry.snapshot();
     const preview = proposalRevisionPreview(snapshot);
-    if (preview !== undefined || input.renderEnv?.revisionPreview !== undefined) {
-      input.renderEnv = { ...input.renderEnv };
-      if (preview) input.renderEnv.revisionPreview = preview;
-      else delete input.renderEnv.revisionPreview;
-      if (!init.layoutWithRegions) input.workerOwned = { ...input.workerOwned, renderEnv: input.renderEnv };
+    if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
+      owner.renderEnv = { ...owner.renderEnv };
+      if (preview) owner.renderEnv.revisionPreview = preview;
+      else delete owner.renderEnv.revisionPreview;
     }
     if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
     else engine.layoutDocumentJson(JSON.stringify(input));
@@ -214,6 +272,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   };
   const relayout = (step?: 'initial' | 'complete' | 'begin' | 'resume', blocks = ALL_BLOCKS) => {
     if (step === 'begin' || step === 'resume') {
+      if (step === 'begin') laidOutReservations = appliedReservations;
       const progress = step === 'begin'
         ? engine.beginRegionLayout(init.layoutInput) : engine.resumeRegionLayout(blocks);
       if (progress.layoutJson !== undefined) {
@@ -224,10 +283,11 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return progress;
     }
     if (step === 'initial') {
+      laidOutReservations = appliedReservations;
       const laid = engine.layoutDocumentWithRegionsExactPrefixRetained(init.layoutInput,
         Math.max(init.provisionalPages ?? 0, init.displayWindow?.[1] ?? 0));
       if (laid.provisional) {
-        prefix = { pages: laid.pages, documentWidth: laid.documentWidth };
+        prefix = { pages: laid.pages, documentWidth: laid.documentWidth, version: engine.proposalEngine.version() };
         provisionalFinalPages = laid.pages;
         incompleteLayout = { layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras };
       }
@@ -238,6 +298,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     }
     if (prefix) supersedeSlicedCompletion();
     if (step === 'complete') {
+      laidOutReservations = appliedReservations;
       if (init.layoutWithRegions) engine.layoutDocumentWithRegionsRetained(init.layoutInput);
       else engine.layoutDocumentJson(layoutInput);
       certify = true;
@@ -262,7 +323,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   let selectionLayout: { version: string; frame: RetainedFrame } | undefined;
   let selectionPage: DocxCommandPageIdentity | undefined;
   let selectionNavigation: {
-    focus: YrsLoc; direction: 'up' | 'down'; queryFrame?: { frame: RetainedFrame; version: string };
+    focus: YrsLoc; direction: 'up' | 'down'; distance?: number; queryFrame?: { frame: RetainedFrame; version: string };
   } | undefined;
   let selectionQueries: {
     frame: RetainedFrame; frameEpoch: number; layoutRevision: number; version: string;
@@ -322,8 +383,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       !frame.pages[caret.pageIndex]!.page.unbuilt ? caret.pageIndex : undefined;
   };
   resetResidentObjectHandles(engine);
-  const hooks = commandHooksFactory(engine, init, {
-    setRenderEnvironment(environment) {
+  const baseHooks = commandHooksFactory(engine, init, {
+    getLayoutReservations() {
+      return (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? null;
+    },
+    setRenderEnvironment(environment, set) {
+      if (set !== undefined) appliedReservations = set ?? (appliedReservations && { version: appliedReservations.version, key: null });
       const input = JSON.parse(init.layoutInput);
       input.renderEnv = { ...input.renderEnv, ...environment };
       init.layoutInput = JSON.stringify(input);
@@ -335,6 +400,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
     supportsFontEnvironment: true,
     proposals: registry,
+    collaboration: collaboration !== null,
     readSelectionLayout() {
       const { version, frame: selectedFrame } = readSelectionFrame();
       let frame = selectedFrame;
@@ -345,6 +411,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (layoutDirty || !retainedFrame) selectionLayout = { version, frame };
         else {
           retainedFrame = frame;
+          if (commandFrameChanges) (commandFrameChanges.selectionFrames ??= []).push(bytes);
           if (commandFrameChanges) commandFrameChanges.reviewFrame = { frameEpoch: frame.frameEpoch, previewVersion: layoutPreviewVersion };
         }
       };
@@ -360,7 +427,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (page?.page.unbuilt) pages.add(page.pageIndex);
       }
       if (selectionNavigation) {
-        const { focus, direction } = selectionNavigation;
+        const { focus, direction, distance } = selectionNavigation;
         const root = focus.story === 'body' || focus.story.startsWith('body:') ? 'body'
           : focus.story.split(':').slice(0, 2).join(':');
         const position = displayPositionIndex(engine).positionOf(focus, root);
@@ -427,8 +494,25 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             }
           }
           if (caret && caret.height > 0 && !frame.pages[caret.pageIndex]?.page.unbuilt) {
-            const neighbour = caret.pageIndex + (direction === 'up' ? -1 : 1);
-            if (frame.pages[neighbour]?.page.unbuilt) pages.add(neighbour);
+            if (distance !== undefined) {
+              let top = 0;
+              const entries = frame.pages.map(({ page, pageIndex }) => {
+                const entry = { pageIndex, top, bottom: top + page.height };
+                top += page.height + CANVAS_PAGE_GAP_PX;
+                return entry;
+              });
+              const origin = entries[caret.pageIndex]!.top + caret.y + caret.height / 2;
+              const target = origin + (direction === 'down' ? distance : -distance);
+              const gap = (entry: typeof entries[number]) => Math.max(entry.top - target, 0, target - entry.bottom);
+              const targetPage = entries.reduce((nearest, entry) => gap(entry) < gap(nearest) ? entry : nearest);
+              const lookahead = targetPage.pageIndex + (direction === 'down' ? 1 : -1);
+              for (const pageIndex of [targetPage.pageIndex, lookahead]) {
+                if (frame.pages[pageIndex]?.page.unbuilt) pages.add(pageIndex);
+              }
+            } else {
+              const neighbour = caret.pageIndex + (direction === 'up' ? -1 : 1);
+              if (frame.pages[neighbour]?.page.unbuilt) pages.add(neighbour);
+            }
           }
         }
       }
@@ -437,19 +521,35 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       return { frame, layoutRevision };
     },
   });
-  const changes: NonNullable<typeof commandFrameChanges> = { pages: new Set<number>(), updates: [], layoutPreviewVersion };
+  const changes: NonNullable<typeof commandFrameChanges> = {
+    causes: new Set(['other']), pages: new Set<number>(), updates: [], layoutPreviewVersion, layoutStale: init.recoveryState !== undefined,
+  };
+  const wrapped = collaboration?.wrap(baseHooks) ?? baseHooks;
+  const hooks = { ...wrapped, ...(wrapped.recoveryState ? {
+    recoveryState: () => ({
+      ...wrapped.recoveryState!(),
+      comments: engine.commentRecoveryState?.(),
+      layoutReservations: {
+        values: (JSON.parse(init.layoutInput) as { renderEnv?: YrsRenderEnv }).renderEnv?.reservations ?? {},
+        set: appliedReservations,
+      },
+    }),
+  } : {}) };
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
     word: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
     line: { backward: 'result', forward: 'result', up: 'interior', down: 'interior' },
+    page: { backward: 'complete', forward: 'complete', up: 'complete', down: 'complete' },
     paragraph: { backward: 'interior', forward: 'interior', up: 'complete', down: 'complete' },
     'document-boundary': { backward: 'result', forward: 'complete', up: 'complete', down: 'complete' },
   } satisfies Record<DocxNavigationIntent['unit'], Record<DocxNavigationIntent['direction'], 'result' | 'interior' | 'complete'>>;
+  const geometryIndependent = new Set<DocxCommandEnvelope['kind']>(['propose', 'setProposalStates', 'withdrawProposals']);
   const canUsePrefix = (
     command: DocxCommandEnvelope, context: DocxCommandApplyContext, result?: DocxCommandSelection | null
   ): boolean => {
     if (!prefix || changes.layoutStale) return false;
+    if (geometryIndependent.has(command.kind)) return true;
     if (result !== undefined) {
       if (!result || result.anchor.story !== result.focus.story || result.anchor.paraId !== result.focus.paraId ||
         result.anchor.offset !== result.focus.offset || result.focus.story !== 'body') return false;
@@ -497,22 +597,43 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   const host = createResidentCommandHost({
     init,
     registry: { handlers: {}, policies: {} },
+    selectionAck: {
+      echoContext() {
+        if (layoutDirty || !retainedFrame || retainedFrame.frameEpoch !== revision ||
+          retainedLayoutVersion !== engine.proposalEngine.version() || hooks.editState().storedMarks ||
+          !echoGlyphState || echoGlyphState.engine !== engine || echoGlyphState.cache !== glyphCache) return undefined;
+        const projected = projectCommandEchoContext({
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(),
+          layout: { frame: retainedFrame, layoutRevision },
+          glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
+        });
+        return projected?.glyphs ? projected : undefined;
+      },
+      deferFrame(ack) { deferredSelectionFrames.add(ack); },
+    },
     hooks: {
       ...hooks,
       async preflight(command, context) {
-        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate') {
+        (changes.causes ??= new Set()).add(
+          ['select', 'selectPoint', 'extendSelection', 'navigate', 'selectTableCells'].includes(command.kind) ? 'selection' : 'other');
+        if (command.kind === 'selectPoint' || command.kind === 'extendSelection' || command.kind === 'navigate' || command.kind === 'moveEmbed') {
           await loadRustDisplayListQueryEngine();
         }
         if (prefix && !(await host.withFrameWork(async () => canUsePrefix(command, context)))) await completeCommandPrefix(host);
-        selectionPage = command.kind === 'selectPoint' || command.kind === 'extendSelection'
-          ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
+        selectionPage = command.kind === 'moveEmbed'
+          ? (command.payload as { drop?: { page?: DocxCommandPageIdentity } } | null)?.drop?.page
+          : command.kind === 'selectPoint' || command.kind === 'extendSelection'
+            ? (command.payload as { page?: DocxCommandPageIdentity } | null)?.page : undefined;
         const navigation = command.kind === 'navigate' ? command.payload as DocxNavigationIntent : undefined;
-        if (navigation?.unit === 'line' && (navigation.direction === 'up' || navigation.direction === 'down')) {
+        if ((navigation?.unit === 'line' || navigation?.unit === 'page') && (navigation.direction === 'up' || navigation.direction === 'down')) {
           const selected = context.predecessorSelection?.focus;
           const focus = selected?.sticky
             ? engine.resolveStickyPosition({ story: selected.story, encoded: selected.sticky })
             : selected ?? engine.selection()?.head;
-          if (focus) selectionNavigation = { focus, direction: navigation.direction };
+          if (focus) selectionNavigation = {
+            focus: navigation.unit === 'page' ? cellSelectionHeadPosition(engine, focus) ?? focus : focus,
+            direction: navigation.direction,
+            ...(navigation.unit === 'page' ? { distance: navigation.distance } : {}) };
         }
         const queryEngine = selectionNavigation ? loadedRustDisplayListQueryEngine() : null;
         const verticalMove = queryEngine?.verticalMoveJson;
@@ -539,12 +660,13 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
-              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
+              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as DocxFontEnvironment));
             } catch (error) {
               if (error instanceof WebAssembly.RuntimeError) throw error;
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
             }
           }
+          if (checked.status !== 'ready') (changes.causes ??= new Set()).add('other');
           return checked;
         } finally {
           if (queryEngine && verticalMove) queryEngine.verticalMoveJson = verticalMove;
@@ -555,12 +677,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       async apply(command, context) {
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
-          if (!prepared) throw new Error('Resident font environment was not prepared');
+          if (!prepared) throw new Error('Worker font environment was not prepared');
           const snapshot = fonts.commit(prepared, (faces, chains) => {
             engine.clearFonts();
             glyphCache = null;
             const registered = registerCommandFonts(engine, faces);
-            if (registered.ids.some(id => id === null)) throw new Error('Resident font registration failed');
+            if (registered.ids.some(id => id === null)) throw new Error('Worker font registration failed');
             const input = JSON.parse(init.layoutInput);
             input.measurement = { ...input.measurement, fontChains: chains };
             init.layoutInput = registered.remap(JSON.stringify(input));
@@ -584,43 +706,81 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           forgetRequirementsCache();
         }
         const result = await hooks.apply(command, context);
-        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) relayout();
+        if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
+          try { relayout(); } catch (error) {
+            if (error instanceof WebAssembly.RuntimeError) throw error;
+            throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         return result;
       },
       async frame({ coversThroughSeq, full }) {
+        const causes = changes.causes;
+        changes.causes = new Set();
+        const publishedGeometry = changes.publishedGeometry;
+        const selectionFrames = changes.selectionFrames?.splice(0) ?? [];
+        const selectionDeltas = selectionFrames.map(bytes => decodeFrameDelta(bytes));
+        let selectionEpoch = publishedGeometry?.frameEpoch;
+        for (const delta of selectionDeltas) {
+          selectionEpoch = !delta.full && delta.baseFrameEpoch === selectionEpoch &&
+            delta.docEpoch === publishedGeometry?.docEpoch && delta.layoutEpoch === publishedGeometry?.layoutEpoch
+            ? delta.frameEpoch : undefined;
+        }
+        let documentVersion = engine.proposalEngine.version();
+        const frameExtras = () => JSON.stringify({
+          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
+        });
+        let extras = frameExtras();
+        const selectionOnly = !full && causes?.size === 1 && causes.has('selection') &&
+          !layoutDirty && !changes.layoutStale && !changes.viewport && !changes.updates.length &&
+          publishedGeometry !== undefined && !publishedGeometry.provisional &&
+          retainedFrame !== null && selectionEpoch === retainedFrame.frameEpoch &&
+          publishedGeometry.docEpoch === retainedFrame.docEpoch && publishedGeometry.layoutEpoch === retainedFrame.layoutEpoch &&
+          publishedGeometry.documentVersion === documentVersion && publishedGeometry.layoutRevision === layoutRevision &&
+          publishedGeometry.layoutInput === init.layoutInput && publishedGeometry.extras === extras &&
+          publishedGeometry.pixelRatio === offscreenDpr * offscreenZoom;
         const viewport = changes.viewport;
         const selectionContext = changes.selectionContext;
         changes.selectionContext = undefined;
         const previousWindow = changes.window ?? commandDisplayWindow ?? init.displayWindow;
+        const frameWindow = changes.window ?? (selectionOnly || selectionContext ? previousWindow ?? [0, 0] : undefined);
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
+        const repaintPictures = changes.repaintPictures === true;
+        changes.repaintPictures = false;
         if (viewport) {
           changes.window = [viewport.start, viewport.end];
           commandDisplayWindow = changes.window;
           engine.setDisplayWindow(...changes.window);
           engine.setDisplayRetainBuiltPages(false);
-        } else if (pages.length && !changes.window) {
+        } else if (pages.length && !changes.window && !selectionOnly) {
           commandDisplayWindow = [Math.min(...pages), Math.max(...pages) + 1];
           engine.setDisplayWindow(...commandDisplayWindow);
         }
         const updates = changes.updates.splice(0);
         for (const update of updates) engine.applyUpdate(update);
         if (updates.length || changes.layoutStale) relayout();
+        documentVersion = engine.proposalEngine.version();
         const framePreviewVersion = layoutPreviewVersion;
         const relaid = layoutDirty;
+        if (relaid) extras = frameExtras();
         layoutDirty = false;
-        const extras = JSON.stringify({
-          ...JSON.parse(init.extras), headersFooters: JSON.parse(engine.retainedHeadersFootersJson() ?? 'null'),
-        });
-        const preceding: Uint8Array[] = [];
+        const preceding: Uint8Array[] = selectionOnly ? selectionFrames : [];
+        let reuseGeometry = selectionOnly;
+        const geometryPages = new Set<number>();
         const residency = changes as typeof changes & {
           builtPages?: Map<string, number>; caretPage?: number; caretPageId?: string;
           caretFocus?: Pick<YrsLoc, 'story' | 'paraId'>;
         };
-        const builtPages = changes.window ? residency.builtPages ??= new Map(retainedFrame?.pages
+        const builtPages = (frameWindow || previousWindow || viewport) ? residency.builtPages ??= new Map(retainedFrame?.pages
           .filter(({ page }) => !page.unbuilt).map(({ pageId, pageIndex }) => [pageId.toString(), pageIndex])) : undefined;
         const trackBuilt = (delta: ReturnType<typeof decodeFrameDelta>) => {
+          if (delta.full) reuseGeometry = false;
+          for (const operation of delta.operations) {
+            if (operation.kind === 'upsert') geometryPages.add(operation.pageIndex);
+            else reuseGeometry = false;
+          }
           if (!builtPages) return;
           if (delta.full) builtPages.clear();
           for (const operation of delta.operations) {
@@ -631,6 +791,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             }
           }
         };
+        if (selectionOnly) {
+          for (const delta of selectionDeltas) trackBuilt(delta);
+        }
         for (const index of pages) {
           const page = retainedFrame?.pages[index];
           if (page && !page.page.unbuilt) builtPages?.set(page.pageId.toString(), page.pageIndex);
@@ -641,10 +804,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             if (retainedFrame.pages[index]?.page.unbuilt) requestedBuilds.add(index);
           }
         }
-        let bytes = (pages.length || viewport) && !relaid
-          ? engine.buildDisplayPagesFrame([...requestedBuilds], full ? 0 : revision)
+        let bytes = (selectionOnly || pages.length || viewport) && !relaid
+          ? engine.buildDisplayPagesFrame([...requestedBuilds], selectionOnly ? retainedFrame!.frameEpoch : full ? 0 : revision)
           : engine.buildDisplayListFrame(extras, full ? 0 : revision);
-        let first: ReturnType<typeof decodeFrameDelta> | undefined;
+        let first: ReturnType<typeof decodeFrameDelta> | undefined = selectionOnly ? selectionDeltas[0] : undefined;
         if (pages.length && relaid) {
           first = applyWorkerFrame(bytes, framePreviewVersion);
           trackBuilt(first);
@@ -657,8 +820,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         let caretPage = finalized.caret.caretRect?.pageIndex;
         let modelCaret: YrsResidentCaretRect | undefined;
         let probed = false;
-        if (changes.window) {
-          const [start, end] = changes.window;
+        if (frameWindow || viewport) {
+          const [start, end] = changes.window ?? frameWindow!;
           const keep = new Set(pages);
           const selection = hooks.selection();
           const selected = selection?.focus;
@@ -751,10 +914,10 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
             finalized = await finalizeResidentFrame(engine.buildDisplayPagesFrame(entering, retainedFrame!.frameEpoch), false, true, true, framePreviewVersion);
             trackBuilt(finalized.delta);
           }
-          const distant = [...builtPages!].flatMap(([pageId, index]) => {
+          const distant = changes.window ? [...builtPages!].flatMap(([pageId, index]) => {
             const page = retainedFrame!.pages[index];
             return page?.pageId.toString() === pageId && !page.page.unbuilt && !keep.has(index) ? [index] : [];
-          });
+          }) : [];
           if (distant.length) {
             const released = engine.releaseDisplayPagesFrame(distant, retainedFrame!.frameEpoch);
             if (released === null) throw new Error('Viewport display pages could not be released');
@@ -786,14 +949,14 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (viewport && !scaleOnlyViewport) {
           for (let index = viewport.start; index < Math.min(viewport.end, layout.frame.pages.length); index += 1) requestedPages.add(index);
         }
-        if (changes.window && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
+        if ((frameWindow || viewport) && caretPage !== undefined && !scaleOnlyViewport) requestedPages.add(caretPage);
         if (!glyphCache) glyphCache = new GlyphCache({ provider: (fontId, glyphId) => engine.outlineGlyphJson(fontId, glyphId) });
         const pixelRatio = offscreenDpr * offscreenZoom;
         const echoRaster = changes.echoRaster;
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
-          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
         if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
@@ -806,6 +969,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const rasterOptions = {
           glyphCache,
           async resolveImage(source: string) {
+            const hosted = hostImages.get(source);
+            if (hosted) return hosted;
             if (failedImages.has(source)) return null;
             let image = images.get(source);
             if (!image) {
@@ -831,8 +996,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           if (retained) visiblePages.add(retained.pageIndex);
         }
         for (const index of pages) visiblePages.add(index);
-        if (changes.window) {
-          for (let index = changes.window[0]; index < Math.min(changes.window[1], layout.frame.pages.length); index += 1) visiblePages.add(index);
+        if (changes.window || frameWindow) {
+          const [start, end] = changes.window ?? frameWindow!;
+          for (let index = start; index < Math.min(end, layout.frame.pages.length); index += 1) visiblePages.add(index);
         } else if (activeOffscreenPageIds.size) {
           for (const pageId of activeOffscreenPageIds) {
             const retained = retainedPageByKey(layout.frame, pageId);
@@ -847,7 +1013,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           const retained = layout.frame.pages[index];
           if (!retained || retained.page.unbuilt) return [];
           const pageId = retained.pageId.toString();
-          if (!full && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
+          if (!full && !repaintPictures && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
           return [{ pageId, pageIndex: retained.pageIndex }];
         });
         const presentation = await stageCommandPresentation({
@@ -877,11 +1043,19 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         for (const page of stagedPages) pendingOffscreenPageIds.delete(page.pageId);
         const shown: ReturnType<typeof presentLayout> = init.provisionalPages === undefined ? {} : presentLayout();
         const selected = hooks.selection();
-        const selectionRects = !shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
+        const cells = readCellSelection(engine);
+        const cellRects = !shown.layoutProvisional ? readResidentCellSelectionRects(engine, layout.frame, cells) : null;
+        const selectionRects = cellRects ?? (!shown.layoutProvisional && selected && (selected.anchor.story !== selected.focus.story ||
           selected.anchor.paraId !== selected.focus.paraId || selected.anchor.offset !== selected.focus.offset)
           ? (await readResidentRangeHighlights(engine, layout.frame, [{
             story: selected.anchor.story, start: selected.anchor, end: selected.focus,
-          }], layoutRevision)).rects[0] ?? [] : [];
+          }], layoutRevision)).rects[0] ?? [] : []);
+        let parts = shown.layoutProvisional ? [] : reuseGeometry ? publishedGeometry!.parts : engine.partGeometry(retainedFrame!);
+        if (!shown.layoutProvisional && reuseGeometry && geometryPages.size) {
+          parts = [...parts.filter(part => !geometryPages.has(part.pageIndex)), ...engine.partGeometry({
+            ...retainedFrame!, pages: [...geometryPages].map(index => retainedFrame!.pages[index]!),
+          })].sort((a, b) => a.pageIndex - b.pageIndex);
+        }
         const built = buildCommandFrame({
           frame: finalized.bytes,
           metadata: first
@@ -890,14 +1064,22 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           pageFrames: preceding, coversThroughSeq, caret: finalized.caret,
           layoutRevision, documentVersion: engine.proposalEngine.version(),
           selectionRects,
+          selectionFocus: selected && !shown.layoutProvisional && !cellRects && !finalized.caret.caretRect
+            ? readDocxSelectionFocus(engine, selected, layout) ?? undefined : undefined,
           ...(fonts.snapshot ? { fontEnvironment: fonts.snapshot } : {}),
-          parts: shown.layoutProvisional ? [] : engine.partGeometry(retainedFrame!),
+          parts,
           geometry: hooks.editState().readOnly || shown.layoutProvisional ? undefined
             : await readResidentFrameGeometry(engine, retainedFrame!, hooks.selection(), layoutRevision),
           ...shown, echoContext, ...(echoGlyphSets.length ? { echoGlyphSets } : {}), stagedPresentation: presentation.value,
+          ...(laidOutReservations ? { reservations: laidOutReservations } : {}),
         });
         echoGlyphs.sent(echoGlyphSets);
         revision = built.value.revision;
+        changes.publishedGeometry = {
+          frameEpoch: retainedFrame!.frameEpoch, docEpoch: retainedFrame!.docEpoch, layoutEpoch: retainedFrame!.layoutEpoch,
+          documentVersion, layoutRevision, layoutInput: init.layoutInput, extras, pixelRatio,
+          provisional: prefix !== null, parts,
+        };
         changes.reviewFrame = { frameEpoch: retainedFrame!.frameEpoch, previewVersion: framePreviewVersion };
         pendingUpdates = [];
         return built;
@@ -906,7 +1088,9 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
     },
   });
   commandInit = init;
+  commandQueries = queriesFor;
   releaseCommandHost = () => {
+    commandQueries = null;
     selectionQueries?.queries.dispose();
     selectionQueries = undefined;
     releaseResidentSelectionReads(engine);
@@ -915,6 +1099,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
   if (!viewportFirst(init)) return host;
   commandLayout = {
     certifiedPages: () => prefix?.pages ?? null,
+    certifiedVersion: () => prefix?.version ?? null,
     begin: () => relayout('begin')!,
     resume: (blocks) => relayout('resume', blocks)!,
     complete() {
@@ -950,7 +1135,7 @@ function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boo
 }
 
 /** Whether `init` opens on a certified prefix that completes in the background. */
-function viewportFirst(init: ResidentCommandInitRequest): boolean {
+function viewportFirst(init: DocxCommandInitRequest): boolean {
   return init.layoutWithRegions && init.provisionalPages !== undefined;
 }
 
@@ -958,7 +1143,7 @@ function viewportFirst(init: ResidentCommandInitRequest): boolean {
  * Finishes a certified prefix's layout after the frames already in flight; false when there is none.
  * Only for requests `runRequest` does not run inside the frame work, which complete directly.
  */
-function completeCommandPrefix(host: ResidentCommandHost): Promise<boolean> {
+function completeCommandPrefix(host: DocxCommandHost): Promise<boolean> {
   if (commandLayout?.certifiedPages() == null) return Promise.resolve(false);
   return host.withFrameWork(async () => commandLayout?.complete() ?? false);
 }
@@ -971,7 +1156,7 @@ function abandonedRegionLayout(error: unknown): boolean {
     message === 'the document or its fonts changed since the region layout began';
 }
 
-function replacementCommandInit(): ResidentCommandInitRequest | null {
+function replacementCommandInit(): DocxCommandInitRequest | null {
   if (!commandInit) return null;
   return {
     ...commandInit, epoch: commandInit.epoch + 1,
@@ -979,8 +1164,8 @@ function replacementCommandInit(): ResidentCommandInitRequest | null {
   };
 }
 
-function requireCommandHost(): ResidentCommandHost {
-  if (!commandHost) throw new Error('Resident commands are not initialized');
+function requireCommandHost(): DocxCommandHost {
+  if (!commandHost) throw new Error('Worker commands are not initialized');
   return commandHost;
 }
 
@@ -996,14 +1181,14 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
 /** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
 function postCommandFrame(
   id: number,
-  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  answer: Omit<DocxEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
   transfer: Transferable[] = []
 ): void {
   const host = requireCommandHost();
   const init = commandInit!;
   void host.frame().then((result) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     const frame = isTransferResult(result) ? result.value : result;
@@ -1014,7 +1199,7 @@ function postCommandFrame(
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
@@ -1058,9 +1243,12 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
 let openedViaSource = false;
 let openedParsed = false;
+/** Toolbar metadata of the parsed document a source open seeded, read once. */
+let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
 class SaveUnavailableError extends Error {}
+class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -1068,6 +1256,10 @@ function noteDocumentChange(): void {
 }
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
+/** Whether the opened source is a cut that stops before the end of its body. */
+let cutPartial = false;
+/** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
+let openedCut: DocxSourceOpenRequest | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1110,6 +1302,7 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
+let projectionFailure: SessionFailure | null = null;
 // A bootstrap laid out only the body's first pages: the request to finish
 // it, then the finished layout until `completeLayout` hands it over.
 interface LayoutRequest {
@@ -1134,7 +1327,7 @@ interface SlicedCompletion {
   /** Times a change in between abandoned the pass. */
   restarts: number;
   /** The command session whose certified prefix this completes; its frames publish the result. */
-  commandOwner?: ResidentCommandHost;
+  commandOwner?: DocxCommandHost;
 }
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_RESTARTS = 3;
@@ -1143,7 +1336,7 @@ const COMPLETION_IDLE_MS = 300;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 interface BackgroundPageBuild {
-  request: Extract<ResidentEngineWorkerRequest, { type: 'buildPages' }>;
+  request: Extract<DocxEngineWorkerRequest, { type: 'buildPages' }>;
   owner: ResidentEngineSession;
   frameEpoch: number;
   frames: Uint8Array[];
@@ -1159,8 +1352,23 @@ const BACKGROUND_SLICE_PAGES = 4;
 let handlingId = 0;
 const trappedIds = new Set<number>();
 
+/** Least time between two progress notices. */
+const PROGRESS_INTERVAL_MS = 1_000;
+const runningIds = new Set<number>();
+let progressReported = 0;
+
+/** Tells the client a running request is still working; engine loops call it through `__betterofficeEngineProgress`. */
+function reportProgress(): void {
+  if (runningIds.size === 0) return;
+  const now = performance.now();
+  if (now - progressReported < PROGRESS_INTERVAL_MS) return;
+  progressReported = now;
+  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies DocxEngineWorkerResponse);
+}
+Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
+
 scope.onmessage = (
-  event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
+  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
 ) => {
   const message = event.data;
   if (message.type === 'editModule') {
@@ -1178,7 +1386,7 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
+function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
   const run = () => runRequest(request);
   switch (request.type) {
     case 'edit': {
@@ -1216,6 +1424,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
       };
     case 'open':
     case 'openSource':
+    case 'previewSource':
     case 'bootstrap':
     case 'sync':
     case 'destroy':
@@ -1252,28 +1461,31 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
 }
 
 function isUserInputCommand(kind: string): boolean {
-  return kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
-    kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' ||
+  return kind === 'moveEmbed' || kind === 'resizeObject' || kind === 'moveObject' || kind === 'setSectionMargins' || kind === 'setTabStops' || kind === 'removeTabStop' || kind === 'setHyperlink' || kind === 'setObjectProperties' || kind === 'setSectionProperties' || kind === 'setNoteProperties' || kind === 'setWatermark' || kind === 'setContentControlValue' || kind === 'addRepeatingItem' || kind === 'removeRepeatingItem' || kind === 'openPart' || kind === 'ensurePart' || kind === 'removePart' || kind === 'replaceMatches' || kind === 'undo' || kind === 'redo' || kind === 'select' || kind === 'insertText' || kind === 'replaceSelection' ||
+    kind === 'deleteBackward' || kind === 'deleteForward' || kind === 'paragraphBreak' || kind === 'lineBreak' ||
     kind === 'toggleMark' || kind === 'formatRange' || kind === 'clearFormatting' ||
     kind === 'setParagraphAttrs' || kind === 'applyParagraphStyle' || kind === 'formatSelection' || kind === 'toggleStrike' ||
     kind === 'toggleList' || kind === 'changeIndent' || kind === 'insertImage' || kind === 'insertTable' ||
     kind === 'pasteFragment' ||
-    kind === 'insertPageBreak' || kind === 'insertSectionBreak';
+    kind === 'insertPageBreak' || kind === 'insertSectionBreak' ||
+    kind === 'setTableBorders' || kind === 'setTableProperties';
 }
 
-function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
+function isLegacyMutation(request: DocxEngineWorkerRequest): boolean {
   return request.type === 'applyInput' || request.type === 'applyDelete' ||
     request.type === 'applyUpdate' || request.type === 'syncUpdate' || request.type === 'sync' ||
     (request.type === 'bootstrap' && request.opened === true) ||
     (request.type === 'proposal' && request.operation.kind !== 'snapshot');
 }
 
-async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
+async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
+  runningIds.add(request.id);
+  progressReported = performance.now();
   try {
-    if (trap) throw trap;
+    if (trap || projectionFailure) throw trap ?? projectionFailure;
     handlingId = request.id;
     if ((commandHost || openedViaSource) && isLegacyMutation(request)) {
-      throw new Error('Legacy mutations are unavailable in a resident command session');
+      throw new Error('Legacy mutations are unavailable in a worker command session');
     }
     if (commandHost && request.type !== 'edit' && request.type !== 'checkpoint' &&
       request.type !== 'commandInit' && request.type !== 'requestFullFrame' &&
@@ -1282,11 +1494,13 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
     } else await handle(request);
   } catch (error) {
     replyFailure(request.id, error);
+  } finally {
+    runningIds.delete(request.id);
   }
 }
 
 /** Answers a request that will not run; after a trap, as the trap's failure. */
-function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): void {
+function replyDropped(response: DocxEngineWorkerResponse & { ok: true }): void {
   if (trap) replyFailure(response.id, trap);
   else reply(response);
 }
@@ -1294,11 +1508,17 @@ function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): vo
 function replyFailure(id: number, error: unknown): void {
   // Once trapped, every failure is the trap's, answered once per request.
   const failure = trap ?? error;
+  if (!trap && projectionFailure) {
+    reply({ id, ok: false, terminal: true, error: projectionFailure.message, failureCode: projectionFailure.code });
+    return;
+  }
   if (isCommandOutcomeUnknownError(failure) || failure instanceof SessionFailure) {
+    const message = collaboration && isCommandOutcomeUnknownError(failure)
+      ? `Command ${failure.refusal.seq} has an unknown outcome` : failure.message;
     reply({
-      id, ok: false, error: failure.message,
+      id, ok: false, error: message,
       commandError: {
-        name: failure.name, message: failure.message,
+        name: failure.name, message,
         ...(isCommandOutcomeUnknownError(failure) ? { refusal: failure.refusal } : {}),
       },
       ...(failure instanceof SessionFailure ? { failureCode: failure.code } : {}),
@@ -1314,6 +1534,7 @@ function replyFailure(id: number, error: unknown): void {
     ok: false,
     error: error instanceof Error ? error.message : String(error),
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
+    ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
   });
 }
 
@@ -1328,14 +1549,16 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
     ok: false,
     error:
       failed > 0
-        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
-        : `Resident engine worker trapped: ${error.message}`,
+        ? `Document worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Document worker trapped: ${error.message}`,
     terminal: true,
     ...(failed > 0 ? { outOfMemory: true } : {}),
   });
 }
 
-async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+async function handle(request: DocxEngineWorkerRequest): Promise<void> {
+  if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
+    !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
@@ -1373,13 +1596,20 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     return;
   }
+  if (request.type === 'previewSource') {
+    if (!session || !openedViaSource || commandHost) throw new Error('A source preview requires an opened source before commands');
+    await replySourcePreview(request.id, session, request.preview, () => request.preview.layoutInput, performance.now());
+    return;
+  }
   if (request.type === 'commandInit') {
     if (!session || !openedDocument || previewing) {
-      throw new Error('Resident commands require a whole opened document');
+      throw new Error('Worker commands require a whole opened document');
     }
-    if (commandHost) throw new Error('Resident commands are already initialized');
+    if (commandHost) throw new Error('Worker commands are already initialized');
+    session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
-    const init = { ...request.request };
+    const { hostImages: decoded, ...init } = request.request;
+    adoptHostImages(decoded);
     if (init.provisionalPages !== undefined &&
       (!Number.isSafeInteger(init.provisionalPages) || init.provisionalPages < 1)) {
       throw new TypeError('Invalid provisional pages');
@@ -1408,6 +1638,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     completedLayout = null;
     const result = await requireCommandHost().handler(undefined, request.command);
     replyCommand(request.id, 'commandAck', result);
+    const ack = isTransferResult(result) ? result.value : result;
+    if (deferredSelectionFrames.delete(ack)) postCommandFrame(0);
     return;
   }
   if (request.type === 'checkpoint') {
@@ -1420,7 +1652,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'commandUpdate') {
     requireCommandHost();
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
+    if (collaboration) throw new Error('Collaboration merges use the ordered applyRemoteUpdate command');
     noteDocumentChange();
     fontRequirements = null;
     completedLayout = null;
@@ -1447,63 +1680,47 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'openSource') {
     validateResidentSource(request.source);
-    if (session) throw new Error('Resident engine worker already holds a document');
-    const started = performance.now();
     const source = request.source;
-    const opening = await createResidentEngineSession(source.heapLimitBytes);
+    if (session && (!previewing || commandHost || source.cut)) throw new Error('Document worker already holds a document');
+    const replaced = previewing ? openedCut : null;
+    if (session) destroySession(true);
+    const started = performance.now();
+    let opening: ResidentEngineSession | undefined;
     try {
-      let hostJson: string | undefined;
-      let document: import('../types/document').Document;
-      if (source.document) {
-        opening.openDocument(source.document, source);
-        document = source.document;
-      } else {
-        hostJson = opening.openSourceDocx(source.bytes!, source);
-        document = decodeDocxHostJson(hostJson, source.bytes!).document;
+      const pinned = source.collaboration;
+      const reseeded = pinned?.clientClock !== undefined && pinned.initialUpdate === undefined;
+      opening = await createResidentEngineSession(source.heapLimitBytes, reseeded ? undefined : pinned?.clientId);
+      let opened = adoptResidentSource(opening, source);
+      if (opened && !reseeded && pinned?.clientClock !== undefined &&
+        stateVectorClock(opening.encodeStateVector(), opening.clientId) < pinned.clientClock) {
+        destroySession(true);
+        opening = await createResidentEngineSession(source.heapLimitBytes);
+        opened = adoptResidentSource(opening, source);
       }
-      opening.setDirectBatches(true);
-      session = opening;
-      openedDocument = { heapLimitBytes: source.heapLimitBytes };
-      openedViaSource = true;
-      openedParsed = source.document !== undefined;
-      openedSource = source.bytes && hostJson ? { bytes: exactBuffer(source.bytes), hostJson } : null;
-      editorSaves = { full: false };
+      if (!opened) {
+        opening.destroy();
+        reply({ id: request.id, ok: true, previewRefused: true });
+        return;
+      }
+      const { document, hostJson } = opened;
+      if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
-      if (source.preview && !source.deferPreview) {
-        sourcePreviewing = true;
-        const preview = typeof source.preview === 'object' ? source.preview : {};
-        const pages = preview.pages ?? 1;
-        const init: ResidentCommandInitRequest = {
-          session: '', incarnation: 0, epoch: 0, readOnly: true,
-          fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
-          layoutInput: preview.layoutInput ?? JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})),
-          layoutWithRegions: true, layoutRevision: 1, extras: preview.extras ?? '{}',
-          displayWindow: preview.displayWindow ?? [0, pages],
-        };
-        setFrameDisplayWindow(opening, init.displayWindow, false);
-        const layout = hydrate({
-          workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
-          fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
-          layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1,
-        }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
-        if (layout.provisional) incompleteLayout = {
-          layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
-        };
-        setFrameDisplayWindow(opening, init.displayWindow, false);
-        const extras = JSON.stringify({ ...JSON.parse(init.extras), headersFooters: JSON.parse(opening.retainedHeadersFootersJson() ?? 'null') });
-        const bytes = opening.buildDisplayListFrame(extras, 0);
-        await replyFrame(request.id, bytes, performance.now() - started, [], undefined, started,
-          false, false, layout.layoutJson ?? undefined, layout.provisional, undefined, [], null,
-          { sourceDocument: metadata, hostJson });
+      const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
+      const svgMedia = opening.svgMedia?.();
+      svgMediaUrls = new Map(svgMedia?.map(({ source, url }) => [source, url]));
+      const listed = svgMedia?.length ? { svgMedia } : {};
+      if (source.preview) {
+        await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity, ...listed });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity, ...listed }, [stateVector]);
       }
     } catch (error) {
-      if (!(error instanceof WebAssembly.RuntimeError)) {
-        if (session === opening) destroySession(true);
-        else opening.destroy();
-      }
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      if (opening && session === opening) destroySession(true);
+      else opening?.destroy();
+      if (replaced && await reopenSourceCut(replaced)) throw new SourceCutKeptError(error instanceof Error ? error.message : String(error));
       throw error;
     }
     return;
@@ -1512,7 +1729,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // One document per worker, so every queued request addresses the one it was sent for;
     // only a preview gives way, to the whole document.
     if (session && (!previewing || request.previewBlocks !== undefined)) {
-      throw new Error('Resident engine worker already holds a document');
+      throw new Error('Document worker already holds a document');
     }
     // The preview's memory goes before the whole package seeds; its pages stay painted.
     if (session) destroySession(true);
@@ -1556,7 +1773,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const replacement = !request.opened ? replacementCommandInit() : null;
     const source = replacement ? openedSource : null;
     if (!request.opened) {
+      // Reopening the same source keeps its media tokens, so its decoded pictures stay valid.
+      const pictures = source ? { images: new Map(hostImages), urls: svgMediaUrls } : null;
+      if (pictures) hostImages.clear();
       destroySession(request.keepSurfaces === true);
+      if (pictures) {
+        for (const [key, image] of pictures.images) hostImages.set(key, image);
+        svgMediaUrls = pictures.urls;
+      }
       openedVersion = null;
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
@@ -1565,12 +1789,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       session = await createResidentEngineSession(request.heapLimitBytes);
       if (source) session.openDocx(new Uint8Array(source.bytes), undefined, undefined, false);
     } else if (!session || !openedDocument) {
-      throw new Error('Resident engine worker has no opened document');
+      throw new Error('Document worker has no opened document');
     } else if (
       request.heapLimitBytes !== undefined &&
       request.heapLimitBytes !== openedDocument.heapLimitBytes
     ) {
-      throw new Error('Resident engine worker opened its document under another heap limit');
+      throw new Error('Document worker opened its document under another heap limit');
     }
     unsubscribe?.();
     unsubscribe = null;
@@ -1645,7 +1869,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'fontRequirements') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const requirementsJson = layoutFontRequirements(session, request.layoutInput);
     requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
@@ -1657,7 +1881,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'encodeState') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const state = exactBuffer(session.encodeState());
     let peerMetadata: ArrayBuffer | undefined;
     let peerMetadataReason: string | undefined;
@@ -1688,17 +1912,17 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'save') {
-    if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
+    if (previewing) throw new SaveUnavailableError('Document worker is still opening');
     if (!session || (!openedSource && !openedParsed)) {
-      throw new SaveUnavailableError('Resident engine worker has no opened document to save');
+      throw new SaveUnavailableError('Document worker has no opened document to save');
     }
     const held = pendingUpdates;
     pendingUpdates = [];
     const before = session.proposalEngine.version();
     try {
-      const projection = commandHost ? session.commentProjection() : null;
+      const projection = commandHost ? session.commentProjection(request.commentsSource !== 'host') : null;
       editorSaves.commentIds = projection?.sessionIds;
-      const comments = projection?.comments ?? request.comments;
+      const comments = request.commentsSource === 'host' ? request.comments : projection?.comments ?? request.comments;
       const saved = openedParsed ? await session.saveDocument(request.host, comments, editorSaves) : await session.save(
         new Uint8Array(openedSource!.bytes),
         openedSource!.hostJson,
@@ -1728,7 +1952,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'revisionCount') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     // Host proposals' revisions are not the document's own.
     const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
     reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
@@ -1740,10 +1964,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   if (request.type === 'proposal') {
     if (!(commandHost ? layoutReady : unsubscribe)) {
-      throw new Error('Resident engine worker has not laid out its document');
+      throw new Error('Document worker has not laid out its document');
     }
     pendingUpdates = [];
     let committed = false;
@@ -1870,9 +2094,30 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       return;
     }
     let value: unknown;
+    let transfer: Transferable[] = [];
     switch (request.read.kind) {
       case 'commentInsertionRange':
         value = readCommentInsertionRange(session, request.read.paraId, request.read.search);
+        break;
+      case 'commentSelectionRange':
+        value = currentSelectionRange(session, request.read.selection);
+        break;
+      case 'collabStateVector':
+        value = session.encodeStateVector();
+        break;
+      case 'collabDiff':
+        value = readResidentCollaborationState(session, request.read.stateVector);
+        break;
+      case 'collabDiffChunks': {
+        const chunks = session.encodeStateAsUpdateChunks(request.read.stateVector, request.read.maxChunkBytes);
+        transfer = chunks.map(chunk => chunk.buffer as ArrayBuffer);
+        value = chunks;
+        break;
+      }
+      case 'collabPresence':
+        value = !retainedFrame || engine.version() !== request.read.expectVersion || retainedLayoutVersion !== engine.version() ||
+          request.read.expectFrameEpoch !== retainedFrame.frameEpoch || request.read.expectLayoutRevision !== layoutRevision
+          ? null : await readResidentPresence(session, retainedFrame, request.read.peers, request.read.pages, layoutRevision);
         break;
       case 'rawSelectionInfo': {
         const { anchor, focus } = request.read.selection;
@@ -1881,6 +2126,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
       case 'clipboardSlice': {
+        const resident = session;
+        const reader = {
+          storySegments: (story: string) => resident.storySegments(story),
+          tablePayload: (story: string, index: number) => resident.tablePayload(story, index),
+          mediaDataUrl: (source: string) => resident.mediaDataUrl(source),
+        };
         const { anchor, focus } = request.read.selection;
         const cells = session.cellSelection();
         const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
@@ -1895,12 +2146,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
             );
           if (holds) {
-            value = readClipboardSlice(session, { cells });
+            value = readClipboardSlice(reader, { cells });
             break;
           }
         }
         if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
-        value = readClipboardSlice(session, {
+        value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
           to: storyOffsetForLoc(session.geometryReader, focus),
@@ -1929,10 +2180,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'sectionProperties':
         value = session.sectionProperties();
         break;
-      case 'exportStructuredWithPages':
+      case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
-        value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
+        let currentRequest = request.read.currentRequest;
+        if (request.read.workerFonts === true && commandInit?.layoutWithRegions) {
+          try {
+            const input = JSON.parse(currentRequest);
+            const owned = JSON.parse(commandInit.layoutInput);
+            if (input?.measurement && typeof input.measurement === 'object' && !Array.isArray(input.measurement) && owned.measurement?.fontChains) {
+              input.measurement = { ...input.measurement, fontChains: owned.measurement.fontChains };
+              currentRequest = JSON.stringify(input);
+            }
+          } catch {}
+        }
+        value = session.exportStructuredWithPagesJson(
+          request.read.options,
+          resolveLayoutReservationInput(session, currentRequest)
+        );
         break;
+      }
       case 'listContentControls':
         value = session.listContentControls(request.read.options);
         break;
@@ -1948,20 +2214,23 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'reviewSnapshot': {
         const registry = proposals ??= createProposalRegistry(engine);
         const frame = retainedFrame;
-        const layoutVersion = retainedLayoutVersion;
+        const layoutVersion = retainedLayoutVersion ?? commandLayout?.certifiedVersion() ?? null;
         const previewVersion = registry.snapshot().previewVersion;
         const published = commandFrameChanges?.reviewFrame;
         const review = !frame || layoutVersion !== engine.version() ||
           (commandHost && (published?.frameEpoch !== frame.frameEpoch || published?.previewVersion !== previewVersion)) ||
           (request.read.expectPreviewVersion !== undefined && request.read.expectPreviewVersion !== previewVersion)
-          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision);
+          ? null : await readResidentReviewSnapshot(session, registry, frame, layoutRevision, {
+            queries: (at, version) => commandQueries?.(at, version), index: displayPositionIndex(session),
+          });
         value = commandHost && review && (review.previewVersion !== previewVersion || review.version !== layoutVersion ||
           registry.snapshot().previewVersion !== previewVersion || engine.version() !== layoutVersion || retainedFrame?.frameEpoch !== frame?.frameEpoch)
           ? null : review;
         break;
       }
       case 'toolbarMetadata':
-        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson) : { styles: [], fontFamilies: [] };
+        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson)
+          : openedParsedToolbar ? openedParsedToolbar() : { styles: [], fontFamilies: [] };
         break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
@@ -1997,6 +2266,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.paraId
         );
+        break;
+      case 'reviewTarget':
+        value = readReviewTarget(session, request.read.target);
         break;
       case 'anchorTargets': {
         const reader = session.geometryReader;
@@ -2046,6 +2318,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.expectVersion
         );
         break;
+      case 'bookmarkTarget':
+        value = resolveBookmarkTarget(displayPositionIndex(session), request.read.story, request.read.name, engine.version());
+        break;
       case 'bookmarkPosition':
         value = resolveBookmarkPosition(
           displayPositionIndex(session),
@@ -2093,6 +2368,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'headings':
         value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
+      case 'adjacentRevision':
+        value = readAdjacentRevision(session.geometryReader, request.read.selection, request.read.direction,
+          new Set(proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds)));
+        break;
       case 'stickyAnchors': {
         const currentSession = session;
         value = request.read.locs.map((loc) => {
@@ -2105,7 +2384,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
     }
-    reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
+    reply({ id: request.id, ok: true, read: { version: engine.version(), value } }, transfer);
     return;
   }
   if (request.type === 'layoutJson') {
@@ -2168,6 +2447,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       ? provisionalFinalPages
       : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
     const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
+    if (request.hostImages) {
+      const owner = request.hostImagesFor;
+      if (!commandHost || !commandInit || !owner || owner.session !== commandInit.session ||
+        owner.incarnation !== commandInit.incarnation || owner.epoch !== commandInit.epoch) {
+        // Pictures decoded for a command session this worker no longer holds.
+        for (const { image } of request.hostImages) image.close();
+        reply({ id: request.id, ok: true });
+        return;
+      }
+      adoptHostImages(request.hostImages);
+      commandFrameChanges!.repaintPictures = true;
+    }
     if (commandHost) {
       for (const page of pages) commandFrameChanges!.pages.add(page);
       postCommandFrame(request.id);
@@ -2415,8 +2706,44 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
   if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
-    throw new Error('Resident engine worker font base revision mismatch');
+    throw new Error('Document worker font base revision mismatch');
   }
+}
+
+const appliedLayoutReservations = new WeakMap<ResidentEngineSession, {
+  version: string;
+  key: string;
+  reservations: DocxResolvedReservations;
+}>();
+
+function resolveLayoutReservationInput(
+  engine: ResidentEngineSession,
+  layoutInput: string,
+  apply = false
+): string {
+  if (!layoutInput.includes('"reservationSets"')) {
+    if (apply) appliedLayoutReservations.delete(engine);
+    return layoutInput;
+  }
+  const input = JSON.parse(layoutInput) as { renderEnv?: YrsRenderEnv };
+  const payload = input.renderEnv?.reservationSets;
+  if (payload === undefined) {
+    if (apply) appliedLayoutReservations.delete(engine);
+    return layoutInput;
+  }
+  const version = engine.proposalEngine.version();
+  const previous = appliedLayoutReservations.get(engine);
+  const key = JSON.stringify(payload);
+  let reservations = previous?.reservations ?? {};
+  if (validReservationsPayload(payload) && payload.version === version) {
+    reservations = previous?.version === version && previous.key === key
+      ? previous.reservations
+      : resolveReservations(engine.geometryReader, payload, version, previous?.reservations ?? null);
+    if (apply) appliedLayoutReservations.set(engine, { version, key, reservations });
+  }
+  delete input.renderEnv!.reservationSets;
+  input.renderEnv!.reservations = reservations;
+  return JSON.stringify(input);
 }
 
 /**
@@ -2432,10 +2759,10 @@ function hydrate(
   loadState = true,
   replyMode?: 'meta',
   knownHeadersFootersEpoch?: number,
-  commandFonts?: ResidentCommandInitRequest,
+  commandFonts?: DocxCommandInitRequest,
   layout = true
 ): { layoutJson: string | null; layoutMeta?: LayoutMetaV1; provisional: boolean } {
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   validateFontsBaseRevision(snapshot);
   layoutReady = false;
   supersedeSlicedCompletion();
@@ -2478,6 +2805,7 @@ function hydrate(
     }
     fontsRevision = snapshot.fontsRevision;
   }
+  snapshot.layoutInput = resolveLayoutReservationInput(session, snapshot.layoutInput, true);
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   if (!layout) {
@@ -2580,7 +2908,7 @@ function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: stri
   }
   const cached = requirementsCache.byInput.get(layoutInput);
   if (cached !== undefined) return cached;
-  const requirementsJson = engine.layoutFontRequirementsJson(layoutInput);
+  const requirementsJson = engine.layoutFontRequirementsJson(resolveLayoutReservationInput(engine, layoutInput));
   if (requirementsCache.byInput.size >= REQUIREMENTS_CACHE_INPUTS) {
     requirementsCache.byInput.delete(requirementsCache.byInput.keys().next().value as string);
   }
@@ -2966,6 +3294,7 @@ function asciiProposalFontsUnchanged(
  * showing the old pages, for a document that replaces it page for page.
  */
 function destroySession(keepSurfaces = false): void {
+  collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
   forgetRequirementsCache();
@@ -2978,6 +3307,7 @@ function destroySession(keepSurfaces = false): void {
   releaseCommandHost?.();
   releaseCommandHost = null;
   session?.destroy();
+  closeHostImages();
   lastProposalMirrorVersion = null;
   session = null;
   commandHost = null;
@@ -2992,10 +3322,13 @@ function destroySession(keepSurfaces = false): void {
   openedSource = null;
   openedViaSource = false;
   openedParsed = false;
+  openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
   openedVersion = undefined;
   previewing = false;
+  cutPartial = false;
+  openedCut = null;
   previewFinalPages = null;
   clearProvisionalFinalPages();
   pendingUpdates = [];
@@ -3087,10 +3420,10 @@ async function finalizeResidentFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   for (const pageId of pendingOffscreenPageIds) {
     const page = retainedPageByKey(retainedFrame, pageId);
@@ -3112,6 +3445,97 @@ async function finalizeResidentFrame(
   return { bytes, delta, caret };
 }
 
+function parsedToolbar(document: import('../types/document').Document): () => DocxToolbarMetadata {
+  let metadata: DocxToolbarMetadata | undefined;
+  return () => (metadata ??= readParsedToolbarMetadata(document));
+}
+
+/** Parses `source` into `opening` and makes it the worker's document; null when the worker declines a cut. */
+function adoptResidentSource(
+  opening: ResidentEngineSession,
+  source: DocxSourceOpenRequest
+): { document: import('../types/document').Document; hostJson?: string } | null {
+  let hostJson: string | undefined;
+  let document: import('../types/document').Document;
+  let partial = false;
+  const options = { ...source, initialUpdate: source.collaboration?.initialUpdate };
+  if (source.document) {
+    opening.openDocument(source.document, options);
+    document = source.document;
+  } else if (source.cut) {
+    const cut = opening.openDocxPreview(source.bytes!, source.cut.blocks, source.cut.paragraphBudget);
+    if (cut === null) return null;
+    hostJson = cut;
+    const host = decodeDocxHostJson(hostJson, source.bytes!);
+    document = host.document;
+    partial = host.wholeBody !== true;
+  } else {
+    hostJson = opening.openSourceDocx(source.bytes!, options);
+    reportProgress();
+    document = decodeDocxHostJson(hostJson, source.bytes!).document;
+    reportProgress();
+  }
+  if (!source.cut) opening.setDirectBatches(true);
+  session = opening;
+  openedDocument = { heapLimitBytes: source.heapLimitBytes };
+  openedViaSource = true;
+  previewing = source.cut !== undefined;
+  cutPartial = partial;
+  openedCut = source.cut ? source : null;
+  openedParsed = source.document !== undefined;
+  openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
+  openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
+  editorSaves = { full: false };
+  return { document, hostJson };
+}
+
+/** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
+async function reopenSourceCut(source: DocxSourceOpenRequest): Promise<boolean> {
+  const opening = await createResidentEngineSession(source.heapLimitBytes);
+  try {
+    if (adoptResidentSource(opening, source)) return true;
+    opening.destroy();
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (session === opening) destroySession(true);
+    else opening.destroy();
+  }
+  return false;
+}
+
+async function replySourcePreview(
+  id: number,
+  opening: ResidentEngineSession,
+  preview: DocxSourcePreviewOptions,
+  defaultLayoutInput: () => string,
+  started: number,
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
+): Promise<void> {
+  sourcePreviewing = true;
+  const pages = preview.pages ?? 1;
+  const init: DocxCommandInitRequest = {
+    session: '', incarnation: 0, epoch: 0, readOnly: true,
+    fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
+    layoutInput: preview.layoutInput ?? defaultLayoutInput(),
+    layoutWithRegions: true, layoutRevision: 1, extras: preview.extras ?? '{}',
+    displayWindow: preview.displayWindow ?? [0, pages],
+  };
+  setFrameDisplayWindow(opening, init.displayWindow, false);
+  const layout = hydrate({
+    workerAuthoritative: true, clientId: 0, state: new Uint8Array(0), selection: null,
+    fonts: init.fonts, fontsRevision: 0, renderInputs: [], measureInputs: [],
+    layoutInput: init.layoutInput, layoutWithRegions: true, layoutRevision: 1, partialDocument: cutPartial,
+  }, pages, true, false, undefined, undefined, init.fontRegistrationSlots ? init : undefined);
+  if (layout.provisional) incompleteLayout = {
+    layoutInput: init.layoutInput, workerAuthoritative: true, extras: init.extras,
+  };
+  setFrameDisplayWindow(opening, init.displayWindow, false);
+  const extras = JSON.stringify({ ...JSON.parse(init.extras), headersFooters: JSON.parse(opening.retainedHeadersFootersJson() ?? 'null') });
+  const bytes = opening.buildDisplayListFrame(extras, 0);
+  await replyFrame(id, bytes, performance.now() - started, [], undefined, started,
+    false, false, layout.layoutJson ?? undefined, layout.provisional, undefined, [], null, sourceOpened);
+}
+
 async function replyFrame(
   id: number,
   bytes: Uint8Array,
@@ -3126,7 +3550,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
@@ -3153,10 +3577,10 @@ async function replyFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;
@@ -3262,7 +3686,7 @@ async function replayOffscreen(
       pageId: string;
     }>
   > = [];
-  const images = openedViaSource && session ? residentMediaImages(session) : undefined;
+  const images = openedViaSource && session ? residentMediaImages(session, hostImages) : undefined;
   for (let index = 0; index < retainedFrame.pages.length; index += 1) {
     const retainedPage = retainedFrame.pages[index];
     const pageIdString = retainedPage.pageId.toString();
@@ -3342,9 +3766,25 @@ function editFailedAllocationBytes(): number {
   return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
 }
 
-function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
+let pipeOutputTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Posts what the worker's collaboration providers produced outside a request, from their timers. */
+function schedulePipeOutput(): void {
+  if (pipeOutputTimer !== null) return;
+  pipeOutputTimer = setTimeout(() => {
+    pipeOutputTimer = null;
+    if (!collaboration) return;
+    try { reply({ id: 0, ok: true }); } catch {}
+  }, 0);
+}
+
+function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
-  scope.postMessage({ ...response, memory: wasmModuleMemories() }, transfer);
+  const drained = collaboration?.drain();
+  const { transfer: piped = [], ...collabUpdates } = drained ?? {};
+  scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
+    ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
+    memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
 }

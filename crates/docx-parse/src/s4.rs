@@ -18,7 +18,7 @@ use crate::smart_art::{
     SmartArtContext, create_smart_art_context, is_smart_art_drawing, parse_smart_art_from_drawing,
 };
 use crate::text_box::parse_text_box;
-use crate::vml::{Watermark, extract_watermark, parse_vml_image_content};
+use crate::vml::{Watermark, extract_watermark, vml_image_content, vml_story_image_contents};
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
 
 const MAX_PROJECTION_DEPTH: usize = 64;
@@ -174,7 +174,17 @@ fn collect_projection_leaves(
             }
         }
         "pict" | "object" => {
-            if let Some(image) = parse_vml_image_content(element, relationships, Some(media)) {
+            let remaining = MAX_DRAWING_LEAVES - output.drawings.len() - output.vml_images.len();
+            let images = if element.local_name() == "object"
+                || crate::paragraph::has_ole_object(element, 0)
+            {
+                vml_image_content(element, relationships, Some(media), Some(budget))
+                    .into_iter()
+                    .collect()
+            } else {
+                vml_story_image_contents(element, relationships, Some(media), Some(budget))
+            };
+            for image in images.into_iter().take(remaining) {
                 output.vml_images.push(DrawingLeaf {
                     element: element.local_name().to_owned(),
                     kind: "vmlImage".to_owned(),
@@ -292,6 +302,61 @@ fn relationship_path_for_part(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn project_vml(xml: &str) -> S4XmlPart {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        project_s4_xml_part(
+            "word/document.xml",
+            document.root().unwrap(),
+            None,
+            &Default::default(),
+            &Default::default(),
+            &mut create_smart_art_context(&IndexMap::<String, Vec<u8>>::new()),
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn ole_objects_project_only_their_first_vml_preview() {
+        for wrapper in ["object", "pict"] {
+            let part = project_vml(&format!(
+                r#"<w:{wrapper} xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:group style="width:100px;height:100px"><v:shape style="width:500;height:500"><v:imagedata r:id="rId1"/></v:shape><v:shape style="width:500;height:500"><v:imagedata r:id="rId2"/></v:shape></v:group><o:OLEObject/></w:{wrapper}>"#
+            ));
+            assert_eq!(part.vml_images.len(), 1);
+            assert_eq!(part.vml_images[0].value["image"]["rId"], "rId1");
+        }
+    }
+
+    #[test]
+    fn textbox_only_picture_projects_once() {
+        let part = project_vml(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:shape style="width:200px;height:100px"><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        assert_eq!(part.vml_images.len(), 1);
+        assert_eq!(part.vml_images[0].value["image"]["rId"], "rId1");
+    }
+
+    #[test]
+    fn nested_textbox_picture_projects_once_with_its_own_size() {
+        let part = project_vml(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r"><v:shape style="width:200px;height:100px"><v:imagedata r:id="rIdOuter"/><v:textbox><w:txbxContent><w:p><w:r><w:pict><v:shape style="width:20px;height:10px"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+        assert_eq!(part.vml_images.len(), 2);
+        assert_eq!(part.vml_images[0].value["image"]["rId"], "rIdOuter");
+        assert_eq!(part.vml_images[1].value["image"]["rId"], "rId1");
+        assert_eq!(
+            part.vml_images[1].value["image"]["size"]["width"],
+            190_500.0
+        );
+        assert_eq!(
+            part.vml_images[1].value["image"]["size"]["height"],
+            95_250.0
+        );
+    }
 
     #[test]
     fn relationship_owner_paths_and_empty_envelope_are_stable() {

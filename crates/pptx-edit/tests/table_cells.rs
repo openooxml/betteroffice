@@ -1,9 +1,98 @@
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
+use yrs::updates::decoder::Decode;
+use yrs::{Any, Doc, Map, MapRef, Out, ReadTxn, Transact, Update};
 
 const DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const V1_UPDATE: &[u8] = include_bytes!("fixtures/deck-schema-v1.update.bin");
 const STORY: &str = "story:slide:0:256:shape:0:table:0:0";
+
+#[test]
+fn a_reattached_source_restores_cell_pictures_to_the_package_and_snapshot() {
+    let source = include_bytes!("../../pptx-render/tests/fixtures/table-picture-fill.pptx");
+    let update = DeckSession::open(source, 34109)
+        .unwrap()
+        .encode_state_as_update_v1();
+    let doc = Doc::new();
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&update).unwrap())
+        .unwrap();
+    let mut txn = doc.transact_mut();
+    let meta = txn.get_map("pptx:meta").unwrap();
+    let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
+        panic!("expected package JSON")
+    };
+    let strip = |json: &str| json.replace("\"pictureFill\":", "\"ignoredPictureFill\":");
+    let package = strip(std::str::from_utf8(&bytes).unwrap());
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(std::sync::Arc::from(package.into_bytes())),
+    );
+    let shapes = txn.get_map("pptx:shapes").unwrap();
+    let maps: Vec<_> = shapes
+        .iter(&txn)
+        .filter_map(|(_, value)| value.cast::<MapRef>().ok())
+        .collect();
+    for shape in maps {
+        if let Some(Out::Any(Any::String(json))) = shape.get(&txn, "graphicJson") {
+            shape.insert(&mut txn, "graphicJson", strip(&json));
+        }
+    }
+    drop(txn);
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&Default::default());
+    let attached = DeckSession::open_from_update_with_source(&update, source, 34110).unwrap();
+    let reopened =
+        DeckSession::open_from_update(&attached.encode_state_as_update_v1(), 34111).unwrap();
+    for table in [stored_table(&reopened), seeded_table(&reopened)] {
+        let cell = serde_json::to_value(&table.rows[0].cells[0]).unwrap();
+        assert_eq!(cell["pictureFill"]["mediaPartPath"], "ppt/media/image1.png");
+    }
+}
+
+#[test]
+fn editing_a_picture_filled_cell_preserves_its_blip_and_relationship() {
+    let source = include_bytes!("../../pptx-render/tests/fixtures/table-picture-fill.pptx");
+    let session = DeckSession::open(source, 34107).unwrap();
+    session
+        .insert_text(
+            &EditCtx::local("test"),
+            STORY,
+            0,
+            "New ",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let saved = session.save().unwrap();
+    let before = ooxml_opc::unzip_parts(source).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    let part = |parts: &[(String, Vec<u8>)], path: &str| {
+        parts
+            .iter()
+            .find(|(name, _)| name == path)
+            .unwrap()
+            .1
+            .clone()
+    };
+    for path in ["ppt/slides/_rels/slide1.xml.rels", "ppt/media/image1.png"] {
+        assert_eq!(part(&before, path), part(&after, path));
+    }
+    let slide = String::from_utf8(part(&after, "ppt/slides/slide1.xml")).unwrap();
+    let original = String::from_utf8(part(&before, "ppt/slides/slide1.xml")).unwrap();
+    for fill in original.split("<a:blipFill>").skip(1) {
+        let fill = format!(
+            "<a:blipFill>{}</a:blipFill>",
+            fill.split("</a:blipFill>").next().unwrap()
+        );
+        assert!(slide.contains(&fill));
+    }
+    assert!(slide.contains("New Header spans two"));
+    let reopened = DeckSession::open(&saved, 34108).unwrap();
+    let cell = serde_json::to_value(&stored_table(&reopened).rows[0].cells[0]).unwrap();
+    assert_eq!(cell["pictureFill"]["mediaPartPath"], "ppt/media/image1.png");
+}
 
 #[test]
 fn editing_a_cell_leaves_its_cell_properties_in_place() {

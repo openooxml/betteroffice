@@ -1,7 +1,10 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
+import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
-import { editFixture, tableCell, tableFixture } from './fixture';
+import { readCommentPart, verifyCommentOutput } from '../src/comment-output';
+import * as commentOutput from '../src/comment-output';
+import { COMMENT_COMPANIONS, commentFixture, editFixture, EXISTING_COMMENT, fixture, tableCell, tableFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes?: Uint8Array) {
@@ -30,7 +33,7 @@ async function edited(doc: DocxAgentDocument, edits: DocxAgentEdit[]) {
   const bytes = await doc.export();
   const xml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string');
   expect(xml).not.toMatch(/<w:(ins|del)\b/);
-  return { receipt, xml, before: await paragraphs(baseline), after: await paragraphs(bytes) };
+  return { receipt, xml, bytes, before: await paragraphs(baseline), after: await paragraphs(bytes) };
 }
 
 async function refusal(promise: Promise<unknown>): Promise<DocumentToolError> {
@@ -279,3 +282,924 @@ test('outline lists table cells by numeric row and column before and after inser
   const reopened = await open(await doc.export());
   expect(table(reopened).map(item => item.text)).toEqual(expected);
 });
+
+const part = async (bytes: Uint8Array, name: string) => (await JSZip.loadAsync(bytes)).file(name)?.async('string');
+const texts = (xml: string) => [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join('');
+
+function companionEntries(xml: string, entry: string) {
+  const tag = entry.slice(1, entry.indexOf(' '));
+  return [...xml.matchAll(new RegExp(`<${tag}\\s([^>]*?)(?:\\s*/>|>\\s*</${tag}>)`, 'g'))].map(([, attributes]) =>
+    new Map([...attributes.matchAll(/([\w:]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, name, double, single]) => [name, double ?? single])));
+}
+
+function comments(xml: string) {
+  return [...xml.matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)].map(([, attributes, body]) => ({
+    id: attributes.match(/w:id="([^"]*)"/)![1],
+    author: attributes.match(/w:author="([^"]*)"/)?.[1],
+    date: attributes.match(/w:date="([^"]*)"/)?.[1],
+    paragraphs: [...body.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].map(([paragraph]) => texts(paragraph)),
+  }));
+}
+
+function anchored(xml: string, id: string) {
+  const marker = (name: string) => `<w:comment${name} w:id="${id}"/>`;
+  for (const name of ['RangeStart', 'RangeEnd', 'Reference']) expect(xml.split(marker(name))).toHaveLength(2);
+  const start = xml.indexOf(marker('RangeStart'));
+  const end = xml.indexOf(marker('RangeEnd'));
+  const reference = xml.indexOf(marker('Reference'));
+  expect(reference).toBeGreaterThan(end);
+  expect(xml.slice(start, reference)).not.toContain('</w:p>');
+  return texts(xml.slice(start, end));
+}
+
+test('add_comment anchors a comment on exactly the matched phrase, one paragraph per line', async () => {
+  const doc = await open();
+  const match = hit(doc, 'strongly in the third');
+  expect(await part(await doc.export(), 'word/comments.xml')).toBeUndefined();
+  const { receipt, xml, bytes, before, after } = await edited(doc, [
+    { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Check the source.\nCompare with Q2.', date: '2026-10-01T09:30:00Z' },
+  ]);
+  expect(receipt).toEqual({ applied: true, version: doc.list().version, results: [{ index: 0, op: 'add_comment', ref: match.ref, start: match.start, end: match.end, comment: expect.any(String) }] });
+  expect(doc.read(match.ref).text).toBe('Revenue grew strongly in the third quarter.');
+  const reference = before.findIndex(p => p.text.startsWith('Revenue grew'));
+  expect(after[reference].text).toBe('Revenue grew strongly in the third\ufffc quarter.');
+  expect(after.map(p => p.style)).toEqual(before.map(p => p.style));
+  expect(after.filter((_, i) => i !== reference)).toEqual(before.filter((_, i) => i !== reference));
+  const [comment, ...rest] = comments((await part(bytes, 'word/comments.xml'))!);
+  expect(rest).toEqual([]);
+  expect(comment).toMatchObject({ author: 'Reviewer', date: '2026-10-01T09:30:00Z', paragraphs: ['Check the source.', 'Compare with Q2.'] });
+  expect(anchored(xml, comment.id)).toBe('strongly in the third');
+});
+
+test('add_comment keeps existing comments byte-identical and anchors in body and table cells', async () => {
+  const source = await commentFixture();
+  expect(await part(source, 'word/comments.xml')).toContain('xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"');
+  const doc = await open(source);
+  expect(await part(await doc.export(), 'word/comments.xml')).toBe(await part(source, 'word/comments.xml'));
+  const revenue = hit(doc, 'Revenue grew');
+  const q1 = hit(doc, 'Q1');
+  const started = Math.floor(Date.now() / 1000) * 1000;
+  const { receipt, xml, bytes } = await edited(doc, [
+    { op: 'add_comment', match: revenue.match, author: 'Reviewer', text: 'Body note', date: '2026-10-01T09:30:00Z' },
+    { op: 'add_comment', match: q1.match, author: 'Reviewer', text: 'Cell note' },
+  ]);
+  expect(new Set(receipt.results.map(result => result.comment)).size).toBe(2);
+  const saved = (await part(bytes, 'word/comments.xml'))!;
+  expect(saved).toContain(EXISTING_COMMENT);
+  const all = comments(saved);
+  expect(all.map(comment => [comment.author, comment.paragraphs])).toEqual([['Existing Reviewer', ['Keep this note.']], ['Reviewer', ['Body note']], ['Reviewer', ['Cell note']]]);
+  const [existing, body, cell] = all;
+  expect(existing.id).toBe('0');
+  expect(anchored(xml, '0')).toBe('Closing note.');
+  expect(anchored(xml, body.id)).toBe('Revenue grew');
+  expect(anchored(xml, cell.id)).toBe('Q1');
+  expect(cell.date).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  expect(Date.parse(cell.date!)).toBeGreaterThanOrEqual(started);
+  expect(Date.parse(cell.date!)).toBeLessThanOrEqual(Date.now());
+  expect(await part(bytes, 'word/styles.xml')).toBe(await part(source, 'word/styles.xml'));
+  for (const [name, , , , entry] of COMMENT_COMPANIONS) {
+    expect(companionEntries((await part(bytes, `word/${name}.xml`))!, entry)).toContainEqual(companionEntries(entry, entry)[0]);
+  }
+});
+
+test('add_comment preserves prefixed relationships and unrelated bytes across batches', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const namespace = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const name = 'word/_rels/document.xml.rels';
+  const relationship = `<pkg:Relationship Id = 'rId7' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles' Target='styles.xml'/>`;
+  zip.file(name, `<Relationships xmlns="${namespace}" xmlns:pkg='${namespace}'>${relationship}</Relationships>`);
+  const root = await zip.file('_rels/.rels')!.async('string');
+  zip.file('_rels/.rels', root.replace('<Relationships xmlns=', '<pkg:Relationships xmlns:pkg=').replace('<Relationship ', '<pkg:Relationship ').replace('</Relationships>', '</pkg:Relationships>'));
+  const payload = new Uint8Array([0, 255, 128, 32, 13, 10]);
+  zip.file('customXml/preserved.bin', payload);
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const doc = await open(source);
+  for (const query of ['Revenue grew', 'Closing note.']) {
+    await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: hit(doc, query).match, author: 'Reviewer', text: 'Note' }] });
+  }
+  const bytes = await doc.export();
+  expect(await part(bytes, name)).toContain(relationship);
+  expect(await part(bytes, '_rels/.rels')).toBe(await part(source, '_rels/.rels'));
+  const saved = await JSZip.loadAsync(bytes);
+  expect(await saved.file('customXml/preserved.bin')!.async('uint8array')).toEqual(payload);
+  expect(comments((await part(bytes, 'word/comments.xml'))!)).toHaveLength(2);
+});
+
+test('add_comment refuses a body content control without applying any batch edits', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('<w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p>',
+    '<w:sdt><w:sdtPr><w:id w:val="5"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p></w:sdtContent></w:sdt>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const match = hit(doc, 'remark');
+  expect(match.story).not.toBe('body');
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const baseline = await doc.export();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+    { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Inside a control' },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.message).toContain('Comments anchor in the main body text and its tables, not inside content controls, headers, footers, notes or text boxes.');
+  expect(error.details).toMatchObject({ failedIndex: 1 });
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.session.listComments()).toEqual([]);
+  const bytes = await doc.export();
+  expect(await part(bytes, 'word/document.xml')).toBe(await part(baseline, 'word/document.xml'));
+  expect(await part(bytes, 'word/comments.xml')).toBeUndefined();
+});
+
+test('add_comment refuses an existing comments part without a w14 root binding atomically', async () => {
+  const namespace = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const source = await commentFixture();
+  const original = (await part(source, 'word/comments.xml'))!;
+  for (const existing of [
+    original.replace(` ${namespace}`, '').replace(/ w14:(?:paraId|textId)="[^"]*"/g, ''),
+    original.replace(` ${namespace}`, '').replace('<w:comment ', `<w:comment ${namespace} `),
+  ]) {
+    const zip = await JSZip.loadAsync(source);
+    zip.file('word/comments.xml', existing);
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const before = doc.session.listComments();
+    const baseline = await doc.export();
+    const error = await refusal(doc.edit({ version, edits: [
+      { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+      { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    ] }));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain('The existing comments part predates paragraph ids, so a new comment cannot be added without rewriting existing comments.');
+    expect(error.details).toMatchObject({ failedIndex: 1 });
+    expect(doc.list().version).toBe(version);
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(doc.session.listComments()).toEqual(before);
+    const bytes = await doc.export();
+    expect(await part(bytes, 'word/document.xml')).toBe(await part(baseline, 'word/document.xml'));
+    expect(await part(bytes, 'word/comments.xml')).toBe(existing);
+  }
+});
+
+test('add_comment refuses a comments part stored under another name atomically', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  const rename = async (name: string, from: string, to: string) => zip.file(name, (await zip.file(name)!.async('string')).replace(from, to));
+  zip.file('word/comments1.xml', await zip.file('word/comments.xml')!.async('string'));
+  zip.remove('word/comments.xml');
+  await rename('[Content_Types].xml', '/word/comments.xml', '/word/comments1.xml');
+  await rename('word/_rels/document.xml.rels', 'Target="comments.xml"', 'Target="comments1.xml"');
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.message).toContain('non-standard part');
+  expect(error.details).toMatchObject({ failedIndex: 0 });
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+});
+
+async function refusedCommentOutput(zip: JSZip) {
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const before = doc.session.listComments();
+  const baseline = await doc.export();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true },
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    { op: 'add_comment', match: hit(doc, 'Q1').match, author: 'Reviewer', text: 'Cell note' },
+    { op: 'format_text', match: hit(doc, 'Obsolete remark').match, italic: true },
+  ] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.details).toMatchObject({ failedIndex: 1 });
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.session.listComments()).toEqual(before);
+  expect(await doc.export()).toEqual(baseline);
+  return error;
+}
+
+async function acceptedCommentOutput(zip: JSZip) {
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const doc = await open(source);
+  const receipt = await doc.edit({ version: doc.list().version, edits: [
+    { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note\nSecond line' },
+    { op: 'add_comment', match: hit(doc, 'Q1').match, author: 'Reviewer', text: 'Cell note' },
+  ] });
+  expect(receipt.applied).toBe(true);
+  const bytes = await doc.export();
+  const saved = (await part(bytes, 'word/comments.xml'))!;
+  const originals = (await part(source, 'word/comments.xml'))!.match(/<w:comment\b[\s\S]*?<\/w:comment>/g)!;
+  for (const original of originals) expect(saved).toContain(original);
+  expect(comments(saved).map(comment => comment.paragraphs)).toEqual([['Keep this note.'], ['New note', 'Second line'], ['Cell note']]);
+  const paraIds = [...saved.matchAll(/<w:comment\b[\s\S]*?<\/w:comment>/g)].map(([comment]) =>
+    [...comment.matchAll(/<w:p\b[^>]*\bw14:paraId="([^"]+)"/g)].at(-1)![1]);
+  let durableIds: string[] = [];
+  for (const [name, prefix, , , entry] of COMMENT_COMPANIONS) {
+    const xml = (await part(bytes, `word/${name}.xml`))!;
+    for (const original of companionEntries((await part(source, `word/${name}.xml`)) ?? '', entry)) {
+      expect(companionEntries(xml, entry)).toContainEqual(original);
+    }
+    const values = (attribute: string) => [...xml.matchAll(new RegExp(`${prefix}:${attribute}="([^"]+)"`, 'g'))].map(match => match[1]);
+    const ids = values(name === 'commentsExtensible' ? 'durableId' : 'paraId');
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+    expect(new Set(ids)).toEqual(new Set(name === 'commentsExtensible' ? durableIds : paraIds));
+    if (name === 'commentsIds') durableIds = values('durableId');
+  }
+  return bytes;
+}
+
+test('add_comment accepts indented companion entries and keeps every entry', async () => {
+  await acceptedCommentOutput(await JSZip.loadAsync(await commentFixture({ indentCompanions: true })));
+});
+
+test('add_comment accepts compact companion entries with reordered attributes', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  for (const [name, , , , entry] of COMMENT_COMPANIONS) {
+    const path = `word/${name}.xml`;
+    const xml = await zip.file(path)!.async('string');
+    const tag = entry.slice(1, entry.indexOf(' '));
+    const attributes = [...entry.matchAll(/(\S+)="([^"]*)"/g)].reverse().map(([, key, value]) => `${key}='${value}'`).join(' ');
+    zip.file(path, xml.replace(entry, `<${tag} ${attributes}/>`));
+  }
+  await acceptedCommentOutput(zip);
+});
+
+test('add_comment refuses normalized milliseconds in an existing commentExtensible atomically', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  for (const path of ['word/comments.xml', 'word/commentsExtensible.xml']) {
+    const xml = await zip.file(path)!.async('string');
+    zip.file(path, xml.replace('2026-01-05T09:00:00Z', '2026-01-05T09:00:00.123Z'));
+  }
+  const error = await refusedCommentOutput(zip);
+  expect(error.message).toContain('Saving comments would rewrite an existing entry in word/commentsExtensible.xml.');
+});
+
+test('add_comment accepts unused namespace and ignorable changes in companion roots', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture({ wordCompanionRoots: true }));
+  for (const [name, prefix, , root] of COMMENT_COMPANIONS) {
+    const path = `word/${name}.xml`;
+    const xml = await zip.file(path)!.async('string');
+    expect(xml).toContain('mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du wp14"');
+    expect(xml.match(/xmlns:/g)!.length).toBeGreaterThan(30);
+    zip.file(path, xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:unused="urn:unused-comment-root" `));
+  }
+  const bytes = await acceptedCommentOutput(zip);
+  for (const [name] of COMMENT_COMPANIONS) {
+    const xml = (await part(bytes, `word/${name}.xml`))!;
+    expect(xml).not.toContain('xmlns:unused=');
+    expect(xml).toContain('mc:Ignorable="w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14"');
+  }
+});
+
+for (const options of [
+  { companions: [] },
+  { companions: ['commentsExtended', 'commentsIds'] },
+  { companions: ['commentsExtended', 'commentsExtensible'], inlineDurableId: true },
+]) {
+  test(`add_comment synthesizes missing companion parts with ${options.companions.join(', ') || 'no companions'}`, async () => {
+    await acceptedCommentOutput(await JSZip.loadAsync(await commentFixture(options)));
+  });
+}
+
+for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
+  for (const variant of ['entry attribute', 'entry extension', 'root attribute', 'extension child', 'entry attribute and extension child', 'XML comment', 'processing instruction', 'text', 'CDATA'] as const) {
+    test(`add_comment refuses lost ${variant} in ${name} atomically`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture());
+      const path = `word/${name}.xml`;
+      const xml = await zip.file(path)!.async('string');
+      const extension = '<extension xmlns="urn:comment-extension"><payload>Keep this markup.</payload></extension>';
+      const tag = entry.slice(1, entry.indexOf(' '));
+      const attributed = xml.replace(entry, entry.replace(' ', ' extra="keep" '));
+      const append = (xml: string, child: string) => xml.replace(`</${prefix}:${root}>`, `${child}</${prefix}:${root}>`);
+      const changed = {
+        'entry attribute': attributed,
+        'entry extension': xml.replace(entry, entry.replace(/\s*\/>$/, `>${extension}</${tag}>`)),
+        'root attribute': xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} extra="keep" `),
+        'extension child': append(xml, extension),
+        'entry attribute and extension child': append(attributed, extension),
+        'XML comment': append(xml, '<!-- Keep this markup. -->'),
+        'processing instruction': append(xml, '<?keep this markup?>'),
+        'text': append(xml, 'Keep this text.'),
+        'CDATA': append(xml, '<![CDATA[ Keep this text. ]]>'),
+      }[variant];
+      zip.file(path, changed);
+      const error = await refusedCommentOutput(zip);
+      expect(error.message).toContain(path);
+      if (variant === 'entry attribute' || variant === 'entry extension') {
+        expect(error.message).toContain(`Saving comments would rewrite an existing entry in ${path}.`);
+      }
+    });
+  }
+
+  for (const variant of ['namespace removal', 'namespace remapping', 'ignorable removal'] as const) {
+    test(`add_comment refuses ${variant} for kept content in ${name} atomically`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture());
+      const path = `word/${name}.xml`;
+      const xml = await zip.file(path)!.async('string');
+      const used = variant === 'namespace removal' ? 'extra' : variant === 'namespace remapping' ? 'w14' : 'wpc';
+      const uri = used === 'wpc' ? 'http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas' : 'urn:comment-extension';
+      const ignorable = variant === 'ignorable removal'
+        ? ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="wpc"'
+        : '';
+      zip.file(path, xml.replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:${used}="${uri}"${ignorable} `)
+        .replace(entry, entry.replace(' ', ` ${used}:keep="unchanged" `)));
+      const error = await refusedCommentOutput(zip);
+      expect(error.message).toContain(`Saving comments would change the root metadata in ${path}.`);
+    });
+  }
+
+  for (const markup of ['<!-- Keep this markup. -->', '<?keep this markup?>']) {
+    for (const position of ['prolog', 'epilog']) {
+      test(`add_comment refuses lost ${markup} in the ${name} ${position} atomically`, async () => {
+        const zip = await JSZip.loadAsync(await commentFixture());
+        const path = `word/${name}.xml`;
+        const xml = await zip.file(path)!.async('string');
+        const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+        zip.file(path, declaration + (position === 'prolog' ? `${markup}\n${xml}` : `${xml}\n${markup}`));
+        const error = await refusedCommentOutput(zip);
+        expect(error.message).toContain(path);
+      });
+    }
+  }
+
+  test(`add_comment synthesizes a missing ${name} entry for an existing comment`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture({ inlineDurableId: name === 'commentsIds' }));
+    const path = `word/${name}.xml`;
+    zip.file(path, (await zip.file(path)!.async('string')).replace(entry, ''));
+    await acceptedCommentOutput(zip);
+  });
+}
+
+async function verifySavedCommentOutput(source: JSZip, saved: JSZip) {
+  const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+  await verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0);
+}
+
+for (const [name, prefix, namespace, root, entry] of COMMENT_COMPANIONS) {
+  const path = `word/${name}.xml`;
+  const tag = entry.slice(1, entry.indexOf(' '));
+  test(`comment output accepts equivalent attributes, prefixes and empty elements in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    const xml = await saved.file(path)!.async('string');
+    const attributes = [...entry.matchAll(/(\S+)="([^"]*)"/g)].reverse().map(([, key, value]) =>
+      `${key.replace(`${prefix}:`, 'alias:')}='${value.replace(/.$/, char => `&#x${char.codePointAt(0)!.toString(16)};`)}'`).join(' ');
+    const alias = tag.replace(`${prefix}:`, 'alias:');
+    saved.file(path, xml.replace(entry, `<${alias} xmlns:alias="${namespace}" ${attributes}></${alias}>`));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  test(`comment output accepts structurally identical nested content in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = await source.file(path)!.async('string');
+    const original = entry.replace(/\s*\/>$/, ` xmlns:before="urn:entry-extension" before:flag="A &amp; B">
+  <before:payload before:keep="yes">Keep &amp; text<before:child/> tail</before:payload>
+</${tag}>`);
+    const kept = entry.replace(/\s*\/>$/, ` xmlns:after="urn:entry-extension" after:flag='A &#38; B'><after:payload after:keep='yes'>Keep <![CDATA[&]]> text<after:child></after:child> tail</after:payload></${tag}>`);
+    source.file(path, xml.replace(entry, original));
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(entry, kept));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  for (const variant of ['entry value', 'added attribute', 'child', 'child attribute', 'child namespace', 'child order', 'text', 'text spacing', 'text position', 'XML comment', 'processing instruction'] as const) {
+    test(`comment output refuses changed ${variant} inside an existing entry in ${name}`, async () => {
+      const source = await JSZip.loadAsync(await commentFixture());
+      const xml = await source.file(path)!.async('string');
+      const original = entry.replace(/\s*\/>$/, ` xmlns:extra="urn:entry-extension" extra:flag="keep"><extra:payload extra:keep="yes">Keep this text.<extra:first/><extra:second/> tail</extra:payload><!-- Keep this markup. --><?keep this markup?></${tag}>`);
+      const changed = {
+        'entry value': original.replace('extra:flag="keep"', 'extra:flag="changed"'),
+        'added attribute': original.replace('extra:flag="keep"', 'extra:flag="keep" added="value"'),
+        'child': original.replace('<extra:second/>', ''),
+        'child attribute': original.replace('extra:keep="yes"', ''),
+        'child namespace': original.replace('<extra:second/>', '<extra:second xmlns:extra="urn:changed-extension"/>'),
+        'child order': original.replace('<extra:first/><extra:second/>', '<extra:second/><extra:first/>'),
+        'text': original.replace('Keep this text.', 'Changed text.'),
+        'text spacing': original.replace('Keep this text.', ' Keep this text.'),
+        'text position': original.replace('Keep this text.<extra:first/>', '<extra:first/>Keep this text.'),
+        'XML comment': original.replace('<!-- Keep this markup. -->', ''),
+        'processing instruction': original.replace('<?keep this markup?>', ''),
+      }[variant];
+      source.file(path, xml.replace(entry, original));
+      const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+      saved.file(path, xml.replace(entry, changed));
+      const error = await refusal(verifySavedCommentOutput(source, saved));
+      expect(error.code).toBe('UNSUPPORTED_TARGET');
+      expect(error.message).toContain(`Saving comments would rewrite an existing entry in ${path}.`);
+    });
+  }
+
+  const metadata = 'xmlns:extra="urn:comment-extension" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
+  for (const [usage, attributes, content] of [
+    ['entry attribute', '', entry.replace(' ', ' extra:keep="unchanged" ')],
+    ['element name', '', `${entry}<extra:payload/>`],
+    ['attribute name', '', `${entry}<extension extra:keep="unchanged"/>`],
+    ['Ignorable token', '', `${entry}<extension mc:Ignorable="extra"/>`],
+    ['ProcessContent token', '', `${entry}<extension mc:ProcessContent="extra:payload"/>`],
+    ['MustUnderstand token', '', `${entry}<extension mc:MustUnderstand="extra"/>`],
+    ['root ProcessContent token', 'mc:ProcessContent="extra:payload"', entry],
+    ['root MustUnderstand token', 'mc:MustUnderstand="extra"', entry],
+  ]) {
+    for (const variant of ['dropped', 'remapped']) {
+      test(`comment output refuses a ${variant} namespace used by a kept ${usage} in ${name}`, async () => {
+        const source = await JSZip.loadAsync(await commentFixture());
+        const xml = (await source.file(path)!.async('string'))
+          .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} ${attributes} `).replace(entry, content);
+        source.file(path, xml);
+        const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+        saved.file(path, xml.replace(' xmlns:extra="urn:comment-extension"', variant === 'dropped' ? '' : ' xmlns:extra="urn:changed-extension"'));
+        const error = await refusal(verifySavedCommentOutput(source, saved));
+        expect(error.code).toBe('UNSUPPORTED_TARGET');
+        if (variant === 'remapped') expect(error.message).toContain(`root metadata in ${path}`);
+      });
+    }
+  }
+
+  test(`comment output refuses a lost used ignorable token with unchanged entries in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} xmlns:unused="urn:unused" mc:Ignorable="extra unused" `)
+      .replace(entry, entry.replace(' ', ' extra:keep="unchanged" '));
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace('mc:Ignorable="extra unused"', 'mc:Ignorable="unused"'));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
+  });
+
+  test(`comment output accepts unused root bindings and tokens changing in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} mc:Ignorable="extra" `);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace('xmlns:extra="urn:comment-extension"', 'xmlns:extra="urn:changed-extension" xmlns:added="urn:added"')
+      .replace('mc:Ignorable="extra"', 'mc:Ignorable="added"'));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  test(`comment output accepts a dropped root binding shadowed inside a kept entry in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns:extra="urn:unused" `)
+      .replace(entry, entry.replace(' ', ' xmlns:extra="urn:local-extension" extra:keep="unchanged" '));
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' xmlns:extra="urn:unused"', ''));
+    await verifySavedCommentOutput(source, saved);
+  });
+
+  test(`comment output preserves ignorable prefixes used by root attributes in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} ${metadata} extra:keep="unchanged" mc:Ignorable="extra" `);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' mc:Ignorable="extra"', ''));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
+  });
+
+  test(`comment output preserves default namespaces used by non-entry markup in ${name}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const xml = (await source.file(path)!.async('string'))
+      .replace(`<${prefix}:${root} `, `<${prefix}:${root} xmlns="urn:comment-extension" `)
+      .replace(entry, `${entry}<extension/>`);
+    source.file(path, xml);
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    saved.file(path, xml.replace(' xmlns="urn:comment-extension"', ''));
+    const error = await refusal(verifySavedCommentOutput(source, saved));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`root metadata in ${path}`);
+  });
+}
+
+test('comment output keeps exterior markup while ignoring declarations and indentation', async () => {
+  const source = await JSZip.loadAsync(await commentFixture({ indentCompanions: true }));
+  const saved = await JSZip.loadAsync(await commentFixture());
+  for (const [name] of COMMENT_COMPANIONS) {
+    const path = `word/${name}.xml`;
+    const before = await source.file(path)!.async('string');
+    const after = await saved.file(path)!.async('string');
+    source.file(path, `<?xml version="1.0"?>\n<!-- Keep  spacing. -->\n<?xml-stylesheet keep?>\n${before}\n<?keep spacing?>\n`);
+    saved.file(path, `<?xml version="1.0" encoding="UTF-8"?> <!-- Keep  spacing. --><?xml-stylesheet keep?>${after} <?keep spacing?>`);
+  }
+  const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+  await verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0);
+});
+
+for (const variant of ['unknown extended paragraph', 'unknown ids paragraph', 'wrong durable id', 'duplicate extended paragraph', 'duplicate ids paragraph', 'duplicate durable id', 'duplicate extensible durable id', 'first paragraph'] as const) {
+  test(`comment output refuses synthesized entries with ${variant}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture({ companions: [] }));
+    const saved = await JSZip.loadAsync(await commentFixture());
+    if (variant === 'first paragraph') {
+      for (const zip of [source, saved]) {
+        const xml = await zip.file('word/comments.xml')!.async('string');
+        zip.file('word/comments.xml', xml.replace('<w:p w14:paraId=', '<w:p w14:paraId="11223344"><w:r><w:t>First line.</w:t></w:r></w:p><w:p w14:paraId='));
+      }
+    }
+    if (variant === 'duplicate durable id') {
+      const extra = EXISTING_COMMENT.replace('w:id="0"', 'w:id="1"').replace('1A2B3C4D', '11223344');
+      for (const zip of [source, saved]) {
+        const xml = await zip.file('word/comments.xml')!.async('string');
+        zip.file('word/comments.xml', xml.replace('</w:comments>', `${extra}</w:comments>`));
+      }
+    }
+    const [name, prefix, , root, entry] = COMMENT_COMPANIONS[
+      variant.includes('extended') || variant === 'first paragraph' ? 0 : variant.includes('extensible') || variant === 'wrong durable id' ? 2 : 1
+    ];
+    const path = `word/${name}.xml`;
+    const xml = await saved.file(path)!.async('string');
+    const changed = variant === 'first paragraph' ? xml.replace('1A2B3C4D', '11223344')
+      : variant.startsWith('unknown') ? xml.replace('1A2B3C4D', 'DEADBEEF')
+      : variant === 'wrong durable id' ? xml.replace('2ECC71AA', 'DEADBEEF')
+      : variant === 'duplicate durable id' ? xml.replace(`</${prefix}:${root}>`, `${entry.replace('1A2B3C4D', '11223344')}</${prefix}:${root}>`)
+      : xml.replace(`</${prefix}:${root}>`, `${entry}</${prefix}:${root}>`);
+    saved.file(path, changed);
+    const original = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+    const error = await refusal(verifyCommentOutput(original, await saved.generateAsync({ type: 'uint8array' }), 0));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(path);
+    if (variant === 'duplicate durable id') expect(error.message).toContain('duplicate durable ids');
+  });
+}
+
+for (const id of ["Id='rId1'", 'Id = "rId1"']) {
+  test(`add_comment refuses a relationship allocation collision with ${id} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    const name = 'word/_rels/document.xml.rels';
+    zip.file(name, (await zip.file(name)!.async('string')).replace('Id="styles"', id));
+    await refusedCommentOutput(zip);
+  });
+}
+
+test('add_comment refuses an unrelated external URL containing comments.xml atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>',
+    '<Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/comments.xml" TargetMode="External"/></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a comments.xml.bak override suppressing registration atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = '[Content_Types].xml';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Types>',
+    '<Override PartName="/word/comments.xml.bak" ContentType="application/xml"/></Types>'));
+  zip.file('word/comments.xml.bak', '<preserved/>');
+  await refusedCommentOutput(zip);
+});
+
+test('add_comment refuses a relationships closing tag inside an XML comment atomically', async () => {
+  const zip = await JSZip.loadAsync(await editFixture());
+  const name = 'word/_rels/document.xml.rels';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('</Relationships>', '<!-- </Relationships> --></Relationships>'));
+  await refusedCommentOutput(zip);
+});
+
+for (const variant of ['XML comment', 'leading-zero id']) {
+  test(`add_comment refuses whole-part fallback with a ${variant} atomically`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture());
+    const name = 'word/comments.xml';
+    const xml = await zip.file(name)!.async('string');
+    const rich = EXISTING_COMMENT.replace('<w:r><w:t>Keep this note.</w:t></w:r>',
+      '<w:hyperlink w:anchor="detail"><w:r><w:t>Keep this note.</w:t></w:r></w:hyperlink>');
+    zip.file(name, xml.replace(EXISTING_COMMENT, variant === 'XML comment'
+      ? `<!-- Preserve this markup. -->${rich}`
+      : rich.replace('w:id="0"', 'w:id="00"')));
+    await refusedCommentOutput(zip);
+  });
+}
+
+test('add_comment refuses a renamed main part or unregistered output parts atomically', async () => {
+  const relationships = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"';
+  const renamed = await JSZip.loadAsync(await commentFixture());
+  const move = async (from: string, to: string) => { renamed.file(to, await renamed.file(from)!.async('uint8array')); renamed.remove(from); };
+  await move('word/document.xml', 'word/document2.xml');
+  await move('word/_rels/document.xml.rels', 'word/_rels/document2.xml.rels');
+  for (const name of ['[Content_Types].xml', '_rels/.rels']) {
+    renamed.file(name, (await renamed.file(name)!.async('string')).replace('word/document.xml', 'word/document2.xml'));
+  }
+  const variants = [`<Relationships ${relationships}/>`, `<rel:Relationships xmlns:rel="http://schemas.openxmlformats.org/package/2006/relationships"></rel:Relationships>`, `<Relationships ${relationships}></Relationships >`];
+  const unusual = await Promise.all(variants.map(async xml => {
+    const zip = await JSZip.loadAsync(await editFixture());
+    zip.file('word/_rels/document.xml.rels', xml);
+    return zip;
+  }));
+  const manifest = await JSZip.loadAsync(await editFixture());
+  const types = await manifest.file('[Content_Types].xml')!.async('string');
+  manifest.file('[Content_Types].xml', types.replace('<Types xmlns=', '<ct:Types xmlns:ct=').replace(/<(Default|Override)\b/g, '<ct:$1').replace('</Types>', '</ct:Types>'));
+  for (const zip of [renamed, ...unusual, manifest]) {
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const error = await refusal(doc.edit({ version, edits: [
+      { op: 'add_comment', match: hit(doc, 'strongly').match, author: 'Reviewer', text: 'New note' },
+    ] }));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.details).toMatchObject({ failedIndex: 0 });
+    if (zip === renamed) expect(error.message).toContain('non-standard part');
+    expect(doc.list().version).toBe(version);
+    expect(doc.session.encodeState()).toEqual(state);
+  }
+});
+
+test('add_comment refusals are atomic: invalid input, stale version, stale match, non-body story', async () => {
+  const doc = await open();
+  const heading = hit(doc, 'Quarterly report');
+  const match = hit(doc, 'strongly');
+  const version = doc.list().version;
+  const comment = (extra: Partial<Extract<DocxAgentEdit, { op: 'add_comment' }>> = {}): DocxAgentEdit => ({ op: 'add_comment', match: match.match, author: 'Reviewer', text: 'Note', ...extra });
+  const refused = async (at: number, edits: DocxAgentEdit[], code: string) => {
+    const error = await refusal(doc.edit({ version: at, edits }));
+    expect(error.code).toBe(code);
+    expect(doc.session.listComments()).toEqual([]);
+    expect(doc.read(heading.ref).style).toBe('Heading1');
+    return error;
+  };
+  await refused(version, [comment({ text: 'Tab\there' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: 'Line\r\nbreak' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ author: 'Two\nlines' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: 'Note\uffff' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ author: 'Reviewer\ufffe' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ text: '' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ date: '1 October 2026' })], 'INVALID_ARGUMENT');
+  await refused(version, [comment({ match: 'm999' })], 'UNKNOWN_MATCH');
+  expect(doc.list().version).toBe(version);
+  await doc.edit({ version, edits: [{ op: 'format_text', match: match.match, italic: true }] });
+  await refused(version, [comment({ match: hit(doc, 'Closing note').match })], 'STALE_VERSION');
+  const fresh = doc.list().version;
+  const atomic = await refused(fresh, [{ op: 'set_paragraph_style', paragraph: heading.ref, style: 'Heading2' }, comment()], 'STALE_TARGET');
+  expect(atomic.details).toMatchObject({ failedIndex: 1 });
+  expect(doc.list().version).toBe(fresh);
+  expect(await part(await doc.export(), 'word/comments.xml')).toBeUndefined();
+
+  const other = await open(await fixture());
+  const header = other.grep({ query: 'Internal' }).matches[0];
+  expect(header.story).not.toBe('body');
+  const error = await refusal(other.edit({ version: other.list().version, edits: [{ op: 'add_comment', match: header.match, author: 'Reviewer', text: 'Note' }] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.details).toMatchObject({ failedIndex: 0 });
+  expect(other.session.listComments()).toEqual([]);
+});
+
+test('comment outline discovers threads, reply to reply targets root and resolve survives export', async () => {
+  const doc = await open(await commentFixture());
+  const listing = doc.list({ story: 'comments', limit: 1 });
+  expect(listing).toMatchObject({ total: 1, nextOffset: null });
+  expect(listing.items[0]).toMatchObject({ id: '0', parentId: null, done: false, text: 'Keep this note.', anchor: expect.any(String) });
+  const reply = await doc.edit({ version: listing.version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }] });
+  const replyId = reply.results[0].comment!;
+  expect(reply.results[0]).toMatchObject({ parentId: '0', done: false });
+  await doc.edit({ version: reply.version, edits: [
+    { op: 'reply_comment', comment: replyId, author: 'Editor', text: 'Second reply' },
+    { op: 'resolve_comment', comment: replyId },
+  ] });
+  const reopened = await open(await doc.export());
+  const comments = reopened.list({ story: 'comments', limit: 100 }).items;
+  expect(comments.find(comment => comment.id === '0')?.done).toBe(true);
+  expect(comments.filter(comment => comment.parentId === '0')).toHaveLength(2);
+  expect(comments.find(comment => comment.text === 'Follow up')).toMatchObject({ author: 'Editor', date: '2026-10-01T00:00:00Z' });
+  const first = reopened.list({ story: 'comments', limit: 1 });
+  expect(first.nextOffset).toBe(1);
+  expect(reopened.list({ story: 'comments', offset: 1, limit: 1 }).items).toHaveLength(1);
+  await reopened.edit({ version: first.version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] });
+  expect((await open(await reopened.export())).list({ story: 'comments' }).items.find(comment => comment.id === '0')?.done).toBe(false);
+});
+
+test('a root resolved in an earlier batch can be replied to, resolved and reopened later', async () => {
+  const doc = await open(await commentFixture());
+  const resolved = await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  const reply = await doc.edit({ version: resolved.version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'After resolve' }] });
+  expect((await open(await doc.export())).list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')?.done).toBe(true);
+  const again = await doc.edit({ version: reply.version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  await doc.edit({ version: again.version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] });
+  const saved = (await open(await doc.export())).list({ story: 'comments', limit: 100 }).items;
+  expect(saved.find(comment => comment.id === '0')?.done).toBe(false);
+  expect(saved.filter(comment => comment.parentId === '0').map(comment => comment.text)).toEqual(['After resolve']);
+});
+
+test('an undone resolution does not block later comment edits', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  zip.file('word/commentsExtended.xml', (await zip.file('word/commentsExtended.xml')!.async('string')).replace(' w15:done="0"', ''));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  expect(doc.session.undo()).toBe(true);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'After undo' }] });
+  const saved = (await open(await doc.export())).list({ story: 'comments', limit: 100 }).items;
+  expect(saved.find(comment => comment.id === '0')?.done).toBe(false);
+  expect(saved.filter(comment => comment.parentId === '0').map(comment => comment.text)).toEqual(['After undo']);
+});
+
+test('comment operations refuse unknown ids atomically and stale versions', async () => {
+  const doc = await open(await commentFixture());
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  for (const op of ['reply_comment', 'resolve_comment'] as const) {
+    const edit: DocxAgentEdit = op === 'reply_comment' ? { op, comment: 'missing', author: 'Editor', text: 'Reply' } : { op, comment: 'missing' };
+    const error = await refusal(doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0' }, edit] }));
+    expect(error.code).toBe('UNKNOWN_REF');
+    expect(error.details).toMatchObject({ failedIndex: 1 });
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(doc.list().version).toBe(version);
+  }
+  await doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+  expect((await refusal(doc.edit({ version, edits: [{ op: 'resolve_comment', comment: '0', done: false }] }))).code).toBe('STALE_VERSION');
+});
+
+
+test('reply_comment targets a comment added earlier in the same batch', async () => {
+  const source = await commentFixture();
+  const doc = await open(source);
+  const draft = await createYrsSession({ clientId: 82300 });
+  draft.openDocx(source, false);
+  draft.loadState(doc.session.encodeState());
+  const fork = spyOn(doc as unknown as { fork(): Promise<YrsSession> }, 'fork').mockResolvedValueOnce(draft);
+  try {
+    const match = hit(doc, 'Revenue grew');
+    const receipt = await doc.edit({ version: doc.list().version, edits: [
+      { op: 'add_comment', match: match.match, author: 'Reviewer', text: 'New root' },
+      { op: 'reply_comment', comment: '82300:0', author: 'Editor', text: 'Same batch reply' },
+      { op: 'resolve_comment', comment: '82300:0' },
+    ] });
+    expect(receipt.results[0].comment).toBe('82300:0');
+    expect(receipt.results[1]).toMatchObject({ parentId: '82300:0' });
+    const comments = (await open(await doc.export())).list({ story: 'comments' }).items;
+    const parent = comments.find(comment => comment.text === 'New root')!;
+    expect(parent.done).toBe(true);
+    expect(comments.find(comment => comment.text === 'Same batch reply')?.parentId).toBe(parent.id);
+  } finally { fork.mockRestore(); }
+});
+
+test('reply-only batches verify the saved reply and its parent metadata', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  const name = 'word/comments.xml';
+  zip.file(name, (await zip.file(name)!.async('string')).replace('<w:p ', '<w:p w14:paraId="11223344"><w:r><w:t>First paragraph.</w:t></w:r></w:p><w:p '));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  const verify = spyOn(commentOutput, 'verifyCommentOutput');
+  try {
+    await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up' }] });
+    expect(verify).toHaveBeenCalledTimes(1);
+    const bytes = await doc.export();
+    const reply = comments((await part(bytes, 'word/comments.xml'))!).find(comment => comment.paragraphs[0] === 'Follow up')!;
+    expect(await part(bytes, 'word/document.xml')).toContain(`<w:commentReference w:id="${reply.id}"/>`);
+    expect(await part(bytes, 'word/commentsExtended.xml')).toContain('w15:paraIdParent="1A2B3C4D"');
+  } finally { verify.mockRestore(); }
+});
+
+test('resolve-only batches verify both resolved and reopened flags', async () => {
+  let doc = await open(await commentFixture());
+  const verify = spyOn(commentOutput, 'verifyCommentOutput');
+  try {
+    for (const done of [true, false]) {
+      await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0', done }] });
+      const bytes = await doc.export();
+      expect(await part(bytes, 'word/commentsExtended.xml')).toContain(`w15:paraId="1A2B3C4D" w15:done="${done ? '1' : '0'}"`);
+      doc = await open(bytes);
+      expect(doc.list({ story: 'comments' }).items[0].done).toBe(done);
+    }
+    expect(verify).toHaveBeenCalledTimes(2);
+  } finally { verify.mockRestore(); }
+});
+
+for (const op of ['reply_comment', 'resolve_comment'] as const) {
+  test(`${op} permits only a missing last-paragraph id to be added to an existing comment`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture());
+    const name = 'word/comments.xml';
+    const original = EXISTING_COMMENT.replace(' w14:paraId="1A2B3C4D"', '').replace('</w:comment>', '<w:p w14:textId="88888888"><w:r><w:t>Last paragraph.</w:t></w:r></w:p></w:comment>');
+    zip.file(name, (await zip.file(name)!.async('string')).replace(EXISTING_COMMENT, original));
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const doc = await open(source);
+    const edit: DocxAgentEdit = op === 'reply_comment' ? { op, comment: '0', author: 'Editor', text: 'Follow up' } : { op, comment: '0' };
+    await doc.edit({ version: doc.list().version, edits: [edit] });
+    const bytes = await doc.export();
+    const saved = (await part(bytes, name))!;
+    const root = saved.match(/<w:comment\b[\s\S]*?<\/w:comment>/)![0];
+    const paraId = root.match(/ w14:paraId="([A-Fa-f0-9]{8})"/)![1];
+    expect(root.replace(` w14:paraId="${paraId}"`, '')).toBe(original);
+    expect(root).toContain(`<w:p w14:textId="88888888" w14:paraId="${paraId}">`);
+    const input = await commentOutput.readCommentPart(new Uint8Array(source).buffer);
+    const expected = doc.session.listComments().map(({ id, parentId, done }) => ({ id, parentId, ...(op === 'resolve_comment' ? { done } : {}) }));
+    const added = op === 'reply_comment' ? 1 : 0;
+    await commentOutput.verifyCommentOutput(input, bytes, added, expected);
+    for (const rewritten of [
+      root.replace('Last paragraph.', 'Changed paragraph.'),
+      root.replace(' w14:textId="88888888"', ' w14:textId="99999999"'),
+      root.replace('<w:p ', '<w:p w14:paraId="12345678" '),
+    ]) {
+      const tampered = await JSZip.loadAsync(bytes);
+      tampered.file(name, saved.replace(root, rewritten));
+      const error = await refusal(commentOutput.verifyCommentOutput(input, await tampered.generateAsync({ type: 'uint8array' }), added, expected));
+      expect(error.code).toBe('UNSUPPORTED_TARGET');
+      expect(error.message).toContain('rewrite an existing comment');
+    }
+  });
+}
+
+for (const missing of ['reply', 'reference', 'parent', 'done', 'reopened flag'] as const) {
+  test(`comment verification rejects a tampered save with a missing ${missing} atomically`, async () => {
+    let doc = await open(await commentFixture());
+    if (missing === 'reopened flag') {
+      await doc.edit({ version: doc.list().version, edits: [{ op: 'resolve_comment', comment: '0' }] });
+      doc = await open(await doc.export());
+    }
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const baseline = await doc.export();
+    const original = commentOutput.verifyCommentOutput;
+    const verify = spyOn(commentOutput, 'verifyCommentOutput').mockImplementationOnce(async (source, bytes, added, expected) => {
+      const zip = await JSZip.loadAsync(bytes);
+      if (missing === 'reply') {
+        const name = 'word/comments.xml';
+        const xml = await zip.file(name)!.async('string');
+        zip.file(name, xml.replace(xml.match(/<w:comment\b[\s\S]*?<\/w:comment>/g)![1], ''));
+      } else if (missing === 'reference') {
+        const name = 'word/document.xml';
+        zip.file(name, (await zip.file(name)!.async('string')).replace(/<w:commentReference w:id="(?!0")[^"]*"\/>/, ''));
+      } else {
+        const name = 'word/commentsExtended.xml';
+        const xml = await zip.file(name)!.async('string');
+        zip.file(name, missing === 'parent'
+          ? xml.replace('w15:paraIdParent="1A2B3C4D"', 'w15:paraIdParent="00000000"')
+          : xml.replace(/ w15:done="[01]"/, ''));
+      }
+      await original(source, await zip.generateAsync({ type: 'uint8array' }), added, expected);
+    });
+    try {
+      const edit: DocxAgentEdit = missing === 'done' || missing === 'reopened flag'
+        ? { op: 'resolve_comment', comment: '0', done: missing === 'done' }
+        : { op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up' };
+      const error = await refusal(doc.edit({ version, edits: [{ op: 'format_text', match: hit(doc, 'Revenue grew').match, bold: true }, edit] }));
+      expect(error.code).toBe('UNSUPPORTED_TARGET');
+      expect(error.message).toContain(missing === 'done' || missing === 'reopened flag'
+        ? 'comment resolution state'
+        : missing === 'parent' ? 'reply or its parent thread' : 'new comment or its document reference');
+      expect(error.details).toMatchObject({ failedIndex: 1 });
+      expect(error.message).toContain('No batch edits were applied.');
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(doc.list().version).toBe(version);
+      expect(doc.session.encodeState()).toEqual(state);
+      expect(await doc.export()).toEqual(baseline);
+    } finally { verify.mockRestore(); }
+  });
+}
+
+for (const done of [true, false]) {
+  test(`comment verification allows only the targeted root done change to ${done}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const path = 'word/commentsExtended.xml';
+    const entry = COMMENT_COMPANIONS[0][4];
+    const original = entry.replace('w15:done="0"', `w15:done="${done ? '0' : '1'}"`)
+      .replace(/\s*\/>$/, ' extra="keep"><payload xmlns="urn:comment-extension">Keep this text.</payload><!-- Keep this markup. --></w15:commentEx>');
+    source.file(path, (await source.file(path)!.async('string')).replace(entry, original));
+    const input = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    const xml = (await saved.file(path)!.async('string')).replace(`w15:done="${done ? '0' : '1'}"`, `w15:done="${done ? '1' : '0'}"`);
+    saved.file(path, xml);
+    const expected = [{ id: '0', parentId: null, done }];
+    await verifyCommentOutput(input, await saved.generateAsync({ type: 'uint8array' }), 0, expected);
+    const unrequested = await refusal(verifyCommentOutput(input, await saved.generateAsync({ type: 'uint8array' }), 0));
+    expect(unrequested.message).toContain(`rewrite an existing entry in ${path}`);
+    for (const changed of [
+      xml.replace('extra="keep"', 'extra="changed"'),
+      xml.replace('Keep this text.', 'Changed text.'),
+      xml.replace('<!-- Keep this markup. -->', ''),
+      xml.replace('<w15:commentEx ', '<w15:commentEx w15:paraIdParent="55667788" '),
+    ]) {
+      saved.file(path, changed);
+      const error = await refusal(verifyCommentOutput(input, await saved.generateAsync({ type: 'uint8array' }), 0, expected));
+      expect(error.code).toBe('UNSUPPORTED_TARGET');
+      expect(error.message).toContain(`rewrite an existing entry in ${path}`);
+    }
+  });
+}
+
+for (const parentId of [null, '0']) {
+  test(`comment verification preserves done on an untargeted existing ${parentId === null ? 'root' : 'reply'}`, async () => {
+    const source = await JSZip.loadAsync(await commentFixture());
+    const commentsPath = 'word/comments.xml';
+    const extra = EXISTING_COMMENT.replace('w:id="0"', 'w:id="1"').replace('1A2B3C4D', '55667788');
+    source.file(commentsPath, (await source.file(commentsPath)!.async('string')).replace('</w:comments>', `${extra}</w:comments>`));
+    const path = 'word/commentsExtended.xml';
+    const entry = `<w15:commentEx w15:paraId="55667788" w15:done="0"${parentId === null ? '' : ' w15:paraIdParent="1A2B3C4D"'}/>`;
+    source.file(path, (await source.file(path)!.async('string')).replace('</w15:commentsEx>', `${entry}</w15:commentsEx>`));
+    const input = await readCommentPart(await source.generateAsync({ type: 'arraybuffer' }));
+    const saved = await JSZip.loadAsync(await source.generateAsync({ type: 'uint8array' }));
+    const xml = (await saved.file(path)!.async('string')).replace('w15:done="0"', 'w15:done="1"');
+    saved.file(path, xml);
+    const expected = [{ id: '0', parentId: null, done: true }, { id: '1', parentId }];
+    await verifyCommentOutput(input, await saved.generateAsync({ type: 'uint8array' }), 0, expected);
+    saved.file(path, xml.replace(entry, entry.replace('w15:done="0"', 'w15:done="1"')));
+    const error = await refusal(verifyCommentOutput(input, await saved.generateAsync({ type: 'uint8array' }), 0, expected));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain(`rewrite an existing entry in ${path}`);
+  });
+}

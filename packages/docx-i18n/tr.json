@@ -584,7 +584,14 @@
     "replaced": "Değiştirildi",
     "with": "yerine",
     "added": "Eklendi",
-    "deleted": "Silindi"
+    "deleted": "Silindi",
+    "agent": "ajan",
+    "previousChange": "Önceki değişiklik",
+    "nextChange": "Sonraki değişiklik",
+    "changeBy": "{author} tarafından değişiklik",
+    "changeCount": "{count, plural, one {# değişiklik} other {# değişiklik}}",
+    "acceptAll": "Tümünü kabul et",
+    "acceptAllChanges": "Tüm değişiklikleri kabul et"
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
@@ -636,6 +643,7 @@
   },
   "errors": {
     "loadingDocument": "Belge yükleniyor...",
+    "stillOpening": null,
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "unableToParse": "Belge ayrıştırılamadı",
@@ -664,6 +672,7 @@
     "borderColor": "Kenarlık rengi",
     "borderWidth": "Kenarlık kalınlığı",
     "unknownAction": "Bilinmeyen işlem",
+    "viewGridlines": "Kılavuz çizgilerini göster",
     "borders": {
       "all": "Tüm kenarlıklar",
       "outside": "Dış kenarlıklar",
@@ -892,8 +901,8 @@
     "imageWrap": null,
     "editingMode": null,
     "review": null,
-    "reviewAccept": null,
-    "reviewReject": null,
+    "reviewAccept": "Değişikliği kabul et",
+    "reviewReject": "Değişikliği reddet",
     "reviewPrevious": null,
     "reviewNext": null,
     "moreActions": null,

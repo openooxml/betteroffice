@@ -1,3 +1,5 @@
+import { DocxSectionError, type SectionInfo } from './sections';
+import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
@@ -37,7 +39,11 @@ import type {
 import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
-import { editorSaveKeys } from './editorSaveKeys';
+import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
+import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
+import type { ResidentPartMetadata } from './residentParts';
+import type { Document, DocumentBody, SectionProperties } from '../types/document';
+import { resolvedFinalSectionProperties } from '../editor/finalSection';
 import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
@@ -51,6 +57,7 @@ import { decodeEncodedSelection } from './encodedSelection';
 import type { CollaborationTextInsertion, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { DocxListStoriesResult } from './stories';
 import type {
+  DocxEditRefusal,
   DocxEditResult,
   DocxFindTextResult,
   DocxReadParagraphsResult,
@@ -176,7 +183,34 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
+export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
+  const seeded = new Set(
+    (JSON.parse(session.list_comments()) as YrsCommentInfo[]).map((comment) => comment.id)
+  );
+  for (const comment of comments ?? []) {
+    if (!seeded.has(String(comment.id)) && comment.parentId === undefined) continue;
+    session.seed_comment_metadata_json(String(comment.id), JSON.stringify({
+      author: comment.author ?? '', date: comment.date ?? '', done: comment.done ?? false,
+      parentId: comment.parentId === undefined ? null : String(comment.parentId),
+      body: comment.blockContent ?? comment.content,
+    }));
+  }
+}
+
 /** A lone UTF-16 surrogate, which crossing into Wasm would turn into U+FFFD. */
+/** Note separator keys per opened source package, shared by every facade over the same bytes. */
+const sourceNoteSeparatorKeys = new WeakMap<ArrayBufferLike, ReturnType<typeof noteSeparatorKeys>>();
+const materializedSources = new WeakMap<EditSession, { source: Uint8Array; document: Document }>();
+const openedSources = new WeakMap<ArrayBuffer, Uint8Array>();
+
+export function forgetMaterializedSource(session: EditSession): void {
+  materializedSources.delete(session);
+}
+
+function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
+}
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -231,6 +265,24 @@ export function wrapSession(
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
     ? editorSaveKeys(opened.host.document)
     : null;
+  let sourceClosing: string[] | null = null;
+  let viewSeparators: { source: Uint8Array; keys: ReturnType<typeof noteSeparatorKeys> } | null = null;
+
+  const materializedSource = (): Document | null => {
+    const source = docxSource;
+    if (!source) return null;
+    let cached = materializedSources.get(session);
+    if (cached?.source !== source) {
+      const json = session.materialize_docx();
+      if (json === undefined) return null;
+      const document = decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      cached = { source, document };
+      materializedSources.set(session, cached);
+    }
+    const buffer = wholeBuffer(source);
+    if (buffer) sourceNoteSeparatorKeys.set(buffer, noteSeparatorKeys(cached.document));
+    return cached.document;
+  };
 
   let readCacheRevision = 0;
   let cachedHeaderFooterAliases: {
@@ -312,6 +364,22 @@ export function wrapSession(
         }
       : null;
 
+  const finalSectionProperties = (): SectionProperties => {
+    type Body = { body?: DocumentBody };
+    const parts = JSON.parse(session.part_metadata_json()) as Body;
+    const properties = JSON.parse(session.document_properties_json()) as { metadata?: Body };
+    const source = docxSourceKeys
+      ? (JSON.parse(docxSourceKeys.metadata) as DocumentBody)
+      : undefined;
+    const margins = JSON.parse(session.section_margins_json()) as { final?: SectionProperties };
+    return {
+      ...(resolvedFinalSectionProperties(parts.body) ??
+        resolvedFinalSectionProperties(properties.metadata?.body) ??
+        resolvedFinalSectionProperties(source)),
+      ...margins.final,
+    };
+  };
+
   const ensureUndo = (targetStory?: string): void => {
     if (!undoTracked) {
       session.track_undo();
@@ -382,6 +450,7 @@ export function wrapSession(
       session.set_media_tokens(options.mediaTokens === true);
       let opened: string;
       try {
+        forgetMaterializedSource(session);
         opened = session.open_docx(
           source,
           seedStories,
@@ -394,9 +463,14 @@ export function wrapSession(
       proposals.reset();
       return opened;
     });
-    const host = withHostMedia(decodeDocxHost(json, source));
+    const host = decodeDocxHost(json, source);
+    if (seedStories) {
+      mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
+    }
+    withHostMedia(host);
     docxSource = source;
     docxSourceKeys = editorSaveKeys(host.document);
+    sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
     partialDocument = false;
     return host;
   };
@@ -427,8 +501,11 @@ export function wrapSession(
     revisionStamps: (ids) => JSON.parse(session.revision_stamps_json(JSON.stringify(ids))),
     settleRevisions: (accept, reject) => {
       const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-      session.settle_revisions_json(JSON.stringify({ accept, reject }));
+      const settled = JSON.parse(
+        session.settle_revisions_json(JSON.stringify({ accept, reject }))
+      ) as { ok: true } | DocxEditRefusal;
       markDirty(facade.storiesChangedSince(since).stories);
+      return settled.ok ? undefined : settled.failure;
     },
     ...(typeof session.begin_shared_reads === 'function' &&
     typeof session.end_shared_reads === 'function'
@@ -452,6 +529,7 @@ export function wrapSession(
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
       markDirty('all');
       resetMedia();
+      forgetMaterializedSource(session);
       const json = mutateAlways(() =>
         paragraphBudget === undefined
           ? session.open_docx_preview(bytes, blocks)
@@ -558,7 +636,7 @@ export function wrapSession(
     residentLayoutInWorker: () => layoutRanInWorker,
     retainedKernelInputsJson: (expectedLayoutRevision) => {
       if (layoutRanInWorker) {
-        throw new Error('the retained layout was computed in the resident worker');
+        throw new Error('the retained layout was computed in the document worker');
       }
       if (expectedLayoutRevision !== residentLayoutRevision) {
         throw new Error(
@@ -695,6 +773,7 @@ export function wrapSession(
         session.load(update);
         proposals.reset();
       });
+      if (docxSourceKeys && !sourceClosing) sourceClosing = sectionClosingParaIds(facade);
     },
     encodePeerMetadata: () => {
       if (typeof peerSession.encode_peer_metadata !== 'function') {
@@ -725,6 +804,7 @@ export function wrapSession(
       const bootstrap = peerSession.bootstrap_peer;
       mutate(() => {
         try {
+          forgetMaterializedSource(session);
           bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
         } catch (error) {
           throw peerMetadataFailure(error);
@@ -734,6 +814,7 @@ export function wrapSession(
         resetMedia();
         docxSource = source;
         docxSourceKeys = keys;
+        sourceClosing = sectionClosingParaIds(facade);
         partialDocument = false;
         proposals.reset();
       });
@@ -763,9 +844,13 @@ export function wrapSession(
     mediaScope: () => mediaScope,
     materializeDocx: () => {
       const source = docxSource;
-      const json = session.materialize_docx();
-      if (!source || json === undefined) return null;
-      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
+      if (!source) return null;
+      const document = materializedSource();
+      if (!document) return null;
+      return {
+        ...structuredClone({ ...document, originalBuffer: undefined }),
+        originalBuffer: docxSourceBuffer(source),
+      };
     },
     loadStories: (stories) => {
       markDirty(stories.map((seed) => seed.storyId));
@@ -779,6 +864,12 @@ export function wrapSession(
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
+    encodeStateAsUpdateChunks: (remoteStateVector, maxChunkBytes) => {
+      if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 0xffffffff) {
+        throw new RangeError('maxChunkBytes must be a positive 32-bit integer');
+      }
+      return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
+    },
     applyUpdate: (update) => {
       markDirty('all');
       return mutate(
@@ -787,6 +878,10 @@ export function wrapSession(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
       );
+    },
+    applyUpdateChunks: (updates) => {
+      markDirty('all');
+      mutate(() => session.apply_update_chunks([...updates]));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();
@@ -1034,6 +1129,15 @@ export function wrapSession(
           )
       );
     },
+    setTableProperties: (table, patch) => {
+      ensureUndo(table.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_table_properties(JSON.stringify(table), JSON.stringify(patch))) as YrsTableReceipt
+          )
+      );
+    },
     insertText: (at, text, suggesting) => {
       ensureUndo(at.story);
       return mutate(
@@ -1049,6 +1153,12 @@ export function wrapSession(
             )
           ) as YrsReplaceReceipt
       );
+    },
+    insertLineBreak: (at, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(() => JSON.parse(session.insert_line_break(
+        at.story, at.paraId, at.offset, suggesting?.name, suggesting?.date
+      )) as YrsReplaceReceipt);
     },
     deleteRange: (range, suggesting) => {
       ensureUndo(range.story);
@@ -1236,11 +1346,41 @@ export function wrapSession(
     },
     insertPageBreak: (at) => {
       ensureUndo(at.story);
-      mutate(() => session.insert_page_break(at.story, at.paraId, at.offset));
+      return mutate(() => {
+        const target = pageBreakTarget(facade, session, at);
+        session.insert_page_break(target.story, target.paraId, target.offset);
+        return target;
+      });
     },
     insertSectionBreak: (at, type) => {
       ensureUndo(at.story);
-      mutate(() => session.insert_section_break(at.story, at.paraId, at.offset, type));
+      mutate(() => {
+        const final: { metadata?: ResidentPartMetadata } = {};
+        splitSection(facade, session, at, (closing) => {
+          if (closing) return closing;
+          const properties = finalSectionProperties();
+          final.metadata = finalSectionStartMetadata(
+            JSON.parse(session.part_metadata_json()) as Partial<ResidentPartMetadata>,
+            docxSourceKeys?.metadata,
+            sourceClosing ?? sectionClosingParaIds(facade),
+            type
+          );
+          if (!final.metadata) throw new Error('Section break needs the section properties');
+          return properties;
+        }, type);
+        if (final.metadata) session.set_part_metadata(JSON.stringify(final.metadata), '[]');
+      });
+    },
+    listSections: () => !facade.hasStory('body') ? [] : JSON.parse(session.list_sections_json()) as SectionInfo[],
+    insertSectionBreakAfter: (paraId, kind) => {
+      const result = facade.applyEdits({ expectVersion: facade.version(), steps: [{ op: 'insertSectionBreakAfter', target: { story: 'body', paraId }, kind }] });
+      if (!result.ok) throw new DocxSectionError(result.failure.code, result.failure.message);
+    },
+    setSectionProperties: (section, properties) => {
+      const id = typeof section === 'number' ? facade.listSections()[section - 1]?.closingParagraphId : section;
+      if (!id || (typeof section === 'number' && (!Number.isSafeInteger(section) || section < 1))) throw new DocxSectionError('missing-target', 'Unknown section');
+      const result = facade.applyEdits({ expectVersion: facade.version(), steps: [{ op: 'setSectionProperties', section: id, properties }] });
+      if (!result.ok) throw new DocxSectionError(result.failure.code, result.failure.message);
     },
     insertWatermark: (at, watermark) => {
       ensureUndo(at.story);
@@ -1278,6 +1418,13 @@ export function wrapSession(
             )
           ) as YrsCommentReceipt
       );
+    },
+    updateComment: (id, patch) => {
+      ensureUndo();
+      mutate(() => {
+        session.update_comment_metadata_json(id, JSON.stringify(patch));
+        markDirty('all');
+      });
     },
     setCommentRanges: (commentId, ranges) => {
       ensureUndo();
@@ -1379,7 +1526,25 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
+    paragraphSavePlan: () => {
+      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+      for (const part of plan.splicedParts ?? []) {
+        if (!part.changed.length) continue;
+        if (!part.paragraphPatches || !part.legacyParagraphs) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+          );
+        }
+        const writerVersion = paragraphPatchWriterVersionWire();
+        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
+          throw new Error(
+            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+          );
+        }
+      }
+      return plan;
+    },
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>
@@ -1527,8 +1692,10 @@ export function wrapSession(
       destroyed = true;
       invalidateReadCaches();
       residentFonts.length = 0;
+      forgetMaterializedSource(session);
       docxSource = null;
       docxSourceKeys = null;
+      sourceClosing = null;
       resetMedia();
       listeners.clear();
       proposals.destroy();
@@ -1542,20 +1709,35 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
+    materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
         ? { buffer: docxSourceBuffer(docxSource), keys: docxSourceKeys }
         : null,
+    sourceNoteSeparators: () => {
+      const source = docxSource;
+      if (!source) return null;
+      const buffer = wholeBuffer(source);
+      const cached = buffer ? sourceNoteSeparatorKeys.get(buffer) : viewSeparators?.source === source ? viewSeparators.keys : undefined;
+      if (cached) return cached;
+      const full = materializedSource();
+      if (!full) return null;
+      const keys = noteSeparatorKeys(full);
+      if (!buffer) viewSeparators = { source, keys };
+      return keys;
+    },
     compareDocx: (original, revised, options) => {
       markDirty('all');
       const json = mutate(() => {
+        forgetMaterializedSource(session);
         const compared = session.compare_docx_json(original, revised, options);
         proposals.reset();
         return compared;
       });
       docxSource = original.slice();
       docxSourceKeys = null;
+      sourceClosing = null;
       return json;
     },
     finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
@@ -1572,7 +1754,12 @@ export function wrapOpenedEditSession(
   source: Uint8Array,
   hostJson: string
 ): { session: YrsSession; host: YrsDocxHost } {
-  const exact = docxSourceBuffer(source) === source.buffer ? source : source.slice();
+  const buffer = docxSourceBuffer(source);
+  let exact = openedSources.get(buffer);
+  if (!exact) {
+    exact = new Uint8Array(buffer);
+    openedSources.set(buffer, exact);
+  }
   const host = decodeDocxHost(hostJson, exact);
   return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

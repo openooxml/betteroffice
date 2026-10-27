@@ -60,7 +60,7 @@ fn tables_in_stories_the_session_created_list_their_cells() {
         let cell = listed
             .stories
             .iter()
-            .find(|info| info.story == format!("{story}:t0:r0c0"))
+            .find(|info| info.story == format!("{story}:t0:r0c0~7104"))
             .unwrap();
         assert_eq!(cell.kind, StoryInfoKind::TableCell, "{story}");
         assert_eq!(cell.parent.as_deref(), Some(story), "{story}");
@@ -75,7 +75,7 @@ fn a_nested_table_moved_by_a_cell_merge_names_the_cell_that_holds_it() {
     let ctx = EditCtx::local("", "");
     doc.insert_table(&ctx, Position::new("body", 0), 1, 2)
         .unwrap();
-    doc.insert_table(&ctx, Position::new("body:t0:r0c1", 0), 1, 1)
+    doc.insert_table(&ctx, Position::new("body:t0:r0c1~7103", 0), 1, 1)
         .unwrap();
     doc.merge_cells(
         &ctx,
@@ -87,15 +87,15 @@ fn a_nested_table_moved_by_a_cell_merge_names_the_cell_that_holds_it() {
         listed
             .stories
             .iter()
-            .all(|info| info.story != "body:t0:r0c1")
+            .all(|info| info.story != "body:t0:r0c1~7103")
     );
     let nested = listed
         .stories
         .iter()
-        .find(|info| info.story == "body:t0:r0c1:t0:r0c0")
+        .find(|info| info.story == "body:t0:r0c1~7103:t0:r0c0~7103")
         .unwrap();
     assert_eq!(nested.kind, StoryInfoKind::TableCell);
-    assert_eq!(nested.parent.as_deref(), Some("body:t0:r0c0"));
+    assert_eq!(nested.parent.as_deref(), Some("body:t0:r0c0~7103"));
     assert_eq!(nested.root, "body");
 }
 

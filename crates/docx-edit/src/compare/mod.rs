@@ -1312,7 +1312,7 @@ pub(crate) fn compare_into(
     let empty = {
         let txn = doc.yrs_doc().transact();
         txn.get_map(crate::STORIES)
-            .is_none_or(|stories| yrs::Map::len(&stories, &txn) == 0)
+            .is_none_or(|stories| crate::live_stories(&stories, &txn).next().is_none())
     };
     if !empty {
         return Err(EditError::InvalidUpdate(

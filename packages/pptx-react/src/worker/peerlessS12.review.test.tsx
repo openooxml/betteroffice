@@ -169,3 +169,58 @@ test('async_review_export', async () => {
   await act(async () => { value.view.rerender(value.ui(true)); await value.api.flushPendingInput(); });
   await expect(review.acceptProposal(id)).rejects.toThrow();
 });
+
+test('stale notes preview shows the current notes before enabling force acceptance', async () => {
+  const value = await open();
+  const access = await value.api.handleAsync();
+  const slideId = value.client.state.slides[0]!.id;
+  await act(async () => {
+    await access.setSlideNotes(slideId, 'Original notes');
+    await access.propose('reviewer', 'Update notes', [{ type: 'setSlideNotes', slideId, text: 'Proposed notes' }]);
+    await access.setSlideNotes(slideId, 'Newer notes');
+    await value.api.commands.execute('proposalsPanel', { open: true });
+  });
+  expect(value.view.queryByTestId('pptx-proposal-force')).toBeNull();
+  act(() => { fireEvent.click(value.view.getByRole('button', { name: 'Preview changes' })); });
+  await waitFor(() => expect(value.view.getByTestId('pptx-proposal-notes-diff').querySelector('del')?.textContent).toBe('Newer notes'));
+  expect(value.view.getByTestId('pptx-proposal-notes-diff').querySelector('ins')?.textContent).toBe('Proposed notes');
+  expect(value.view.getByTestId('pptx-proposal-force').textContent).toBe('Apply updated proposal');
+  expect(value.view.getByTestId('pptx-proposal').textContent).toContain('Applying will override the changed targets');
+  await act(async () => { fireEvent.click(value.view.getByTestId('pptx-proposal-force')); });
+  await waitFor(() => expect(value.view.queryByTestId('pptx-proposal') === null).toBe(true));
+  expect((await access.snapshot()).slides[0]!.notes).toBe('Proposed notes');
+});
+
+test('force acceptance refreshes notes changed since preview without applying them', async () => {
+  const value = await open();
+  const access = await value.api.handleAsync();
+  const slideId = value.client.state.slides[0]!.id;
+  await act(async () => {
+    await access.propose('reviewer', 'Update notes', [{ type: 'setSlideNotes', slideId, text: 'Proposed notes' }]);
+    await access.setSlideNotes(slideId, 'Newer notes');
+    await value.api.commands.execute('proposalsPanel', { open: true });
+  });
+  act(() => { fireEvent.click(value.view.getByRole('button', { name: 'Preview changes' })); });
+  await waitFor(() => expect(value.view.getByTestId('pptx-proposal-force')).toBeDefined());
+  const read = value.client.access!;
+  let changed = false;
+  const refresh = spyOn(value.client, 'access').mockImplementation((async (method, ...args) => {
+    if (method === 'previewProposal' && !changed) {
+      changed = true;
+      await access.setSlideNotes(slideId, 'Changed again');
+    }
+    return (read as (...args: unknown[]) => Promise<unknown>)(method, ...args);
+  }) as typeof read);
+  try {
+    await act(async () => { fireEvent.click(value.view.getByTestId('pptx-proposal-force')); });
+    await waitFor(() => expect(value.view.getAllByRole('alert').some((alert) => alert.textContent?.includes('changed again'))).toBe(true));
+  } finally { refresh.mockRestore(); }
+  await waitFor(() => expect(value.view.getByTestId('pptx-proposal-notes-diff').querySelector('del')?.textContent).toBe('Changed again'));
+  expect((await access.snapshot()).slides[0]!.notes).toBe('Changed again');
+  expect(await access.listProposals()).toHaveLength(1);
+  expect(value.view.getAllByRole('alert').some((alert) => alert.textContent?.includes('changed again'))).toBe(true);
+  await waitFor(() => expect(value.view.queryByTestId('pptx-proposal-force') !== null).toBe(true));
+  await act(async () => { fireEvent.click(value.view.getByTestId('pptx-proposal-force')); });
+  await waitFor(() => expect(value.view.queryByTestId('pptx-proposal') === null).toBe(true));
+  expect((await access.snapshot()).slides[0]!.notes).toBe('Proposed notes');
+});

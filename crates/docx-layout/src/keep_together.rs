@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::table_row_break::{RowBreaks, first_table_fragment_height};
 use crate::types::{
@@ -72,12 +73,20 @@ fn is_bound_paragraph(block: &LayoutBlock) -> bool {
 /// must land on the follower's page. A paragraph that starts a new page is
 /// never a follower: Word lets the page break win over keepNext.
 pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
+    let marks = measured_section_break_marks(measured, None, None);
+    analyze_keep_with_next_with_marks(measured, &marks)
+}
+
+pub(crate) fn analyze_keep_with_next_with_marks(
+    measured: &[MeasuredBlock],
+    section_marks: &[bool],
+) -> KeepWithNextScan {
     let mut groups_by_head: BTreeMap<usize, KeepWithNextGroup> = BTreeMap::new();
     let mut interior_members: BTreeSet<usize> = BTreeSet::new();
 
     let mut cursor = 0usize;
     while cursor < measured.len() {
-        if !is_bound_paragraph(&measured[cursor].block) {
+        if section_marks[cursor] || !is_bound_paragraph(&measured[cursor].block) {
             cursor += 1;
             continue;
         }
@@ -86,6 +95,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         let mut tail_index = cursor;
         let mut probe = cursor + 1;
         while probe < measured.len()
+            && !section_marks[probe]
             && is_bound_paragraph(&measured[probe].block)
             && !paragraph_breaks_before(&measured[probe].block)
         {
@@ -98,6 +108,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         // supported flow object. Forced/section breaks terminate it.
         let after_tail = tail_index + 1;
         let follower = if after_tail < measured.len()
+            && !section_marks[after_tail]
             && !paragraph_breaks_before(&measured[after_tail].block)
             && matches!(
                 measured[after_tail].block,
@@ -107,6 +118,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
                     | LayoutBlock::Shape(_)
                     | LayoutBlock::Chart(_)
                     | LayoutBlock::TextBox(_)
+                    | LayoutBlock::Reserved(_)
             ) {
             Some(after_tail)
         } else {

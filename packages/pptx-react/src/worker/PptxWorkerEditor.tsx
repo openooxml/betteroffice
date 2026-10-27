@@ -8,8 +8,8 @@ export type PptxWorkerEditorProps = Omit<PptxInThreadEditorProps, 'onReady' | 'r
   /** @deprecated Removed in 0.6.0. Omit for the async editor. */
   [LEGACY_SYNC_API]: true;
   collaboration?: undefined;
-  /** Keeps worker opening enabled in the legacy runtime. */
-  experimentalWorkerOpen?: true;
+  /** Edits in the worker; without it the legacy runtime runs in-thread. */
+  experimentalWorkerOpen: true;
   readOnly?: false;
   /** Without `Worker`, falls back to the in-thread engine and passes `PptxEditorApi`. */
   onReady?: (api: PptxWorkerEditorApi) => void;

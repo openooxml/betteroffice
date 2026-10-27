@@ -361,7 +361,9 @@ fn revision_ranges<T: ReadTxn>(
     let Some(stories) = txn.get_map(STORIES) else {
         return Ok(Vec::new());
     };
-    let mut story_ids: Vec<_> = stories.iter(txn).map(|(id, _)| id.to_owned()).collect();
+    let mut story_ids: Vec<_> = crate::live_stories(&stories, txn)
+        .map(|(id, _)| id.to_owned())
+        .collect();
     if story_ids.iter().any(|id| !id.is_ascii()) {
         return Err(GeometrySentinel::Legacy);
     }

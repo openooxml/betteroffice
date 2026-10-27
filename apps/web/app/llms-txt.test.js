@@ -8,17 +8,15 @@ import {
 } from "../../../scripts/published-packages.mjs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { agentEvalCards, agentEvalTasks, parseAgentEvals } from "../lib/agent-evals.ts";
 import { BENCHMARKS, BENCHMARKS_SITE, DEMO, DOCS, EDITORS, PACKAGES, RELEASES, REPO, SITE } from "./content.ts";
 import { USED_BY, usedByLine } from "./used-by.ts";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
-const LLMS = readFileSync(join(ROOT, "apps/web/public/llms.txt"), "utf8");
+const LLMS = readFileSync(join(ROOT, "apps/web/content/llms.txt"), "utf8");
 
 const README = readFileSync(join(ROOT, "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;
 process.env.BETTEROFFICE_AGENT_EVALS = README;
-const EVALS = parseAgentEvals(README);
 const { default: Home } = await import("./page.tsx");
 const PAGE = renderToStaticMarkup(createElement(Home));
 
@@ -30,8 +28,7 @@ const COVERAGE = {
   foundation: ["tracked changes", "undoes as one step", "Untouched file parts", "self-hostable", `(${DOCS}/docs)`],
   benchmarks: [
     `(${BENCHMARKS})`, `(${BENCHMARKS_SITE})`, `(${SITE}/#benchmarks)`, "LibreOffice", "render and recalculation time", "scripts/office-quality",
-    `(${REPO}#evals)`, `${agentEvalTasks(EVALS)} editing tasks`,
-    ...agentEvalCards(EVALS).map((card) => `${card.format.toUpperCase()} ${card.bars[0].text} vs ${card.bars[1].text}`),
+    `(${REPO}#evals)`, "graded runs", "BetterOffice MCP vs generic file tools", "DOCX, XLSX and PPTX",
   ],
   collaboration: ["People and agents", "offline edits", `(${DOCS}/docs/collaboration)`],
   packages: ["never leave the page", ...PACKAGES.map((pkg) => `[${pkg.name}](`), `(${DOCS}/docs/packages)`, `(${RELEASES})`],

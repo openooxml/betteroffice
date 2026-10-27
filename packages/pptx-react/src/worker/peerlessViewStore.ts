@@ -1,13 +1,14 @@
 import {
   decodeCommandDisplayList, findLine, frameAssetIds, hitGeometry, indexGeometry, navigateGeometry,
-  presentationSharedInputs, selectionGeometry, transformedRect,
-} from '@betteroffice/pptx/peerless';
+  presentationSharedInputs, PptxWorkerEditorDisposedError, selectionGeometry, transformedRect,
+} from '@betteroffice/pptx/worker';
+import type { SlideDisplayList, PositionedTextRun } from '@betteroffice/pptx';
 import type {
   PresentationCommandAck, PresentationCommandBasis, PresentationCommandClient, PresentationCommandEditState,
-  PresentationCommandFrame, PresentationCommandFailure, PresentationCommandIntent,
-  PresentationCommandMotion, PresentationCommandOutcome, PresentationCommandSelected, PresentationCommandSelection, PresentationCommandSelectionReference,
-  CommandGeometryLine, CommandRect, SlideDisplayList, PositionedTextRun,
-} from '@betteroffice/pptx';
+  PresentationCommandFrame, PresentationCommandFailure, PresentationCommandIntent, PresentationCommandMotion,
+  PresentationCommandOutcome, PresentationCommandSelected, PresentationCommandSelection,
+  PresentationCommandSelectionReference, CommandGeometryLine, CommandRect,
+} from '@betteroffice/pptx/worker';
 import { measureEchoPosition } from './localEchoPainter';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 
@@ -50,7 +51,7 @@ export interface PeerlessViewSnapshot {
   caret: PeerlessRect | null;
   selectionRects: readonly PeerlessRect[];
   composition: PeerlessComposition | null;
-  inputFailure?: PeerlessCommandRefusedError;
+  inputFailure?: PptxCommandRefusedError;
   echo: PeerlessEcho | null;
   activeLine: PeerlessActiveLine | null;
   activeContextBytes: number;
@@ -78,7 +79,7 @@ export interface PeerlessViewStore {
   subscribePresentation(listener: () => void): () => void;
   subscribeStructure(listener: () => void): () => void;
   subscribeEditState(listener: () => void): () => void;
-  dispatch(intent: PresentationCommandIntent): Promise<PresentationCommandAck>;
+  dispatch(intent: PresentationCommandIntent, options?: { reportRefusal?: boolean }): Promise<PresentationCommandAck>;
   fence(): Promise<void>;
   setSelection(selection: PresentationCommandSelection | null): void;
   setFocused(focused: boolean): void;
@@ -98,6 +99,7 @@ interface WaitingInput {
   intent: PresentationCommandIntent;
   chunks: string[];
   echoed: boolean;
+  quiet: boolean;
   operation: Promise<PresentationCommandAck>;
   resolve(ack: PresentationCommandAck): void;
   reject(error: unknown): void;
@@ -105,8 +107,9 @@ interface WaitingInput {
 
 interface ViewController {
   install(frame: PresentationCommandFrame): boolean;
-  hit(point: { x: number; y: number }): ReturnType<typeof hitGeometry>;
+  hit(point: { x: number; y: number }, borderScale?: number): ReturnType<typeof hitGeometry>;
   navigate(motion: PresentationCommandMotion, extend: boolean): PresentationCommandSelection | null;
+  inTableCell(): boolean;
   known(): boolean;
   reference(predecessorSelection?: boolean): PresentationCommandSelectionReference | null;
   finishComposition(): (PeerlessComposition & { at: PresentationCommandSelectionReference }) | null;
@@ -124,15 +127,15 @@ export function peerlessGestureActive(store: PeerlessViewStore): boolean { retur
 
 const controllers = new WeakMap<PeerlessViewStore, ViewController>();
 
-export class PeerlessFrameDecodeError extends Error {
-  override readonly name = 'PeerlessFrameDecodeError';
+export class PptxFrameDecodeError extends Error {
+  override readonly name = 'PptxFrameDecodeError';
   constructor(readonly seq: number, readonly cause: unknown) {
     super('Could not decode the covering presentation frame');
   }
 }
 
-export class PeerlessCommandRefusedError extends Error {
-  override readonly name = 'PeerlessCommandRefusedError';
+export class PptxCommandRefusedError extends Error {
+  override readonly name = 'PptxCommandRefusedError';
   constructor(readonly operation: PresentationCommandIntent['kind'], readonly outcome: PresentationCommandOutcome) {
     super(`Presentation ${operation} refused: ${outcome.reason}`);
   }
@@ -140,7 +143,7 @@ export class PeerlessCommandRefusedError extends Error {
 
 export function createPeerlessViewStore(
   client: PresentationCommandClient, painters: PeerlessViewPainters,
-  { echoEnabled = false, onError }: { echoEnabled?: boolean; onError?(error: PeerlessFrameDecodeError | PeerlessCommandRefusedError): void } = {},
+  { echoEnabled = false, onError }: { echoEnabled?: boolean; onError?(error: PptxFrameDecodeError | PptxCommandRefusedError): void } = {},
 ): PeerlessViewStore {
   const initial = client.state;
   const identity = { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch };
@@ -154,6 +157,7 @@ export function createPeerlessViewStore(
   const navigationTargets = new Map<number, string>();
   let navigationReply: { seq: number; slideId: string } | undefined;
   const captured = new Map<Promise<PresentationCommandAck>, (error: unknown) => void>();
+  const quietSeqs = new Set<number>();
   const sharedInput = presentationSharedInputs.get(client);
   const resultReferences = new WeakMap<PresentationCommandSelectionReference, WaitingInput>();
   let compatibilityNextSeq = initial.throughSeq + 1;
@@ -168,6 +172,7 @@ export function createPeerlessViewStore(
   let failure: unknown;
   let draining = false;
   let compositionVisible = false;
+  let pendingSelection: { inTableCell: boolean } | undefined;
   let geometry: ReturnType<typeof indexGeometry> = initial.frame
     ? indexGeometry(decodeCommandDisplayList(initial.frame)) : { hits: [], lines: new Map() };
   let echoCharacters: Map<number, Set<string>> | null = null;
@@ -320,12 +325,13 @@ export function createPeerlessViewStore(
         input.basisThroughSeq = ack.throughSeq;
       }
     }
-    const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && record.intent.kind === 'applyRemoteUpdate');
+    const remoteHistory = view.pending.some((record) => record.seq === ack.historyThroughSeq && (record.intent.kind === 'applyRemoteUpdate' || record.intent.kind === 'collabPipe'));
     const refusals = view.pending.flatMap((record) => {
       const outcome = ack.outcomes.find((entry) => entry.seq === record.seq);
-      return outcome?.reason && (outcome.status === 'refused' || outcome.status === 'cancelled')
-        ? [new PeerlessCommandRefusedError(record.intent.kind, outcome)] : [];
+      return outcome?.reason && !quietSeqs.has(record.seq) && (outcome.status === 'refused' || outcome.status === 'cancelled')
+        ? [new PptxCommandRefusedError(record.intent.kind, outcome)] : [];
     });
+    for (const outcome of ack.outcomes) quietSeqs.delete(outcome.seq);
     if (ack.historyThroughSeq === ack.throughSeq) {
       localOnlySelection = false;
       localSelectionSeq = ack.throughSeq;
@@ -373,7 +379,7 @@ export function createPeerlessViewStore(
       waiting.splice(index, 1);
       const outcome: PresentationCommandOutcome = { seq: sharedInput ? lastSentSeq + index + 1 : input.seq,
         status: 'cancelled', reason: 'dependency-refused', committed: false };
-      refusals.push(new PeerlessCommandRefusedError(input.intent.kind, outcome));
+      if (!input.quiet) refusals.push(new PptxCommandRefusedError(input.intent.kind, outcome));
       input.resolve({ ...ack, outcomes: [outcome] });
     }
     if (!sharedInput) {
@@ -438,6 +444,18 @@ export function createPeerlessViewStore(
       (frame.slideRevision < previous.slideRevision || frame.slideRevision === previous.slideRevision &&
         frame.coversThroughSeq <= view.presentedThroughSeq) ||
       frame.coversThroughSeq < view.presentedThroughSeq) return false;
+    const covered = view.pending.filter((record) => record.seq <= frame.coversThroughSeq);
+    if (!activation && previous && !changedSlide && frame.version === previous.version &&
+      frame.slideRevision === previous.slideRevision && covered.length > 0 &&
+      covered.every((record) => record.intent.kind === 'collabPipe')) {
+      view.confirmed!.frame = { ...frame, displayList: previous.displayList, media: previous.media };
+      echoContext = echoContexts.get(frame.coversThroughSeq) ?? echoContext;
+      view = { ...view, presentedThroughSeq: frame.coversThroughSeq,
+        pending: view.pending.filter((record) => record.seq > frame.coversThroughSeq) };
+      retireCoverage(frame.coversThroughSeq);
+      drain();
+      return true;
+    }
     const selection = activation ? replies.get(frame.coversThroughSeq) ?? null
       : localOnlySelection || localSelectionSeq > frame.coversThroughSeq ? view.selection
       : replies.has(frame.coversThroughSeq) ? replies.get(frame.coversThroughSeq)! : view.selection;
@@ -445,7 +463,7 @@ export function createPeerlessViewStore(
     try { confirmed = decodeFrame(frame); }
     catch (error) {
       if (!sharedInput) throw error;
-      throw new PeerlessFrameDecodeError(frame.coversThroughSeq, error);
+      throw new PptxFrameDecodeError(frame.coversThroughSeq, error);
     }
     const saved = sharedInput ? { view, geometry, echoContext, echoCharacters, compositionVisible } : undefined;
     let rollback: PeerlessPaintCheckpoint | undefined;
@@ -478,13 +496,17 @@ export function createPeerlessViewStore(
     }
     rollback?.commit?.();
     if (activation) { localOnlySelection = false; compositionVisible = false; }
-    for (const seq of navigationTargets.keys()) if (seq <= frame.coversThroughSeq) navigationTargets.delete(seq);
-    for (const seq of replies.keys()) if (seq < frame.coversThroughSeq) replies.delete(seq);
-    for (const seq of echoContexts.keys()) if (seq <= frame.coversThroughSeq) echoContexts.delete(seq);
+    retireCoverage(frame.coversThroughSeq);
     notify(presentation);
     if (changedSlide) notify(structure);
     drain();
     return true;
+  }
+
+  function retireCoverage(throughSeq: number): void {
+    for (const seq of navigationTargets.keys()) if (seq <= throughSeq) navigationTargets.delete(seq);
+    for (const seq of replies.keys()) if (seq < throughSeq) replies.delete(seq);
+    for (const seq of echoContexts.keys()) if (seq <= throughSeq) echoContexts.delete(seq);
   }
 
   function blocked(): boolean {
@@ -515,15 +537,16 @@ export function createPeerlessViewStore(
     if (intent.kind === 'setSelection' && intent.payload.selection && intent.payload.selection.slideId !== view.confirmed?.frame.slideId) {
       navigationTargets.set(input.seq, intent.payload.selection.slideId);
     }
+    if (input.quiet) quietSeqs.add(input.seq);
     if (needsWorkerResolution(intent)) {
       unresolvedThroughSeq = Math.max(unresolvedThroughSeq, input.seq);
-      localOnlySelection = false;
+      if (intent.kind !== 'collabPipe') localOnlySelection = false;
     }
     view = { ...view, pending: [...view.pending, { seq: input.seq, basisThroughSeq: input.basisThroughSeq,
       afterSeq: at?.source === 'afterSeq' ? at.seq : undefined, intent, status: 'pending', echoed: input.echoed }] };
     lastSentSeq = input.seq;
     if (!preservesSelection(intent)) selectionTailSeq = input.seq;
-    paintLocal();
+    if (intent.kind !== 'collabPipe') paintLocal();
   }
 
   function send(input: WaitingInput): void {
@@ -568,7 +591,7 @@ export function createPeerlessViewStore(
     try { receiveAck(ack); input.resolve(ack); }
     catch (error) {
       input.reject(error);
-      if (error instanceof PeerlessFrameDecodeError) {
+      if (error instanceof PptxFrameDecodeError) {
         try { onError?.(error); } catch {}
         drain();
       } else fail(error);
@@ -592,8 +615,8 @@ export function createPeerlessViewStore(
     subscribePresentation: (listener) => subscribe(presentation, listener),
     subscribeStructure: (listener) => subscribe(structure, listener),
     subscribeEditState: (listener) => subscribe(editState, listener),
-    dispatch(intent) {
-      if (disposed) return Promise.reject(new Error('Peerless view is disposed'));
+    dispatch(intent, { reportRefusal = true } = {}) {
+      if (disposed) return Promise.reject(new PptxWorkerEditorDisposedError());
       if (failure) return Promise.reject(failure);
       if (view.inputFailure) view = { ...view, inputFailure: undefined };
       const wasKnown = known();
@@ -638,20 +661,34 @@ export function createPeerlessViewStore(
       void operation.then(() => { captured.delete(operation); }, () => { captured.delete(operation); });
       const input: WaitingInput = { seq, intent, after, basisThroughSeq: view.presentedThroughSeq,
         basis: { epoch: identity.epoch, version: view.confirmed?.frame.version ?? client.state.version },
-        echoed, chunks: [], operation, resolve, reject };
+        echoed, quiet: !reportRefusal, chunks: [], operation, resolve, reject };
+      let target: PresentationCommandSelected | null | undefined;
+      if (intent.kind === 'selectAtPoint' && !intent.payload.drag) {
+        const hit = hitGeometry(geometry, intent.payload);
+        target = hit?.kind === 'text' ? { slideId: intent.payload.frame.slideId,
+          shapeId: hit.shapeId, storyId: hit.storyId, anchor: hit.position, focus: hit.position,
+          affinity: hit.affinity ?? 'downstream' } : null;
+      } else if (intent.kind === 'setSelection') target = intent.payload.selection;
+      else if (intent.kind === 'selectObject' || intent.kind === 'activateSlide') target = null;
+      if (target !== undefined) {
+        const pending = { inTableCell: Boolean(navigateGeometry(geometry, target, 'nextCell', false)) };
+        pendingSelection = pending;
+        const settled = () => { if (pendingSelection === pending) pendingSelection = undefined; };
+        void operation.then(settled, settled);
+      }
       if (!preservesSelection(intent)) chainTailInput = input;
       if (waiting.length || blocked()) {
         waiting.push(input);
         view = { ...view, waitingInputCount: waiting.length };
-        notify(presentation);
+        if (intent.kind !== 'collabPipe') notify(presentation);
       } else send(input);
       return operation;
     },
     async fence() {
-      if (disposed) throw new Error('Peerless view is disposed');
+      if (disposed) throw new PptxWorkerEditorDisposedError();
       if (failure) throw failure;
       await Promise.all([...captured.keys()]);
-      if (disposed) throw new Error('Peerless view is disposed');
+      if (disposed) throw new PptxWorkerEditorDisposedError();
       if (failure) throw failure;
     },
     setSelection(selection) {
@@ -722,7 +759,7 @@ export function createPeerlessViewStore(
       unsubscribeAck(); unsubscribeFrame(); unsubscribeMedia(); unsubscribeFailure(); unsubscribeSent?.();
       waiting.length = 0;
       submitted.clear();
-      for (const reject of captured.values()) reject(new Error('Peerless view is disposed'));
+      for (const reject of captured.values()) reject(new PptxWorkerEditorDisposedError());
       presentation.clear(); structure.clear(); editState.clear(); replies.clear(); echoContexts.clear(); captured.clear();
       navigationTargets.clear();
       media.clear();
@@ -736,8 +773,9 @@ export function createPeerlessViewStore(
   }
 
   controllers.set(store, {
-    install, known, reference, hit: (point) => hitGeometry(geometry, point),
+    install, known, reference, hit: (point, borderScale) => hitGeometry(geometry, point, undefined, borderScale),
     navigate: (motion, extend) => navigateGeometry(geometry, view.selection, motion, extend),
+    inTableCell: () => pendingSelection?.inTableCell ?? Boolean(navigateGeometry(geometry, view.selection, 'nextCell', false)),
     finishComposition() {
       const composition = view.composition;
       const at = reference();
@@ -788,6 +826,7 @@ function chainedIntent(intent: PresentationCommandIntent, seq: number): Presenta
 }
 
 function isTextMutation(intent: PresentationCommandIntent): boolean {
+  if (intent.kind === 'collabPipe') return intent.payload.ops.some((op) => op.op === 'event' && op.event.type === 'message');
   return ['insertText', 'replaceText', 'deleteBackward', 'deleteForward', 'paragraphBreak', 'compositionCommit',
     'formatText', 'setParagraphAlignment', 'undo', 'redo', 'moveShape', 'setShapeRect', 'insertTextBox', 'insertShape', 'insertPicture', 'applyEdits', 'registerFont', 'applyRemoteUpdate', 'invoke'].includes(intent.kind);
 }
@@ -797,6 +836,7 @@ function isLocalSelection(intent: PresentationCommandIntent): boolean {
 }
 
 function preservesSelection(intent: PresentationCommandIntent): boolean {
+  if (intent.kind === 'collabPipe') return !isTextMutation(intent);
   return intent.kind === 'invoke' && ['setSlideNotes', 'addComment', 'replyToComment', 'setCommentStatus',
     'setCommentPosition', 'removeComment', 'setCommentFlavor'].includes(intent.payload.method);
 }
@@ -817,8 +857,8 @@ export function installCoveringFrame(store: PeerlessViewStore, frame: Presentati
   return controllers.get(store)?.install(frame) ?? false;
 }
 
-export function hitConfirmedGeometry(store: PeerlessViewStore, point: { x: number; y: number }): ReturnType<typeof hitGeometry> {
-  return controllers.get(store)?.hit(point) ?? null;
+export function hitConfirmedGeometry(store: PeerlessViewStore, point: { x: number; y: number }, borderScale?: number): ReturnType<typeof hitGeometry> {
+  return controllers.get(store)?.hit(point, borderScale) ?? null;
 }
 
 export function peerlessKnownState(store: PeerlessViewStore): boolean {
@@ -830,14 +870,19 @@ export function peerlessInputReference(store: PeerlessViewStore, predecessorSele
 }
 
 export function navigateConfirmedSelection(store: PeerlessViewStore, key: string, extend = false,
-  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey'>): PresentationCommandSelection | null {
+  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>): PresentationCommandSelection | null {
   const motion = commandMotion(key, modifiers);
   if (!peerlessKnownState(store) || !motion) return null;
   return controllers.get(store)?.navigate(motion, extend) ?? null;
 }
 
+/** Whether the current or pending selection is in a table cell. */
+export function peerlessSelectionInTableCell(store: PeerlessViewStore): boolean {
+  return controllers.get(store)?.inTableCell() ?? false;
+}
+
 export function commandMotion(key: string,
-  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey'>): PresentationCommandMotion | null {
+  modifiers?: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>): PresentationCommandMotion | null {
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const word = mac ? modifiers?.altKey : modifiers?.ctrlKey;
   switch (key) {
@@ -846,6 +891,8 @@ export function commandMotion(key: string,
     case 'Home': return modifiers?.metaKey || modifiers?.ctrlKey ? 'storyStart' : 'lineStart';
     case 'End': return modifiers?.metaKey || modifiers?.ctrlKey ? 'storyEnd' : 'lineEnd';
     case 'ArrowUp': return 'up'; case 'ArrowDown': return 'down';
+    case 'Tab': return modifiers?.altKey || modifiers?.ctrlKey || modifiers?.metaKey ? null
+      : modifiers?.shiftKey ? 'previousCell' : 'nextCell';
     default: return null;
   }
 }

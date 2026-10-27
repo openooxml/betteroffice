@@ -14,25 +14,26 @@ use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart, SheetId,
-    Workbook,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
+    Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
 use crate::axis::SheetAxes;
 use crate::package::{
-    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
-    XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
-    parse_relationships, relationship_part_path, relationships_by_id, remove_attribute,
-    set_attribute,
+    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship,
+    SourceSheetKind, XmlAttribute, XmlTemplate, attributes_from_fragment, effective_content_type,
+    normalized_part_name, parse_relationships, relationship_part_path, relationships_by_id,
+    remove_attribute, set_attribute,
 };
 use crate::patch::{
-    SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
-    sheet_data_regeneration_loss,
+    SheetPatch, SourceStyles, StyleMatch, keeps_source_conditional_formats, keeps_source_xf,
+    retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
+mod app_titles;
 mod source_coordinates;
 mod style_derivation;
 mod views;
@@ -93,6 +94,208 @@ fn drawingml_namespace(main_namespace: &str) -> &'static str {
     }
 }
 
+struct CfPlan {
+    authored: Vec<DifferentialFormat>,
+    assigned: HashMap<(usize, usize, usize), u32>,
+}
+
+impl CfPlan {
+    fn new(wb: &Workbook) -> Self {
+        let mut plan = Self {
+            authored: Vec::new(),
+            assigned: HashMap::new(),
+        };
+        let start = wb.styles.dxfs.len() as u32;
+        for (sheet_index, sheet) in wb.sheets.iter().enumerate() {
+            for (group_index, group) in sheet.conditional_formats.iter().enumerate() {
+                for (rule_index, rule) in group.rules.iter().enumerate() {
+                    if rule.raw_xml.is_none() {
+                        let id = start + plan.authored.len() as u32;
+                        plan.assigned
+                            .insert((sheet_index, group_index, rule_index), id);
+                        plan.authored.push(rule.format.clone());
+                    }
+                }
+            }
+        }
+        plan
+    }
+
+    fn dxf_id(
+        &self,
+        sheet: usize,
+        group: usize,
+        rule: usize,
+        fallback: Option<u32>,
+    ) -> Option<u32> {
+        self.assigned
+            .get(&(sheet, group, rule))
+            .copied()
+            .or(fallback)
+    }
+}
+
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_xml_attr(text: &str) -> String {
+    escape_xml_text(text).replace('"', "&quot;")
+}
+
+fn argb(color: &str) -> String {
+    format!("FF{}", color.trim_start_matches('#').to_ascii_uppercase())
+}
+
+fn dxf_bytes(format: &DifferentialFormat) -> Vec<u8> {
+    let mut out = String::from("<dxf>");
+    if format.font_color.is_some() || format.bold.is_some() || format.italic.is_some() {
+        out.push_str("<font>");
+        match format.bold {
+            Some(true) => out.push_str("<b/>"),
+            Some(false) => out.push_str("<b val=\"0\"/>"),
+            None => {}
+        }
+        match format.italic {
+            Some(true) => out.push_str("<i/>"),
+            Some(false) => out.push_str("<i val=\"0\"/>"),
+            None => {}
+        }
+        if let Some(color) = &format.font_color {
+            out.push_str(&format!("<color rgb=\"{}\"/>", argb(color)));
+        }
+        out.push_str("</font>");
+    }
+    if let Some(fill) = &format.fill {
+        out.push_str(&format!(
+            "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"{}\"/></patternFill></fill>",
+            argb(fill)
+        ));
+    }
+    out.push_str("</dxf>");
+    if out == "<dxf></dxf>" {
+        return b"<dxf/>".to_vec();
+    }
+    out.into_bytes()
+}
+
+fn conditional_formatting_bytes(
+    sheet: &Sheet,
+    sheet_index: usize,
+    plan: &CfPlan,
+    source: Option<(&XmlTemplate, &Sheet)>,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let mut source_indices = sheet
+        .conditional_formats
+        .iter()
+        .map(|group| {
+            source.and_then(|(_, original)| {
+                original.conditional_formats.iter().position(|original| {
+                    group.rules.iter().any(|rule| {
+                        rule.raw_xml.is_some() && original.rules.iter().any(|old| old.id == rule.id)
+                    })
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut used = source_indices
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+    if let Some((_, original)) = source {
+        for (group, index) in sheet.conditional_formats.iter().zip(&mut source_indices) {
+            if index.is_none() {
+                *index = original
+                    .conditional_formats
+                    .iter()
+                    .enumerate()
+                    .find(|(index, original)| {
+                        !used.contains(index) && original.sqref == group.sqref
+                    })
+                    .map(|(index, _)| index);
+                if let Some(index) = index {
+                    used.insert(*index);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (group_index, group) in sheet.conditional_formats.iter().enumerate() {
+        if group.rules.is_empty() {
+            continue;
+        }
+        let wrapper = source
+            .and_then(|(template, _)| {
+                source_indices[group_index]
+                    .and_then(|index| template.children_named("conditionalFormatting").nth(index))
+            })
+            .map(|child| XmlTemplate::capture(&child.bytes))
+            .transpose()?;
+        let mut rules = Vec::new();
+        for (rule_index, rule) in group.rules.iter().enumerate() {
+            if let Some(raw) = &rule.raw_xml {
+                rules.push(raw.as_bytes().to_vec());
+                continue;
+            }
+            let mut rule_xml = format!("<cfRule type=\"{}\"", escape_xml_attr(&rule.rule_type));
+            if let Some(dxf) = plan.dxf_id(sheet_index, group_index, rule_index, rule.dxf_id) {
+                rule_xml.push_str(&format!(" dxfId=\"{dxf}\""));
+            }
+            rule_xml.push_str(&format!(" priority=\"{}\"", rule.priority));
+            if let Some(operator) = &rule.operator {
+                rule_xml.push_str(&format!(" operator=\"{}\"", escape_xml_attr(operator)));
+            }
+            if rule.formulas.is_empty() {
+                rule_xml.push_str("/>");
+            } else {
+                rule_xml.push('>');
+                for formula in &rule.formulas {
+                    rule_xml.push_str(&format!("<formula>{}</formula>", escape_xml_text(formula)));
+                }
+                rule_xml.push_str("</cfRule>");
+            }
+            rules.push(match &wrapper {
+                Some(wrapper) => wrapper.qualify_fragment(rule_xml.as_bytes())?,
+                None => rule_xml.into_bytes(),
+            });
+        }
+        if let Some(wrapper) = wrapper {
+            wrapper.require_unwrapped_child("cfRule")?;
+            out.extend(wrapper.render_repeated("cfRule", &rules, &[])?);
+        } else {
+            out.extend_from_slice(
+                format!(
+                    "<conditionalFormatting sqref=\"{}\">",
+                    escape_xml_attr(&group.sqref)
+                )
+                .as_bytes(),
+            );
+            for rule in rules {
+                out.extend(rule);
+            }
+            out.extend_from_slice(b"</conditionalFormatting>");
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+fn cf_only_delta(wb: &Workbook, original: &Workbook) -> bool {
+    if wb.sheets.len() != original.sheets.len() {
+        return false;
+    }
+    let strip = |book: &Workbook| {
+        let mut book = book.clone();
+        for sheet in &mut book.sheets {
+            sheet.conditional_formats = Vec::new();
+        }
+        book
+    };
+    strip(wb) == strip(original)
+}
+
 /// serialize a workbook to opc parts in a fixed, deterministic order. a chart
 /// is refused: this writer emits no drawing, chart relationship or chart part,
 /// so it would drop one rather than write it.
@@ -111,8 +314,9 @@ pub fn serialize_workbook_with_active_sheet(
             "a chart can only be written back into the package it was read from".to_owned(),
         ));
     }
+    let cf_plan = CfPlan::new(wb);
     let have_sst = !wb.shared_strings.is_empty();
-    let have_styles = !wb.styles.is_empty();
+    let have_styles = !wb.styles.is_empty() || !cf_plan.authored.is_empty();
     let mut parts = vec![
         (
             "[Content_Types].xml".to_string(),
@@ -132,7 +336,10 @@ pub fn serialize_workbook_with_active_sheet(
         parts.push(("xl/sharedStrings.xml".to_string(), shared_strings_xml(wb)?));
     }
     if have_styles {
-        parts.push(("xl/styles.xml".to_string(), styles_xml(&wb.styles)?));
+        parts.push((
+            "xl/styles.xml".to_string(),
+            styles_xml_with_authored(&wb.styles, &cf_plan.authored)?,
+        ));
         parts.push((
             "xl/theme/theme1.xml".to_string(),
             theme_xml(&wb.styles, NS_DML)?,
@@ -142,7 +349,7 @@ pub fn serialize_workbook_with_active_sheet(
         let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None, i, &cf_plan)?,
         ));
         if !links.relationships.is_empty() {
             parts.push((
@@ -307,8 +514,20 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     }
     preflight_preserved_save(wb, package, origins, edits)?;
 
+    let mut cf_plan = CfPlan::new(wb);
+    if !cf_plan.authored.is_empty()
+        && let Some(template) = &package.stylesheet_template
+    {
+        let count = source_dxf_count(template)? as u32;
+        for id in cf_plan.assigned.values_mut() {
+            *id = count + (*id - wb.styles.dxfs.len() as u32);
+        }
+    }
+    let cf_only = edited && cf_only_delta(wb, &package.original_workbook);
+    let edited = edited && !cf_only;
     let have_sst = !wb.shared_strings.is_empty();
-    let have_styles = !wb.styles.is_empty() || package.styles.is_some();
+    let have_styles =
+        !wb.styles.is_empty() || package.styles.is_some() || !cf_plan.authored.is_empty();
     let main_namespace = package
         .workbook_template
         .root_namespace()
@@ -388,6 +607,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     });
 
     let mut parts = PartStore::new(&package.parts);
+    if let Some(path) = app_titles::part_path(&package.root_relationships)
+        && let Some(bytes) = parts.get(&path)
+        && let Some(patched) = app_titles::patch(bytes, wb, &package.original_workbook, origins)
+    {
+        parts.set(path, patched)?;
+    }
     let retained_origins = sheets
         .iter()
         .filter_map(|sheet| sheet.origin)
@@ -404,7 +629,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    patch_chart_parts(wb, package, origins, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -482,6 +707,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     shared_string_plan.as_ref(),
                     axes,
                     &style_match,
+                    index,
+                    &cf_plan,
                 )?
             }
             Some(_) => continue,
@@ -503,6 +730,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                         &relationship_namespace,
                         &links,
                         shared_string_plan.as_ref(),
+                        index,
+                        &cf_plan,
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -568,11 +797,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         main_namespace,
         shared_string_plan.as_ref(),
     )?;
-    let styles_retained =
-        matches!(
-            (package.styles.as_ref(), styles.as_ref()),
-            (Some(source), Some(planned)) if source.path == planned.path
-        ) && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
+    let styles_retained = matches!(
+        (package.styles.as_ref(), styles.as_ref()),
+        (Some(source), Some(planned)) if source.path == planned.path
+    ) && cf_plan.authored.is_empty()
+        && retains_source_styles(&style_plan.styles, &package.original_workbook.styles);
     if !styles_retained {
         replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
             match &package.stylesheet_template {
@@ -581,8 +810,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     &package.original_workbook.styles,
                     template,
                     &style_plan.overrides,
+                    &cf_plan.authored,
                 ),
-                None => styles_xml_with_namespace(&wb.styles, main_namespace),
+                None => styles_xml_with_namespace(&wb.styles, main_namespace, &cf_plan.authored),
             }
         })?;
     }
@@ -606,13 +836,19 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         (None, None) => {}
     }
 
+    for (path, bytes) in chart_refreshes {
+        let _ = parts.set(path, bytes);
+    }
     Ok(parts.finish())
 }
 
 /// What one sheet wants written into a chart part it anchors.
 struct ChartClaim<'a> {
+    chart: &'a SheetChart,
     refs: &'a [ChartRef],
     sheet: &'a str,
+    original_refs: std::borrow::Cow<'a, [ChartRef]>,
+    original_sheet: &'a str,
 }
 
 /// What one sheet wants written into a drawing anchor it holds.
@@ -631,23 +867,23 @@ fn patch_chart_parts(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
-) -> Result<(), ParseError> {
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
-    let mut moved_refs: HashSet<&str> = HashSet::new();
     let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
-        let source = origin
-            .and_then(|origin| package.original_workbook.sheets.get(origin))
+        let original_sheet = origin.and_then(|origin| package.original_workbook.sheets.get(origin));
+        let source = original_sheet
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
             let original = source_chart(source, chart, &sheet.name)?;
-            if original.refs.len() != chart.refs.len()
-                || original
-                    .refs
-                    .iter()
-                    .zip(&chart.refs)
-                    .any(|(original, edited)| original.kind != edited.kind)
+            if chart.raw_xml.is_none()
+                && (original.refs.len() != chart.refs.len()
+                    || original
+                        .refs
+                        .iter()
+                        .zip(&chart.refs)
+                        .any(|(original, edited)| original.kind != edited.kind))
             {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "chart {} no longer holds the references it was read from",
@@ -658,12 +894,17 @@ fn patch_chart_parts(
                 .entry(chart.part.as_str())
                 .or_default()
                 .push(ChartClaim {
+                    chart,
                     refs: chart.refs.as_slice(),
                     sheet: sheet.name.as_str(),
+                    original_refs: match &chart.raw_xml {
+                        Some(xml) => {
+                            std::borrow::Cow::Owned(crate::chart::chart_references(xml.as_bytes())?)
+                        }
+                        None => std::borrow::Cow::Borrowed(original.refs.as_slice()),
+                    },
+                    original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
-            if original.refs != chart.refs {
-                moved_refs.insert(chart.part.as_str());
-            }
             claim_anchor(
                 anchors.entry(chart.drawing.as_str()).or_default(),
                 chart,
@@ -672,13 +913,31 @@ fn patch_chart_parts(
             )?;
         }
     }
+    let mut refreshes = Vec::new();
     for (path, claims) in chart_refs {
-        if !moved_refs.contains(path) {
+        let moved = claims.iter().any(|claim| {
+            claim.refs != claim.original_refs.as_ref() || claim.chart.raw_xml.is_some()
+        });
+        let Some(source) = package.part_bytes(path) else {
+            if moved {
+                return Err(missing_part(path));
+            }
             continue;
+        };
+        let rewritten = if moved {
+            agreed_chart_bytes(source, path, &claims, wb, &package.original_workbook)?
+                .unwrap_or_else(|| source.to_vec())
+        } else {
+            source.to_vec()
+        };
+        if let Some(bytes) =
+            refreshed_chart_bytes(&rewritten, &claims, wb, &package.original_workbook)
+            && bytes != rewritten
+        {
+            refreshes.push((path.to_owned(), bytes));
         }
-        let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        if let Some(bytes) = agreed_chart_bytes(source, path, &claims, wb)? {
-            parts.set(path.to_owned(), bytes)?;
+        if rewritten != source {
+            parts.set(path.to_owned(), rewritten)?;
         }
     }
     for (path, claims) in anchors {
@@ -696,7 +955,7 @@ fn patch_chart_parts(
             crate::chart::patch_drawing_anchors(source, &moved)?,
         )?;
     }
-    Ok(())
+    Ok(refreshes)
 }
 
 /// Records what one sheet wants at a drawing anchor, refusing when a sheet
@@ -738,10 +997,26 @@ fn agreed_chart_bytes(
     path: &str,
     claims: &[ChartClaim<'_>],
     wb: &Workbook,
+    original: &Workbook,
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let mut agreed: Option<(Vec<u8>, &str)> = None;
     for claim in claims {
-        let bytes = crate::chart::patch_chart_refs(source, claim.refs, wb, claim.sheet)?;
+        let base = match &claim.chart.raw_xml {
+            Some(xml) => crate::tree::Part::decode(source)?.encode_text(xml),
+            None => source.to_vec(),
+        };
+        let bytes = crate::chart::patch_chart_refs(
+            &base,
+            path,
+            claim.refs,
+            wb,
+            claim.sheet,
+            claim
+                .chart
+                .raw_xml
+                .is_none()
+                .then_some((original, claim.original_sheet)),
+        )?;
         match &agreed {
             Some((first, owner)) if *first != bytes => {
                 return Err(conflicting_shared_part(path, owner, claim.sheet));
@@ -751,6 +1026,54 @@ fn agreed_chart_bytes(
         }
     }
     Ok(agreed.map(|(bytes, _)| bytes))
+}
+
+fn refreshed_chart_bytes(
+    source: &[u8],
+    claims: &[ChartClaim<'_>],
+    wb: &Workbook,
+    original: &Workbook,
+) -> Option<Vec<u8>> {
+    let plan = crate::chart::ChartRefreshPlan::new(source);
+    let mut refresh = plan
+        .save_refresh(wb, original)
+        .edited(claims.iter().any(|claim| claim.chart.raw_xml.is_some()));
+    let mut refreshed = None;
+    let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
+    for claim in claims {
+        let owner = if plan.owner_dependent() {
+            claim.sheet
+        } else {
+            ""
+        };
+        let original_owner = if claim
+            .original_refs
+            .iter()
+            .any(|reference| !reference.formula.contains('!'))
+        {
+            claim.original_sheet
+        } else {
+            ""
+        };
+        let references = seen.entry((owner, original_owner)).or_default();
+        if references.contains(&claim.original_refs.as_ref()) {
+            continue;
+        }
+        references.push(claim.original_refs.as_ref());
+        let bytes = refresh
+            .refresh_changed(
+                claim.sheet,
+                claim.original_sheet,
+                claim.original_refs.as_ref(),
+            )
+            .unwrap_or_else(|| source.to_vec());
+        match &refreshed {
+            Some(first) if *first != bytes => return None,
+            Some(_) => {}
+            None => refreshed = Some(bytes),
+        }
+    }
+    refreshed
 }
 
 /// Two sheets anchor one part and no longer agree on what it holds. The part
@@ -978,6 +1301,11 @@ fn sheet_body_matches(
     }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
+        && keeps_source_conditional_formats(
+            &sheet.conditional_formats,
+            &original.conditional_formats,
+        )
+        && sheet.auto_filter == original.auto_filter
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
@@ -2091,7 +2419,7 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited {
+    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
         set_attribute(
             &mut attributes,
@@ -2113,13 +2441,23 @@ fn workbook_xml_with_template(
         ("sheets", sheets_fragment),
         ("calcPr", calc_pr),
     ];
-    if let Some(child) = package.workbook_template.child("definedNames") {
-        replacements.push((
-            "definedNames",
-            render_defined_names(&child.bytes, wb, package)?,
-        ));
-    }
     let mut template = package.workbook_template.clone();
+    if wb.defined_names != package.original_workbook.defined_names {
+        let origins = sheets.iter().map(|sheet| sheet.origin).collect::<Vec<_>>();
+        let defined_names = edited_defined_names(wb, package, &origins)?;
+        if let Some(index) = template
+            .children
+            .iter()
+            .position(|child| template.is_root_child_named(child, "definedNames"))
+            && let Some(bytes) = &defined_names
+        {
+            template.children[index].bytes = bytes.clone();
+        } else {
+            replacements.push(("definedNames", defined_names));
+        }
+    } else if let Some(child) = package.workbook_template.child("definedNames") {
+        replacements.push(("definedNames", Some(child.bytes.clone())));
+    }
     if let Some(view_plan) = view_plan {
         if let Some(index) = template
             .children
@@ -2134,45 +2472,145 @@ fn workbook_xml_with_template(
     template.render(replacements, workbook_child_rank)
 }
 
-/// Patches retained `definedName` elements from the model, which the sheet ops
-/// have already rescoped, rewritten or dropped. Source entries the model no
-/// longer carries are dropped; every other byte of the element survives.
-fn render_defined_names(
-    fragment: &[u8],
+/// Whether the saved workbook holds a formula. Only worksheet cells are
+/// modeled, and an `mc:AlternateContent` branch can hide one from the model,
+/// so a macrosheet, an unknown sheet kind or such a source sheet counts too.
+fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSheet]) -> bool {
+    sheets.iter().filter_map(|plan| plan.origin).any(|origin| {
+        matches!(
+            package.source_sheet_kind(origin),
+            Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
+        ) || package
+            .source_cell_facts(origin)
+            .is_some_and(|facts| facts.alternate_formulas)
+    }) || wb
+        .sheets
+        .iter()
+        .any(|sheet| sheet.iter_cells().any(|(_, cell)| cell.formula.is_some()))
+}
+
+#[doc(hidden)]
+pub fn validate_defined_name_edits(
     wb: &Workbook,
     package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    if wb.defined_names != package.original_workbook.defined_names {
+        edited_defined_names(wb, package, origins)?;
+    }
+    Ok(())
+}
+
+fn edited_defined_names(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
 ) -> Result<Option<Vec<u8>>, ParseError> {
-    if wb.defined_names == package.original_workbook.defined_names {
-        return Ok(Some(fragment.to_vec()));
+    let unsupported = || ParseError::UnsupportedEdit("ambiguous defined name source layout".into());
+    let root = &package.workbook_template;
+    root.require_unwrapped_child("definedNames")?;
+    let containers = root.children_named("definedNames").collect::<Vec<_>>();
+    if containers.len() > 1 {
+        return Err(unsupported());
     }
-    let template = XmlTemplate::capture(fragment)?;
-    let sources = template.children_named("definedName").collect::<Vec<_>>();
-    if sources.len() != package.original_workbook.defined_names.len() {
-        return Ok(Some(fragment.to_vec()));
-    }
-    let ambiguous =
-        ambiguous_defined_names(&package.original_workbook.defined_names, &wb.defined_names);
-    let mut current = wb.defined_names.iter().peekable();
-    let mut replacements = Vec::new();
-    for (source, original) in sources.iter().zip(&package.original_workbook.defined_names) {
-        let Some(defined) = current
-            .peek()
-            .filter(|defined| defined.name == original.name)
-        else {
-            continue;
-        };
-        let defined = *defined;
-        current.next();
-        if defined == original && !ambiguous.contains(defined.name.as_str()) {
-            replacements.push(source.bytes.clone());
-            continue;
+    let Some(container) = containers.first() else {
+        if !package.original_workbook.defined_names.is_empty() {
+            return Err(unsupported());
         }
-        let patched = if ambiguous.contains(defined.name.as_str()) {
-            written_defined_name(defined)?
+        return if wb.defined_names.is_empty() {
+            Ok(None)
         } else {
-            patch_defined_name(&source.bytes, defined)?
+            Ok(Some(fragment(|writer| write_defined_names(writer, wb))?))
         };
-        replacements.push(template.qualify_fragment(&patched)?);
+    };
+    let template = root.capture_child(container)?;
+    template.require_unwrapped_child("definedName")?;
+    let sources = template.children_named("definedName").collect::<Vec<_>>();
+    let originals = &package.original_workbook.defined_names;
+    if sources.len() != originals.len() {
+        return Err(unsupported());
+    }
+    let mut identities = HashSet::new();
+    let mut scoped_counts = HashMap::<String, (usize, usize)>::new();
+    for original in originals {
+        if !identities.insert((original.name.to_ascii_lowercase(), original.local_sheet)) {
+            return Err(unsupported());
+        }
+        if original.local_sheet.is_some() {
+            scoped_counts
+                .entry(original.name.to_ascii_lowercase())
+                .or_default()
+                .0 += 1;
+        }
+    }
+    let mut current_identities = HashSet::new();
+    let mut current_by_origin = HashMap::new();
+    for (index, current) in wb.defined_names.iter().enumerate() {
+        if !current_identities.insert((current.name.to_ascii_lowercase(), current.local_sheet)) {
+            return Err(unsupported());
+        }
+        if current.local_sheet.is_some()
+            && let Some(counts) = scoped_counts.get_mut(&current.name.to_ascii_lowercase())
+        {
+            counts.1 += 1;
+        }
+        let scope = match current.local_sheet {
+            None => Some(None),
+            Some(sheet) => origins.get(sheet.0 as usize).copied().flatten().map(Some),
+        };
+        if let Some(scope) = scope {
+            current_by_origin.insert((current.name.to_ascii_lowercase(), scope), index);
+        }
+    }
+    let mut used = HashSet::new();
+    let mut replacements = Vec::new();
+    for (source, original) in sources.iter().zip(originals) {
+        if !XmlTemplate::capture(&source.bytes)?.children.is_empty() {
+            return Err(unsupported());
+        }
+        let attributes = attributes_from_fragment(&source.bytes)?;
+        let source_name = attributes
+            .iter()
+            .find(|attr| attr.name == "name")
+            .map(|attr| attr.value.as_str());
+        let source_scope = attributes
+            .iter()
+            .find(|attr| attr.name == "localSheetId")
+            .map(|attr| attr.value.parse::<u32>())
+            .transpose()
+            .map_err(|_| unsupported())?;
+        if source_name != Some(original.name.as_str())
+            || source_scope != original.local_sheet.map(|sheet| sheet.0)
+        {
+            return Err(unsupported());
+        }
+        let identity = (
+            original.name.to_ascii_lowercase(),
+            original.local_sheet.map(|sheet| sheet.0 as usize),
+        );
+        if let Some(&index) = current_by_origin.get(&identity) {
+            let current = &wb.defined_names[index];
+            used.insert(index);
+            replacements.push(if current == original {
+                source.bytes.clone()
+            } else if scoped_counts
+                .get(&identity.0)
+                .is_some_and(|&(before, after)| before > 1 && before != after)
+                && original.local_sheet.is_some()
+                && (current.name != original.name
+                    || current.formula != original.formula
+                    || current.hidden != original.hidden)
+            {
+                template.qualify_fragment(&written_defined_name(current)?)?
+            } else {
+                patch_defined_name(&source.bytes, current)?
+            });
+        }
+    }
+    for (index, current) in wb.defined_names.iter().enumerate() {
+        if !used.contains(&index) {
+            replacements.push(template.qualify_fragment(&written_defined_name(current)?)?);
+        }
     }
     if replacements.is_empty() {
         return Ok(None);
@@ -2184,30 +2622,6 @@ fn render_defined_names(
     )?))
 }
 
-/// Several `_xlnm.Print_Area` entries with different scopes are normal, and the
-/// model carries no source identity to tell them apart. Once their count
-/// changes, no pairing is trustworthy, so those entries are rewritten from the
-/// model rather than inheriting another entry's markup.
-fn ambiguous_defined_names<'a>(
-    original: &'a [xlsx_model::DefinedName],
-    current: &[xlsx_model::DefinedName],
-) -> HashSet<&'a str> {
-    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
-    for defined in original {
-        counts.entry(defined.name.as_str()).or_default().0 += 1;
-    }
-    for defined in current {
-        if let Some(entry) = counts.get_mut(defined.name.as_str()) {
-            entry.1 += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .filter(|(_, (before, after))| *before > 1 && before != after)
-        .map(|(name, _)| name)
-        .collect()
-}
-
 fn written_defined_name(defined: &xlsx_model::DefinedName) -> Result<Vec<u8>, ParseError> {
     fragment(|writer| write_defined_name(writer, defined))
 }
@@ -2216,24 +2630,53 @@ fn patch_defined_name(
     source: &[u8],
     defined: &xlsx_model::DefinedName,
 ) -> Result<Vec<u8>, ParseError> {
+    let mut reader = Reader::from_reader(source);
+    let element_name = loop {
+        match reader.read_event().map_err(xml_err)? {
+            Event::Start(element) | Event::Empty(element) => {
+                break String::from_utf8_lossy(element.name().as_ref()).into_owned();
+            }
+            Event::Eof => {
+                return Err(ParseError::UnsupportedEdit(
+                    "missing defined name element".into(),
+                ));
+            }
+            _ => {}
+        }
+    };
     let mut attributes = attributes_from_fragment(source)?;
-    match defined.local_sheet {
-        Some(sheet) => set_attribute(
-            &mut attributes,
+    for (name, value) in [
+        ("name", Some(defined.name.clone())),
+        ("hidden", defined.hidden.then(|| "1".to_owned())),
+        (
             "localSheetId",
-            "localSheetId",
-            sheet.0.to_string(),
+            defined.local_sheet.map(|sheet| sheet.0.to_string()),
         ),
-        None => remove_attribute(&mut attributes, "localSheetId"),
+    ] {
+        if let Some(value) = value {
+            if let Some(attribute) = attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == name)
+            {
+                attribute.value = value;
+            } else {
+                attributes.push(XmlAttribute {
+                    name: name.into(),
+                    value,
+                });
+            }
+        } else {
+            attributes.retain(|attribute| attribute.name != name);
+        }
     }
     fragment(|writer| {
-        let mut element = BytesStart::new("definedName");
+        let mut element = BytesStart::new(element_name.as_str());
         for attribute in &attributes {
             element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
         }
         writer.write_event(Event::Start(element))?;
         writer.write_event(Event::Text(BytesText::new(&defined.formula)))?;
-        writer.write_event(Event::End(BytesEnd::new("definedName")))?;
+        writer.write_event(Event::End(BytesEnd::new(element_name.as_str())))?;
         Ok(())
     })
 }
@@ -2481,6 +2924,7 @@ fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worksheet_xml_with_namespace(
     sheet: &Sheet,
     wb: &Workbook,
@@ -2488,6 +2932,8 @@ fn worksheet_xml_with_namespace(
     relationship_namespace: &str,
     links: &HyperlinkPlan,
     shared_string_plan: Option<&SharedStringPlan>,
+    sheet_index: usize,
+    cf_plan: &CfPlan,
 ) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
@@ -2506,7 +2952,17 @@ fn worksheet_xml_with_namespace(
             shared_string_plan,
             None,
         )?;
+        if let Some(bytes) =
+            auto_filter_bytes(sheet).map_err(|error| io::Error::other(error.to_string()))?
+        {
+            writer.get_mut().extend_from_slice(&bytes);
+        }
         write_merges(writer, sheet)?;
+        if let Some(bytes) = conditional_formatting_bytes(sheet, sheet_index, cf_plan, None)
+            .map_err(|error| io::Error::other(error.to_string()))?
+        {
+            writer.get_mut().extend_from_slice(&bytes);
+        }
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
         Ok(())
@@ -2617,8 +3073,26 @@ fn worksheet_xml_with_template(
     shared_string_plan: Option<&SharedStringPlan>,
     sheet_axes: Option<&SheetAxes>,
     styles: &StyleMatch<'_>,
+    sheet_index: usize,
+    cf_plan: &CfPlan,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
+    if let Some(original) = original
+        && original.auto_filter != sheet.auto_filter
+        && sheet_axes.is_none_or(SheetAxes::is_identity)
+        && wb.styles == package.original_workbook.styles
+        && wb.shared_strings == package.original_workbook.shared_strings
+    {
+        let mut retained = original.clone();
+        retained.auto_filter = sheet.auto_filter.clone();
+        if retained == *sheet {
+            let replacements = vec![("autoFilter", auto_filter_bytes(sheet)?)];
+            return Ok(WorksheetOutput {
+                bytes: render_auto_filter(template, replacements, sheet)?,
+                relationships: None,
+            });
+        }
+    }
     let patched = match (original, sheet_axes) {
         (Some(original), Some(axes)) => Some(patched_grid(
             sheet,
@@ -2659,14 +3133,52 @@ fn worksheet_xml_with_template(
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
-    let mut replacements = vec![
-        ("cols", columns),
-        ("sheetData", sheet_data),
-        ("mergeCells", merges),
-    ];
+    let mut replacements = vec![("cols", columns), ("sheetData", sheet_data)];
+    if original.is_none_or(|original| original.merges != sheet.merges) {
+        replacements.push(("mergeCells", merges));
+    }
+
+    let extent = cell_extent(sheet);
+    let authored = source_extent(template, sheet_axes);
+    if template.child("dimension").is_some()
+        && template.require_unwrapped_child("dimension").is_ok()
+        && (original.is_none_or(|original| cell_extent(original) != extent)
+            || authored != source_extent(template, None))
+    {
+        let reference =
+            union_extent(extent, authored).map_or_else(|| "A1".to_owned(), |range| range.to_a1());
+        replacements.push((
+            "dimension",
+            Some(fragment(|writer| {
+                writer
+                    .create_element("dimension")
+                    .with_attribute(("ref", reference.as_str()))
+                    .write_empty()
+                    .map(|_| ())
+            })?),
+        ));
+    }
 
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
+    }
+
+    if original.is_none_or(|original| original.auto_filter != sheet.auto_filter) {
+        replacements.push(("autoFilter", auto_filter_bytes(sheet)?));
+    }
+
+    if original.is_none_or(|original| {
+        !keeps_source_conditional_formats(&sheet.conditional_formats, &original.conditional_formats)
+    }) {
+        replacements.push((
+            "conditionalFormatting",
+            conditional_formatting_bytes(
+                sheet,
+                sheet_index,
+                cf_plan,
+                original.map(|sheet| (template, sheet)),
+            )?,
+        ));
     }
 
     let mut relationships = None;
@@ -2689,9 +3201,112 @@ fn worksheet_xml_with_template(
     }
 
     Ok(WorksheetOutput {
-        bytes: template.render(replacements, worksheet_child_rank)?,
+        bytes: render_auto_filter(template, replacements, sheet)?,
         relationships,
     })
+}
+
+fn render_auto_filter(
+    template: &XmlTemplate,
+    mut replacements: Vec<(&'static str, Option<Vec<u8>>)>,
+    sheet: &Sheet,
+) -> Result<Vec<u8>, ParseError> {
+    if sheet
+        .auto_filter
+        .as_ref()
+        .is_some_and(|filter| filter.raw_xml.is_some())
+        && let Some(index) = template
+            .children
+            .iter()
+            .position(|child| template.is_root_child_named(child, "autoFilter"))
+        && let Some(replacement) = replacements
+            .iter()
+            .position(|(name, bytes)| *name == "autoFilter" && bytes.is_some())
+    {
+        let mut template = template.clone();
+        template.children[index].bytes = replacements.remove(replacement).1.unwrap();
+        return template.render(replacements, worksheet_child_rank);
+    }
+    template.render(replacements, worksheet_child_rank)
+}
+
+fn auto_filter_bytes(sheet: &Sheet) -> Result<Option<Vec<u8>>, ParseError> {
+    let Some(filter) = &sheet.auto_filter else {
+        return Ok(None);
+    };
+    let reference = filter.range.to_a1();
+    let Some(raw) = &filter.raw_xml else {
+        return Ok(Some(
+            format!("<autoFilter ref=\"{reference}\"/>").into_bytes(),
+        ));
+    };
+    let mut reader = Reader::from_reader(raw.as_bytes());
+    let event = reader.read_event().map_err(xml_err)?;
+    let (Event::Start(element) | Event::Empty(element)) = event else {
+        return Err(ParseError::Malformed("invalid autoFilter source".into()));
+    };
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(xml_err)?;
+        if attribute.key.as_ref() == b"ref" {
+            let value = attribute.value.as_ref();
+            let start = 1 + value.as_ptr() as usize - element.as_ref().as_ptr() as usize;
+            let mut bytes = raw.as_bytes().to_vec();
+            bytes.splice(start..start + value.len(), reference.bytes());
+            return Ok(Some(bytes));
+        }
+    }
+    Err(ParseError::Malformed("autoFilter source has no ref".into()))
+}
+
+fn cell_extent(sheet: &Sheet) -> Option<CellRange> {
+    let mut cells = sheet.iter_cells().map(|(at, _)| at);
+    let first = cells.next()?;
+    let (mut last_row, mut min_col, mut max_col) = (first.row, first.col, first.col);
+    for at in cells {
+        last_row = at.row;
+        min_col = min_col.min(at.col);
+        max_col = max_col.max(at.col);
+    }
+    Some(CellRange::new(
+        CellRef::new(first.row, min_col),
+        CellRef::new(last_row, max_col),
+    ))
+}
+
+/// The source `<dimension>` moved through the sheet's row and column edits;
+/// it still covers source cells the model does not hold.
+fn source_extent(template: &XmlTemplate, axes: Option<&SheetAxes>) -> Option<CellRange> {
+    let attributes = attributes_from_fragment(&template.child("dimension")?.bytes).ok()?;
+    let reference = attributes
+        .iter()
+        .find(|attribute| attribute.local_name() == "ref")?;
+    let range = CellRange::parse_a1(&reference.value).ok()?;
+    let Some(axes) = axes else {
+        return Some(range);
+    };
+    let span = |ranges: Vec<Range<u32>>| Some(ranges.first()?.start..ranges.last()?.end);
+    let rows = span(
+        axes.rows
+            .current_ranges(range.start.row..range.end.row.saturating_add(1)),
+    )?;
+    let cols = span(
+        axes.cols
+            .current_ranges(range.start.col..range.end.col.saturating_add(1)),
+    )?;
+    Some(CellRange::new(
+        CellRef::new(rows.start, cols.start),
+        CellRef::new(rows.end - 1, cols.end - 1),
+    ))
+}
+
+fn union_extent(a: Option<CellRange>, b: Option<CellRange>) -> Option<CellRange> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(CellRange::new(
+            CellRef::new(a.start.row.min(b.start.row), a.start.col.min(b.start.col)),
+            CellRef::new(a.end.row.max(b.end.row), a.end.col.max(b.end.col)),
+        )),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Rewrites each `<sheetView>`'s pane while its zoom, selection and view flags
@@ -2961,6 +3576,7 @@ pub(crate) struct ColRun {
     pub(crate) first: ColId,
     last: ColId,
     width: Option<f64>,
+    hidden_width: Option<f64>,
     style: Option<u32>,
 }
 
@@ -3019,6 +3635,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
                 first,
                 last,
                 width,
+                hidden_width: sheet.hidden_col_widths.get(&first).copied(),
                 style,
             }),
         }
@@ -3029,7 +3646,14 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
 pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io::Result<()> {
     let first = (u64::from(run.first) + 1).to_string();
     let last = (u64::from(run.last) + 1).to_string();
-    let width = run.width.map(fmt_num);
+    let hidden = run.width == Some(0.0);
+    let width = run.width.map(|width| {
+        fmt_num(if hidden {
+            run.hidden_width.unwrap_or(width)
+        } else {
+            width
+        })
+    });
     let style = run.style.map(|style| style.to_string());
     let mut element = BytesStart::new("col");
     element.push_attribute(("min", first.as_str()));
@@ -3041,7 +3665,7 @@ pub(crate) fn write_col_run<W: io::Write>(w: &mut Writer<W>, run: &ColRun) -> io
     if let Some(style) = &style {
         element.push_attribute(("style", style.as_str()));
     }
-    if width.as_deref() == Some("0") {
+    if hidden {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;
@@ -3071,11 +3695,18 @@ where
         start.push_attribute(("s", style.as_str()));
         start.push_attribute(("customFormat", "1"));
     }
-    let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
+    let hidden = sheet.row_heights.get(&row) == Some(&0.0);
+    let ht = sheet.row_heights.get(&row).map(|h| {
+        fmt_num(if hidden {
+            sheet.hidden_row_heights.get(&row).copied().unwrap_or(*h)
+        } else {
+            *h
+        })
+    });
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
-        if h == "0" {
+        if hidden {
             start.push_attribute(("hidden", "1"));
         }
     }
@@ -3237,13 +3868,34 @@ fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// serialize the style tables verbatim; callers building a stylesheet from
-/// scratch must include the sml convention entries for excel to accept it.
-fn styles_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
-    styles_xml_with_namespace(ss, NS_MAIN)
+fn styles_xml_with_authored(
+    ss: &Stylesheet,
+    authored: &[DifferentialFormat],
+) -> Result<Vec<u8>, ParseError> {
+    styles_xml_with_namespace(ss, NS_MAIN, authored)
 }
 
-fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Vec<u8>, ParseError> {
+fn write_dxfs(w: &mut Writer<Vec<u8>>, dxfs: &[DifferentialFormat]) -> io::Result<()> {
+    if dxfs.is_empty() {
+        return Ok(());
+    }
+    let count = dxfs.len().to_string();
+    w.create_element("dxfs")
+        .with_attribute(("count", count.as_str()))
+        .write_inner_content(|w| {
+            for dxf in dxfs {
+                w.get_mut().extend_from_slice(&dxf_bytes(dxf));
+            }
+            Ok(())
+        })?;
+    Ok(())
+}
+
+fn styles_xml_with_namespace(
+    ss: &Stylesheet,
+    main_namespace: &str,
+    authored: &[DifferentialFormat],
+) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("styleSheet")
             .with_attribute(("xmlns", main_namespace))
@@ -3253,11 +3905,61 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
                 write_fills(w, ss)?;
                 write_borders(w, ss)?;
                 write_cell_xfs(w, ss)?;
+                let mut dxfs = ss.dxfs.clone();
+                dxfs.extend(authored.iter().cloned());
+                write_dxfs(w, &dxfs)?;
                 write_colors(w, ss)?;
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn source_dxf_count(template: &XmlTemplate) -> Result<usize, ParseError> {
+    let Some(pool) = template.child("dxfs") else {
+        return Ok(0);
+    };
+    let mut reader = crate::xml::reader(&pool.bytes);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut count = 0;
+    loop {
+        match crate::xml::next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if depth == 2 && e.local_name().as_ref() == b"dxf" => count += 1,
+            Event::Eof => return Ok(count),
+            _ => {}
+        }
+    }
+}
+
+fn patched_dxfs(
+    template: &XmlTemplate,
+    authored: &[DifferentialFormat],
+) -> Result<Option<Vec<u8>>, ParseError> {
+    if authored.is_empty() {
+        return Ok(None);
+    }
+    template.require_unwrapped_child("dxfs")?;
+    let Some(pool) = template
+        .child("dxfs")
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?
+    else {
+        return Ok(Some(fragment(|writer| {
+            let dxfs = authored.to_vec();
+            write_dxfs(writer, &dxfs)
+        })?));
+    };
+    pool.require_unwrapped_child("dxf")?;
+    let mut items = pool
+        .children_named("dxf")
+        .map(|child| child.bytes.clone())
+        .collect::<Vec<_>>();
+    for format in authored {
+        items.push(pool.qualify_fragment(&dxf_bytes(format))?);
+    }
+    pool.render_repeated("dxf", &items, &[("count", items.len().to_string())])
+        .map(Some)
 }
 
 /// Reuses each source pool entry `kept` says the model left alone, so font
@@ -3274,13 +3976,20 @@ fn patched_pool<T>(
     write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
     overrides: Option<&HashMap<usize, Vec<u8>>>,
 ) -> Result<Option<Vec<u8>>, ParseError> {
+    template.require_unwrapped_child(pool_name)?;
+    let pool = template
+        .child(pool_name)
+        .map(|child| XmlTemplate::capture(&child.bytes))
+        .transpose()?;
+    if let Some(pool) = &pool {
+        pool.require_unwrapped_child(item_name)?;
+    }
     if values.is_empty() {
         return Ok(None);
     }
-    let Some(child) = template.child(pool_name) else {
+    let Some(pool) = pool else {
         return write_pool().map(Some);
     };
-    let pool = XmlTemplate::capture(&child.bytes)?;
     let sources = pool.children_named(item_name).collect::<Vec<_>>();
     let mut items = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
@@ -3305,6 +4014,7 @@ fn styles_xml_with_template(
     original: &Stylesheet,
     template: &XmlTemplate,
     overrides: &style_derivation::StyleOverrides,
+    authored_dxfs: &[DifferentialFormat],
 ) -> Result<Vec<u8>, ParseError> {
     let num_fmts = patched_pool(
         template,
@@ -3370,6 +4080,9 @@ fn styles_xml_with_template(
         ("borders", borders),
         ("cellXfs", cell_xfs),
     ];
+    if !authored_dxfs.is_empty() {
+        replacements.push(("dxfs", patched_dxfs(template, authored_dxfs)?));
+    }
     if stylesheet.indexed_colors != original.indexed_colors {
         let colors = match template.child("colors") {
             Some(source) => {

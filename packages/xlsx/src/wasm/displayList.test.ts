@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import * as xlsx from '../index';
 import { workbookDisplayListJson } from './loader';
+import { createTestWorkbookSession } from '../session/testHelpers';
 
 const LAST_ROW = 1_048_575;
 const LAST_COL = 16_383;
@@ -68,9 +69,10 @@ describe('display list viewport limits', () => {
     try {
       const frame = handle.displayList({ x: 0, y: 0, width: 1600, height: 1000 });
       const grid = frame.grid!;
-      expect(grid.colOffsets).toHaveLength(9);
+      expect(grid.colOffsets).toHaveLength(6);
+      expect(grid.colIndices).toEqual([0, 1, 5, 6, 7]);
       expect(grid.rowOffsets).toHaveLength(21);
-      const right = grid.colOffsets[8];
+      const right = grid.colOffsets[5];
       const bottom = grid.rowOffsets[20];
       expect(xlsx.cellAtPoint(grid, grid.colOffsets[2] + 1, 1)).toEqual({ row: 0, col: 5 });
       expect(xlsx.cellAtPoint(grid, right - 1, bottom - 1)).toEqual({ row: 19, col: 7 });
@@ -82,21 +84,79 @@ describe('display list viewport limits', () => {
     }
   });
 
-  it('reports typed oversized viewports and exposes the cell limit', () => {
+  it('degrades oversized viewports and warns once across all frame readers', () => {
     const handle = xlsx.openWorkbook(bytes);
     const viewport = { x: 0, y: 0, width: 100, height: 6_000_000 };
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
     try {
       for (const read of [
         () => handle.displayList(viewport),
-        () => handle.displayListProfiled(viewport),
-        () => workbookDisplayListJson(handle, viewport, 0),
+        () => handle.displayListProfiled(viewport).displayList,
+        () => JSON.parse(workbookDisplayListJson(handle, viewport, 0)) as xlsx.DisplayList,
       ]) {
-        let failure: unknown;
-        try { read(); } catch (error) { failure = error; }
-        expect(failure).toMatchObject({ code: 'displayTooLarge', cells: 600_002, maxCells: 250_000 });
-        expect(failure).toBeInstanceOf(xlsx.DisplayTooLargeError);
-        expect((failure as xlsx.DisplayTooLargeError).maxCells).toBe(xlsx.getDisplayListCellLimit());
+        const frame = read();
+        expect(frame.truncated).toBe(true);
+        expect((frame.grid!.rowOffsets.length - 1) * (frame.grid!.colOffsets.length - 1))
+          .toBeLessThanOrEqual(xlsx.getDisplayListCellLimit());
       }
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0][0])).toContain('displayTooLarge');
+    } finally {
+      warning.mockRestore();
+      handle.dispose();
+    }
+  });
+
+  it('opens a dense low-zoom worker frame and scrolls with bounded hit testing', async () => {
+    const sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      + '<sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView></sheetViews>'
+      + '<sheetFormatPr defaultRowHeight="3" customHeight="1"/><cols><col min="1" max="16384" width="0.5" customWidth="1"/></cols>'
+      + '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>origin</t></is></c></row>'
+      + '<row r="102"><c r="CX102" t="inlineStr"><is><t>scrolled</t></is></c></row></sheetData></worksheet>';
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
+    let session: xlsx.WorkbookSession | undefined;
+    try {
+      session = await createTestWorkbookSession(await workbookBytes(sheet), undefined, {
+        initialViewport: { width: 1600, height: 1000, zoom: 0.1, dpr: 1, requestGeneration: 1 },
+      });
+      expect(session.state.stage).toBe('ready');
+      const first = session.initialPaint!.frame;
+      expect(first.displayList.truncated).toBe(true);
+      expect(first.displayList.commands.some((command) => command.op === 'text' && command.text === 'origin')).toBe(true);
+      const at = await session.call.cellGeometry(0, 100, 100);
+      const viewport = { x: at.rect.x, y: at.rect.y, width: 16000, height: 10000 };
+      for (let index = 0; index < 2; index++) {
+        const frame = await session.call.frame(viewport);
+        const grid = frame.displayList.grid!;
+        expect(frame.displayList.truncated).toBe(true);
+        expect(frame.viewport).toEqual(viewport);
+        expect(frame.displayList.commands.some((command) => command.op === 'text' && command.text === 'scrolled')).toBe(true);
+        expect(xlsx.cellAtPoint(grid, 1, 1)).toEqual({ row: 0, col: 0 });
+        expect(xlsx.cellAtPoint(grid, grid.colOffsets[1] + 1, grid.rowOffsets[1] + 1)).toEqual({ row: 101, col: 101 });
+        expect(xlsx.cellAtPoint(grid, 1, grid.rowOffsets[grid.rowOffsets.length - 1] + 1)).toBeNull();
+        expect(xlsx.cellRect(grid, grid.rowIndices![grid.rowIndices!.length - 1] + 1, 101)).toBeNull();
+        expect(xlsx.rangeRect(grid, {
+          top: grid.rowIndices![grid.rowIndices!.length - 1] + 1, bottom: grid.rowIndices![grid.rowIndices!.length - 1] + 2,
+          left: 101, right: 101,
+        })).toBeNull();
+        expect((grid.rowOffsets.length - 1) * (grid.colOffsets.length - 1)).toBeLessThanOrEqual(250000);
+      }
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(String(warning.mock.calls[0][0])).toContain('displayTooLarge');
+      expect(session.failure).toBeUndefined();
+    } finally {
+      await session?.dispose();
+      warning.mockRestore();
+    }
+  });
+
+  it('keeps typed cell-limit errors for print ranges', () => {
+    const handle = xlsx.openWorkbook(bytes);
+    try {
+      expect(() => handle.printDisplayList(0, 'A1:XFD1048576', {
+        dpi: 96, maxDigitWidth: 7, defaultRowHeightPt: 15,
+        fontSizePt: 11, fontFamily: 'Calibri', fontAscent: 10, fontDescent: 3,
+      }, false)).toThrow(xlsx.DisplayTooLargeError);
     } finally {
       handle.dispose();
     }

@@ -6,6 +6,7 @@
 export { XlsxEditor, XlsxSaveRefusedError } from './XlsxEditor';
 export type {
   XlsxEditorProps,
+  XlsxDocumentChange,
   XlsxInThreadEditorProps,
   XlsxLegacyEditorProps,
   XlsxEditorApi,
@@ -22,7 +23,7 @@ export type { XlsxAsyncEditorApi, XlsxProposalRequest, XlsxProposalResult } from
 /** @experimental */
 export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 /** @experimental */
-export { XlsxAsyncApiUnavailableError, XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
 /** @experimental */
 export { XlsxWorkerSessionFailedError } from './worker/useEditableSessionWorkbook';
 export { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditor';
@@ -144,3 +145,5 @@ export type {
   XlsxPluginSelection,
   XlsxPluginSnapshot,
 } from './plugins/types';
+
+export type { XlsxSheetVisibility } from '@betteroffice/xlsx';

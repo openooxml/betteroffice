@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import {
   caretGoalX,
   extendTextRange,
@@ -136,3 +136,47 @@ describe('pptx caret movement', () => {
 function stops(start: number, xs: number[]): Array<{ position: number; x: number }> {
   return xs.map((x, index) => ({ position: start + index, x }));
 }
+
+test('vertical caret movement preserves the column-relative goal across columns', () => {
+  for (const offset of [100, -100]) {
+    const row = (start: number, x: number, y: number, width = 40, columnOffset = 0) => ({
+      x, y, columnOffset, start, end: start + width / 20,
+      caretStops: Array.from({ length: width / 20 + 1 }, (_, index) => ({
+        position: start + index, x: x + index * 20,
+      })),
+    });
+    const lines = [row(0, 10, 0), row(3, 10, 20, 20),
+      row(5, 10 + offset, 0, 40, offset), row(8, 10 + offset, 20, 40, offset)];
+    const start = { position: 2, lineIndex: 0 };
+    const goal = caretGoalX(lines, start);
+    const short = verticalCaretMove(lines, start, 'down', goal);
+    expect(short).toEqual({ position: 4, lineIndex: 1 });
+    const next = verticalCaretMove(lines, short, 'down', goal);
+    expect(next).toEqual({ position: 7, lineIndex: 2 });
+    expect(verticalCaretMove(lines, next, 'down', goal)).toEqual({ position: 10, lineIndex: 3 });
+    const reverseGoal = caretGoalX(lines, next);
+    expect(verticalCaretMove(lines, next, 'up', reverseGoal)).toEqual(short);
+    expect(verticalCaretMove(lines, short, 'up', reverseGoal)).toEqual(start);
+  }
+});
+
+test('vertical caret movement uses the true column origin for centered short lines', () => {
+  for (const offset of [100, -100]) {
+    for (const inset of [40, 80]) {
+      const row = (start: number, x: number, y: number, width: number, columnOffset: number) => ({
+        x, y, columnOffset, start, end: start + width / 10,
+        caretStops: Array.from({ length: width / 10 + 1 }, (_, index) => ({
+          position: start + index, x: x + index * 10,
+        })),
+      });
+      const lines = [row(0, 0, 0, 100, 0), row(11, inset, 20, 20, 0),
+        row(14, offset + inset, 0, 20, offset)];
+      const start = { position: 12, lineIndex: 1 };
+      const next = { position: 15, lineIndex: 2 };
+      const goal = caretGoalX(lines, start);
+      expect(verticalCaretMove(lines, start, 'down', goal)).toEqual(next);
+      expect(caretGoalX(lines, next)).toBe(goal);
+      expect(verticalCaretMove(lines, next, 'up')).toEqual(start);
+    }
+  }
+});

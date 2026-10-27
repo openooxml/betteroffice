@@ -1,16 +1,15 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
-import { createFontProvider } from '@betteroffice/fonts';
+import { createFontProvider, resolveGlyphFallbackFace } from '@betteroffice/fonts';
 import { paintSlide, type PresentationHandle, type CanvasImageResolver, type ShapeSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
-export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1): Promise<RenderedPage> {
+export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1, provider = createFontProvider()): Promise<RenderedPage> {
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1];
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);
   if (!Number.isFinite(scale) || scale < 0.25 || scale > 3) throw new DocumentToolError('INVALID_ARGUMENT', 'scale must be from 0.25 to 3.');
   const warnings = new Set<string>(['Preview uses the presentation engine and bundled substitute fonts.']);
-  const provider = createFontProvider();
   const faces = new Map<string, { family: string; bold: boolean; italic: boolean }>();
   faces.set('Arial:false:false', { family: 'Arial', bold: false, italic: false });
   function collect(shapes: ShapeSnapshot[]) {
@@ -26,11 +25,27 @@ export async function renderPptxSlide(handle: PresentationHandle, page: number, 
   }
   collect(slide.shapes);
   if (faces.size > 64) throw new DocumentToolError('FONT_LIMIT', 'Slide uses more than 64 font styles. Reduce font variety before previewing.');
+  const coverageFaces = new Set<string>();
   for (const face of faces.values()) {
-    const load = provider.resolve(face.family, face.bold, face.italic) ?? provider.resolveLastResort(face.family, face.bold, face.italic, 'powerpoint');
-    const bytes = new Uint8Array(await load());
+    let buffer: ArrayBuffer | undefined;
+    try {
+      const load = provider.resolve(face.family, face.bold, face.italic);
+      buffer = await load?.();
+    } catch {}
+    buffer ??= await provider.resolveLastResort(face.family, face.bold, face.italic, 'powerpoint')();
+    const bytes = new Uint8Array(buffer);
     handle.registerFont({ ...face, bytes });
     GlobalFonts.register(Buffer.from(bytes), face.family);
+    const coverageFace = resolveGlyphFallbackFace(face.family, face.bold, face.italic, 'powerpoint');
+    const coverage = provider.resolveGlyphFallback?.(face.family, face.bold, face.italic, 'powerpoint');
+    const coverageKey = coverageFace && `${coverageFace.file}:${coverageFace.weight === 700}:${face.italic}`;
+    if (coverage && coverageFace && coverageKey && !coverageFaces.has(coverageKey)) {
+      let fallbackBytes: Uint8Array;
+      try { fallbackBytes = new Uint8Array(await coverage()); } catch { continue; }
+      coverageFaces.add(coverageKey);
+      handle.registerFallbackFont({ family: coverageFace.family, bold: coverageFace.weight === 700, italic: face.italic, bytes: fallbackBytes });
+      GlobalFonts.register(Buffer.from(fallbackBytes), coverageFace.family);
+    }
   }
   const list = handle.layoutSlide(page - 1);
   const width = Math.ceil(list.width * scale);

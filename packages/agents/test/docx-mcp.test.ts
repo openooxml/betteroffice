@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDocx } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
-import { editFixture, tableCell, tableFixture } from './fixture';
+import { commentFixture, editFixture, tableCell, tableFixture } from './fixture';
 
 test('stdio docx_edit applies a style, format and table-row batch that survives export', async () => {
   const root = await mkdtemp(join(tmpdir(), 'docx-edit-mcp-'));
@@ -29,6 +29,8 @@ test('stdio docx_edit applies a style, format and table-row batch that survives 
     expect(tool?.inputSchema.additionalProperties).toBe(false);
     const schema = JSON.stringify(tool?.inputSchema);
     for (const op of ['set_paragraph_style', 'format_text', 'insert_paragraphs', 'delete_paragraph', 'insert_table_row', 'delete_table_row']) expect(schema).toContain(op);
+    expect(schema).toContain('runFormat');
+    expect(schema).toContain('anchor');
 
     const { document } = await call('office_open', { path: 'report.docx' });
     const outline = await call('office_outline', { document, limit: 100 });
@@ -137,4 +139,74 @@ test('docx_edit refuses merged and final row batches atomically', async () => {
     await server.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('docx_edit add_comment anchors a comment that survives export and refreshes the version', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docx-comment-mcp-'));
+  const server = await createOfficeMcpServer({ root });
+  const client = new Client({ name: 'docx-comment', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const output = await client.callTool({ name, arguments: args });
+    expect(output.isError, JSON.stringify(output.structuredContent)).not.toBe(true);
+    return output.structuredContent as Record<string, any>;
+  };
+  try {
+    await writeFile(join(root, 'report.docx'), await commentFixture());
+    const tool = (await client.listTools()).tools.find(item => item.name === 'docx_edit');
+    expect(JSON.stringify(tool?.inputSchema)).toContain('add_comment');
+    expect(tool?.description).toContain('one grep match in the body or a table;');
+    expect(tool?.description).not.toContain('or a content control');
+    const { document } = await call('office_open', { path: 'report.docx' });
+    const found = await call('office_grep', { document, query: 'third quarter' });
+    const edits = [{ op: 'add_comment', match: found.matches[0].match, author: 'Scheduling Review', text: 'Please confirm the dates.' }];
+    const edited = await call('docx_edit', { document, version: found.version, edits });
+    expect(edited.results).toEqual([expect.objectContaining({ op: 'add_comment', ref: found.matches[0].ref, comment: expect.any(String) })]);
+    expect(edited.version).not.toBe(found.version);
+    const stale = await client.callTool({ name: 'docx_edit', arguments: { document, version: found.version, edits } });
+    expect(stale.structuredContent).toMatchObject({ code: 'STALE_VERSION' });
+    await call('office_export', { document, path: 'commented.docx' });
+    const zip = await JSZip.loadAsync(await readFile(join(root, 'commented.docx')));
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    expect(comments).toContain('w:author="Scheduling Review"');
+    expect(comments).toContain('Please confirm the dates.');
+    expect(comments).toContain('Keep this note.');
+    expect((await zip.file('word/document.xml')!.async('string')).match(/<w:commentReference /g)).toHaveLength(2);
+  } finally {
+    await client.close();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP discovers comments and replies and resolves by id', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comment-thread-mcp-'));
+  const server = await createOfficeMcpServer({ root });
+  const client = new Client({ name: 'comment-thread', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const output = await client.callTool({ name, arguments: args });
+    expect(output.isError, JSON.stringify(output.structuredContent)).not.toBe(true);
+    return output.structuredContent as Record<string, any>;
+  };
+  try {
+    await writeFile(join(root, 'source.docx'), await commentFixture());
+    const { document } = await call('office_open', { path: 'source.docx' });
+    const outline = await call('office_outline', { document, story: 'comments' });
+    expect(outline.items[0]).toMatchObject({ id: '0', text: 'Keep this note.' });
+    const reply = await call('docx_edit', { document, version: outline.version, edits: [{ op: 'reply_comment', comment: outline.items[0].id, author: 'Editor', text: 'Follow up' }] });
+    await call('docx_edit', { document, version: reply.version, edits: [{ op: 'resolve_comment', comment: reply.results[0].comment }] });
+    await call('office_export', { document, path: 'saved.docx' });
+    const reopened = await openDocx(await readFile(join(root, 'saved.docx')));
+    try {
+      expect(reopened.list({ story: 'comments' }).items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: '0', done: true }),
+        expect.objectContaining({ parentId: '0', text: 'Follow up' }),
+      ]));
+    } finally { reopened.close(); }
+  } finally { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });

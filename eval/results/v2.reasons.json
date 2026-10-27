@@ -1,0 +1,130 @@
+[
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "docx-03-correct-cell",
+    "run": 1,
+    "reason": "python-docx cell.text replaced the edited cell paragraphs and dropped their paragraph ids, right alignment, run size and total bold formatting.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "docx-04-add-row",
+    "run": 1,
+    "reason": "The model copied a template row with its paragraph ids intact, duplicating them, and added an empty run to the Total row.",
+    "cause": "model"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "docx-05-delete-row",
+    "run": 1,
+    "reason": "python-docx cell.text replaced the total cell paragraphs and dropped their paragraph ids, right alignment, run size and bold formatting.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "docx-07-bold-phrase",
+    "run": 1,
+    "reason": "The model created a suffix run starting with a space without xml:space=\"preserve\", so that space was no longer preserved.",
+    "cause": "model"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "pptx-01-change-title",
+    "run": 1,
+    "reason": "The model assigned shape.text to rebuild the title paragraph, dropping its paragraph and run formatting.",
+    "cause": "model"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "pptx-10-insert-slide",
+    "run": 1,
+    "reason": "python-pptx created an extra notes master and theme when the model added speaker notes to the new slide.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-01-correct-value",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId, changing unrelated workbook state.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-02-fix-total",
+    "run": 1,
+    "reason": "openpyxl cleared the existing Budget!B5 formula cache on save while the model restored only the requested C5 result.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-03-replace-product",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId while replacing product text.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-04-style-header",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId while styling the header.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-05-sort-inventory",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId while sorting the inventory.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-06-add-totals",
+    "run": 1,
+    "reason": "The model wrote total formulas but left their calculated results empty, relying on a later recalculation instead of saving the requested values.",
+    "cause": "model"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-07-growth-column",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId while inserting the growth column.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-08-organize-sheets",
+    "run": 1,
+    "reason": "openpyxl cleared the Assumptions!B2 formula cache and renumbered sheet ids on save while the model renamed and reordered sheets.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-09-budget-summary",
+    "run": 1,
+    "reason": "openpyxl saved extra theme and document property parts, page margins and a calcId while building the budget summary.",
+    "cause": "library"
+  },
+  {
+    "model": "gpt-6-luna",
+    "arm": "generic",
+    "task": "xlsx-10-quarter-report",
+    "run": 1,
+    "reason": "The model changed a shared default fill color through a shallow copy, changing the base fill outside the requested header.",
+    "cause": "model"
+  }
+]

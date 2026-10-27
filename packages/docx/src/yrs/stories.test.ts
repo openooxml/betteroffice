@@ -138,3 +138,39 @@ it('lists and reads the stories of a first-page preview', async () => {
     listed.stories.map((story) => [story.story, true])
   );
 });
+
+it('names a cell made on one replica by the same id on every replica', async () => {
+  const left = await createYrsSession({ clientId: 76211 });
+  const right = await createYrsSession({ clientId: 76212 });
+  sessions.push(left, right);
+  left.openDocx(storiesDocx(), true);
+  right.openDocx(storiesDocx(), false);
+  right.applyUpdate(left.encodeState());
+  const sync = () => {
+    right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
+    left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
+  };
+  const opened = left.listStories().stories;
+  const before = { story: 'body', paraId: left.paragraphs('body')[0]!.paraId, offset: 0 };
+  const cell = left.insertTable(before, 1, 1).createdStoryIds[0]!;
+  left.insertText({ story: cell, paraId: left.paragraphs(cell)[0]!.paraId, offset: 0 }, 'born here');
+  sync();
+
+  const listed = right.listStories().stories;
+  expect(listed).toEqual(left.listStories().stories);
+  expect(listed.find((story) => story.story === cell)).toEqual({ story: cell, kind: 'tableCell', parent: 'body', root: 'body' });
+  expect(listed.filter((story) => !story.story.endsWith('~76211'))).toEqual(opened);
+  expect(texts(right, { stories: [cell] })).toEqual([[cell, ['born here']]]);
+
+  const found = right.findText({ text: 'born', within: { kind: 'story', story: cell }, view: 'accepted' });
+  if (!found.ok) throw new Error(found.failure.message);
+  expect(found.matches.map((match) => match.range.story)).toEqual([cell]);
+  const edited = right.applyEdits({
+    expectVersion: found.version,
+    steps: [{ op: 'replaceText', target: { kind: 'range', ...found.matches[0]!.range }, text: 'made' }],
+  });
+  if (!edited.ok) throw new Error(edited.failure.message);
+  sync();
+  expect(texts(left, { stories: [cell] })).toEqual([[cell, ['made here']]]);
+  expect(left.listStories().stories).toEqual(right.listStories().stories);
+});

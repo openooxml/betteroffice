@@ -6,6 +6,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import { useTranslation } from '../i18n';
 import { en as defaultLocale } from '@betteroffice/docx-i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
@@ -39,7 +40,8 @@ export type TextContextAction =
   | 'addComment'
   | 'resizeImage'
   | 'moveImage'
-  | 'resizeColumn';
+  | 'resizeColumn'
+  | `wrap:${ImageLayoutTarget}`;
 
 /**
  * Menu item configuration
@@ -813,7 +815,7 @@ export function useTextContextMenu(
  * Get action label
  */
 export function getTextActionLabel(action: TextContextAction): string {
-  const labels: Record<TextContextAction, string> = {
+  const labels: Partial<Record<TextContextAction, string>> = {
     cut: 'Cut',
     copy: 'Copy',
     paste: 'Paste',
@@ -836,14 +838,14 @@ export function getTextActionLabel(action: TextContextAction): string {
     moveImage: 'Move image',
     resizeColumn: 'Column width',
   };
-  return labels[action];
+  return labels[action] ?? '';
 }
 
 /**
  * Get action shortcut
  */
 export function getTextActionShortcut(action: TextContextAction): string {
-  const shortcuts: Record<TextContextAction, string> = {
+  const shortcuts: Partial<Record<TextContextAction, string>> = {
     cut: 'Ctrl+X',
     copy: 'Ctrl+C',
     paste: 'Ctrl+V',
@@ -866,7 +868,7 @@ export function getTextActionShortcut(action: TextContextAction): string {
     moveImage: '',
     resizeColumn: '',
   };
-  return shortcuts[action];
+  return shortcuts[action] ?? '';
 }
 
 /**

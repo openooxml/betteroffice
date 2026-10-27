@@ -162,6 +162,9 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
     for (page_index, page) in input.layout.pages.iter().enumerate() {
         let mut body: Vec<(usize, Vec<PlacedItem<'a>>)> = Vec::new();
         for fragment in &page.fragments {
+            if matches!(fragment, Fragment::Reserved(_)) {
+                continue;
+            }
             let Some(index) = arena.find(fragment) else {
                 output.issues.push(PlacementIssue {
                     page_index,
@@ -410,6 +413,42 @@ fn refs_for(
     }
 }
 
+/// Header and footer bands painted on one page.
+pub fn painted_bands<'a>(
+    payload: &'a HeaderFooterPayload,
+    page: &'a Page,
+    page_index: usize,
+) -> Vec<PlacedRegion<'a>> {
+    [HeaderFooterKind::Header, HeaderFooterKind::Footer]
+        .into_iter()
+        .filter_map(|kind| {
+            painted_band_for_page(payload, page, page_index, kind).map(|(band, hf_type)| {
+                PlacedRegion::Band {
+                    kind,
+                    hf_type,
+                    r_id: &band.r_id,
+                    section_index: band.section_index,
+                }
+            })
+        })
+        .collect()
+}
+
+fn painted_band_for_page<'a>(
+    payload: &'a HeaderFooterPayload,
+    page: &'a Page,
+    page_index: usize,
+    kind: HeaderFooterKind,
+) -> Option<(
+    &'a crate::header_footer::HeaderFooterVariant,
+    HeaderFooterType,
+)> {
+    if page.parity_filler == Some(true) {
+        return None;
+    }
+    band_for_page(payload, page, page_index, kind)
+}
+
 /// The header or footer variant the display list paints on `page`, with the role it shows it in.
 fn band_for_page<'a>(
     payload: &'a HeaderFooterPayload,
@@ -508,7 +547,8 @@ fn whole_items<'a>(
             (
                 LayoutBlock::SectionBreak(_)
                 | LayoutBlock::PageBreak(_)
-                | LayoutBlock::ColumnBreak(_),
+                | LayoutBlock::ColumnBreak(_)
+                | LayoutBlock::Reserved(_),
                 _,
             )
             | (LayoutBlock::Unsupported, _) => {}
@@ -689,6 +729,7 @@ fn fragment_tag(fragment: &Fragment) -> Option<u8> {
         Fragment::Shape(_) => Some(3),
         Fragment::Chart(_) => Some(4),
         Fragment::TextBox(_) => Some(5),
+        Fragment::Reserved(_) => Some(6),
     }
 }
 
@@ -700,6 +741,7 @@ fn fragment_pm_start(fragment: &Fragment) -> Option<f64> {
         Fragment::Shape(value) => value.pm_start,
         Fragment::Chart(value) => value.pm_start,
         Fragment::TextBox(value) => value.pm_start,
+        Fragment::Reserved(_) => None,
     }
 }
 
@@ -752,6 +794,7 @@ impl<'a> Arena<'a> {
             Fragment::Shape(value) => &value.block_id,
             Fragment::Chart(value) => &value.block_id,
             Fragment::TextBox(value) => &value.block_id,
+            Fragment::Reserved(value) => &value.block_id,
         };
         (self.measured[index].block.block_id() == Some(expected)).then_some(index)
     }

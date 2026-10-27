@@ -77,6 +77,22 @@ export interface PptxTextMatch {
 
 export type ShapeKind = 'shape' | 'picture' | 'graphicFrame' | 'group';
 
+/** Hue and hue offsets use turns; other values use fractions. */
+export type ColorTransform =
+  | {
+      kind:
+        | 'tint' | 'shade'
+        | 'hue' | 'hueMod' | 'hueOff'
+        | 'sat' | 'satMod' | 'satOff'
+        | 'lum' | 'lumMod' | 'lumOff'
+        | 'red' | 'redMod' | 'redOff'
+        | 'green' | 'greenMod' | 'greenOff'
+        | 'blue' | 'blueMod' | 'blueOff'
+        | 'alpha' | 'alphaMod' | 'alphaOff';
+      value: number;
+    }
+  | { kind: 'comp' | 'inv' | 'gray' | 'gamma' | 'invGamma' };
+
 export interface ColorValue {
   rgb?: string;
   themeColor?: string;
@@ -87,6 +103,8 @@ export interface ColorValue {
   luminanceOffset?: number;
   saturationModulation?: number;
   alpha?: number;
+  /** Overrides legacy colour modifiers; legacy alpha applies without an alpha step. */
+  transforms?: ColorTransform[];
 }
 
 export interface ShapeGradient {
@@ -143,6 +161,8 @@ export interface ShapeSnapshot {
   inherited?: InheritedGeometry | null;
   /** Hides this shape and its descendants; omitted when false. */
   hidden?: boolean;
+  textBox?: boolean;
+  aspectRatioLocked?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
@@ -170,13 +190,25 @@ export interface InheritedGeometry {
   flipV: boolean;
 }
 
+export interface SlideLayoutSnapshot {
+  name: string | null;
+  type: string | null;
+}
+
 export interface SlideSnapshot {
+  title?: string | null;
+  hidden?: boolean | null;
+  layout?: SlideLayoutSnapshot | null;
   id: string;
   sourcePartPath: string | null;
   layoutPartPath: string | null;
   name: string | null;
   /** Speaker notes as plain text; absent when the slide has none. */
   notes?: string;
+  /** The slide's own background; absent when it inherits the layout's. */
+  background?: ShapeFill;
+  /** `true` once an edit changed the background from the one the file declares. */
+  backgroundEdited?: boolean;
   shapes: ShapeSnapshot[];
 }
 
@@ -200,7 +232,7 @@ export interface CommentSnapshot {
   created: string | null;
   xEmu: number;
   yEmu: number;
-  /** Set on a reply; names the thread root. Modern decks only. */
+  /** Set on a reply; names the thread root. */
   parentId: string | null;
   resolved: boolean;
 }
@@ -449,6 +481,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
+  /** Bitmap destination within the picture frame. */
+  destination?: { x: number; y: number; w: number; h: number };
   /** `a:tile`: repeat the picture at its own size, scaled by these fractions. */
   tile?: { scaleX: number; scaleY: number };
   /** Outline the picture is masked to, when its `spPr` gives it one. */
@@ -492,6 +526,7 @@ export interface PositionedTextRun {
 }
 
 export interface PositionedTextLine {
+  columnOffset?: number;
   x: number;
   y: number;
   width: number;
@@ -579,4 +614,12 @@ export interface TextParagraphDraft {
   bullet?: boolean;
   alignment?: ParagraphAlignment | null;
   runs: Array<{ text: string; style?: TextStyle }>;
+}
+
+export interface TableReceipt {
+  slideId: string;
+  shapeId: string;
+  rowCount: number;
+  columnCount: number;
+  newCellRefs: string[];
 }

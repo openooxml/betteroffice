@@ -304,9 +304,11 @@ fn apply_drawing_metadata(chart: &mut Chart, drawing: &XmlElement) {
     chart.description = doc_pr
         .and_then(|value| value.attribute(None, "descr"))
         .map(str::to_owned);
-    chart.decorative =
-        (doc_pr.and_then(|value| value.attribute(None, "decorative")) == Some("1")).then_some(true);
-    let hidden = doc_pr.and_then(|value| value.attribute(None, "hidden")) == Some("1");
+    chart.decorative = (doc_pr.and_then(|value| value.parse_boolean_attribute(None, "decorative"))
+        == Some(true))
+    .then_some(true);
+    let hidden =
+        doc_pr.and_then(|value| value.parse_boolean_attribute(None, "hidden")) == Some(true);
     if container.name == "wp:inline" {
         chart.wrap = Some(ImageWrap {
             wrap_type: "inline".to_owned(),
@@ -319,7 +321,7 @@ fn apply_drawing_metadata(chart: &mut Chart, drawing: &XmlElement) {
         });
         return;
     }
-    let behind_doc = container.attribute(None, "behindDoc") == Some("1");
+    let behind_doc = container.parse_boolean_attribute(None, "behindDoc") == Some(true);
     let wrap_element = container.child_elements().find(|child| {
         matches!(
             child.name.as_str(),

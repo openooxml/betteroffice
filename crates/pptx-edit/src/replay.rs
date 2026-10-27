@@ -64,11 +64,23 @@ enum Op {
     InsertParagraphBreak(String, u32),
     SetParagraphAlignment(String, u32, u32, Option<String>),
     SetStoryParagraphs(String, Vec<crate::TextParagraphDraft>),
+    InsertTableRow(String, String, u32, crate::TableInsertPosition, Vec<String>),
+    DeleteTableRow(String, String, u32),
+    InsertTableColumn(
+        String,
+        String,
+        u32,
+        crate::TableInsertPosition,
+        Vec<String>,
+        crate::TableColumnWidth,
+    ),
+    DeleteTableColumn(String, String, u32),
     InsertSlide(u32, Option<String>),
     DuplicateSlide(String, u32),
     DeleteSlide(String),
     MoveSlide(String, u32),
     SetSlideNotes(String, String),
+    SetSlideLayout(String, String, Vec<(String, u32)>),
     AddTextBox(String, ShapeDraft),
     AddShape(String, PresetShapeDraft),
     AddPicture(String, PictureDraft),
@@ -339,6 +351,42 @@ impl WireOp {
                 let (id, paragraphs) = tuple(a, 2, 2)?;
                 Op::SetStoryParagraphs(id, paragraphs)
             }
+            "insertTableRow" => {
+                let (slide, shape, index, position, cells): (
+                    String,
+                    String,
+                    u32,
+                    crate::TableInsertPosition,
+                    Option<Vec<String>>,
+                ) = tuple(a, 4, 5)?;
+                Op::InsertTableRow(slide, shape, index, position, cells.unwrap_or_default())
+            }
+            "deleteTableRow" => {
+                let (slide, shape, index) = tuple(a, 3, 3)?;
+                Op::DeleteTableRow(slide, shape, index)
+            }
+            "insertTableColumn" => {
+                let (slide, shape, index, position, cells, width): (
+                    String,
+                    String,
+                    u32,
+                    crate::TableInsertPosition,
+                    Option<Vec<String>>,
+                    Option<crate::TableColumnWidth>,
+                ) = tuple(a, 4, 6)?;
+                Op::InsertTableColumn(
+                    slide,
+                    shape,
+                    index,
+                    position,
+                    cells.unwrap_or_default(),
+                    width.unwrap_or_default(),
+                )
+            }
+            "deleteTableColumn" => {
+                let (slide, shape, index) = tuple(a, 3, 3)?;
+                Op::DeleteTableColumn(slide, shape, index)
+            }
             "insertSlide" => {
                 let (index, layout) = tuple(a, 1, 2)?;
                 Op::InsertSlide(index, layout)
@@ -354,6 +402,27 @@ impl WireOp {
             "moveSlide" => {
                 let (id, index) = tuple(a, 2, 2)?;
                 Op::MoveSlide(id, index)
+            }
+            "setSlideLayout" => {
+                let (id, layout, mapping): (String, String, Option<Vec<(String, String)>>) =
+                    tuple(a, 2, 3)?;
+                let mapping = mapping
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(shape, target)| {
+                        if target.is_empty() || !target.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return Err(PeerError::new(
+                                "arguments",
+                                "invalid layout placeholder ID",
+                            ));
+                        }
+                        target
+                            .parse::<u32>()
+                            .map(|id| (shape, id))
+                            .map_err(|error| PeerError::new("arguments", error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Op::SetSlideLayout(id, layout, mapping)
             }
             "setSlideNotes" => {
                 let (id, text) = tuple(a, 2, 2)?;
@@ -513,12 +582,30 @@ impl Op {
             Self::SetStoryParagraphs(id, paragraphs) => {
                 value(session.set_story_paragraphs(&ctx, id, paragraphs)?)
             }
+            Self::InsertTableRow(slide, shape, index, position, cells) => {
+                value(session.insert_table_row(&ctx, slide, shape, *index, *position, cells)?)
+            }
+            Self::DeleteTableRow(slide, shape, index) => {
+                value(session.delete_table_row(&ctx, slide, shape, *index)?)
+            }
+            Self::InsertTableColumn(slide, shape, index, position, cells, width) => {
+                value(session.insert_table_column_with_width(
+                    &ctx, slide, shape, *index, *position, cells, *width,
+                )?)
+            }
+            Self::DeleteTableColumn(slide, shape, index) => {
+                value(session.delete_table_column(&ctx, slide, shape, *index)?)
+            }
             Self::InsertSlide(at, layout) => {
                 value(session.insert_slide(&ctx, *at, layout.as_deref())?)
             }
             Self::DuplicateSlide(id, at) => value(session.duplicate_slide(&ctx, id, *at)?),
             Self::DeleteSlide(id) => value(session.delete_slide(&ctx, id)?),
             Self::MoveSlide(id, at) => value(session.move_slide(&ctx, id, *at)?),
+            Self::SetSlideLayout(id, layout, mapping) => {
+                session.set_slide_layout(&ctx, id, layout, mapping)?;
+                Ok(Value::Null)
+            }
             Self::SetSlideNotes(id, text) => {
                 session.set_slide_notes(&ctx, id, text)?;
                 Ok(Value::Null)
@@ -619,7 +706,9 @@ impl Op {
             }
         }
         match self {
-            Self::SetSlideNotes(id, _) | Self::SetStoryParagraphs(id, _) => {
+            Self::SetSlideNotes(id, _)
+            | Self::SetSlideLayout(id, _, _)
+            | Self::SetStoryParagraphs(id, _) => {
                 targets.insert(id.clone());
             }
             Self::Undo | Self::Redo | Self::SetCommentFlavor(_) => {

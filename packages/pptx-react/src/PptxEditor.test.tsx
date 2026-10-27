@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { useState } from 'react';
 import type { ComponentProps } from 'react';
 import { initWasm } from '@betteroffice/pptx';
-import * as pptx from '@betteroffice/pptx/editor';
+import * as pptx from '@betteroffice/pptx';
 import type {
   DeckSnapshot,
   PptxEditRequest,
@@ -25,6 +25,7 @@ import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
 import * as presenceRendering from './presence-rendering';
+import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -1284,7 +1285,7 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('pptx-canvas-review-toggle'));
     expect(view.getByTestId('pptx-canvas-proposal-diff')).toBeDefined();
     fireEvent.click(view.getByTestId('pptx-proposals-button'));
-    expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title');
+    await waitFor(() => expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title'));
     fireEvent.click(view.getByTestId('pptx-proposal-preview'));
     await waitFor(() => expect((view.getByTestId('pptx-proposal-preview-dialog') as HTMLDialogElement).open).toBe(true));
     expect(view.getByRole('img', { name: 'Current slide' })).toBeDefined();
@@ -1367,7 +1368,7 @@ describe('PptxEditor proposal review', () => {
       api!.refresh();
     });
     fireEvent.click(view.getByTestId('pptx-proposals-button'));
-    const card = view.getByTestId('pptx-proposal');
+    const card = await view.findByTestId('pptx-proposal');
     const link = Array.from(card.querySelectorAll('button')).find((button) => button.textContent?.includes(shape.name))!;
     const cursorCount = cursors.length;
     fireEvent.click(link);
@@ -1464,6 +1465,26 @@ describe('PptxEditor host controls', () => {
       } finally { serialize.mockRestore(); }
     });
   }
+
+  it('returns the saved bytes from the sync save() under legacySyncApi alone', async () => {
+    const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
+    const workerOpen = spyOn(workerEditorSessionOpener, 'open').mockImplementation(() => {
+      throw new Error('opened the worker editor');
+    });
+    try {
+      let api: PptxEditorApi | undefined;
+      render(<PptxEditor legacySyncApi file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      expect(workerOpen).not.toHaveBeenCalled();
+      expect(api!.save().byteLength).toBeGreaterThan(0);
+    } finally {
+      workerOpen.mockRestore();
+      if (worker) Object.defineProperty(globalThis, 'Worker', worker);
+      else Reflect.deleteProperty(globalThis, 'Worker');
+    }
+  });
 
   it('discards an awaiting save after replacement and rejects stale flush handles', async () => {
     const opened: PptxEditorApi[] = [];

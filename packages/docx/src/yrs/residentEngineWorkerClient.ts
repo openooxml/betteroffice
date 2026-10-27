@@ -1,15 +1,18 @@
+import { pipeOpBuffers, type PipeOp, type PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { LayoutMetaV1 } from './layoutMeta';
-import { isCommandAck, type Checkpoint } from '../../../../shared/office-session/commands/types';
+import { isCommandAck } from '../../../../shared/office-session/commands/types';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { discardCommandPresentation } from './residentCommandPresentation';
 import type {
   DocxCommandAck,
   DocxCommandEnvelope,
   DocxCommandFrame,
-  ResidentCommandClient,
-  ResidentCommandInitReply,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandClient,
+  DocxCommandCheckpoint,
+  DocxCommandInitReply,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
+  DocxHostImage,
 } from './residentCommandProtocol';
 import type {
   YrsEngineApplyProfile,
@@ -18,14 +21,15 @@ import type {
   YrsSelection,
 } from './index';
 import type { CollaborationCursor } from '../collaboration/types';
+import type { CollaborationTextInsertion } from '../collaboration/types';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
-  ResidentDocumentRead,
-  ResidentDocumentReadValues,
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
+  DocxDocumentRead,
+  DocxDocumentReadValues,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerResponse,
   ResidentProposalOperation,
   ResidentProposalResponse,
 } from './residentEngineWorkerProtocol';
@@ -44,7 +48,7 @@ export interface ResidentProposalReply
 }
 
 export interface ResidentEngineWorkerFrame {
-  commandInitial?: ResidentCommandInitReply;
+  commandInitial?: DocxCommandInitReply;
   frame: Uint8Array;
   pageFrames?: Uint8Array[];
   updates: Uint8Array[];
@@ -139,7 +143,7 @@ const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
 
 type PendingRequest = {
   type: AwaitedRequest['type'];
-  resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
+  resolve(response: DocxEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
 };
 
@@ -156,32 +160,32 @@ type AwaitedRequest = Exclude<
 export const RESIDENT_WORKER_SILENCE_MS = 60_000;
 
 export interface ResidentEngineWorkerPort {
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
   postMessage(
-    message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule,
+    message: DocxEngineWorkerRequest | DocxEngineWorkerHostModule,
     transfer?: Transferable[]
   ): void;
   terminate(): void;
 }
 
 function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
-  return new Worker(new URL('./residentEngineWorker.mjs', import.meta.url), {
+  return new Worker(new URL('./docxWorker.mjs', import.meta.url), {
     type: 'module',
-    name: 'openooxml-resident-engine',
+    name: 'betteroffice-docx-worker',
   });
 }
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
-export class ResidentEngineWorkerClient implements ResidentCommandClient {
+export class ResidentEngineWorkerClient implements DocxCommandClient {
   protected readonly pending = new Map<number, PendingRequest>();
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private nextId = 1;
   protected terminalError: Error | null = null;
   private commandSession = false;
   private commandGenerationValue = 0;
-  private readonly commandInitialGenerations = new WeakMap<ResidentCommandInitReply, number>();
+  private readonly commandInitialGenerations = new WeakMap<DocxCommandInitReply, number>();
   private commandReplacementPending = false;
   private ready = false;
   protected revision = 0;
@@ -205,6 +209,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   private retainBuiltPages = false;
   private failureListener: ((error: Error) => void) | null = null;
   private readonly frameListeners = new Set<(frame: DocxCommandFrame) => void>();
+  private readonly pipeListeners = new Set<(batches: readonly PipeOutputBatch[]) => void>();
+  private readonly collabListeners = new Set<(event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void>();
   protected commandIdentity: { session: string; incarnation: number; epoch: number } | null = null;
 
   constructor(protected readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
@@ -220,7 +226,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
           const pending = this.pending.get(response.id);
           if (pending) {
             this.pending.delete(response.id);
-            pending.reject(new SessionFailure('disposed', 'Resident command frame was superseded'));
+            pending.reject(new SessionFailure('disposed', 'Worker command frame was superseded'));
           }
           if (this.pending.size > 0) this.armWatchdog();
           else this.disarmWatchdog();
@@ -228,11 +234,20 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
         }
         if (!isCommandAck({ ...identity, version: 0, throughSeq: 0, outcomes: [], frame: pushed.frame })) {
           discardCommandPresentation(pushed.frame);
-          this.fail(new SessionFailure('message', 'Malformed resident command frame'));
+          this.fail(new SessionFailure('message', 'Malformed worker command frame'));
           return;
         }
       }
       if (response.memory) this.lastMemory = response.memory;
+      const collaboration = response.collabUpdates;
+      const identity = response.ok ? response.commandInitial ?? this.commandIdentity : this.commandIdentity;
+      if (collaboration && !this.terminalError && !this.commandReplacementPending &&
+        (collaboration.session === undefined || (identity && collaboration.session === identity.session &&
+          collaboration.incarnation === identity.incarnation && collaboration.epoch === identity.epoch))) {
+        const event = { updates: collaboration.updates.map(buffer => new Uint8Array(buffer)), inferences: collaboration.inferences, clock: collaboration.clock };
+        for (const listener of [...this.collabListeners]) { try { listener(event); } catch {} }
+        if (collaboration.pipe) for (const listener of [...this.pipeListeners]) { try { listener(collaboration.pipe); } catch {} }
+      }
       if (response.ok && response.caret) {
         this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.caret.frameEpoch);
       }
@@ -282,16 +297,18 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
               ? new SessionFailure(response.failureCode, response.commandError.message)
               : Object.assign(new Error(response.commandError.message), response.commandError)
             : response.code === 'save-unavailable'
-            ? new ResidentWorkerSaveUnavailableError(response.error)
+            ? new DocxWorkerSaveUnavailableError(response.error)
+            : response.code === 'cut-kept'
+            ? new ResidentWorkerCutKeptError(response.error)
             : residentWorkerError(response.error, response.residentUnavailable)
         );
       }
     };
     this.worker.onerror = (event) => {
-      this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
+      this.fail(new ResidentWorkerFailureError(`Document worker failed: ${event.message}`));
     };
     this.worker.onmessageerror = () => {
-      const message = 'Resident engine worker returned an unreadable message';
+      const message = 'Document worker returned an unreadable message';
       this.fail(this.commandSession ? new SessionFailure('message', message) : new ResidentWorkerFailureError(message));
     };
   }
@@ -308,23 +325,23 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return this.terminalError ?? undefined;
   }
 
-  commandInitialGeneration(initial: ResidentCommandInitReply): number | undefined {
+  commandInitialGeneration(initial: DocxCommandInitReply): number | undefined {
     return this.commandInitialGenerations.get(initial);
   }
 
-  async commandInit(request: ResidentCommandInitRequest): Promise<ResidentCommandInitReply> {
+  async commandInit(request: DocxCommandInitRequest): Promise<DocxCommandInitReply> {
     this.commandSession = true;
     const generation = this.commandGeneration;
-    const response = await this.request({ type: 'commandInit', request });
+    const response = await this.request({ type: 'commandInit', request }, request.hostImages?.map(({ image }) => image));
     if (generation !== this.commandGeneration) {
       discardCommandPresentation(response.commandInitial?.frame);
-      throw new SessionFailure('disposed', 'Resident command initialization was superseded');
+      throw new SessionFailure('disposed', 'Worker command initialization was superseded');
     }
     const initial = response.commandInitial;
     if (!initial || !isCommandAck(initial) || initial.selection === undefined ||
       initial.editState === undefined || !initial.frame) {
       discardCommandPresentation(initial?.frame);
-      throw new SessionFailure('message', 'Resident command initialization omitted its state or frame');
+      throw new SessionFailure('message', 'Worker command initialization omitted its state or frame');
     }
     this.commandInitialGenerations.set(initial, generation);
     this.commandIdentity = { session: initial.session, incarnation: initial.incarnation, epoch: initial.epoch };
@@ -335,23 +352,48 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   async edit(command: DocxCommandEnvelope): Promise<DocxCommandAck> {
-    const response = await this.request({ type: 'edit', command });
+    const transfer: ArrayBuffer[] = [];
+    const owned = (update: ArrayBuffer) => {
+      const copy = update.slice(0);
+      transfer.push(copy);
+      return copy;
+    };
+    if (command.kind === 'applyRemoteUpdate' && command.payload && typeof command.payload === 'object' &&
+      'update' in command.payload && command.payload.update instanceof ArrayBuffer) {
+      command = { ...command, payload: { ...command.payload, update: owned(command.payload.update) } };
+    } else if (command.kind === 'applyRemoteUpdateChunks' && command.payload && typeof command.payload === 'object' &&
+      'updates' in command.payload && Array.isArray(command.payload.updates) &&
+      command.payload.updates.every(update => update instanceof ArrayBuffer)) {
+      command = { ...command, payload: { ...command.payload, updates: command.payload.updates.map(owned) } };
+    } else if (command.kind === 'collabPipe' && command.payload && typeof command.payload === 'object' &&
+      'ops' in command.payload && Array.isArray(command.payload.ops)) {
+      transfer.push(...pipeOpBuffers(command.payload.ops as PipeOp[]));
+    }
+    const response = await this.request({ type: 'edit', command }, transfer);
     return this.commandAck(response);
   }
 
-  async checkpoint(): Promise<Checkpoint> {
+  async checkpoint(): Promise<DocxCommandCheckpoint> {
     const response = await this.request({ type: 'checkpoint' });
     if (!response.checkpoint || !(response.checkpoint.state instanceof Uint8Array)) {
-      throw new SessionFailure('message', 'Resident command checkpoint omitted its state');
+      throw new SessionFailure('message', 'Worker command checkpoint omitted its state');
     }
-    return response.checkpoint;
+    return response.checkpoint as DocxCommandCheckpoint;
   }
 
   async requestFullFrame(): Promise<DocxCommandAck> {
     return this.commandAck(await this.request({ type: 'requestFullFrame' }));
   }
 
-  async requestViewport(request: ResidentCommandViewportRequest): Promise<void> {
+  /** Hands the worker pictures the host decoded after `commandInit`; the displayed pages repaint with them. */
+  async provideHostImages(images: DocxHostImage[]): Promise<void> {
+    const owner = this.commandIdentity;
+    if (!owner) throw new SessionFailure('disposed', 'Resident command session is not initialized');
+    await this.request({ type: 'buildPages', pages: [], expectedFrameEpoch: this.answeredFrameEpoch, paintCaret: false,
+      hostImages: images, hostImagesFor: { ...owner } }, images.map(({ image }) => image));
+  }
+
+  async requestViewport(request: DocxCommandViewportRequest): Promise<void> {
     await this.request({ type: 'commandViewport', request });
   }
 
@@ -360,16 +402,27 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return () => { this.frameListeners.delete(listener); };
   }
 
+  /** Output of the collaboration providers the worker runs, per provider, in order. */
+  onCollabPipe(listener: (batches: readonly PipeOutputBatch[]) => void): () => void {
+    this.pipeListeners.add(listener);
+    return () => { this.pipeListeners.delete(listener); };
+  }
+
+  onCollabUpdates(listener: (event: { updates: Uint8Array[]; inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>; clock?: number }) => void): () => void {
+    this.collabListeners.add(listener);
+    return () => { this.collabListeners.delete(listener); };
+  }
+
   async applyRemoteUpdate(update: Uint8Array): Promise<void> {
     const owned = update.slice();
     await this.request({ type: 'commandUpdate', update: owned }, [owned.buffer]);
   }
 
-  private commandAck(response: ResidentEngineWorkerResponse & { ok: true }): DocxCommandAck {
+  private commandAck(response: DocxEngineWorkerResponse & { ok: true }): DocxCommandAck {
     const frame = response.commandAck?.frame;
     if (!response.commandAck || !isCommandAck(response.commandAck)) {
       discardCommandPresentation(frame);
-      throw new SessionFailure('message', 'Resident command response omitted its acknowledgement');
+      throw new SessionFailure('message', 'Worker command response omitted its acknowledgement');
     }
     if (response.commandAck.frame) {
       this.answeredFrameEpoch = Math.max(this.answeredFrameEpoch, response.commandAck.frame.revision);
@@ -469,11 +522,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     options: { digest?: string; generation?: string; heapLimitBytes?: number } = {}
   ): Promise<ResidentEngineWorkerOpened> {
     if (this.openedHeapLimit || this.bootstrapped) {
-      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
     }
     const reservation = { bytes: options.heapLimitBytes };
     this.openedHeapLimit = reservation;
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       const copy = new Uint8Array(bytes);
       response = await this.request(
@@ -492,7 +545,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       throw error;
     }
     if (response.hostJson === undefined || !response.stateVector) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the opened document');
+      throw new ResidentWorkerFailureError('Document worker omitted the opened document');
     }
     return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
   }
@@ -509,11 +562,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     options: { heapLimitBytes?: number; paragraphBudget?: number } = {}
   ): Promise<ResidentEngineWorkerOpened | null> {
     if (this.openedHeapLimit || this.bootstrapped) {
-      throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
+      throw new ResidentWorkerFailureError('Document worker already holds a document');
     }
     const reservation = { bytes: options.heapLimitBytes };
     this.openedHeapLimit = reservation;
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       const copy = new Uint8Array(bytes);
       response = await this.request(
@@ -537,7 +590,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       return null;
     }
     if (response.hostJson === undefined || !response.stateVector) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the opened preview');
+      throw new ResidentWorkerFailureError('Document worker omitted the opened preview');
     }
     return { hostJson: response.hostJson, stateVector: new Uint8Array(response.stateVector) };
   }
@@ -550,7 +603,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     }
     const reply = this.request({ type: 'fontRequirements', layoutInput }).then((response) => {
       if (response.requirementsJson === undefined) {
-        throw new ResidentWorkerFailureError('Resident engine worker omitted the font requirements');
+        throw new ResidentWorkerFailureError('Document worker omitted the font requirements');
       }
       return response.requirementsJson;
     });
@@ -567,7 +620,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const response = await this.request({ type: 'layoutJson', layoutRevision });
     if (response.layoutJsonStatus === 'stale') return { status: 'stale' };
     if (response.layoutJsonStatus !== 'ok' || response.layoutJson === undefined) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted its retained layout');
+      throw new ResidentWorkerFailureError('Document worker omitted its retained layout');
     }
     return { status: 'ok', layoutJson: response.layoutJson };
   }
@@ -575,11 +628,11 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   /** @internal */
   async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
     if (!this.bootstrapped && !this.commandSession) {
-      throw new ResidentWorkerFailureError('Resident engine worker has not laid out its document');
+      throw new ResidentWorkerFailureError('Document worker has not laid out its document');
     }
     const response = await this.request({ type: 'proposal', operation });
     if (!response.proposal) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
+      throw new ResidentWorkerFailureError('Document worker omitted the proposal result');
     }
     const { peerDiff, ...proposal } = response.proposal;
     return {
@@ -593,14 +646,14 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }
 
   /** @internal */
-  async documentRead<K extends ResidentDocumentRead['kind']>(
-    read: ResidentDocumentRead & { kind: K }
-  ): Promise<{ version: string; value: ResidentDocumentReadValues[K] }> {
+  async documentRead<K extends DocxDocumentRead['kind']>(
+    read: DocxDocumentRead & { kind: K }
+  ): Promise<{ version: string; value: DocxDocumentReadValues[K] }> {
     const response = await this.request({ type: 'documentRead', read });
     if (!response.read) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+      throw new ResidentWorkerFailureError('Document worker omitted the document read');
     }
-    return response.read as { version: string; value: ResidentDocumentReadValues[K] };
+    return response.read as { version: string; value: DocxDocumentReadValues[K] };
   }
 
   /**
@@ -608,21 +661,21 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    * read then answers `superseded` when the document moved on meanwhile.
    * @internal
    */
-  async documentReadAt<K extends ResidentDocumentRead['kind']>(
-    read: ResidentDocumentRead & { kind: K },
+  async documentReadAt<K extends DocxDocumentRead['kind']>(
+    read: DocxDocumentRead & { kind: K },
     expectVersion: string
   ): Promise<
-    | { status: 'ok'; version: string; value: ResidentDocumentReadValues[K] }
+    | { status: 'ok'; version: string; value: DocxDocumentReadValues[K] }
     | { status: 'superseded' }
   > {
     const response = await this.request({ type: 'documentRead', read, expectVersion });
     if (response.superseded) return { status: 'superseded' };
     if (!response.read) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the document read');
+      throw new ResidentWorkerFailureError('Document worker omitted the document read');
     }
     const { version, value } = response.read as {
       version: string;
-      value: ResidentDocumentReadValues[K];
+      value: DocxDocumentReadValues[K];
     };
     return { status: 'ok', version, value };
   }
@@ -637,7 +690,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }> {
     const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
     if (!response.state || response.version === undefined || !response.proposals) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
+      throw new ResidentWorkerFailureError('Document worker omitted its document handoff');
     }
     return {
       state: new Uint8Array(response.state),
@@ -656,7 +709,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   async encodeState(): Promise<Uint8Array> {
     const response = await this.request({ type: 'encodeState' });
     if (!response.state) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
+      throw new ResidentWorkerFailureError('Document worker omitted its state');
     }
     return new Uint8Array(response.state);
   }
@@ -670,7 +723,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   }> {
     const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
     if (!response.state) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
+      throw new ResidentWorkerFailureError('Document worker omitted its state');
     }
     return {
       state: new Uint8Array(response.state),
@@ -692,6 +745,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
    */
   async save(request: {
     comments: Comment[];
+    /** @internal */
+    commentsSource?: 'host';
     host?: Document;
     stateVector?: Uint8Array;
     /** @internal */
@@ -700,6 +755,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
+      ...(request.commentsSource === undefined ? {} : { commentsSource: request.commentsSource }),
       ...(request.host === undefined ? {} : { host: request.host }),
       ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
       ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
@@ -709,7 +765,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       !Array.isArray(response.updates) ||
       typeof response.version !== 'string'
     ) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the saved document');
+      throw new ResidentWorkerFailureError('Document worker omitted the saved document');
     }
     return {
       bytes: response.saved,
@@ -725,7 +781,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       !Number.isInteger(response.revisionCount) ||
       response.revisionCount < 0
     ) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted a valid revision count');
+      throw new ResidentWorkerFailureError('Document worker omitted a valid revision count');
     }
     return response.revisionCount;
   }
@@ -752,7 +808,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     options: ResidentEngineWorkerLayoutOptions & ResidentEngineWorkerSnapshotOptions = {}
   ): Promise<ResidentEngineWorkerFrame> {
     if (options.opened && !this.openedHeapLimit) {
-      throw new ResidentWorkerFailureError('Resident engine worker has no opened document');
+      throw new ResidentWorkerFailureError('Document worker has no opened document');
     }
     if (
       options.opened &&
@@ -760,7 +816,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       options.heapLimitBytes !== this.openedHeapLimit?.bytes
     ) {
       throw new ResidentWorkerFailureError(
-        'Resident engine worker opened its document under another heap limit'
+        'Document worker opened its document under another heap limit'
       );
     }
     const fontsRevision = snapshot.fontsRevision;
@@ -797,7 +853,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       snapshotTransfers(snapshot)
     );
     this.recordSent(options.stateVector, fontsRevision);
-    let response: ResidentEngineWorkerResponse & { ok: true };
+    let response: DocxEngineWorkerResponse & { ok: true };
     try {
       response = await pending;
     } catch (error) {
@@ -813,13 +869,13 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     if (commandReplacement) {
       if (generation !== this.bootstraps) {
         discardCommandPresentation(response.commandInitial?.frame);
-        throw new SessionFailure('disposed', 'Resident command replacement was superseded');
+        throw new SessionFailure('disposed', 'Worker command replacement was superseded');
       }
       const initial = response.commandInitial;
       if (!initial || !isCommandAck(initial) || initial.selection === undefined ||
         initial.editState === undefined || !initial.frame || initial.frame.baseRevision !== undefined) {
         discardCommandPresentation(initial?.frame);
-        throw new SessionFailure('message', 'Resident replacement omitted its initial command state');
+        throw new SessionFailure('message', 'Worker replacement omitted its initial command state');
       }
       result.commandInitial = initial;
       this.commandInitialGenerations.set(initial, commandGeneration);
@@ -1011,7 +1067,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   eraseCaret(): void {
     if (this.terminalError) return;
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
+    const message: DocxEngineWorkerRequest = { id, type: 'eraseCaret' };
     this.worker.postMessage(message);
   }
 
@@ -1021,7 +1077,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.ready = false;
     const owned = update.slice();
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = {
+    const message: DocxEngineWorkerRequest = {
       id,
       type: 'applyUpdate',
       update: owned,
@@ -1046,7 +1102,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
       !(response.stateVector instanceof ArrayBuffer) ||
       (response.repair !== null && !(response.repair instanceof ArrayBuffer))
     ) {
-      throw new ResidentWorkerFailureError('Resident engine worker omitted the update acknowledgment');
+      throw new ResidentWorkerFailureError('Document worker omitted the update acknowledgment');
     }
     return {
       version: response.version,
@@ -1072,20 +1128,20 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   destroy(): void {
     if (this.terminalError) return;
     const id = this.nextId++;
-    const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
+    const message: DocxEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'), false);
+    this.fail(Object.assign(new ResidentWorkerFailureError('Document worker was destroyed'), { code: 'disposed' }), false);
   }
 
   protected request(
     request: AwaitedRequest,
     transfer: Transferable[] = []
-  ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
+  ): Promise<DocxEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.commandReplacementPending &&
       (request.type === 'edit' || request.type === 'checkpoint' || request.type === 'requestFullFrame' ||
         request.type === 'commandUpdate' || request.type === 'buildPages' || request.type === 'commandViewport')) {
-      return Promise.reject(new SessionFailure('disposed', 'Resident command document is being replaced'));
+      return Promise.reject(new SessionFailure('disposed', 'Worker command document is being replaced'));
     }
     if (
       request.type === 'open' ||
@@ -1100,7 +1156,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     return new Promise((resolve, reject) => {
       if (this.pending.size === 0) this.armWatchdog();
       this.pending.set(id, { type: request.type, resolve, reject });
-      this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
+      this.worker.postMessage({ ...request, id } as DocxEngineWorkerRequest, transfer);
     });
   }
 
@@ -1108,7 +1164,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.commandReplacementPending = true;
     this.commandGenerationValue += 1;
     this.commandIdentity = null;
-    const failure = new SessionFailure('disposed', 'Resident command document was replaced');
+    const failure = new SessionFailure('disposed', 'Worker command document was replaced');
     const listener = this.failureListener;
     this.failureListener = null;
     for (const [id, pending] of this.pending) {
@@ -1139,7 +1195,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     this.watchdog = setTimeout(() => {
       this.watchdog = null;
       const waiting = this.pending.values().next().value?.type ?? 'a request';
-      const message = `Resident engine worker did not answer ${waiting} within ${RESIDENT_WORKER_SILENCE_MS}ms`;
+      const message = `Document worker did not answer ${waiting} within ${RESIDENT_WORKER_SILENCE_MS}ms`;
       this.fail(
         this.commandSession ? new SessionFailure('silence', message) : new ResidentWorkerFailureError(message)
       );
@@ -1155,7 +1211,7 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
    * The state vector is tracked centrally in `onmessage`. */
   private recordSync(
-    response: ResidentEngineWorkerResponse & { ok: true },
+    response: DocxEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
     if (response.id >= this.lastSnapshotId && response.id > this.lastFailedFontsSnapshotId) {
@@ -1172,6 +1228,8 @@ export class ResidentEngineWorkerClient implements ResidentCommandClient {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.frameListeners.clear();
+    this.collabListeners.clear();
+    this.pipeListeners.clear();
     for (const resolve of this.bootstrapWaiters.splice(0)) resolve();
     if (notify && first) this.failureListener?.(error);
   }
@@ -1183,7 +1241,10 @@ class ResidentWorkerUnavailableError extends Error {}
 export class ResidentWorkerFailureError extends Error {}
 
 /** The worker has no whole opened package to save. @internal */
-export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+export class DocxWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
+
+/** A whole source failed to open and the worker still holds the source cut it was to replace. @internal */
+export class ResidentWorkerCutKeptError extends Error {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {
@@ -1216,14 +1277,14 @@ function snapshotTransfers(snapshot: YrsResidentWorkerSnapshot): Transferable[] 
 }
 
 function frameResult(
-  response: ResidentEngineWorkerResponse & { ok: true }
+  response: DocxEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its FrameDelta');
+    throw new ResidentWorkerFailureError('Document worker response omitted its FrameDelta');
   if (!response.caret)
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its caret snapshot');
+    throw new ResidentWorkerFailureError('Document worker response omitted its caret snapshot');
   if (response.selection === undefined) {
-    throw new ResidentWorkerFailureError('Resident engine worker response omitted its selection');
+    throw new ResidentWorkerFailureError('Document worker response omitted its selection');
   }
   return {
     frame: new Uint8Array(response.frame),

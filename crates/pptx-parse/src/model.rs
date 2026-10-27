@@ -84,6 +84,34 @@ impl PptxPackage {
             .map(|part| part.bytes.as_slice())
     }
 
+    /// Authored other-style levels, including explicitly empty levels when source is attached.
+    pub fn master_other_style_levels(&self, master: &SlideMaster) -> [bool; 9] {
+        let mut levels = std::array::from_fn(|index| {
+            master
+                .text_styles
+                .other
+                .get(index)
+                .is_some_and(|properties| properties != &ParagraphProperties::default())
+        });
+        let Some(bytes) = self.part_bytes(&master.part_path) else {
+            return levels;
+        };
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let Ok(root) = crate::xml::parse_xml(bytes, &master.part_path, &mut budget) else {
+            return levels;
+        };
+        let other = root
+            .child("txStyles")
+            .and_then(|styles| styles.child("otherStyle"));
+        for (index, present) in levels.iter_mut().enumerate() {
+            *present |= other
+                .and_then(|style| style.child(&format!("lvl{}pPr", index + 1)))
+                .is_some();
+        }
+        levels
+    }
+
     /// False for packages recovered from a collaboration update, which carry
     /// the parsed model but not the raw part bytes.
     pub fn has_parts(&self) -> bool {
@@ -171,6 +199,10 @@ pub struct Slide {
     pub background_picture: Option<Box<PictureFill>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
+    /// `p:cSld` declares `p:bg`, whatever fill it holds; `false` in packages
+    /// stored before it was read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_background: bool,
     pub shapes: Vec<ShapeNode>,
     /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,6 +428,8 @@ pub struct Shape {
     pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_bg_fill: bool,
     pub fill: Option<ShapeFill>,
     /// The image behind an `a:blipFill`, when the fill is a stretched picture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +456,9 @@ pub struct PictureFill {
     /// `a:tile`: the picture repeats at its own size instead of stretching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile: Option<PictureTile>,
+    /// Bitmap effects in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<BlipEffect>,
 }
 
 /// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
@@ -449,15 +486,19 @@ pub struct CustomGeometryPath {
 pub struct Picture {
     #[serde(flatten)]
     pub base: ShapeBase,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aspect_ratio_locked: bool,
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
     /// Bitmap effects in document order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<BlipEffect>,
-    /// Preset mask; defaults to the frame rectangle.
+    /// Mask geometry; defaults to the frame rectangle.
     #[serde(default = "rect_geometry", skip_serializing_if = "is_rect")]
     pub geometry: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<CustomGeometryPath>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
@@ -576,6 +617,8 @@ pub enum GraphicFrameData {
 #[serde(rename_all = "camelCase")]
 pub struct DiagramDrawing {
     pub part_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_extent: Option<[i64; 2]>,
     pub shapes: Vec<ShapeNode>,
 }
 
@@ -653,6 +696,8 @@ pub struct TableCell {
     pub merged: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_fill: Option<PictureFill>,
     #[serde(default, skip_serializing_if = "TableCellBorders::is_empty")]
     pub borders: TableCellBorders,
 }
@@ -680,6 +725,7 @@ impl Default for TableCell {
             row_span: 1,
             merged: false,
             fill: None,
+            picture_fill: None,
             borders: TableCellBorders::default(),
         }
     }
@@ -765,6 +811,12 @@ where
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_col: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_col: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtl_col: Option<bool>,
     /// Use a 1.2 em percentage pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,

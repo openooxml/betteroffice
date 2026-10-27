@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type PointerEvent, type RefObject } from 'react';
 import {
   commandMotion, navigateConfirmedSelection, setPeerlessGestureActive, peerlessInputReference,
-  peerlessKnownState, type PeerlessViewStore,
+  peerlessKnownState, peerlessSelectionInTableCell, type PeerlessViewStore,
 } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import { peerlessPositionAtPoint } from './createPeerlessEditorApi';
@@ -26,13 +26,17 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
   }, [store]);
 
   const move = useCallback((event: KeyboardEvent): boolean => {
-    if (!store || store.getSnapshot().selection?.kind === 'object') return false;
+    if (!store) return false;
     const motion = commandMotion(event.key, event);
     if (!motion) return false;
+    const cell = motion === 'nextCell' || motion === 'previousCell';
+    if (!cell && store.getSnapshot().selection?.kind === 'object') return false;
+    if (cell && !peerlessSelectionInTableCell(store)) return false;
+    const extend = event.shiftKey && !cell;
     const textDependent = motion === 'wordLeft' || motion === 'wordRight' ||
       motion === 'storyStart' || motion === 'storyEnd';
     if (!textDependent && peerlessKnownState(store)) {
-      const selection = navigateConfirmedSelection(store, event.key, event.shiftKey, event);
+      const selection = navigateConfirmedSelection(store, event.key, extend, event);
       if (!selection) return false;
       event.preventDefault();
       void store.dispatch({ kind: 'setSelection', payload: { selection,
@@ -42,7 +46,7 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
     const at = peerlessInputReference(store, true);
     if (!at) return false;
     event.preventDefault();
-    void store.dispatch({ kind: 'moveSelection', payload: { at, motion, extend: event.shiftKey,
+    void store.dispatch({ kind: 'moveSelection', payload: { at, motion, extend,
       inputTime: event.timeStamp, undoGroup: 'selection' } }).catch(() => {});
     return true;
   }, [store]);
@@ -59,7 +63,15 @@ export function usePeerlessTextSelection(store: PeerlessViewStore | null, {
     let extend = drag;
     if (!drag) {
       const hit = peerlessPositionAtPoint(presentation, canvas.current, event.clientX, event.clientY);
-      if (hit?.kind !== 'text') return false;
+      if (!hit) {
+        recent.current = null;
+        event.preventDefault();
+        void store.dispatch({ kind: 'setSelection', payload: { selection: null,
+          inputTime: event.timeStamp, undoGroup: 'selection' } }).catch(() => {});
+        event.currentTarget.focus();
+        return true;
+      }
+      if (hit.kind !== 'text') return false;
       const selected = at?.source === 'confirmed' ? at.selection : null;
       extend = event.shiftKey && (at?.source === 'afterSeq' || selected?.slideId === confirmed.frame.slideId &&
         selected.shapeId === hit.shapeId && selected.storyId === hit.storyId && selected.kind !== 'shape' && selected.kind !== 'object');

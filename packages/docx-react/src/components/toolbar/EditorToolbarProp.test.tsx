@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from '../DocxEditor/peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -16,7 +17,7 @@ import {
   type InProcessResidentWorker,
 } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
-import type { DocxEditorProps, DocxEditorRef } from '../../index';
+import type { DocxEditorBaseProps, DocxEditorRef } from '../../index';
 import {
   resetEngineChoiceForTests,
   setMissingWorkerCapabilitiesForTests,
@@ -106,15 +107,15 @@ function CompactToolbar({ onShare }: { onShare(): void }) {
 
 const COMPACT: ReactNode = <CompactToolbar onShare={() => {}} />;
 
-async function mountEditor(props: Partial<DocxEditorProps>, experimentalWorkerOpen: false | undefined) {
+async function mountEditor(props: Partial<DocxEditorBaseProps>, experimentalWorkerOpen: false | undefined) {
   const ref = createRef<DocxEditorRef>();
   const opens = workers.reduce(
     (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
   );
   const view = render(
     experimentalWorkerOpen === false
-      ? <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={documentBytes()} {...props} />
-      : <DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />
+      ? <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} experimentalWorkerOpen={false} documentBuffer={documentBytes()} {...props} />
+      : <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} ref={ref} documentBuffer={documentBytes()} {...props} />
   );
   for (let attempt = 0; attempt < 200; attempt += 1) {
     await act(async () => {
@@ -178,7 +179,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
     } as unknown as typeof Worker;
   });
 
-  const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, experimentalWorkerOpen);
+  const mount = (props: Partial<DocxEditorBaseProps> = {}) => mountEditor(props, experimentalWorkerOpen);
   const selectFirstWord = async (ref: React.RefObject<DocxEditorRef | null>) => {
     if (experimentalWorkerOpen === false) return selectInThreadFirstWord(ref);
     const read = await ref.current!.readParagraphs({ view: 'accepted' });
@@ -461,7 +462,7 @@ describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, ex
   });
 });
 
-const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false);
+const mount = (props: Partial<DocxEditorBaseProps> = {}) => mountEditor(props, false);
 
 describe('DocxEditor toolbar prop (in-thread engine)', () => {
   test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
@@ -505,7 +506,7 @@ describe('DocxEditor toolbar prop (in-thread engine)', () => {
 describe('DocxEditor toolbar prop (worker engine)', () => {
   const workers = setupWorkerEngine();
 
-  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+  async function mountWorker(props: Partial<DocxEditorBaseProps> = {}) {
     const opens = workers.reduce(
       (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
     );

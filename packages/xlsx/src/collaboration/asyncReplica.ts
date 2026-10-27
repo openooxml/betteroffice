@@ -1,4 +1,5 @@
-import type { CollaborationReplica, CollaborationUpdateOrigin } from './types';
+import type { CollaborationPipeChannel } from '../../../../shared/collaboration-pipe/main';
+import type { AwarenessCursor, AwarenessPeer, CollaborationReplica, CollaborationUpdateOrigin } from './types';
 
 /** @experimental */
 export interface AsyncCollaborationReplica {
@@ -6,6 +7,8 @@ export interface AsyncCollaborationReplica {
   encodeStateVector(): Promise<Uint8Array>;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
   applyUpdate(update: Uint8Array): Promise<unknown>;
+  /** Applies updates in order as one merge; rejects at the first refused update, keeping the ones before it. */
+  applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
   onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
 }
 
@@ -18,6 +21,19 @@ const adapters = new WeakMap<CollaborationReplica, AsyncCollaborationReplica>();
 
 export function asyncReplicaFor(replica: CollaborationReplica): AsyncCollaborationReplica | undefined {
   return adapters.get(replica);
+}
+
+const pipes = new WeakMap<CollaborationReplica, CollaborationPipeChannel<AwarenessCursor, AwarenessPeer>>();
+
+/** @internal */
+export function attachCollaborationPipe(adapter: AsyncReplicaAdapter, channel: CollaborationPipeChannel<AwarenessCursor, AwarenessPeer> | undefined): void {
+  if (channel) pipes.set(adapter, channel);
+  else pipes.delete(adapter);
+}
+
+/** @internal */
+export function collaborationPipeFor(replica: CollaborationReplica): CollaborationPipeChannel<AwarenessCursor, AwarenessPeer> | undefined {
+  return pipes.get(replica);
 }
 
 /** @experimental */

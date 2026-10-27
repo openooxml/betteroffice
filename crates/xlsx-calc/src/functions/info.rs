@@ -20,7 +20,7 @@ fn parity(args: &[Expr], ctx: &EvalContext<'_>, want: i64) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    match crate::eval::to_number(&evaluate(&args[0], ctx)) {
+    match ctx.number(&evaluate(&args[0], ctx)) {
         Ok(n) if !n.is_finite() => err(ErrorValue::Num),
         Ok(n) => boolean((n.trunc() as i64).rem_euclid(2) == want),
         Err(e) => err(e),
@@ -94,8 +94,5 @@ fn test(args: &[Expr], ctx: &EvalContext<'_>, pred: fn(&CellValue) -> bool) -> C
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    let checkpoint = ctx.budget_error_checkpoint();
-    let value = evaluate(&args[0], ctx);
-    ctx.handle_budget_errors_since(checkpoint);
-    boolean(pred(&value))
+    boolean(pred(&evaluate(&args[0], ctx)))
 }

@@ -1,5 +1,6 @@
 //! Bounded PresentationML parsing and part-preserving package writes.
 
+mod attribute_patch;
 mod builtin_table_styles;
 mod chart;
 mod comment_patch;
@@ -33,8 +34,9 @@ pub use package::{
 };
 pub use relationships::{Relationship, TargetMode, relationship_types};
 pub use write::{
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, RunWrite, ShapeAdd,
-    ShapePatch, ShapeWrite, SlideWrite, TextTarget, TextWrite, is_supported_image_content_type,
-    text_paragraph_xml, write_pptx_with_edits,
+    BackgroundWrite, DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd,
+    RunWrite, ShapeAdd, ShapePatch, ShapeWrite, SlideWrite, TableRowSource, TableStructure,
+    TextTarget, TextWrite, is_supported_image_content_type, text_paragraph_xml,
+    write_pptx_with_edits,
 };
 pub use xml::ParseLimits;

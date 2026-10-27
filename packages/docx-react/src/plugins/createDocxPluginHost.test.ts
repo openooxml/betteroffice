@@ -85,6 +85,7 @@ const layout = (previewVersion: number): DocxPluginLayout => ({
   id: 'layout',
   version: 'v1',
   previewVersion,
+  reservationsVersion: null,
   zoom: 1,
   pageCount: 1,
 });
@@ -422,4 +423,40 @@ describe('plugin host proposal previews', () => {
     ]);
     host.close('unmounted');
   });
+});
+
+
+test('notification idle waits for running handlers and every queued event', async () => {
+  const { host } = setup();
+  const registry = stubSession();
+  const delivered: string[] = [];
+  let release!: () => void;
+  let started!: () => void;
+  const entering = new Promise<void>((resolve) => { started = resolve; });
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const plugin = defineDocxPlugin({
+    id: 'test.drain', createState: () => null,
+    async onEvent(_context, event) {
+      if (event.type === 'mode-change') { started(); await held; }
+      delivered.push(event.type);
+    },
+  });
+  host.setPlugins([plugin]);
+  host.open(registry.session);
+  await host.notificationsIdle();
+  delivered.length = 0;
+  host.modeChanged('viewing', true);
+  await entering;
+  host.selectionChanged({ formatting: null, displayRange: { story: 'body', from: 1, to: 2, layoutId: 'layout' } });
+  let idle = false;
+  const drained = host.notificationsIdle().then(() => { idle = true; });
+  await Promise.resolve();
+  expect(idle).toBe(false);
+  expect(delivered).toEqual([]);
+  release();
+  await drained;
+  expect(delivered).toEqual(['mode-change', 'selection-change']);
+  expect(idle).toBe(true);
+  host.close('unmounted');
+  await host.notificationsIdle();
 });

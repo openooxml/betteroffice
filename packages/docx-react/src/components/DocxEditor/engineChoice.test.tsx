@@ -9,13 +9,14 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { Document } from '@betteroffice/docx/types/document';
 import * as yrs from '@betteroffice/docx/yrs';
 import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
+  DocxEngineWorkerHostModule,
+  DocxEngineWorkerRequest,
+  DocxEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import type { DocxEditorProps } from '../DocxEditor';
+import type { DocxEditorBaseProps } from '../DocxEditor';
 import * as displayList from './hooks/useDisplayList';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -40,11 +41,11 @@ const errors: Error[] = [];
 let warn: ReturnType<typeof spyOn<typeof console, 'warn'>>;
 
 class FakeWorker {
-  static requests: ResidentEngineWorkerRequest[] = [];
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
+  static requests: DocxEngineWorkerRequest[] = [];
+  onmessage: ((event: MessageEvent<DocxEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
-  postMessage(request: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
+  postMessage(request: DocxEngineWorkerRequest | DocxEngineWorkerHostModule): void {
     if ('id' in request) FakeWorker.requests.push(request);
   }
   terminate(): void {}
@@ -112,11 +113,14 @@ afterAll(async () => {
 });
 
 const openRequests = () => FakeWorker.requests.filter((request) => request.type === 'open');
-const warnings = () => warn.mock.calls
-  .map(([message]) => String(message))
-  .filter((message) => message.startsWith('[DocxEditor]'));
-const editor = (props: DocxEditorProps = {}) => (
-  <DocxEditor showToolbar={false} documentBuffer={buffer} onError={(error) => errors.push(error)} {...props} />
+const warnings = () => {
+  const messages = warn.mock.calls.map(([message]) => String(message))
+    .filter((message) => message.startsWith('[DocxEditor]'));
+  expect(messages.filter((message) => message.includes(LEGACY_SYNC_API_PROP))).toHaveLength(1);
+  return messages.filter((message) => !message.includes(LEGACY_SYNC_API_PROP));
+};
+const editor = (props: DocxEditorBaseProps = {}) => (
+  <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }} showToolbar={false} documentBuffer={buffer} onError={(error) => errors.push(error)} {...props} />
 );
 
 async function expectInThread(): Promise<void> {
@@ -126,7 +130,7 @@ async function expectInThread(): Promise<void> {
   expect(errors).toEqual([]);
 }
 
-test('the default opens in the worker and keeps its engine when the prop changes', async () => {
+test('the hybrid opens in the worker and keeps its engine when the prop changes', async () => {
   const view = render(editor());
   await waitFor(() => expect(openRequests()).toHaveLength(1));
   view.rerender(editor({ experimentalWorkerOpen: false }));
@@ -137,7 +141,7 @@ test('the default opens in the worker and keeps its engine when the prop changes
   expect(errors).toEqual([]);
 });
 
-const lateOpeningOptions: Array<[string, () => DocxEditorProps]> = [
+const lateOpeningOptions: Array<[string, () => DocxEditorBaseProps]> = [
   ['mediaTokens', () => ({ mediaTokens: true })],
   ['collaboration.initialUpdate', () => ({ collaboration: { initialUpdate } })],
 ];
@@ -198,7 +202,15 @@ test('missing capabilities fall back even with an explicit worker request', asyn
   expect(warnings()[0]).toContain('createImageBitmap');
 });
 
-const unsupportedSources: Array<[string, () => DocxEditorProps]> = [
+test('a capability fallback with collaboration.initialUpdate warns only about capabilities', async () => {
+  setMissingWorkerCapabilitiesForTests(['OffscreenCanvas']);
+  render(editor({ collaboration: { initialUpdate } }));
+  await expectInThread();
+  expect(warnings()).toHaveLength(1);
+  expect(warnings()[0]).toContain('OffscreenCanvas');
+});
+
+const unsupportedSources: Array<[string, () => DocxEditorBaseProps]> = [
   ['mediaTokens', () => ({ mediaTokens: true })],
   ['collaboration.initialUpdate', () => ({ collaboration: { initialUpdate }, experimentalWorkerOpen: true })],
   ['document', () => ({ document: parsed, documentBuffer: undefined, experimentalWorkerOpen: true })],
@@ -210,7 +222,7 @@ test.each(unsupportedSources)('%s falls back with one named warning', async (pro
   expect(warnings()[0]).toContain(prop);
 });
 
-const viewerSources: Array<[string, DocxEditorProps]> = [
+const viewerSources: Array<[string, DocxEditorBaseProps]> = [
   ['readOnly', { readOnly: true }],
   ['viewing mode', { mode: 'viewing' }],
   ['readOnly with collaboration', { readOnly: true, collaboration: { clientId: 7 } }],

@@ -61,6 +61,7 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
   let revisionThroughSeq = -1;
   let nextSeq = initial.throughSeq + 1;
   let dispatchOrder = 0;
+  let waitingDispatch: Promise<void> | undefined;
   let editState = initial.editState;
   let editStateThroughSeq = initial.throughSeq;
   let failure: SessionFailure | undefined;
@@ -107,7 +108,12 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
 
   async function dispatch(input: WorkbookSharedCommand): Promise<WorkbookSharedAck> {
     const blocked = [...barriers].filter((barrier) => (input.payload.dispatchOrder ?? 0) > barrier.order);
-    if (blocked.length) await Promise.all(blocked.map((barrier) => barrier.done));
+    const earlier = waitingDispatch;
+    if (blocked.length || earlier) {
+      const ready = Promise.all([earlier, ...blocked.map((barrier) => barrier.done)]).then(() => {});
+      waitingDispatch = ready;
+      try { await ready; } finally { if (waitingDispatch === ready) waitingDispatch = undefined; }
+    }
     checkActive();
     const compatibility = input.payload.compatibility;
     if (compatibility && compatibility.seq !== input.seq) {
@@ -313,7 +319,7 @@ export function createWorkbookEditSession<X = unknown>(options: Omit<SessionOpti
       const inputTime = metadata && 'inputTime' in metadata ? metadata.inputTime : undefined;
       const group = metadata && 'undoGroupId' in metadata ? metadata.undoGroupId : undefined;
       const ticket: WorkbookCommandTicket = shared.submit(input.kind, { ...payload, dispatchOrder: ++dispatchOrder }, {
-        lane: input.kind === 'applyUpdate' ? 'collab' : 'input',
+        lane: input.kind === 'applyUpdate' || input.kind === 'collabPipe' ? 'collab' : 'input',
         fence: true,
         ...(typeof inputTime === 'number' && Number.isFinite(inputTime) ? { inputTime } : {}),
         ...(typeof group === 'string' ? { group } : {}) });

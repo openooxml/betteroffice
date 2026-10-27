@@ -4,7 +4,7 @@
  * chrome and this layer stays a deterministic reducer core.
  */
 
-import type { CellAddr, CellRange, Direction, MoveOpts, Selection, SelectionLimits } from './types';
+import type { CellAddr, CellRange, Direction, MoveOpts, Selection, SelectionLimits, SelectionMerges } from './types';
 
 function clamp(value: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, value));
@@ -18,9 +18,10 @@ export function selectionAt(addr: CellAddr): Selection {
 }
 
 /**
- * The normalized inclusive rectangle spanned by a selection's anchor and focus.
+ * The explicit bounds or normalized rectangle spanned by the endpoints.
  */
 export function normalizeRange(sel: Selection): CellRange {
+  if (sel.range) return { ...sel.range };
   return {
     top: Math.min(sel.anchor.row, sel.focus.row),
     bottom: Math.max(sel.anchor.row, sel.focus.row),
@@ -56,31 +57,46 @@ export function extendTo(sel: Selection, addr: CellAddr, limits?: SelectionLimit
   return { anchor: { ...sel.anchor }, focus };
 }
 
-function delta(direction: Direction, step: number): CellAddr {
-  switch (direction) {
-    case 'up':
-      return { row: -step, col: 0 };
-    case 'down':
-      return { row: step, col: 0 };
-    case 'left':
-      return { row: 0, col: -step };
-    case 'right':
-      return { row: 0, col: step };
-  }
+/**
+ * The anchor of the merged area covering `addr`, or `addr` itself.
+ */
+export function mergeAnchor(addr: CellAddr, merges?: SelectionMerges): CellAddr {
+  const merged = merges?.mergeAt(addr.row, addr.col);
+  return merged ? { row: merged.top, col: merged.left } : { ...addr };
 }
 
 /**
  * Move the focus one (or `step`) cells in a direction. When `extend` is set the
  * anchor holds and the range grows; otherwise the whole selection collapses onto
- * the new focus. The result is clamped to the grid bounds in `opts.limits`.
+ * the new focus. The result is clamped to the grid bounds in `opts.limits`. A
+ * merged area counts as one cell: the move starts from its far edge, and a
+ * collapsed selection that lands inside one lands on its anchor.
  */
 export function moveFocus(sel: Selection, direction: Direction, opts: MoveOpts): Selection {
-  const { limits } = opts;
-  const step = opts.step ?? 1;
-  const d = delta(direction, step);
-  const next: CellAddr = {
-    row: clamp(sel.focus.row + d.row, 0, limits.rows - 1),
-    col: clamp(sel.focus.col + d.col, 0, limits.cols - 1),
-  };
+  const { limits, hidden, merges } = opts;
+  const vertical = direction === 'up' || direction === 'down';
+  const back = direction === 'up' || direction === 'left';
+  const merged = merges?.mergeAt(sel.focus.row, sel.focus.col);
+  const edge = merged ? vertical ? back ? merged.top : merged.bottom : back ? merged.left : merged.right
+    : vertical ? sel.focus.row : sel.focus.col;
+  const limit = vertical ? limits.rows : limits.cols;
+  let position = edge;
+  if (!hidden) position = clamp(edge + (back ? -1 : 1) * (opts.step ?? 1), 0, limit - 1);
+  else {
+    const isHidden = vertical ? hidden.isRowHidden : hidden.isColHidden;
+    let remaining = opts.step ?? 1;
+    while (remaining > 0) {
+      let candidate = position + (back ? -1 : 1);
+      while (candidate >= 0 && candidate < limit && isHidden(candidate)) candidate += back ? -1 : 1;
+      if (candidate < 0 || candidate >= limit) break;
+      position = candidate;
+      remaining -= 1;
+    }
+  }
+  const moved = position !== edge;
+  const target = vertical ? { row: position, col: sel.focus.col } : { row: sel.focus.row, col: position };
+  const landed = moved ? target : sel.focus;
+  const next = opts.extend ? landed : mergeAnchor(landed, merges);
+  if (hidden && next.row === sel.focus.row && next.col === sel.focus.col) return sel;
   return opts.extend ? extendTo(sel, next) : selectionAt(next);
 }

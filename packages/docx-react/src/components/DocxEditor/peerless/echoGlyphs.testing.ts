@@ -1,4 +1,4 @@
-import type { DocxEchoGlyphLine, DocxEchoGlyphSet } from '@betteroffice/docx/peerless';
+import type { DocxEchoGlyphLine, DocxEchoGlyphSet } from '@betteroffice/docx/worker';
 
 const alphabet = Array.from({ length: 95 }, (_, index) => String.fromCharCode(32 + index)).join('');
 

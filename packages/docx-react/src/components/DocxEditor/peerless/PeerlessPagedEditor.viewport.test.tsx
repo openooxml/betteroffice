@@ -5,7 +5,7 @@ import {
   applyFrameDelta, applyFrameDeltaOwned, CANVAS_PAGE_GAP_PX, displayPageIsShiftOf, displayPageNoteAnchorRevision,
   displayPageRevision, FRAME_DELTA_VERSION, type DecodedFrameDelta, type DisplayPage, type FramePageOperation,
 } from '@betteroffice/docx/layout/render';
-import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandAck, DocxCommandEchoContext, DocxCommandEnvelope, DocxCommandFrame, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { PeerlessEditSessionBinding, UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { CanvasPageMirror } from '../CanvasPageMirror';
@@ -117,13 +117,13 @@ async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false, p
   const requests: { start: number; end: number; built: number[]; released: number[]; rasterScale?: number }[] = [];
   const initialScales: (number | undefined)[] = [];
   const edits: DocxCommandEnvelope[] = [];
-  const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
+  const initial: DocxCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
     outcomes: [], selection: null,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: nextFrame([...built]),
   };
-  const connection: ResidentCommandConnection & {
+  const connection: DocxCommandConnection & {
     requestViewport(request: { start: number; end: number; frameEpoch: number; rasterScale?: number }): Promise<void>;
   } = {
     initial, requestFullFrame: async () => initial,
@@ -409,7 +409,7 @@ test('a certified prefix grows its scroll column without moving the visible page
   expect(editor.container.querySelector('[data-page-id="11"] canvas')?.getAttribute('width')).toBe('200');
 });
 
-test('pages entering the window while scrolling build their mirror at idle time once the scroll settles', async () => {
+test('pages entering the window while scrolling build their mirror in a frame once the scroll settles', async () => {
   const scheduler = fakeIdleScheduler();
   restorers.push(() => scheduler.restore());
   const editor = await mount(1, 0, false, true);
@@ -422,9 +422,7 @@ test('pages entering the window while scrolling build their mirror at idle time 
   const { start, end } = editor.requests.at(-1)!;
   const entered = Array.from({ length: end - start }, (_, index) => start + index);
   expect(entered.filter((pageIndex) => (mirror(pageIndex)?.childElementCount ?? 0) > 0)).toEqual([]);
-  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 200)); });
-  expect(entered.filter(full)).toEqual([]);
-  while (scheduler.idleWork.size > 0) act(() => scheduler.flushIdle());
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 250)); });
   expect(entered.filter(full)).toEqual(entered);
   expect(mirror(10)!.textContent).toContain('Readable page 11');
 });
@@ -448,7 +446,7 @@ test('a text page mirror keeps readable text and pointer selection without build
     expect(mirror(pageIndex)!.textContent?.trim()).toBe(`Readable page ${pageIndex + 1}`);
   }
   expect(editor.container.querySelector('.layout-run-text')).toBeNull();
-  const pages = editor.container.querySelector<HTMLElement>('[data-peerless-pages-host]')!;
+  const pages = editor.container.querySelector<HTMLElement>('[data-docx-pages-host]')!;
   fireEvent.pointerDown(pages, { pointerId: 1, button: 0, clientX: 50, clientY: 10 });
   await waitFor(() => expect(editor.edits.map(({ kind }) => kind)).toContain('selectPoint'));
 });

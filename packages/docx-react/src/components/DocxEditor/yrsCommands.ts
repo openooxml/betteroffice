@@ -305,7 +305,7 @@ function storyContains(parent: string, story: string): boolean {
 
 /** Resolve the innermost table-cell identity encoded in a yrs story id. */
 export function yrsCellLocFromStory(story: string): YrsCellLoc | null {
-  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?=:|$)/g));
+  const matches = Array.from(story.matchAll(/:t(\d+):r(\d+)c(\d+)(?:~\d+)?(?=:|$)/g));
   const match = matches[matches.length - 1];
   if (!match || match.index == null) return null;
   const tableIndex = Number(match[1]);

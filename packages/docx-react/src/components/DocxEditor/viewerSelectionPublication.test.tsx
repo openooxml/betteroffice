@@ -1,3 +1,4 @@
+import { LEGACY_SYNC_API_PROP } from './peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -5,7 +6,7 @@ import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   residentWorkerFactory,
@@ -15,7 +16,7 @@ import {
   DocxAsyncOnlyError,
   DocxEditor,
   defineDocxPlugin,
-  type DocxEditorProps,
+  type DocxEditorBaseProps,
   type DocxEditorRef,
   type DocxPluginContext,
   type DocxPluginSelection,
@@ -64,7 +65,7 @@ afterAll(async () => {
 });
 
 async function navigationViewer(
-  props: Partial<DocxEditorProps> = {},
+  props: Partial<DocxEditorBaseProps> = {},
   observeWorker?: (worker: InProcessResidentWorker) => void
 ) {
   spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
@@ -106,7 +107,7 @@ async function navigationViewer(
       if (event.type === 'load') loads.push(next);
     },
   });
-  const view = render(<DocxEditor
+  const view = render(<DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
     ref={ref} documentBuffer={await pagedDocx(1, 2)} readOnly experimentalWorkerOpen
     previewFirstPage={false} measurementFontProvider={provider} plugins={[plugin]}
     {...props}
@@ -235,7 +236,7 @@ test('viewer navigation re-reads a newer frame and applies with the latest scrol
     navigate({
       ...access, host: () => host, queries: () => queries,
       awaitFrame: async () => { queries = frame('v2'); return queries; },
-      read: (async (request: ResidentDocumentRead) => {
+      read: (async (request: DocxDocumentRead) => {
         if (!('expectVersion' in request)) throw new Error('Expected versioned read');
         versions.push(request.expectVersion);
         if (request.expectVersion === 'v') await pending;
@@ -287,7 +288,7 @@ test('viewer selections reach the prop, ref subscribers and plugin snapshot, inc
       font.byteOffset, font.byteOffset + font.byteLength
     ) as ArrayBuffer) };
     const element = (buffer: ArrayBuffer) => (
-      <DocxEditor
+      <DocxEditor {...{ [LEGACY_SYNC_API_PROP]: true }}
         ref={ref}
         documentBuffer={buffer}
         readOnly

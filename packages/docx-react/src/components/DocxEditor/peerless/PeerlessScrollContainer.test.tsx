@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
 import { CANVAS_PAGE_GAP_PX } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
-import type { DocxCommandFrame, ResidentCommandConnection } from '@betteroffice/docx/peerless';
+import type { DocxCommandFrame, DocxCommandConnection } from '@betteroffice/docx/worker';
 import type { UsePeerlessEditSessionOptions } from '../hooks/usePeerlessEditSession';
 import type { PeerlessFrameGeometry } from './viewStore';
 import { PeerlessDocxEditor } from './PeerlessDocxEditor';
@@ -45,7 +45,7 @@ function frame(): DocxCommandFrame {
   } };
 }
 
-async function mount() {
+async function mount(withCaret = false) {
   let scroller: HTMLElement | undefined;
   const rect = spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
     const top = this === scroller ? 0 : -(scroller?.scrollTop ?? 0);
@@ -57,13 +57,13 @@ async function mount() {
   }) as unknown as CanvasRenderingContext2D) as unknown as typeof HTMLCanvasElement.prototype.getContext);
   restorers.push(() => rect.mockRestore(), () => context.mockRestore());
   const requests: { start: number; end: number; frameEpoch: number }[] = [];
-  const initial: ResidentCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
+  const initial: DocxCommandConnection['initial'] = { ...identity, version: 0, throughSeq: 0,
     outcomes: [], selection: null,
     editState: { readOnly: false, toolbar: null, effectiveFormatting: null, storedMarks: null,
       canUndo: false, canRedo: false, hyperlink: null, tableContext: null },
     frame: frame(),
   };
-  const connection: ResidentCommandConnection = {
+  const connection: DocxCommandConnection = {
     initial, requestFullFrame: async () => initial,
     async requestViewport(request) { requests.push(request); },
     client: { failure: undefined, onFailure: () => () => {}, dispose: async () => {},
@@ -79,7 +79,7 @@ async function mount() {
         pages: Array.from({ length: 20 }, (_, pageIndex): PeerlessFrameGeometry['pages'][number] => ({
           page: { pageId: String(pageIndex + 1), pageIndex },
           bounds: { x: 0, y: pageIndex * stride, width: 200, height: 100 }, transform: [1, 0, 0, 1, 0, 0],
-        })), caret: null, selectionRects: [],
+        })), caret: withCaret ? { x: 20, y: 30, width: 1, height: 12 } : null, selectionRects: [],
       };
     },
   };
@@ -118,6 +118,11 @@ test('peerless_editor_owns_scroll_container', async () => {
   expect(editor.scroller.tabIndex).toBe(0);
 });
 
+test('peerless_scroll_container_contains_scroll_chaining', async () => {
+  const editor = await mount();
+  expect(editor.scroller.style.overscrollBehavior).toBe('contain');
+});
+
 test('page_keys_scroll_peerless_container_without_blurring_document_input', async () => {
   const editor = await mount();
   const input = editor.getByRole('textbox', { name: 'Document input' });
@@ -136,6 +141,20 @@ test('page_keys_scroll_peerless_container_without_blurring_document_input', asyn
   expect(editor.scroller.scrollTop).toBe(before);
   expect(up.defaultPrevented).toBe(true);
   expect(document.activeElement).toBe(input);
+});
+
+test('admitted_page_keys_do_not_also_scroll_the_peerless_container', async () => {
+  const editor = await mount(true);
+  const input = editor.getByRole('textbox', { name: 'Document input' });
+  act(() => { input.focus(); });
+  const before = editor.scroller.scrollTop;
+  for (const key of ['PageDown', 'PageUp']) {
+    const event = new KeyboardEvent('keydown', { key, shiftKey: true, bubbles: true, cancelable: true });
+    act(() => { fireEvent(input, event); });
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.scroller.scrollTop).toBe(before);
+    expect(document.activeElement).toBe(input);
+  }
 });
 
 test('scrolling_peerless_container_updates_display_window', async () => {

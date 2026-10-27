@@ -131,7 +131,10 @@ mod tests {
             let output = ooxml_redact::redact_with_options(
                 source,
                 Format::Auto,
-                &ooxml_redact::RedactionOptions { random_characters },
+                &ooxml_redact::RedactionOptions {
+                    random_characters,
+                    ..Default::default()
+                },
             )
             .unwrap();
             let after = vsdx_parse::parse_vsdx(&output).unwrap();
