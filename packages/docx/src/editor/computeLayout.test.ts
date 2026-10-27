@@ -177,6 +177,23 @@ describe('buildResidentRegionLayoutRequest defaultParagraphStyleId', () => {
     expect(preserved.renderEnv.defaultParagraphStyleId).toBe('Normal');
   });
 
+  test('a styles part without docDefaults sz resolves every paragraph style chain', () => {
+    const doc = {
+      package: {
+        styles: {
+          styles: [
+            { styleId: 'Normal', type: 'paragraph', default: true, rPr: { fontSize: 24 } },
+            { styleId: 'Plain', type: 'paragraph' },
+          ],
+        },
+        document: { content: [] },
+      },
+    } as unknown as Document;
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 12, Plain: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
+  });
+
   test('ignores character defaults and empty ids', () => {
     const characterOnly = stylesDoc([{ styleId: 'BodyDefault', type: 'character', default: true }]);
     expect(
@@ -255,14 +272,14 @@ describe('buildResidentRegionLayoutRequest paragraph style font sizes', () => {
     expect(env.docDefaultFontSize).toBe(10);
   });
 
-  test('a basedOn cycle ends the walk without a size', () => {
+  test('a basedOn cycle ends the walk at the docDefaults size', () => {
     const doc = sizedDoc(undefined, [
       { styleId: 'A', type: 'paragraph', basedOn: 'B' },
       { styleId: 'B', type: 'paragraph', basedOn: 'A' },
     ]);
     const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
-    expect(env.paragraphStyleFontSizes).toBeUndefined();
-    expect(env.docDefaultFontSize).toBeUndefined();
+    expect(env.paragraphStyleFontSizes).toEqual({ A: 10, B: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
   });
 
   test('caller supplied sizes win per style', () => {

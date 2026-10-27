@@ -134,7 +134,7 @@ function chainFontSizeEnv(
 ): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'docDefaultFontSize'> {
   const styles = document?.package.styles;
   if (!styles) return {};
-  const docDefault = styles.docDefaults?.rPr?.fontSize;
+  const docDefault = styles.docDefaults?.rPr?.fontSize ?? 20;
   const byId = new Map((styles.styles ?? []).map((style) => [style.styleId, style]));
   const sizes: Record<string, number> = { ...(renderEnv.paragraphStyleFontSizes ?? {}) };
   for (const style of styles.styles ?? []) {
@@ -151,11 +151,11 @@ function chainFontSizeEnv(
       current = current.basedOn ? byId.get(current.basedOn) : undefined;
     }
     const resolved = size ?? docDefault;
-    if (resolved != null) sizes[style.styleId] = resolved / 2;
+    sizes[style.styleId] = resolved / 2;
   }
   return {
     ...(Object.keys(sizes).length > 0 ? { paragraphStyleFontSizes: sizes } : {}),
-    ...(renderEnv.docDefaultFontSize == null && docDefault != null
+    ...(renderEnv.docDefaultFontSize == null
       ? { docDefaultFontSize: docDefault / 2 }
       : {}),
   };

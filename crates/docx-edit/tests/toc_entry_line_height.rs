@@ -67,6 +67,101 @@ fn entry(text: &str, tab_size: Option<u32>, mark_size: Option<u32>) -> String {
     )
 }
 
+fn chain_env(bytes: &[u8]) -> Value {
+    let parts = ooxml_opc::unzip_parts(bytes).unwrap();
+    let Some(styles_xml) = parts
+        .iter()
+        .find(|(name, _)| name == "word/styles.xml")
+        .map(|(_, value)| String::from_utf8(value.clone()).unwrap())
+    else {
+        return json!({});
+    };
+    let attr = |text: &str, name: &str| -> Option<String> {
+        text.split(&format!("{name}=\""))
+            .nth(1)?
+            .split('"')
+            .next()
+            .map(str::to_owned)
+    };
+    let sz_after = |text: &str, from: usize| -> Option<f64> {
+        let rest = &text[from..];
+        let start = rest.find("<w:sz ")?;
+        attr(&rest[start..], "w:val")?.parse().ok()
+    };
+    let doc_default_half = styles_xml
+        .find("<w:docDefaults>")
+        .and_then(|start| {
+            let chunk = &styles_xml[start..];
+            let end = chunk
+                .find("</w:docDefaults>")
+                .map_or(chunk.len(), |index| index);
+            sz_after(&chunk[..end], 0)
+        })
+        .unwrap_or(20.0);
+    let mut styles: Vec<(String, Option<String>, Option<f64>, bool)> = Vec::new();
+    let mut rest = styles_xml.as_str();
+    while let Some(start) = rest.find("<w:style ") {
+        let chunk = &rest[start..];
+        let end = chunk
+            .find("</w:style>")
+            .map_or(chunk.len(), |index| index + 10);
+        let chunk = &chunk[..end];
+        rest = &rest[start + 9..];
+        if attr(chunk, "w:type").as_deref() != Some("paragraph") {
+            continue;
+        }
+        let Some(style_id) = attr(chunk, "w:styleId") else {
+            continue;
+        };
+        let based_on = chunk
+            .find("<w:basedOn ")
+            .and_then(|index| attr(&chunk[index..], "w:val"));
+        let own = chunk
+            .find("<w:rPr>")
+            .and_then(|index| sz_after(chunk, index));
+        styles.push((style_id, based_on, own, chunk.contains("w:default=\"1\"")));
+    }
+    let mut sizes = serde_json::Map::new();
+    for (style_id, _, _, _) in &styles {
+        let mut size = None;
+        let mut seen: Vec<&str> = Vec::new();
+        let mut current = Some(style_id.as_str());
+        while let Some(id) = current {
+            if seen.contains(&id) {
+                break;
+            }
+            seen.push(id);
+            let Some(entry) = styles.iter().find(|(entry_id, _, _, _)| entry_id == id) else {
+                break;
+            };
+            if let Some(found) = entry.2 {
+                size = Some(found);
+                break;
+            }
+            current = entry.1.as_deref();
+        }
+        sizes.insert(
+            style_id.clone(),
+            json!(size.unwrap_or(doc_default_half) / 2.0),
+        );
+    }
+    let default_id = styles
+        .iter()
+        .find(|(_, _, _, is_default)| *is_default)
+        .map(|(style_id, _, _, _)| style_id.clone())
+        .or_else(|| {
+            styles
+                .iter()
+                .any(|(style_id, _, _, _)| style_id == "Normal")
+                .then(|| "Normal".to_owned())
+        });
+    json!({
+        "paragraphStyleFontSizes": sizes,
+        "docDefaultFontSize": doc_default_half / 2.0,
+        "defaultParagraphStyleId": default_id,
+    })
+}
+
 fn line_heights(bytes: &[u8]) -> Vec<f64> {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
@@ -79,7 +174,7 @@ fn line_heights(bytes: &[u8]) -> Vec<f64> {
         &engine
             .layout_document_with_regions_json(
                 &json!({
-                    "bodyStory": "body", "renderEnv": {},
+                    "bodyStory": "body", "renderEnv": chain_env(bytes),
                     "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
                     "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 10}}
                 })
@@ -108,6 +203,30 @@ fn line_heights(bytes: &[u8]) -> Vec<f64> {
             lines[0]["lineHeight"].as_f64()
         })
         .collect()
+}
+
+fn lowered_first_run(bytes: &[u8], render_env: Value) -> Value {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let engine = EngineSession::new(77100);
+    seed_from_docx(engine.doc(), bytes).unwrap();
+    let output: Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_json(
+                &json!({
+                    "bodyStory": "body", "renderEnv": render_env,
+                    "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
+                    "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 10}}
+                })
+                .to_string(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    output["measured"][0]["block"]["runs"][0].clone()
 }
 
 fn assert_height(actual: f64, expected_pt: f64) {
@@ -528,6 +647,61 @@ fn a_paragraph_with_an_unknown_style_takes_the_default_style_chain_size() {
         json!({"defaultParagraphStyleId": "Normal", "paragraphStyleFontSizes": {"Normal": 11.0}, "docDefaultFontSize": 10.0}),
     );
     assert_height(heights[0], 11.0);
+}
+
+/// Red test: a style with no basedOn over a 12pt Normal, in a styles
+/// part whose docDefaults has no size, measures at the 10pt Word
+/// default. The fixed builders give every paragraph style a chain
+/// entry, so Plain resolves 10pt and does not take Normal 12pt through
+/// the default style fallback.
+#[test]
+fn a_style_without_basedon_over_a_12pt_normal_measures_10pt() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style></w:styles>"#;
+    let body =
+        r#"<w:p><w:pPr><w:pStyle w:val="Plain"/></w:pPr><w:r><w:t>Body text</w:t></w:r></w:p>"#;
+    let heights = heights_with_env(
+        &document(body, styles),
+        json!({"defaultParagraphStyleId": "Normal", "paragraphStyleFontSizes": {"Normal": 12.0, "Plain": 10.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_height(heights[0], 10.0);
+}
+
+/// Red test: with no chain sizes in the env at all, an unsized run
+/// beside a directly sized 18pt run stays at the merged paragraph
+/// default size, as on main, not at the larger run size.
+#[test]
+fn an_unsized_run_beside_a_larger_direct_run_keeps_the_paragraph_default_size() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Small </w:t></w:r><w:r><w:rPr><w:sz w:val="36"/></w:rPr><w:t>Big</w:t></w:r></w:p>"#;
+    let run = lowered_first_run(&document(body, &styles(None, None)), json!({}));
+    assert_eq!(run["fontSize"], 10.0);
+}
+
+const CS_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/><w:szCs w:val="28"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#;
+
+/// Red test: a style chain with sz 20 and szCs 28 sizes an unsized
+/// complex script run at the 14pt cs size, not the 10pt chain size.
+#[test]
+fn an_unsized_complex_script_run_takes_the_cs_chain_size() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:rPr><w:cs/></w:rPr><w:t>Complex</w:t></w:r></w:p>"#;
+    let run = lowered_first_run(
+        &document(body, CS_STYLES),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_eq!(run["fontSizeCs"], 14.0);
+}
+
+/// Red test: a run with a direct sz 32 and no szCs keeps the cs size
+/// main computed from the merged defaults, 14pt here, instead of
+/// taking the 10pt chain size as its cs size.
+#[test]
+fn a_directly_sized_run_without_szcs_keeps_the_main_cs_size() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:rPr><w:sz w:val="32"/><w:cs/></w:rPr><w:t>Complex</w:t></w:r></w:p>"#;
+    let run = lowered_first_run(
+        &document(body, CS_STYLES),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0}, "docDefaultFontSize": 10.0}),
+    );
+    assert_eq!(run["fontSize"], 16.0);
+    assert_eq!(run["fontSizeCs"], 14.0);
 }
 
 /// A split at the end rebuilds the second paragraph from the caret
