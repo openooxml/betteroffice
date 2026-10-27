@@ -2529,7 +2529,9 @@ mod pagination_rule_tests {
 
     #[test]
     fn cached_keep_table_witnesses_preserve_page_dependent_measurements() {
-        use crate::keep_together::{analyze_keep_with_next, measure_keep_with_next_group_witnessing};
+        use crate::keep_together::{
+            analyze_keep_with_next, measure_keep_with_next_group_witnessing,
+        };
 
         let mut value = keep_run_input(24, false, 3.7);
         let cell = paragraph(100, 4, 7.3, json!({}));
