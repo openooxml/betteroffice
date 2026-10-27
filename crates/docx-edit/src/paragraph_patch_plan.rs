@@ -1028,30 +1028,32 @@ pub(crate) fn diff_paragraph_v1(
             after.properties.remove(key);
         }
     }
-    let original_numpr = |snapshot: &Snapshot| {
+    fn original_numpr(snapshot: &Snapshot) -> Option<&Value> {
         snapshot
             .carriers
             .get("_originalFormatting")
             .and_then(|value| value.get("numPr"))
             .filter(|value| !value.is_null())
-    };
+    }
     let (seeded_properties, _) = context.inheritance(&before.properties, &Attrs::new());
     let (para_inherit, _) = context.inheritance(&after.properties, &Attrs::new());
     let seeded_mark = mark_inheritance(&context, &before);
     let mark_inherit = mark_inheritance(&context, &after);
-    let slot_value = |slot: &SlotV1| match slot {
-        SlotV1::Present { value } if !value.is_null() => Some(value),
-        _ => None,
-    };
-    let inherited_value = |attrs: &Attrs, path: &[String]| {
+    fn slot_value(slot: &SlotV1) -> Option<&Value> {
+        match slot {
+            SlotV1::Present { value } if !value.is_null() => Some(value),
+            _ => None,
+        }
+    }
+    fn inherited_value<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
         attr_at(attrs, path).filter(|value| !value.is_null())
-    };
-    let original_object = |snapshot: &Snapshot| {
+    }
+    fn original_object(snapshot: &Snapshot) -> Option<&serde_json::Map<String, Value>> {
         snapshot
             .carriers
             .get("_originalFormatting")
             .and_then(Value::as_object)
-    };
+    }
     let mut before_direct = original_object(&before).cloned().unwrap_or_default();
     let mut after_direct = original_object(&after).cloned().unwrap_or_default();
     before_direct.remove("styleId");
@@ -1071,8 +1073,7 @@ pub(crate) fn diff_paragraph_v1(
                         .is_some_and(|value| !value.is_null())
                 });
             !direct
-                && slot_value(&delta.before)
-                    == inherited_value(&seeded_properties, &delta.path)
+                && slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
                 && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
         });
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")

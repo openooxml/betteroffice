@@ -190,17 +190,6 @@ pub(super) fn paragraph_properties(
     if deltas.is_empty() {
         return Ok(source.to_owned());
     }
-    let at = |attrs: &Attrs, path: &[String]| {
-        attrs
-            .get(&path[0])
-            .and_then(|value| {
-                path[1..]
-                    .iter()
-                    .try_fold(value, |value, key| value.get(key.as_str()))
-            })
-            .filter(|value| !value.is_null())
-    };
-    let present = |value: &SlotV1| slot(value).filter(|value| !value.is_null());
     let restyle = deltas
         .iter()
         .any(|delta| delta.path.first().is_some_and(|key| key == "pStyle"));
@@ -208,8 +197,8 @@ pub(super) fn paragraph_properties(
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if restyle && key != "pStyle" {
-            if present(&delta.before) == at(seed_inherit, &delta.path)
-                && present(&delta.after) == at(inherit, &delta.path)
+            if present_slot(&delta.before) == attr_at(seed_inherit, &delta.path)
+                && present_slot(&delta.after) == attr_at(inherit, &delta.path)
             {
                 continue;
             }
@@ -343,6 +332,21 @@ pub(super) fn expand(
         slot(&delta.after),
         emit,
     )
+}
+
+fn attr_at<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
+    attrs
+        .get(&path[0])
+        .and_then(|value| {
+            path[1..]
+                .iter()
+                .try_fold(value, |value, key| value.get(key.as_str()))
+        })
+        .filter(|value| !value.is_null())
+}
+
+fn present_slot(value: &SlotV1) -> Option<&Value> {
+    slot(value).filter(|value| !value.is_null())
 }
 
 pub(super) fn slot(slot: &SlotV1) -> Option<&Value> {
