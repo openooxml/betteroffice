@@ -4,11 +4,11 @@ import { type FidelityFormat, fidelityCharts, quantity } from "./fidelity";
 
 export type Theme = "light" | "dark";
 
-// ours is the landing page's accent (--bo-acc in shared/site-tokens.css), text and rules use its ink tokens;
-// the other engine gets a cooler neutral than the page's grey so it reads against both the green and the background
+// the same values as the benchmarks site (apps/fidelity, shared/site-tokens.css): ours is --bo-acc, the other
+// engine --lo = --bo-dim, and each bar sits on a --bo-line-soft track; text and rules use the ink tokens
 const PALETTE = {
-  light: { fg: "#0b0b0b", dim: "#6b6b6b", line: "#e4e4e4", ours: "#047857", other: "#94a3b8" },
-  dark: { fg: "#f2f2f0", dim: "#8c8c8c", line: "#262626", ours: "#34d399", other: "#64748b" },
+  light: { fg: "#0b0b0b", dim: "#6b6b6b", line: "#e4e4e4", ours: "#047857", other: "#6b6b6b", track: "#000000", trackOpacity: 0.065 },
+  dark: { fg: "#f2f2f0", dim: "#8c8c8c", line: "#262626", ours: "#34d399", other: "#8c8c8c", track: "#ffffff", trackOpacity: 0.07 },
 } as const;
 
 // the landing page's Geist, embedded because an SVG loaded through <img> cannot fetch fonts
@@ -215,6 +215,7 @@ export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): str
     body += `<g data-row="${esc(row.format)}:${esc(row.label)}"><text x="0" y="${y + (lower ? 14 : pair / 2 + 4)}" font-size="12" fill="${c.fg}">${esc(shown(row))}</text>`;
     if (lower) body += `<text x="0" y="${y + 27}" font-size="10" font-style="italic" fill="${c.dim}">lower is better</text>`;
     for (const [offset, bar, ours] of [[0, row.ours, true], [barHeight + 3, row.theirs, false]] as const) {
+      body += `<rect x="${barX}" y="${y + offset}" width="${plot}" height="${barHeight}" fill="${c.track}" fill-opacity="${c.trackOpacity}"/>`;
       if (bar.share === null) {
         body += `<text x="${barX}" y="${y + offset + 12}" font-size="12" fill="${c.dim}">${esc(bar.text)}</text>`;
         continue;

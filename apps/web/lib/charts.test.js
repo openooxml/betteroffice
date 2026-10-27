@@ -117,7 +117,8 @@ describe("chart SVGs", () => {
         const group = bench.slice(bench.indexOf(marker), bench.indexOf("</g>", bench.indexOf(marker)));
         expect(group).toContain(`>${row.ours}<`);
         expect(group).toContain(`>${row.theirs}<`);
-        expect(group.match(/<rect /g)).toHaveLength(2);
+        expect(group.match(/<rect /g)).toHaveLength(4);
+        expect(group.match(/fill-opacity="0\.065"/g)).toHaveLength(2);
         seen += 1;
       }
       expect(bench).toContain(`>${format.format.toUpperCase()}<`);
@@ -178,18 +179,31 @@ describe("chart SVGs", () => {
     const svg = benchmarksChartSvg(formats, "light");
     const start = svg.indexOf('data-row="docx:SSIM"');
     const group = svg.slice(start, svg.indexOf("</g>", start));
-    expect(group.match(/<rect /g)).toHaveLength(1);
+    expect(group.match(/<rect /g)).toHaveLength(3);
     expect(group).toContain(">—<");
   });
 
   test("the theme changes the palette and anything unknown is light", () => {
     expect(evals("dark")).toContain("#34d399");
     expect(evals("dark")).not.toContain("#047857");
-    expect(evals("light")).toContain("#94a3b8");
-    expect(evals("dark")).toContain("#64748b");
     const tokens = readFileSync(join(import.meta.dir, "..", "..", "..", "shared", "site-tokens.css"), "utf8");
-    expect(tokens).toContain("--bo-acc: #047857");
-    expect(tokens).toContain("--bo-acc: #34d399");
+    const styles = readFileSync(join(import.meta.dir, "..", "..", "..", "apps", "fidelity", "src", "styles.css"), "utf8");
+    expect(styles).toContain("--ours: var(--bo-acc);");
+    expect(styles).toContain("--lo: var(--bo-dim);");
+    expect(styles).toContain("--track: var(--bo-line-soft);");
+    const token = (name) => [...tokens.matchAll(new RegExp(`--bo-${name}: ([^;]+);`, "g"))].map((m) => m[1]);
+    expect(token("acc")).toEqual(["#047857", "#34d399"]);
+    expect(token("dim")).toEqual(["#6b6b6b", "#8c8c8c"]);
+    expect(token("line-soft")).toEqual(["rgb(0 0 0 / 0.065)", "rgb(255 255 255 / 0.07)"]);
+    const bench = (theme) => benchmarksChartSvg(FORMATS, theme);
+    expect(bench("light")).toContain('fill="#047857"');
+    expect(bench("light")).toContain('fill="#6b6b6b"');
+    expect(bench("light")).toContain('fill="#000000" fill-opacity="0.065"');
+    expect(bench("dark")).toContain('fill="#34d399"');
+    expect(bench("dark")).toContain('fill="#8c8c8c"');
+    expect(bench("dark")).toContain('fill="#ffffff" fill-opacity="0.07"');
+    expect(evals("dark")).toContain('fill="#8c8c8c"');
+    expect(evals("light")).toMatch(/fill="#6b6b6b" fill-opacity="0.2" stroke="#6b6b6b"/);
     expect(themeOf("dark")).toBe("dark");
     expect(themeOf("sepia")).toBe("light");
     expect(themeOf(null)).toBe("light");
