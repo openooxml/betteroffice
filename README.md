@@ -125,7 +125,7 @@ For how scores, timings and coverage are measured, see the [benchmark methodolog
 
 ## Evals
 
-Model: `gpt-6-luna` (deliberately weak model), Harness: `codex`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+Model: `gpt-6-luna`, Harness: `codex`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
 
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/evals.svg?theme=dark">
