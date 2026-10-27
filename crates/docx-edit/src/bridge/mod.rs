@@ -4716,8 +4716,11 @@ fn lower_paragraph_spacing(
         .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
-    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
-        && true_property(values, "pageBreakBeforeRun") == Some(true);
+    let suppress_before = (env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true))
+        || (env.compatibility_flags.compatibility_mode >= 15
+            && (true_property(values, "pageBreakBeforeRun") == Some(true)
+                || true_property(values, "pageBreakBefore") == Some(true)));
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
