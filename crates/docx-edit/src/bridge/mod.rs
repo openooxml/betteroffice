@@ -1535,7 +1535,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
                         formatting: formatting.clone(),
-                        text_box,
+                        inline_text_box: text_box,
                     });
                 }
                 story_index += 1;
@@ -1560,7 +1560,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
                         formatting: lower_run_formatting(attributes, env),
-                        text_box: true,
+                        inline_text_box: false,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1604,7 +1604,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     revision_hidden: env.revision_hidden(attributes),
                     anchored: false,
                     formatting: lower_run_formatting(attributes, env),
-                    text_box: false,
+                    inline_text_box: false,
                 });
                 story_index += 1;
                 paragraph_pm_units += 1;
@@ -3387,8 +3387,10 @@ struct DrawingMarker {
     revision_hidden: bool,
     anchored: bool,
     formatting: RunFormatting,
-    /// The source drawing is a text box (`txBox`), not a plain text shape.
-    text_box: bool,
+    /// The source drawing is a `wp:inline` text box (`txBox`) lowered as a
+    /// typed shape, not a plain text shape and not an opaque (VML) text
+    /// box, which keeps its block path.
+    inline_text_box: bool,
 }
 
 impl DrawingMarker {
@@ -3649,15 +3651,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
     let (width, height, alt, shape_type, decorative, inline_shape, inline_chart) = match block {
         LayoutBlock::Chart(chart) => {
             let (width, height) = (chart.width, chart.height);
-            (
-                width,
-                height,
-                None,
-                None,
-                None,
-                None,
-                Some(Box::new(chart)),
-            )
+            (width, height, None, None, None, None, Some(Box::new(chart)))
         }
         LayoutBlock::Shape(shape) => {
             let (width, height) = (shape.width, shape.height);
@@ -3739,8 +3733,10 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
 /// inline runs of its line when they share that line with another in-flow
 /// drawing or with visible inline content, as Word draws inline pictures.
 /// A lone chart or text box keeps the block lowering, anchored drawings
-/// never convert, and a plain shape with text (no `txBox`) keeps splitting
-/// its paragraph. Converted drawings keep their block ids in the carriers.
+/// never convert, a plain shape with text (no `txBox`) keeps splitting
+/// its paragraph, and an opaque (VML) text box keeps its block path: it
+/// has no `wp:inline` wrapper to flow. Converted drawings keep their
+/// block ids in the carriers.
 fn inline_shared_drawings(
     raw_runs: &mut Vec<RawRun>,
     carried: &[(u32, Vec<RawRun>)],
@@ -3751,13 +3747,14 @@ fn inline_shared_drawings(
         !drawing.anchored
             && match &drawing.block {
                 LayoutBlock::Chart(_) => true,
-                LayoutBlock::Shape(shape) => {
-                    drawing.text_box || shape.shape_type == "textBox"
-                }
+                LayoutBlock::Shape(_) => drawing.inline_text_box,
                 _ => false,
             }
     };
-    let count = drawings.iter().filter(|drawing| convertible(drawing)).count();
+    let count = drawings
+        .iter()
+        .filter(|drawing| convertible(drawing))
+        .count();
     if count == 0 {
         return;
     }

@@ -28872,8 +28872,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             &bounds.para_id,
         )
         .unwrap();
-        assert_eq!(start, 2.0);
-        assert_eq!(end - start, f64::from(bounds.len()) + 2.0);
+        assert_eq!(start, 0.0);
+        assert_eq!(end - start, f64::from(bounds.len()) + 4.0);
 
         let caret_page = 1;
         let fragment_end = |engine: &EngineSession, page: usize| {
@@ -28930,8 +28930,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             &bounds.para_id,
         )
         .unwrap();
-        assert_eq!(end - start, f64::from(bounds.len() + 1) + 2.0);
-        assert_eq!(start + 1.0 + f64::from(caret_index), caret_position + 2.0);
+        assert_eq!(end - start, f64::from(bounds.len() + 1) + 4.0);
+        assert_eq!(start + 1.0 + f64::from(caret_index), caret_position);
         let edited = engine.with_display_list(Clone::clone).unwrap();
         assert_eq!(edited.pages.len(), initial.pages.len());
         assert!(!edited.pages[caret_page].unbuilt);

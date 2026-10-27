@@ -181,19 +181,39 @@ fn paragraph_fragment<'a>(layout: &'a Value, para_id: &str) -> Option<&'a Value>
 }
 
 /// (x, baseline y) of the first painted run whose text contains `needle`.
+/// Painted text arrives as one primitive per character (a `text`
+/// primitive, or a glyph run when fonts shape it), so the needle is
+/// located in the concatenation of all text primitives in paint order.
 fn text_origin(display: &Value, needle: &str) -> (f64, f64) {
-    let primitive = primitives(display)
-        .iter()
-        .find(|primitive| {
-            primitive["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(needle))
-        })
-        .unwrap_or_else(|| panic!("no painted text {needle:?} in {display}"));
-    if let Some(glyph) = primitive["glyphs"].as_array().and_then(|g| g.first()) {
-        return (num(glyph, "x"), num(glyph, "y"));
+    let mut joined = String::new();
+    let mut entries: Vec<(usize, f64, f64)> = Vec::new();
+    for primitive in primitives(display) {
+        let Some(text) = primitive["text"].as_str() else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let (x, baseline) =
+            if let Some(glyph) = primitive["glyphs"].as_array().and_then(|g| g.first()) {
+                (num(glyph, "x"), num(glyph, "y"))
+            } else if primitive["x"].is_number() {
+                (num(primitive, "x"), num(primitive, "baselineY"))
+            } else {
+                continue;
+            };
+        entries.push((joined.len(), x, baseline));
+        joined.push_str(text);
     }
-    (num(primitive, "x"), num(primitive, "baselineY"))
+    let start = joined
+        .find(needle)
+        .unwrap_or_else(|| panic!("no painted text {needle:?} in {display}"));
+    let (_, x, baseline) = entries
+        .iter()
+        .rev()
+        .find(|(offset, _, _)| *offset <= start)
+        .unwrap();
+    (*x, *baseline)
 }
 
 fn near(actual: f64, expected: f64, tolerance: f64, what: &str) {
@@ -210,7 +230,12 @@ fn chart_and_text_box_share_one_line_on_a_wide_page() {
     let chart = chart_canvas(&display);
     let boxed = box_shape(&display);
     near(num(&chart, "x"), 72.0, 1.5, "chart at the left margin");
-    near(num(&chart, "y"), num(&boxed, "y"), 1.5, "same top on one line");
+    near(
+        num(&chart, "y"),
+        num(&boxed, "y"),
+        1.5,
+        "same top on one line",
+    );
     // Word adds the first object's effectExtent (1 px here) between the
     // boxes; abutting placement is within 2 px of Word's box x.
     near(
@@ -290,11 +315,7 @@ fn a_single_inline_text_box_keeps_the_block_layout() {
 fn text_after_an_inline_chart_stays_on_the_chart_line() {
     let body = paragraph(
         "10000003",
-        &format!(
-            "{}{}",
-            run(&chart_drawing()),
-            text_run("After the chart")
-        ),
+        &format!("{}{}", run(&chart_drawing()), text_run("After the chart")),
     );
     let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78205);
     assert_eq!(page_count(&layout), 1);
