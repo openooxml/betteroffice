@@ -543,9 +543,7 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         }
     };
 
-    // `runDefaultTextFormatting` is seed owned: it is dropped here, never
-    // accepted from the wire and never exposed back.
-    const TYPED_KEYS: [&str; 14] = [
+    const TYPED_KEYS: [&str; 13] = [
         "alignment",
         "lineSpacing",
         "lineSpacingRule",
@@ -558,7 +556,6 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         "bidi",
         "tabs",
         "defaultTextFormatting",
-        "runDefaultTextFormatting",
         "other",
     ];
     let mut other = BTreeMap::new();

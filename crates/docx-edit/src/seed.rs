@@ -3479,13 +3479,6 @@ fn paragraph_attrs(
             merge_text_formatting(style.default_run.as_deref(), direct.as_ref())
                 .unwrap_or(Value::Null),
         );
-        // The style chain run defaults alone, without the mark's direct
-        // rPr: what unsized runs inherit. The mark's own size stays in
-        // `defaultTextFormatting` for the mark itself.
-        attrs.insert(
-            "runDefaultTextFormatting".to_owned(),
-            style.default_run.as_deref().cloned().unwrap_or(Value::Null),
-        );
         if field(formatting, "numPr").is_none()
             && field(style_ppr_ref, "numPr").is_some()
             && number(field(field(style_ppr_ref, "numPr"), "numId")) != Some(0.0)
