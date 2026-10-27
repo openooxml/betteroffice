@@ -275,27 +275,21 @@ describe('paged structured export', () => {
       );
       const paragraph = paged.structured.stories[0]!.blocks[0]!;
       if (paragraph.kind !== 'paragraph') throw new Error('expected a scout paragraph');
-      const scenario = paragraph.paragraph.inlines.find(
-        (inline) => inline.kind === 'text' && inline.text === 'scenario,'
+      const inline = paragraph.paragraph.inlines.find(
+        (candidate) => candidate.kind === 'text' && candidate.text.includes('scenario,')
       );
-      expect(scenario).toBeDefined();
-      const prefixInline = paragraph.paragraph.inlines[0]!;
-      const rectsFor = (nodeId: string) =>
-        paged.layout.fragments
-          .filter((fragment) => fragment.nodeId === nodeId && fragment.slice.kind === 'text')
-          .flatMap((fragment) => fragment.geometry?.rects ?? []);
-      const prefixRects = rectsFor(prefixInline.id);
-      const scenarioRects = rectsFor(scenario!.id);
-      expect(prefixRects).toHaveLength(1);
-      expect(scenarioRects).toHaveLength(1);
-      const firstLine = prefixRects[0]!;
-      const scout = scenarioRects[0]!;
+      if (inline?.kind !== 'text') throw new Error('expected the scout text inline');
+      const lines = paged.layout.fragments
+        .filter((fragment) => fragment.nodeId === inline.id)
+        .flatMap((fragment) => (fragment.slice.kind === 'text' ? [fragment.slice.range] : []))
+        .sort((a, b) => a.start.offset - b.start.offset);
+      expect(lines.length).toBeGreaterThan(1);
+      const scoutStart = lines[0]!.start.offset + inline.text.indexOf('scenario,');
+      const firstLineEnd = lines[0]!.end.offset;
       if (mode === 15) {
-        expect(scout.y).toBeCloseTo(firstLine.y, 3);
-        expect(scout.x).toBeGreaterThan(firstLine.x);
+        expect(firstLineEnd).toBeGreaterThanOrEqual(scoutStart + 'scenario,'.length);
       } else {
-        expect(scout.y).toBeGreaterThan(firstLine.y);
-        expect(scout.x).toBeCloseTo(firstLine.x, 3);
+        expect(firstLineEnd).toBeLessThanOrEqual(scoutStart);
       }
     }
   });
