@@ -361,12 +361,12 @@ export function createHostClient(options: HostClientOptions): HostClient {
     });
   }
 
-  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; progress?: boolean }, op: string, accessToken: string): ReadableStream<Uint8Array> {
+  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; pulled?: boolean }, op: string, accessToken: string): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
-        if (count > 0) state.progress = true;
+        state.pulled = true;
         let chunk: ChunkResult;
         try {
           chunk = await idleRead(reader, op, accessToken);
@@ -410,7 +410,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       headers.set("X-WOPI-TimeStamp", signed.timestamp);
       if (spec.override) headers.set("X-WOPI-Override", spec.override);
       if (spec.op === "GetFile") headers.set("X-WOPI-MaxExpectedSize", String(maxFileBytes));
-      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; progress?: boolean } = { exceeded: false };
+      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; pulled?: boolean } = { exceeded: false };
       let body: BodyInit | undefined;
       let streamed = false;
       if (spec.body instanceof Uint8Array && spec.body.byteLength > 1024 * 1024) {
@@ -435,7 +435,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       if (streamed) {
         uploadState.onDone = armHeaderTimeout;
         connectTimer = setTimeout(() => {
-          if (!uploadState.progress) controller.abort();
+          if (!uploadState.pulled) controller.abort();
         }, timeoutMs);
       } else {
         armHeaderTimeout();
