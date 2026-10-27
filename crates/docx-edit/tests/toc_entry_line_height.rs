@@ -142,6 +142,27 @@ fn a_hyperlink_style_size_does_not_raise_a_toc_entry() {
     assert_height(heights[0], 10.0);
 }
 
+/// Red test: a 12pt TOC1 entry whose Hyperlink style is 14pt stays at
+/// the 12pt chain size Word uses, not the 10pt fallback the stripped
+/// Hyperlink size would leave behind.
+#[test]
+fn a_hyperlink_style_size_does_not_drop_a_toc_entry_below_its_chain() {
+    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#;
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
+    let heights = line_heights(&document(body, styles));
+    assert_height(heights[0], 12.0);
+}
+
+/// Red test: an entry with no size in its chain, a 14pt mark and a
+/// 14pt PAGEREF result stays at the 10pt default. The field result is
+/// capped even when no entry text run carries a size.
+#[test]
+fn a_larger_field_result_does_not_raise_an_unsized_toc_entry() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#;
+    let heights = line_heights(&document(body, &styles(None, None)));
+    assert_height(heights[0], 10.0);
+}
+
 #[test]
 fn a_larger_field_result_does_not_raise_a_toc_entry() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#.to_owned();
