@@ -145,45 +145,34 @@ impl RunContent {
     pub fn drawing_properties(&self) -> Option<&crate::image::DrawingProperties> {
         match self {
             Self::Drawing {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::Shape {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::Chart {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::OpaqueDrawing {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             } => drawing_properties.as_ref(),
             _ => None,
         }
     }
 
-    pub fn set_drawing_properties(
-        &mut self,
-        properties: Option<crate::image::DrawingProperties>,
-    ) {
+    pub fn set_drawing_properties(&mut self, properties: Option<crate::image::DrawingProperties>) {
         match self {
             Self::Drawing {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::Shape {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::Chart {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             }
             | Self::OpaqueDrawing {
-                drawing_properties,
-                ..
+                drawing_properties, ..
             } => *drawing_properties = properties,
             _ => {}
         }

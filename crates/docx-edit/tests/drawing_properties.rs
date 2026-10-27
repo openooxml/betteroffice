@@ -28,10 +28,7 @@ fn picture(container: &str, doc_pr: &str) -> String {
 }
 
 fn inline_picture(id: &str, extra: &str) -> String {
-    picture(
-        "inline",
-        &format!(r#"<wp:docPr id="{id}" {extra}/>"#),
-    )
+    picture("inline", &format!(r#"<wp:docPr id="{id}" {extra}/>"#))
 }
 
 fn anchored_picture(id: &str, extra: &str, wrap: &str, behind: &str) -> String {
@@ -66,7 +63,12 @@ fn fixture() -> Vec<u8> {
     );
     let anchored = paragraph(
         "10000002",
-        &anchored_picture("2", r#"name="N-anchor" title="T-anchor" descr="D-anchor""#, "Square", "0"),
+        &anchored_picture(
+            "2",
+            r#"name="N-anchor" title="T-anchor" descr="D-anchor""#,
+            "Square",
+            "0",
+        ),
     );
     let behind = paragraph(
         "10000003",
@@ -74,57 +76,66 @@ fn fixture() -> Vec<u8> {
     );
     let cell = format!(
         r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
-        paragraph(
-            "10000004",
-            &inline_picture("4", r#"name="N-cell""#),
-        )
+        paragraph("10000004", &inline_picture("4", r#"name="N-cell""#),)
     );
-    let text_box = paragraph("10000006", concat!(
-        r#"<w:drawing><wp:anchor relativeHeight="2"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
-        r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapSquare/>"#,
-        r#"<wp:docPr id="6" name="N-textbox" title="T-textbox" descr="D-textbox"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
-        r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>"#,
-        r#"<wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#,
-        r#"</a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
-    ));
-    let shape = paragraph("10000007", concat!(
-        r#"<w:drawing><wp:anchor relativeHeight="3"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
-        r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapSquare/>"#,
-        r#"<wp:docPr id="7" name="N-shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
-        r#"<wps:wsp><wps:cNvPr id="7" name="inner-shape"/><wps:spPr><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>"#,
-        r#"</a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
-    ));
-    let group = paragraph("10000008", concat!(
-        r#"<w:drawing><wp:inline><wp:extent cx="2000" cy="1000"/><wp:docPr id="8" name="N-group"/>"#,
-        r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp>"#,
-        r#"<wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="2000" cy="1000"/></a:xfrm></wpg:grpSpPr>"#,
-        r#"<wps:wsp><wps:cNvPr id="81" name="child"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>"#,
-        r#"</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
-    ));
-    let chart = paragraph("10000009", concat!(
-        r#"<w:drawing><wp:inline><wp:extent cx="2743200" cy="1828800"/><wp:docPr id="9" name="N-chart" descr="D-chart"/>"#,
-        r#"<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
-    ));
+    let text_box = paragraph(
+        "10000006",
+        concat!(
+            r#"<w:drawing><wp:anchor relativeHeight="2"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapSquare/>"#,
+            r#"<wp:docPr id="6" name="N-textbox" title="T-textbox" descr="D-textbox"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+            r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>"#,
+            r#"<wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#,
+            r#"</a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        ),
+    );
+    let shape = paragraph(
+        "10000007",
+        concat!(
+            r#"<w:drawing><wp:anchor relativeHeight="3"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+            r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapSquare/>"#,
+            r#"<wp:docPr id="7" name="N-shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+            r#"<wps:wsp><wps:cNvPr id="7" name="inner-shape"/><wps:spPr><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>"#,
+            r#"</a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        ),
+    );
+    let group = paragraph(
+        "10000008",
+        concat!(
+            r#"<w:drawing><wp:inline><wp:extent cx="2000" cy="1000"/><wp:docPr id="8" name="N-group"/>"#,
+            r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp>"#,
+            r#"<wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000" cy="1000"/><a:chOff x="0" y="0"/><a:chExt cx="2000" cy="1000"/></a:xfrm></wpg:grpSpPr>"#,
+            r#"<wps:wsp><wps:cNvPr id="81" name="child"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr></wps:wsp>"#,
+            r#"</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        ),
+    );
+    let chart = paragraph(
+        "10000009",
+        concat!(
+            r#"<w:drawing><wp:inline><wp:extent cx="2743200" cy="1828800"/><wp:docPr id="9" name="N-chart" descr="D-chart"/>"#,
+            r#"<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+        ),
+    );
     let hidden = paragraph(
         "1000000A",
         &inline_picture("10", r#"name="N-hidden" hidden="1""#),
     );
-    let decorative = paragraph("1000000B", &picture("inline", concat!(
-        r#"<wp:docPr id="11" name="N-decorative"><a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}">"#,
-        r#"<adec:decorative val="1"/></a:ext></a:extLst></wp:docPr>"#,
-    )));
+    let decorative = paragraph(
+        "1000000B",
+        &picture(
+            "inline",
+            concat!(
+                r#"<wp:docPr id="11" name="N-decorative"><a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}">"#,
+                r#"<adec:decorative val="1"/></a:ext></a:extLst></wp:docPr>"#,
+            ),
+        ),
+    );
     let empty_name = paragraph(
         "1000000C",
         &inline_picture("12", r#"name="" title="T-empty""#),
     );
-    let duplicate_a = paragraph(
-        "1000000D",
-        &inline_picture("99", r#"name="N-dup-a""#),
-    );
-    let duplicate_b = paragraph(
-        "1000000E",
-        &inline_picture("99", r#"name="N-dup-b""#),
-    );
+    let duplicate_a = paragraph("1000000D", &inline_picture("99", r#"name="N-dup-a""#));
+    let duplicate_b = paragraph("1000000E", &inline_picture("99", r#"name="N-dup-b""#));
     let body = format!(
         "{inline}{anchored}{behind}{cell}{text_box}{shape}{group}{chart}{hidden}{decorative}{empty_name}{duplicate_a}{duplicate_b}<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rIdHeader\"/><w:pgSz w:w=\"11906\" w:h=\"16838\"/><w:pgMar w:top=\"1120\" w:right=\"900\" w:bottom=\"1440\" w:left=\"900\"/></w:sectPr>"
     );
@@ -192,13 +203,13 @@ fn open(bytes: &[u8]) -> EditingDoc {
 }
 
 fn drawings(atoms: &[TextAtom]) -> Vec<&DrawingProperties> {
-    atoms.iter().filter_map(|atom| atom.drawing.as_ref()).collect()
+    atoms
+        .iter()
+        .filter_map(|atom| atom.drawing.as_ref())
+        .collect()
 }
 
-fn by_name<'a>(
-    atoms: &'a [TextAtom],
-    name: &str,
-) -> &'a DrawingProperties {
+fn by_name<'a>(atoms: &'a [TextAtom], name: &str) -> &'a DrawingProperties {
     drawings(atoms)
         .into_iter()
         .find(|drawing| drawing.name.as_deref() == Some(name))
@@ -242,9 +253,15 @@ fn read_stories_carry_doc_pr_properties() {
     assert_eq!(anchored.placement, DrawingPlacement::Anchor);
     assert_eq!(anchored.descr.as_deref(), Some("D-anchor"));
 
-    assert_eq!(by_name(&atoms, "N-behind").placement, DrawingPlacement::Anchor);
+    assert_eq!(
+        by_name(&atoms, "N-behind").placement,
+        DrawingPlacement::Anchor
+    );
     assert_eq!(by_name(&atoms, "N-cell").doc_pr_id.as_deref(), Some("4"));
-    assert_eq!(by_name(&header_atoms, "N-header").descr.as_deref(), Some("D-header"));
+    assert_eq!(
+        by_name(&header_atoms, "N-header").descr.as_deref(),
+        Some("D-header")
+    );
 
     let text_box = by_name(&atoms, "N-textbox");
     assert_eq!(text_box.drawing_type, DrawingType::TextBox);
@@ -286,7 +303,9 @@ fn collect_inlines(blocks: &[Block], out: &mut Vec<Inline>) {
         match &block.content {
             BlockKind::Paragraph { paragraph }
             | BlockKind::Heading { paragraph, .. }
-            | BlockKind::ListItem { paragraph, .. } => out.extend(paragraph.inlines.iter().cloned()),
+            | BlockKind::ListItem { paragraph, .. } => {
+                out.extend(paragraph.inlines.iter().cloned())
+            }
             BlockKind::Table { table } => {
                 for row in &table.rows {
                     for cell in &row.cells {
@@ -318,7 +337,12 @@ fn structured_export_carries_doc_pr_properties() {
     let image = inlines
         .iter()
         .find_map(|inline| match &inline.content {
-            InlineKind::Image { drawing, alt_text, .. } if drawing.as_ref().is_some_and(|d| d.name.as_deref() == Some("N-inline")) => {
+            InlineKind::Image {
+                drawing, alt_text, ..
+            } if drawing
+                .as_ref()
+                .is_some_and(|d| d.name.as_deref() == Some("N-inline")) =>
+            {
                 Some((drawing.clone(), alt_text.clone()))
             }
             _ => None,
@@ -333,13 +357,19 @@ fn structured_export_carries_doc_pr_properties() {
         ("N-chart", "c:chart"),
     ] {
         let found = inlines.iter().any(|inline| match &inline.content {
-            InlineKind::Unsupported { element: found, drawing, .. } => {
+            InlineKind::Unsupported {
+                element: found,
+                drawing,
+                ..
+            } => {
                 found == element
-                    && drawing.as_ref().is_some_and(|d| d.name.as_deref() == Some(name))
+                    && drawing
+                        .as_ref()
+                        .is_some_and(|d| d.name.as_deref() == Some(name))
             }
-            InlineKind::Image { drawing, .. } => {
-                drawing.as_ref().is_some_and(|d| d.name.as_deref() == Some(name))
-            }
+            InlineKind::Image { drawing, .. } => drawing
+                .as_ref()
+                .is_some_and(|d| d.name.as_deref() == Some(name)),
             _ => false,
         });
         assert!(found, "structured export carries {name} as {element}");
@@ -357,23 +387,29 @@ fn save_round_trip_keeps_document_xml_unchanged() {
     let wire = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
     let projection = docx_parse::parse_docx_s8_projection(&bytes).unwrap();
     let body = serde_json::to_value(projection.body).unwrap();
-    let request: docx_parse::serializer::S13SaveRequest = serde_json::from_value(serde_json::json!({
-        "determinism": {
-            "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "now": "2030-01-02T03:04:05.006Z"
-        },
-        "document": body,
-        "relationshipEntries": wire.document.package.relationship_entries,
-        "headerEntries": wire.document.package.header_entries,
-        "options": {"updateModifiedDate": false},
-        "selective": serde_json::Value::Null
-    }))
-    .unwrap();
+    let request: docx_parse::serializer::S13SaveRequest =
+        serde_json::from_value(serde_json::json!({
+            "determinism": {
+                "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "now": "2030-01-02T03:04:05.006Z"
+            },
+            "document": body,
+            "relationshipEntries": wire.document.package.relationship_entries,
+            "headerEntries": wire.document.package.header_entries,
+            "options": {"updateModifiedDate": false},
+            "selective": serde_json::Value::Null
+        }))
+        .unwrap();
     let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
     let original = ooxml_opc::unzip_parts(&bytes).unwrap();
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let part = |parts: &[(String, Vec<u8>)], name: &str| {
-        parts.iter().find(|(path, _)| path == name).unwrap().1.clone()
+        parts
+            .iter()
+            .find(|(path, _)| path == name)
+            .unwrap()
+            .1
+            .clone()
     };
     assert_eq!(
         part(&saved_parts, "word/document.xml"),

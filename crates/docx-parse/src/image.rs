@@ -456,7 +456,11 @@ pub struct DrawingProperties {
     pub drawing_type: DrawingType,
 }
 
-fn descendant_by_local<'a>(element: &'a XmlElement, local: &str, depth: usize) -> Option<&'a XmlElement> {
+fn descendant_by_local<'a>(
+    element: &'a XmlElement,
+    local: &str,
+    depth: usize,
+) -> Option<&'a XmlElement> {
     if depth > 64 {
         return None;
     }
@@ -478,7 +482,9 @@ fn decorative_extension(element: &XmlElement) -> bool {
         {
             return element.parse_boolean_attribute(None, "val").unwrap_or(true);
         }
-        element.child_elements().any(|child| visit(child, depth + 1))
+        element
+            .child_elements()
+            .any(|child| visit(child, depth + 1))
     }
     visit(element, 0)
 }
@@ -508,8 +514,9 @@ pub fn parse_drawing_properties(drawing: &XmlElement) -> Option<DrawingPropertie
                 Some(child) if child.name == "pic:pic" => DrawingType::Picture,
                 Some(child) if child.name == "wps:wsp" => {
                     let text_box = descendant_by_local(child, "txbx", 0).is_some()
-                        || descendant_by_local(child, "cNvSpPr", 0)
-                            .is_some_and(|locks| locks.parse_boolean_attribute(None, "txBox") == Some(true));
+                        || descendant_by_local(child, "cNvSpPr", 0).is_some_and(|locks| {
+                            locks.parse_boolean_attribute(None, "txBox") == Some(true)
+                        });
                     if text_box {
                         DrawingType::TextBox
                     } else {

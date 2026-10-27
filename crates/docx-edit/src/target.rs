@@ -129,10 +129,7 @@ pub struct TextAtom {
     pub drawing: Option<DrawingProperties>,
 }
 
-fn drawing_properties<T: ReadTxn>(
-    map: Option<&MapRef>,
-    txn: &T,
-) -> Option<DrawingProperties> {
+fn drawing_properties<T: ReadTxn>(map: Option<&MapRef>, txn: &T) -> Option<DrawingProperties> {
     let map = map?;
     let Out::Any(Any::Map(properties)) = map.get(txn, "docPr")? else {
         return None;

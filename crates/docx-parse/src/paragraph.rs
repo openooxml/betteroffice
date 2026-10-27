@@ -1224,13 +1224,8 @@ fn parse_drawing_owned(
     in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
     let properties = crate::image::parse_drawing_properties(element);
-    let mut parsed = parse_drawing_owned_inner(
-        element,
-        relationships,
-        budget,
-        drawing,
-        in_header_footer,
-    )?;
+    let mut parsed =
+        parse_drawing_owned_inner(element, relationships, budget, drawing, in_header_footer)?;
     if properties.is_some() {
         for content in &mut parsed {
             if content.drawing_properties().is_none() {
