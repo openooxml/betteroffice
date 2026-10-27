@@ -1738,7 +1738,14 @@ def single_cell_reference(formula, sheet):
     return (quoted.replace("''", "'") if quoted is not None else unquoted or sheet, column.upper() + row)
 
 
-def rename_sheet_titles(package, renames):
+def title_items(package):
+    if 'docProps/app.xml' not in package.parts:
+        return []
+    titles = next((n for n in package.root('docProps/app.xml') if local(n.tag) == 'TitlesOfParts'), None)
+    return [n for n in titles[0] if local(n.tag) == 'lpstr'] if titles is not None and len(titles) else []
+
+
+def rename_sheet_titles(package, renames, revised):
     # Leading TitlesOfParts groups list sheets (labels are localized); later groups list defined names,
     # bare when global and Sheet!Name when local, so only a sheet qualifier follows a rename there.
     root = package.root('docProps/app.xml')
@@ -1748,13 +1755,14 @@ def rename_sheet_titles(package, renames):
         return
     sheets = {n.get('name') for n in xml(package, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
     variants, items = list(headings[0]), [n for n in titles[0] if local(n.tag) == 'lpstr']
+    written = [item.text for item in title_items(revised)]
     offset, listing_sheets = 0, True
     for index in range(0, len(variants) - 1, 2):
         number = int(next(iter(variants[index + 1])).text)
         group = items[offset:offset + number]
         offset += number
         listing_sheets = listing_sheets and offset <= len(sheets) and all(item.text in sheets for item in group)
-        for item in group:
+        for position, item in enumerate(group, offset - number):
             if listing_sheets:
                 item.text = renames.get(item.text, item.text)
                 continue
@@ -1762,8 +1770,9 @@ def rename_sheet_titles(package, renames):
             sheet = match and (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2))
             if sheet in renames:
                 new = renames[sheet]
+                quoted = "'" + new.replace("'", "''") + "'!" + match.group(3)
                 plain = re.fullmatch(r'[^\W\d][\w.]*', new) and not re.fullmatch(r'(?i)[A-Z]{1,3}[0-9]+|R[0-9]*C?[0-9]*|C[0-9]*', new)
-                item.text = (new if plain else "'" + new.replace("'", "''") + "'") + '!' + match.group(3)
+                item.text = new + '!' + match.group(3) if plain and written[position:position + 1] != [quoted] else quoted
 
 
 def check_real(task, source, revised):
@@ -1780,7 +1789,7 @@ def check_real(task, source, revised):
         accept_full_calc_on_load(original, actual)
         renames = spec.get('rename', {})
         if renames and 'docProps/app.xml' in original.parts:
-            rename_sheet_titles(original, renames)
+            rename_sheet_titles(original, renames, actual)
         before = workbook(original, real=True)
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
