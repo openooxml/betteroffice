@@ -5,7 +5,8 @@ name: WOPI image
 # after packages publish, and only when WOPI_IMAGE_PUBLISH is true.
 # The image version is the version field of apps/wopi/package.json: that
 # package stays private and is never published to npm, so bump its version
-# there to change the version tag below (latest always tracks a release).
+# there to change the version tag below. A version tag that already exists
+# is never overwritten, and latest moves only when a new version is pushed.
 on:
   pull_request:
     paths:
@@ -13,8 +14,12 @@ on:
       - "packages/**"
       - "crates/**"
       - "shared/**"
+      - "scripts/**"
       - "bun.lock"
       - "Cargo.lock"
+      - "package.json"
+      - "Cargo.toml"
+      - ".dockerignore"
       - ".github/workflows/wopi-image.yml"
   push:
     branches: [main]
@@ -23,8 +28,12 @@ on:
       - "packages/**"
       - "crates/**"
       - "shared/**"
+      - "scripts/**"
       - "bun.lock"
       - "Cargo.lock"
+      - "package.json"
+      - "Cargo.toml"
+      - ".dockerignore"
       - ".github/workflows/wopi-image.yml"
   workflow_call:
     inputs:
@@ -106,7 +115,7 @@ jobs:
 
   publish:
     name: Publish WOPI image
-    if: ${{ inputs.publish && vars.WOPI_IMAGE_PUBLISH == 'true' }}
+    if: ${{ inputs.publish && github.event_name == 'workflow_call' && github.ref == 'refs/heads/main' && vars.WOPI_IMAGE_PUBLISH == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -138,8 +147,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check whether the version tag already exists
+        id: exists
+        run: |
+          image="ghcr.io/${{ github.repository_owner }}/betteroffice-wopi:${{ steps.version.outputs.version }}"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version tag $image already exists: skipping the push, latest is not moved."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push image
         id: build
+        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -161,6 +182,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Attest build provenance
+        if: steps.exists.outputs.exists != 'true'
         uses: actions/attest-build-provenance@v2
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/betteroffice-wopi

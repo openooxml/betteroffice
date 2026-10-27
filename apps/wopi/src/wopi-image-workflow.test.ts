@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse } from "yaml";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
 const wopiWorkflowPath = join(repoRoot, ".github", "workflows", "wopi-image.yml");
 const releaseWorkflowPath = join(repoRoot, ".github", "workflows", "release.yml");
 
 type Step = {
+  id?: string;
+  name?: string;
+  if?: string;
   uses?: string;
   run?: string;
   with?: Record<string, unknown>;
@@ -17,6 +19,7 @@ type Job = {
   if?: string;
   uses?: string;
   needs?: string | string[];
+  outputs?: Record<string, string>;
   permissions?: Record<string, string>;
   with?: Record<string, unknown>;
   steps?: Step[];
@@ -28,7 +31,7 @@ type Workflow = {
 };
 
 function loadWorkflow(path: string): Workflow {
-  const parsed = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  const parsed = Bun.YAML.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   const triggers = (parsed.on ?? parsed[true as unknown as string]) as Workflow["on"];
   return { ...(parsed as unknown as Workflow), on: triggers };
 }
@@ -47,10 +50,18 @@ const EXPECTED_PATHS = [
   "packages/**",
   "crates/**",
   "shared/**",
+  "scripts/**",
   "bun.lock",
   "Cargo.lock",
+  "package.json",
+  "Cargo.toml",
+  ".dockerignore",
   ".github/workflows/wopi-image.yml",
 ];
+const PUBLISH_IF =
+  "${{ inputs.publish && github.event_name == 'workflow_call' && github.ref == 'refs/heads/main' && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
+const RELEASE_WOPI_IF =
+  "needs.release.result == 'success' && needs.release.outputs.published == 'true' && vars.WOPI_IMAGE_PUBLISH == 'true'";
 
 describe("wopi-image workflow", () => {
   test("triggers on pull requests and main pushes with the image paths", () => {
@@ -66,7 +77,8 @@ describe("wopi-image workflow", () => {
   test("never pushes on the pull request or main push build path", () => {
     const workflow = loadWorkflow(wopiWorkflowPath);
     const build = workflow.jobs.build!;
-    expect(build.if).toContain("!inputs.publish");
+    expect(build.if).toBe("${{ !inputs.publish }}");
+    expect(build.if).not.toContain("||");
     const builds = buildPushSteps(build);
     expect(builds).toHaveLength(1);
     expect(builds[0]!.with?.push).toBe(false);
@@ -86,8 +98,8 @@ describe("wopi-image workflow", () => {
   test("publishes multi-arch to ghcr only behind the repository variable", () => {
     const workflow = loadWorkflow(wopiWorkflowPath);
     const publish = workflow.jobs.publish!;
-    expect(publish.if).toContain("inputs.publish");
-    expect(publish.if).toContain("vars.WOPI_IMAGE_PUBLISH == 'true'");
+    expect(publish.if).toBe(PUBLISH_IF);
+    expect(publish.if).not.toContain("||");
     const builds = buildPushSteps(publish);
     expect(builds).toHaveLength(1);
     const built = builds[0]!;
@@ -108,6 +120,27 @@ describe("wopi-image workflow", () => {
     expect((publish.steps ?? []).some((step) => step.uses?.startsWith("docker/setup-qemu-action@"))).toBe(true);
     const version = (publish.steps ?? []).find((step) => step.run?.includes("apps/wopi/package.json"));
     expect(version).toBeDefined();
+  });
+
+  test("skips the push when the version tag already exists", () => {
+    const workflow = loadWorkflow(wopiWorkflowPath);
+    const publish = workflow.jobs.publish!;
+    const steps = publish.steps ?? [];
+    const check = steps.find((step) => step.id === "exists");
+    expect(check).toBeDefined();
+    expect(check!.run).toContain("docker buildx imagetools inspect");
+    expect(check!.run).toContain(
+      "ghcr.io/${{ github.repository_owner }}/betteroffice-wopi:${{ steps.version.outputs.version }}",
+    );
+    expect(check!.run).toContain('echo "exists=true" >> "$GITHUB_OUTPUT"');
+    expect(check!.run).toContain('echo "exists=false" >> "$GITHUB_OUTPUT"');
+    const build = steps.find((step) => step.id === "build");
+    expect(build).toBeDefined();
+    expect(build!.if).toBe("steps.exists.outputs.exists != 'true'");
+    const attest = steps.find((step) => step.uses?.startsWith("actions/attest-build-provenance@"));
+    expect(attest).toBeDefined();
+    expect(attest!.if).toBe("steps.exists.outputs.exists != 'true'");
+    expect(steps.indexOf(check!)).toBeLessThan(steps.indexOf(build!));
   });
 
   test("keeps permissions minimal per job", () => {
@@ -158,8 +191,13 @@ describe("release workflow WOPI image job", () => {
     const caller = callers[0]!;
     const needs = Array.isArray(caller.needs) ? caller.needs : [caller.needs];
     expect(needs).toContain("release");
-    expect(caller.if).toContain("needs.release.outputs.publishing == 'true'");
-    expect(caller.if).toContain("vars.WOPI_IMAGE_PUBLISH == 'true'");
+    expect(workflow.jobs.release!.outputs).toEqual({
+      publishing: "${{ steps.pending.outputs.publishing }}",
+      published: "${{ steps.changesets.outputs.published }}",
+    });
+    expect(caller.if).toBe(RELEASE_WOPI_IF);
+    expect(caller.if).not.toContain("||");
+    expect(caller.if).not.toContain("outputs.publishing");
     expect(caller.with?.publish).toBe(true);
     expect(caller.permissions).toEqual({
       contents: "read",
@@ -181,5 +219,9 @@ describe("wopi package version", () => {
     expect(pkg.private).toBe(true);
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(pkg.version).not.toBe("0.0.0");
+    const lock = readFileSync(join(repoRoot, "bun.lock"), "utf8");
+    expect(lock).toContain(
+      `"apps/wopi": {\n      "name": "@betteroffice/wopi",\n      "version": "${pkg.version}",`,
+    );
   });
 });

@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
+      published: ${{ steps.changesets.outputs.published }}
     permissions:
       contents: write
       pull-requests: write
@@ -282,7 +283,7 @@ jobs:
   wopi-image:
     name: Publish WOPI image
     needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.WOPI_IMAGE_PUBLISH == 'true'
+    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && vars.WOPI_IMAGE_PUBLISH == 'true'
     uses: ./.github/workflows/wopi-image.yml
     with:
       publish: true
