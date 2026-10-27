@@ -1227,6 +1227,12 @@ fn place<F: PartialEq>(
                         &next_section_config,
                         next_type,
                     );
+                let parity_restart = match next_type {
+                    Some(SectionBreakType::OddPage | SectionBreakType::EvenPage) => {
+                        restart.map(|restart| restart.start)
+                    }
+                    _ => None,
+                };
                 let next_type = match (next_type, restart) {
                     (Some(SectionBreakType::OddPage | SectionBreakType::EvenPage), _) => next_type,
                     (_, Some(restart)) if restart.align_parity && restart_starts_page => {
@@ -1238,8 +1244,13 @@ fn place<F: PartialEq>(
                     }
                     _ => next_type,
                 };
-                let opened_column_region =
-                    hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
+                let opened_column_region = hooks::handle_section_break(
+                    block,
+                    paginator,
+                    &next_section_config,
+                    next_type,
+                    parity_restart,
+                )?;
                 paginator.set_section_index(section_idx + 1);
                 if let Some(restart) = restart
                     && restart_starts_page
