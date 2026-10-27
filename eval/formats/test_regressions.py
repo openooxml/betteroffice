@@ -459,6 +459,23 @@ class RenamedSheetTitleTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         runner.checker.check_real(task, source, output)
 
+    def test_rename_to_a_plain_name_accepts_a_quoted_or_bare_local_title(self):
+        task = {'format': 'xlsx', 'suite': 'v3', 'expected': {'rename': {'Version': 'Reg_01'}}}
+        names = ("'Reg_01'!$A$1", "'Reg_01'!$A$2")
+        for name, titles, accepted in (
+                ('bare qualifier', ('Reg_01', 'Version', 'Reg_01!Notes'), True),
+                ('quoted qualifier', ('Reg_01', 'Version', "'Reg_01'!Notes"), True),
+                ('quoted wrong sheet', ('Reg_01', 'Version', "'Reg_02'!Notes"), False),
+                ('bare old sheet', ('Reg_01', 'Version', 'Version!Notes'), False),
+                ('quoted wrong name', ('Reg_01', 'Version', "'Reg_01'!Note"), False)):
+            with self.subTest(output=name), self.package('Version', ('Version', 'Version', 'Version!Notes')) as source, \
+                    self.package('Reg_01', titles, names) as output:
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, source, output)
+
 
 def sheet_reference(name):
     return name if name.isidentifier() else "'" + name.replace("'", "''") + "'"
