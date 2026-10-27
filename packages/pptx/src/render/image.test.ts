@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { decodePresentationImage, needsElementDecode, presentationImageBlob } from './image';
+import { decodePresentationImage, metafileImageBytes, needsElementDecode, presentationImageBlob } from './image';
 
 function record(command: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(6 + payload.length);
@@ -420,7 +420,7 @@ describe('engine metafile SVG display copies', () => {
         const id = primitive.assetId;
         const bytes = presentation.mediaBytes(id);
         expect(presentationImageBlob(bytes).type).toBe('');
-        const blob = presentationImageBlob(bytes, () => presentation.metafileSvg(id));
+        const blob = presentationImageBlob(metafileImageBytes(bytes, () => presentation.metafileSvg(id)));
         expect(blob.type).toBe('image/svg+xml');
         expect(needsElementDecode(blob)).toBe(true);
         expect(await blob.text()).toContain('<svg');
@@ -436,12 +436,12 @@ describe('engine metafile SVG display copies', () => {
 
   test('a refused engine replay produces an empty display copy', () => {
     const bytes = enhancedMetafile([new Uint8Array(8)]);
-    expect(presentationImageBlob(bytes, () => undefined).size).toBe(0);
+    expect(metafileImageBytes(bytes, () => undefined).byteLength).toBe(0);
   });
 
   test('bitmap wrappers keep their browser fast path', () => {
     const bytes = bitmapMetafile();
-    const blob = presentationImageBlob(bytes, () => { throw new Error('unexpected replay'); });
+    const blob = presentationImageBlob(metafileImageBytes(bytes, () => { throw new Error('unexpected replay'); }));
     expect(blob.type).toBe('image/bmp');
   });
 });

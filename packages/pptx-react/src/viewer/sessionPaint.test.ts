@@ -168,8 +168,8 @@ test('metafile replay is deferred until image resolution and reused on a second 
   view.setUint32(40, 0x464d4520, true);
   const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"/>');
   const bitmap = { width: 96, height: 96, close: mock(() => {}) } as unknown as ImageBitmap;
-  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation(async (source, _, options) => {
-    expect(await pptx.presentationImageBlob(source, options?.metafileSvg).text()).toContain('<svg');
+  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation(async (source) => {
+    expect(await pptx.presentationImageBlob(source).text()).toContain('<svg');
     return bitmap;
   });
   const replay = mock(() => svg);

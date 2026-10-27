@@ -1,4 +1,4 @@
-import { metafileImageBytes } from '../render/metafileImage';
+import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';

@@ -1,5 +1,5 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
-export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
+export { decodePresentationImage, metafileImageBytes, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';

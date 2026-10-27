@@ -187,13 +187,31 @@ function declarationEnd(text: string, from: number): number {
   return -1;
 }
 
-function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
+/**
+ * A metafile's display bytes: `resolve`'s replay of it, unless the browser
+ * path already draws it (a plain bitmap wrapper). Other images are unchanged.
+ */
+export function metafileImageBytes(bytes: Uint8Array, resolve?: () => Uint8Array | undefined): Uint8Array {
+  if (!resolve || (!emfData(bytes) && wmfStart(bytes) < 0) || wmfBitmap(bytes) || emfBitmap(bytes)) return bytes;
+  return resolve() ?? new Uint8Array();
+}
+
+function emfData(bytes: Uint8Array): DataView | undefined {
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (
-    data.byteLength < 108 ||
-    data.getUint32(0, true) !== 1 ||
-    data.getUint32(40, true) !== 0x464d4520
-  ) return;
+  return data.byteLength >= 44 && data.getUint32(0, true) === 1 && data.getUint32(40, true) === 0x464d4520 ? data : undefined;
+}
+
+/** Where a WMF's header starts after an optional placeable header, or -1. */
+function wmfStart(bytes: Uint8Array): number {
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const start = data.byteLength >= 4 && data.getUint32(0, true) === 0x9ac6cdd7 ? 22 : 0;
+  return data.byteLength >= start + 18 && [1, 2].includes(data.getUint16(start, true)) &&
+    data.getUint16(start + 2, true) === 9 && data.getUint16(start + 4, true) === 0x0300 ? start : -1;
+}
+
+function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
+  const data = emfData(bytes);
+  if (!data || data.byteLength < 108) return;
   const header = data.getUint32(4, true);
   if (header < 88 || header % 4 || header > data.byteLength - 8) return;
   const width = data.getInt32(16, true) - data.getInt32(8, true) + 1;
@@ -227,15 +245,8 @@ function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
 
 function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (data.byteLength < 18) return;
-  const start = data.getUint32(0, true) === 0x9ac6cdd7 ? 22 : 0;
-  if (
-    data.byteLength < start + 18 ||
-    ![1, 2].includes(data.getUint16(start, true)) ||
-    data.getUint16(start + 2, true) !== 9 ||
-    data.getUint16(start + 4, true) !== 0x0300 ||
-    data.getUint32(start + 6, true) * 2 !== data.byteLength - start
-  ) return;
+  const start = wmfStart(bytes);
+  if (start < 0 || data.getUint32(start + 6, true) * 2 !== data.byteLength - start) return;
   let originX = 0;
   let originY = 0;
   let windowWidth = 0;

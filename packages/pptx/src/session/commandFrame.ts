@@ -1,4 +1,4 @@
-import { metafileImageBytes } from '../render/metafileImage';
+import { metafileImageBytes } from '../render/browserImage';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { graphemeBoundaries } from '../../../../shared/textSelection';
