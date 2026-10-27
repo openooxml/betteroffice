@@ -409,6 +409,43 @@ for (const format of FORMATS) {
       }
     });
 
+    test("delete-before-insert is a causalGap until the insert arrives", async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const client = await openTestClient(server.joinPayload(), source, clientId());
+      try {
+        client.edit("gap-delete ", 0);
+        const afterInsert = client.encodeStateVector();
+        const insert = client.encodeStateAsUpdate(server.encodeStateVector());
+        client.remove("gap-delete");
+        const deletion = client.encodeStateAsUpdate(afterInsert);
+
+        expect(server.applyUpdate(deletion)).toEqual({
+          accepted: false,
+          reason: "causalGap",
+        });
+        expect(server.version).toBe(0);
+        expect(server.applyUpdate(insert)).toEqual({ accepted: true });
+        expect(server.applyUpdate(deletion)).toEqual({ accepted: true });
+        expect([...server.encodeStateVector()]).toEqual([
+          ...client.encodeStateVector(),
+        ]);
+        const fresh = await openFreshClient(
+          format,
+          (await server.save()).bytes,
+          clientId(),
+        );
+        try {
+          expect(fresh.contains("gap-delete")).toBe(false);
+        } finally {
+          fresh.destroy();
+        }
+      } finally {
+        client.destroy();
+        server.destroy();
+      }
+    });
+
     test("calls after destroy throw", async () => {
       const source = sourceBytes(format);
       const server = await openServerReplica(format, source, { clientId: clientId() });
@@ -503,6 +540,64 @@ describe("docx save update", () => {
       server.destroy();
     }
   });
+
+  test("identity repair on apply emits a server-only update that converges a peer", async () => {
+    const source = sourceBytes("docx");
+    const server = await openServerReplica("docx", source, { clientId: clientId() });
+    const peer = await openTestClient(server.joinPayload(), source, clientId());
+    const author = await openTestClient(server.joinPayload(), source, clientId());
+    const emitted: Uint8Array[] = [];
+    const off = server.onLocalUpdate((update) => emitted.push(update));
+    try {
+      author.insertDuplicatePilcrow();
+      const authorUpdate = author.encodeStateAsUpdate(server.encodeStateVector());
+      expect(server.applyUpdate(authorUpdate)).toEqual({ accepted: true });
+      expect(emitted.length).toBeGreaterThan(0);
+      for (const update of emitted) {
+        expect([...Y.parseUpdateMeta(update).to.keys()]).toEqual([
+          server.clientId,
+        ]);
+      }
+      peer.applyUpdate(authorUpdate);
+      for (const update of emitted) peer.applyUpdate(update);
+      expect([...peer.encodeStateVector()]).toEqual([
+        ...server.encodeStateVector(),
+      ]);
+    } finally {
+      off();
+      peer.destroy();
+      author.destroy();
+      server.destroy();
+    }
+  });
+});
+
+describe("fingerprinted client updates", () => {
+  for (const format of ["xlsx", "pptx"] as Format[]) {
+    test(`${format} fingerprinted update is accepted and applied`, async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const client = await openTestClient(server.joinPayload(), source, clientId());
+      try {
+        client.edit("tagged-marker ", 0);
+        const raw = client.encodeStateAsUpdate(server.encodeStateVector());
+        expect(server.applyUpdate(raw)).toEqual({ accepted: true });
+        const fresh = await openFreshClient(
+          format,
+          (await server.save()).bytes,
+          clientId(),
+        );
+        try {
+          expect(fresh.contains("tagged-marker")).toBe(true);
+        } finally {
+          fresh.destroy();
+        }
+      } finally {
+        client.destroy();
+        server.destroy();
+      }
+    });
+  }
 });
 
 describe("hasCausalGap", () => {
@@ -527,5 +622,13 @@ describe("hasCausalGap", () => {
     ]);
     expect(hasCausalGap(trailer, empty)).toBe(true);
     expect(hasCausalGap(new Uint8Array([255, 254]), empty)).toBe(false);
+
+    const deleter = new Y.Doc();
+    deleter.getText("t").insert(0, "hello");
+    const insertVector = Y.encodeStateVector(deleter);
+    deleter.getText("t").delete(0, 5);
+    const deletion = Y.encodeStateAsUpdate(deleter, insertVector);
+    expect(hasCausalGap(deletion, empty)).toBe(true);
+    expect(hasCausalGap(deletion, insertVector)).toBe(false);
   });
 });

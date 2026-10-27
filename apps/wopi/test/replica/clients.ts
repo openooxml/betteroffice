@@ -62,6 +62,7 @@ export interface TestClient {
   applyUpdate(update: Uint8Array): void;
   edit(marker: string, slot?: number): void;
   splitFirstParagraph(): void;
+  insertDuplicatePilcrow(): void;
   remove(marker: string): void;
   contains(marker: string): boolean;
   save(): Promise<Uint8Array>;
@@ -103,6 +104,21 @@ function wrapDocx(session: YrsSession, extra?: YrsSession): TestClient {
         offset: Math.min(1, para.text.length),
       });
     },
+    insertDuplicatePilcrow: () => {
+      const para = session.paragraphs("body")[0]!;
+      const identity = session
+        .paragraphIdentities()
+        .paragraphs.find((entry) => entry.session?.paraId === para.paraId);
+      if (!identity) throw new Error("first paragraph has no identity");
+      session.applyRawOps("body", [
+        {
+          op: "insertEmbed",
+          index: 0,
+          kind: "pilcrow",
+          payload: { paraId: "duplicate-pilcrow", ooxmlParaId: identity.ooxmlParaId },
+        },
+      ]);
+    },
     remove: (marker) => {
       for (const para of session.paragraphs("body")) {
         const at = para.text.indexOf(marker);
@@ -141,6 +157,9 @@ function wrapXlsx(handle: WorkbookHandle): TestClient {
     },
     splitFirstParagraph: () => {
       throw new Error("splitFirstParagraph is docx only");
+    },
+    insertDuplicatePilcrow: () => {
+      throw new Error("insertDuplicatePilcrow is docx only");
     },
     remove: (marker) => {
       for (let row = 20; row <= 32; row += 1) {
@@ -189,6 +208,9 @@ function wrapPptx(handle: PresentationHandle): TestClient {
     },
     splitFirstParagraph: () => {
       throw new Error("splitFirstParagraph is docx only");
+    },
+    insertDuplicatePilcrow: () => {
+      throw new Error("insertDuplicatePilcrow is docx only");
     },
     remove: (marker) => {
       for (const slide of handle.snapshot().slides) {
