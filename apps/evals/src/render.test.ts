@@ -41,8 +41,8 @@ test('multi-tier suites separate arm pass rates and format task tables', () => {
   expect(page.match(/<table class="task-table">/g)).toHaveLength(2);
 });
 
-test('only basic results and copy are published by default on every route', () => {
-  const pages = renderPages({ suites: [v3 as Suite], frame });
+test('a basic-only allowlist hides complex results and copy on every route', () => {
+  const pages = renderPages({ suites: [v3 as Suite], frame, publishedTiers: ['basic'] });
   const hidden = v3.tasks.filter(task => task.tier === 'complex');
   for (const page of pages.values()) {
     expect(page).not.toMatch(/\bcomplex\b/i);
@@ -50,10 +50,21 @@ test('only basic results and copy are published by default on every route', () =
     for (const task of hidden) expect(page).not.toContain(taskAnchor('gpt-6-luna', task.id));
   }
   const overview = pages.get('index.html')!;
-  expect(overview).toContain('228/288');
-  expect(overview).toContain('161/288');
+  expect(overview).toContain('262/288');
+  expect(overview).toContain('164/288');
   expect(overview).not.toContain('/387');
   expect(pages.get('docx/index.html')).toContain(taskAnchor('gpt-6-luna', v3.tasks.find(task => task.tier === 'basic' && task.format === 'docx')!.id));
+});
+
+test('both tiers are published by default', () => {
+  const pages = renderPages({ suites: [v3 as Suite], frame });
+  const overview = pages.get('index.html')!;
+  expect(overview).toContain('<h3 class="eyebrow my-6">Basic</h3>');
+  expect(overview).toContain('<h3 class="eyebrow my-6">Complex</h3>');
+  for (const format of ['docx', 'xlsx', 'pptx']) {
+    const complex = v3.tasks.find(task => task.tier === 'complex' && task.format === format)!;
+    expect(pages.get(`${format}/index.html`)).toContain(taskAnchor('gpt-6-luna', complex.id));
+  }
 });
 
 test('grouped bars pair both arms for each format and total on one percentage axis', () => {
@@ -69,9 +80,9 @@ test('grouped bars pair both arms for each format and total on one percentage ax
     expect(group[1]!.match(/class="chart-value"/g)).toHaveLength(2);
   }
   expect(chart).toContain('style="height:42.7%"');
-  expect(chart).toContain('style="height:66.7%"');
+  expect(chart).toContain('style="height:79.2%"');
   expect(chart).toContain('<table class="sr-only">');
   expect(chart).toContain('shared scale from 0% to 100%');
-  expect(chart).toContain('<td>BetterOffice MCP</td><td>228/288</td><td>79.2%</td>');
+  expect(chart).toContain('<td>BetterOffice MCP</td><td>262/288</td><td>91.0%</td>');
   expect(overview).not.toContain('rate-bar');
 });

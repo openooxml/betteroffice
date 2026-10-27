@@ -149,17 +149,27 @@ For how scores, timings and coverage are measured, see the [benchmark methodolog
 
 ## Evals
 
-`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
 
 Basic tier: 96 single edits, 32 per format.
 
 | | Generic file tools | BetterOffice MCP |
 |---|---|---|
-| DOCX | 41/96 | **64/96** |
-| XLSX | 39/96 | **75/96** |
-| PPTX | 81/96 | **89/96** |
+| DOCX | 41/96 | **76/96** |
+| XLSX | 42/96 | **94/96** |
+| PPTX | 81/96 | **92/96** |
 
-Basic: 228/288 for BetterOffice, 161/288 for generic file tools.
+Basic: 262/288 for BetterOffice, 164/288 for generic file tools.
+
+Complex tier: 33 multi-step tasks, 11 per format.
+
+| | Generic file tools | BetterOffice MCP |
+|---|---|---|
+| DOCX | 1/33 | **19/33** |
+| XLSX | 14/33 | **31/33** |
+| PPTX | 21/33 | **31/33** |
+
+Complex: 81/99 for BetterOffice, 36/99 for generic file tools.
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
 
