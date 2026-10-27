@@ -4149,6 +4149,21 @@ fn run_prefix_units(run: &Value) -> usize {
         .sum()
 }
 
+fn floating_run_content(content: &Value) -> bool {
+    match string(field(Some(content), "type")) {
+        Some("drawing") => {
+            let wrap = field(field(Some(content), "image"), "wrap");
+            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+        }
+        Some("shape") => {
+            let shape = field(Some(content), "shape");
+            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
+                || field(shape, "position").is_some_and(|position| !position.is_null())
+        }
+        _ => false,
+    }
+}
+
 fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
     for content in array(field(Some(run), "content")) {
         if string(field(Some(content), "type")) == Some("break")
@@ -4164,6 +4179,8 @@ fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
                     "pageBreak"
                 },
             );
+        } else if floating_run_content(content) {
+            continue;
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -7778,6 +7795,103 @@ mod tests {
 
     fn run(text: &str) -> Value {
         json!({"type":"run","content":[{"type":"text","text":text}]})
+    }
+
+    fn drawing_run(wrap: &str) -> Value {
+        json!({"type":"run","content":[{"type":"drawing","image":{
+            "type":"image","rId":"rIdImage",
+            "size":{"width":914400,"height":457200},
+            "wrap":{"type":wrap}
+        }}]})
+    }
+
+    fn page_break_run() -> Value {
+        json!({"type":"run","content":[{"type":"break","breakType":"page"}]})
+    }
+
+    #[test]
+    fn anchored_drawing_before_page_break_makes_the_break_leading() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inFront"),
+            page_break_run(),
+            run("Version Control Table")
+        ]});
+        assert_eq!(
+            paragraph_flow_breaks(&paragraph),
+            (Vec::new(), Vec::new())
+        );
+        assert!(paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn inline_drawing_before_page_break_keeps_the_break_trailing() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inline"),
+            page_break_run(),
+            run("Version Control Table")
+        ]});
+        assert_eq!(
+            paragraph_flow_breaks(&paragraph),
+            (Vec::new(), vec!["pageBreak"])
+        );
+        assert!(!paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_and_page_break_without_text_stays_trailing() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inFront"),
+            page_break_run()
+        ]});
+        assert_eq!(
+            paragraph_flow_breaks(&paragraph),
+            (Vec::new(), vec!["pageBreak"])
+        );
+        assert!(!paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_before_page_break_keeps_saved_run_order() {
+        let anchored = r#"<w:r><w:drawing><wp:anchor relativeHeight="0"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="1" name="Picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+        let bytes = fixture::Package::new(&fixture::para(
+            "00000001",
+            &format!(
+                "{anchored}<w:r><w:br w:type=\"page\"/></w:r>{}",
+                fixture::run("Version Control Table")
+            ),
+        ))
+        .rel("rIdImage", "image", "media/image1.png")
+        .bytes();
+        let lowered = lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let breaks: Vec<_> = lowered
+            .read
+            .provenance
+            .inline
+            .iter()
+            .filter(|record| matches!(record.content, InlineSource::Break { .. }))
+            .collect();
+        assert_eq!(breaks.len(), 1);
+        assert!(matches!(breaks[0].witness, Witness::Leading));
+        assert_eq!(breaks[0].pin.unit, 1);
+        assert!(lowered.read.provenance.relocated.is_empty());
+        let document = EditingDoc::new(74105);
+        crate::seed_from_docx(&document, &bytes).unwrap();
+        let exported = document
+            .export_structured(&crate::structured::ExportOptions::new(
+                crate::structured::RevisionView::Accepted,
+            ))
+            .unwrap();
+        let value = serde_json::to_value(&exported.content).unwrap();
+        let inlines = value["stories"][0]["blocks"][0]["paragraph"]["inlines"]
+            .as_array()
+            .unwrap();
+        let kinds: Vec<_> = inlines
+            .iter()
+            .map(|inline| inline["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["image", "break", "text"]);
+        assert_eq!(inlines[1]["breakType"], json!("page"));
+        assert_eq!(inlines[2]["text"], json!("Version Control Table"));
     }
 
     fn block_field(instruction: &str, blocks: &[Value]) -> Value {
