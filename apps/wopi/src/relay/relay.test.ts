@@ -254,9 +254,16 @@ describe("collab relay", () => {
     a.send(encodeSyncStep1(a.client.encodeStateVector()));
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(updates).toBe(0);
-    a.editAndSend("counted-edit ", 0);
+    a.client.edit("counted-edit ", 0);
+    const counted = encodeUpdateFrame(a.client.encodeStateAsUpdate());
+    a.send(counted);
     await waitFor(() => b.client.contains("counted-edit"), "b sees counted edit");
     expect(updates).toBeGreaterThan(0);
+    const afterFirst = updates;
+    a.send(counted);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(updates).toBe(afterFirst);
+    expect(a.closeCode).toBeNull();
     await expectNoTokens(s);
   });
 
@@ -302,6 +309,72 @@ describe("collab relay", () => {
     b.editAndSend("still-working ", 0);
     await s.h.clock.advance(30000);
     expect(s.h.putCount()).toBe(1);
+    await expectNoTokens(s);
+  });
+
+  test("docx save replicaUpdate reaches every socket and both clients converge with the server", async () => {
+    const s = setup("docx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 933001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 933101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    a.client.splitFirstParagraph();
+    a.send(encodeUpdateFrame(a.client.encodeStateAsUpdate()));
+    const session = s.h.registry.list()[0]!;
+    await waitFor(
+      () => [...b.client.encodeStateVector()].join(",") === [...session.replica!.encodeStateVector()].join(","),
+      "b synced after split",
+    );
+    const save = await fetch(`${s.base}/api/session/save`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${handleA}` },
+    });
+    expect(save.status).toBe(200);
+    await save.text();
+    const serverVector = () => [...session.replica!.encodeStateVector()].join(",");
+    await waitFor(
+      () => [...a.client.encodeStateVector()].join(",") === serverVector() && [...b.client.encodeStateVector()].join(",") === serverVector(),
+      "both clients converge with server after save",
+    );
+    expect(a.closeCode).toBeNull();
+    expect(b.closeCode).toBeNull();
+    await expectNoTokens(s);
+  });
+
+  test("xlsx causalGap answers with sync step 1, is not broadcast, and resyncs", async () => {
+    const s = setup("xlsx");
+    const handleA = await joinPage(s, TOKENS[0]!);
+    const handleB = await joinPage(s, TOKENS[1]!);
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 934001));
+    const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 934101));
+    cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const gappedPayloadsAtB: Uint8Array[] = [];
+    let step1AtA = 0;
+    b.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "update" || m.type === "sync-step-2") gappedPayloadsAtB.push(m.update);
+      }
+    });
+    a.ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string") return;
+      for (const m of decodeMessages(new Uint8Array(event.data as ArrayBuffer))) {
+        if (m.type === "sync-step-1") step1AtA += 1;
+      }
+    });
+    a.client.edit("gap-first ", 0);
+    const afterFirst = a.client.encodeStateVector();
+    a.client.edit("gap-second ", 1);
+    const second = a.client.encodeStateAsUpdate(afterFirst);
+    const step1Before = step1AtA;
+    a.send(encodeUpdateFrame(second));
+    await waitFor(() => b.client.contains("gap-first") && b.client.contains("gap-second"), "resync converges");
+    expect(step1AtA).toBeGreaterThan(step1Before);
+    expect(a.closeCode).toBeNull();
+    expect(gappedPayloadsAtB.some((p) => [...p].join(",") === [...second].join(","))).toBe(false);
     await expectNoTokens(s);
   });
 

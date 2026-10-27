@@ -103,6 +103,9 @@ export class CollabRelay {
     if (!this.#subscribed.has(resolved.session)) {
       this.#subscribed.add(resolved.session);
       resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
+      resolved.session.on("replicaUpdate", ({ update }) => {
+        this.#broadcastAll(resolved.session, encodeUpdateFrame(update));
+      });
     }
     const state: SocketState = {
       ws,
@@ -204,6 +207,12 @@ export class CollabRelay {
     }
   }
 
+  #broadcastAll(session: FileSession, frame: Uint8Array): void {
+    const room = this.#rooms.get(session.fileKey);
+    if (!room) return;
+    for (const peer of [...room]) this.#send(peer, frame);
+  }
+
   #consumeAwareness(state: SocketState): boolean {
     const now = Date.now();
     const elapsed = (now - state.bucketAt) / 1000;
@@ -285,6 +294,14 @@ export class CollabRelay {
           return;
         }
         if (!result.accepted) {
+          if (result.reason === "causalGap") {
+            if (replica) {
+              try {
+                this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
+              } catch {}
+            }
+            continue;
+          }
           const readOnly = /read only|token expired|not connected|not open/i.test(result.reason);
           this.#close(state, readOnly ? 4403 : 4400, result.reason || "update rejected, resync");
           return;
