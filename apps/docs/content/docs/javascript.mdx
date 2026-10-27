@@ -517,6 +517,8 @@ rails move groups into an accessible More menu; wrap other host content in
 
 ## Host XLSX editor plugins
 
+`readCells` sheet entries expose `headerFooter` with printable left, center and right sections using Excel dialog field tokens. Inactive even and first variants are null; `headerFooter` is null when absent or empty and omitted when source facts are unknown.
+
 `XlsxEditor` installs host-owned tools through the same `plugins`,
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
 created with `defineXlsxPlugin` contributes a docked panel, an overlay on the

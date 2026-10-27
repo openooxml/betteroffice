@@ -77,6 +77,8 @@ pub struct ReadRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_footer: Option<Option<xlsx_parse::SheetHeaderFooter>>,
     pub visibility: XlsxSheetVisibility,
     pub sheet_id: String,
     pub name: String,
@@ -450,6 +452,7 @@ impl Workbook {
             .iter()
             .enumerate()
             .map(|(index, sheet)| SheetEntry {
+                header_footer: None,
                 sheet_id: keys[index].clone(),
                 name: sheet.name.clone(),
                 visibility: crate::structured::sheet_visibility(
