@@ -135,8 +135,7 @@ export class FileSession {
   #replica: ServerReplica | null = null;
   #leader: UserSession | null = null;
   #listeners = new Map<string, Set<Listener<never>>>();
-  #joinChain: Promise<unknown> = Promise.resolve();
-  #saveChain: Promise<unknown> = Promise.resolve();
+  #opChain: Promise<unknown> = Promise.resolve();
   #fileName = "";
   #fileSize = 0;
   #lastModifiedTime: string | null = null;
@@ -154,7 +153,6 @@ export class FileSession {
   #holdTimer: ReturnType<typeof setTimeout> | null = null;
   #sweepTimer: ReturnType<typeof setInterval> | null = null;
   #userTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
-  #closingFlow: Promise<void> | null = null;
   #format: Format | null = null;
   #journalActive = false;
   #journalVersion: string | null = null;
@@ -171,7 +169,7 @@ export class FileSession {
     this.#now = deps.now ?? (() => Date.now());
     this.#scheduler = deps.scheduler ?? systemScheduler;
     this.#sweepTimer = this.#scheduler.setInterval(() => {
-      void this.#sweep();
+      this.#enqueueTask(() => this.#sweepInternal());
     }, 5000);
   }
 
@@ -272,15 +270,25 @@ export class FileSession {
     return this.#pendingJoins > 0;
   }
 
-  /** Joins a user to this file session. */
-  join(input: JoinInput): Promise<JoinResult> {
-    this.#pendingJoins += 1;
-    const run = this.#joinChain.then(() => this.#joinInternal(input));
-    this.#joinChain = run.then(
+  #enqueue<T>(task: () => Promise<T> | T): Promise<T> {
+    const run = this.#opChain.then(task);
+    this.#opChain = run.then(
       () => undefined,
       () => undefined,
     );
-    return run.finally(() => {
+    return run;
+  }
+
+  #enqueueTask(task: () => Promise<unknown> | unknown): void {
+    void this.#enqueue(task).catch(() => {
+      this.#log("warn", "session task failed");
+    });
+  }
+
+  /** Joins a user to this file session. */
+  join(input: JoinInput): Promise<JoinResult> {
+    this.#pendingJoins += 1;
+    return this.#enqueue(() => this.#joinInternal(input)).finally(() => {
       this.#pendingJoins -= 1;
     });
   }
@@ -318,6 +326,7 @@ export class FileSession {
       this.#fileName = info.BaseFileName || this.#fileName;
       this.#fileSize = info.Size;
     }
+    const lockHeldBefore = this.#lockHeld;
     if (!this.#lockHeld && this.#viewOnlyReason === null && wantsWrite) {
       try {
         await this.#attemptLock(input.accessToken);
@@ -326,6 +335,7 @@ export class FileSession {
         throw err;
       }
     }
+    const lockJustAcquired = !lockHeldBefore && this.#lockHeld;
     if (this.#lockHeld && !this.#journalActive) {
       this.#replayJournal(info.Version ?? this.#journalVersion ?? this.#itemVersion);
     }
@@ -345,14 +355,15 @@ export class FileSession {
     this.#history.push(user);
     if (canWrite) this.#everHadEditor = true;
     this.#scheduleUserTimers(user);
-    await this.#refreshLeader();
+    await this.#refreshLeader(lockJustAcquired);
     if (canWrite && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
     if (this.#holdPending && canWrite) {
       this.#holdPending = false;
       this.#clearTimer("hold");
       if (this.dirty) {
-        await this.#queueSave({ tokenUser: user, isAutosave: false, isExitSave: false, by: user.id });
+        await this.#saveInternal({ tokenUser: user, isAutosave: false, isExitSave: false, by: user.id });
       }
+      if (this.dirty) this.#scheduleAutosave();
     }
     const result: JoinResult = {
       user,
@@ -366,14 +377,20 @@ export class FileSession {
   }
 
   #failOpening(): void {
-    this.#state = "closed";
-    this.#clearAllTimers();
+    this.#state = "opening";
+    this.#clearTimer("refresh");
+    this.#clearTimer("autosave");
+    this.#clearTimer("hold");
     if (this.#replica) {
       try {
         this.#replica.destroy();
       } catch {}
       this.#replica = null;
     }
+    this.#lockHeld = false;
+    this.#viewOnlyReason = null;
+    this.#leader = null;
+    this.#journalActive = false;
     this.#deps.journal?.close();
   }
 
@@ -493,25 +510,36 @@ export class FileSession {
       }
     }, handles);
     this.#setTimerAt(user.expiresAt - 2 * 60 * 1000 + 1, () => {
-      void this.#refreshLeader();
+      this.#enqueueTask(async () => {
+        if (this.#users.has(user.id)) await this.#refreshLeader();
+      });
     }, handles);
     this.#setTimerAt(user.expiresAt, () => {
-      void (async () => {
-        if (!this.#users.has(user.id)) return;
+      this.#enqueueTask(async () => {
+        if (!this.#users.has(user.id) || this.#state !== "open") return;
         user.canWrite = false;
         await this.#refreshLeader();
         await this.#maybeCloseAfterDeparture([user]);
-      })();
+      });
     }, handles);
   }
 
-  async #refreshLeader(): Promise<UserSession | null> {
+  #syncLeader(): UserSession | null {
     const previous = this.#leader;
     const next = electLeader([...this.#users.values()], this.#now());
     this.#leader = next;
     if (previous?.id !== next?.id) {
       this.#emit("leaderChanged", { leaderId: next?.id ?? null, previousLeaderId: previous?.id ?? null });
-      if (next && this.#lockHeld && previous !== null) {
+    }
+    return next;
+  }
+
+  async #refreshLeader(suppressRefresh = false): Promise<UserSession | null> {
+    const previous = this.#leader;
+    const next = this.#syncLeader();
+    if (previous?.id !== next?.id) {
+      if (this.dirty) this.#scheduleAutosave();
+      if (next && this.#lockHeld && !suppressRefresh) {
         await this.#refreshLockNow();
         this.#scheduleRefresh();
       }
@@ -523,10 +551,11 @@ export class FileSession {
     this.#clearTimer("refresh");
     if (!this.#lockHeld || this.#state !== "open") return;
     this.#refreshTimer = this.#scheduler.setTimeout(() => {
-      void (async () => {
+      this.#enqueueTask(async () => {
+        if (this.#state !== "open" || !this.#lockHeld) return;
         await this.#refreshLockNow();
         this.#scheduleRefresh();
-      })();
+      });
     }, LOCK_REFRESH_MS);
   }
 
@@ -576,7 +605,8 @@ export class FileSession {
 
   #markTokenDead(user: UserSession): void {
     if (user.expiresAt === null || user.expiresAt > this.#now()) user.expiresAt = this.#now();
-    void this.#refreshLeader();
+    user.canWrite = false;
+    this.#syncLeader();
   }
 
   /** Applies one update from a connected writer. */
@@ -611,13 +641,14 @@ export class FileSession {
     const target = Math.min(this.#lastUpdateAt + AUTOSAVE_DEBOUNCE_MS, first + AUTOSAVE_MAX_MS);
     const delay = Math.max(0, target - this.#now());
     this.#autosaveTimer = this.#scheduler.setTimeout(() => {
-      void (async () => {
+      this.#enqueueTask(async () => {
+        if (this.#state !== "open" || !this.dirty) return;
         const tokenUser = this.#leader ?? (await this.#refreshLeader()) ?? this.#pickToken([]);
         if (tokenUser && this.dirty) {
-          await this.#queueSave({ tokenUser, isAutosave: true, isExitSave: false, by: tokenUser.id });
+          await this.#saveInternal({ tokenUser, isAutosave: true, isExitSave: false, by: tokenUser.id });
         }
-        if (this.dirty) this.#scheduleAutosave();
-      })();
+        if (this.dirty && this.#state === "open") this.#scheduleAutosave();
+      });
     }, delay);
   }
 
@@ -626,18 +657,25 @@ export class FileSession {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     user.lastSeen = this.#now();
-    if (!user.connected) {
-      user.connected = true;
+    if (user.connected) return;
+    user.connected = true;
+    this.#enqueueTask(async () => {
+      if (this.#state !== "open" || !this.#users.has(user.id) || !user.connected) return;
       if (this.#holdPending && this.#isConnectedEditor(user)) {
         this.#holdPending = false;
         this.#clearTimer("hold");
       }
-      void this.#refreshLeader();
-    }
+      await this.#refreshLeader();
+      if (this.dirty) this.#scheduleAutosave();
+    });
   }
 
   /** Marks a user disconnected and runs the departure policy. */
-  async disconnect(userId: string): Promise<void> {
+  disconnect(userId: string): Promise<void> {
+    return this.#enqueue(() => this.#disconnectInternal(userId));
+  }
+
+  async #disconnectInternal(userId: string): Promise<void> {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (!user.connected) return;
@@ -647,7 +685,11 @@ export class FileSession {
   }
 
   /** Removes a user and runs the departure policy. */
-  async leave(userId: string): Promise<void> {
+  leave(userId: string): Promise<void> {
+    return this.#enqueue(() => this.#leaveInternal(userId));
+  }
+
+  async #leaveInternal(userId: string): Promise<void> {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     const leaderBefore = this.#leader;
@@ -659,7 +701,7 @@ export class FileSession {
     await this.#maybeCloseAfterDeparture(departing);
   }
 
-  async #sweep(): Promise<void> {
+  async #sweepInternal(): Promise<void> {
     if (this.#state !== "open") return;
     const now = this.#now();
     const stale = [...this.#users.values()].filter((user) => user.connected && now - user.lastSeen >= HEARTBEAT_TIMEOUT_MS);
@@ -674,23 +716,17 @@ export class FileSession {
   }
 
   /** Saves now, crediting the requesting user when their token can write. */
-  async requestSave(userId: string): Promise<SaveResult> {
+  requestSave(userId: string): Promise<SaveResult> {
+    return this.#enqueue(() => this.#requestSaveInternal(userId));
+  }
+
+  async #requestSaveInternal(userId: string): Promise<SaveResult> {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (this.#state !== "open") throw new SessionError("closed", "file session is not open");
     if (!this.dirty) return { saved: false, itemVersion: this.#itemVersion, by: null };
-    const tokenUser = user.canWrite && user.isTokenValidAt(this.#now()) ? user : this.#leader;
-    const result = await this.#queueSave({ tokenUser, isAutosave: false, isExitSave: false, by: tokenUser?.id ?? null });
-    return result;
-  }
-
-  #queueSave(options: SaveOptions): Promise<SaveResult> {
-    const run = this.#saveChain.then(() => this.#saveInternal(options));
-    this.#saveChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+    const tokenUser = user.canWrite && user.isTokenValidAt(this.#now()) ? user : this.#leader ?? this.#pickToken([]);
+    return this.#saveInternal({ tokenUser, isAutosave: false, isExitSave: false, by: tokenUser?.id ?? null });
   }
 
   #advanceJournal(versionAtStart: number, savedVersionBefore: number): void {
@@ -814,60 +850,51 @@ export class FileSession {
 
   async #maybeCloseAfterDeparture(departing: UserSession[]): Promise<void> {
     if (this.#state !== "open") return;
-    if (this.#closingFlow) return this.#closingFlow;
     if (this.#connectedEditors().length > 0) return;
     if (!this.#everHadEditor) {
       const connected = [...this.#users.values()].filter((user) => user.connected);
       if (connected.length === 0) await this.#closeFinal(true);
       return;
     }
-    const flow = (async () => {
-      for (;;) {
-        if (this.#state !== "open") return;
+    for (;;) {
+      if (this.#state !== "open") return;
+      if (this.#connectedEditors().length > 0) return;
+      if (this.dirty) {
+        const tokenUser = this.#pickToken(departing);
+        if (!tokenUser) {
+          this.#enterHold();
+          return;
+        }
+        const result = await this.#saveInternal({ tokenUser, isAutosave: false, isExitSave: true, by: tokenUser.id });
         if (this.#connectedEditors().length > 0) return;
         if (this.dirty) {
-          const tokenUser = this.#pickToken(departing);
-          if (!tokenUser) {
-            this.#enterHold();
-            return;
-          }
-          const result = await this.#queueSave({ tokenUser, isAutosave: false, isExitSave: true, by: tokenUser.id });
-          if (this.#connectedEditors().length > 0) return;
-          if (this.dirty) {
-            if (result.saved) continue;
-            this.#enterHold();
-            return;
-          }
-          continue;
+          if (result.saved) continue;
+          this.#enterHold();
+          return;
         }
-        if (this.#lockHeld) {
-          const unlocked = await this.#unlockWith(departing);
-          if (this.#connectedEditors().length > 0) {
-            if (unlocked) {
-              const editor = this.#connectedEditors()[0];
-              if (editor) {
-                try {
-                  await this.#attemptLock(editor.accessToken);
-                } catch {
-                  this.#log("warn", "relock after reconnect failed");
-                }
+        continue;
+      }
+      if (this.#lockHeld) {
+        const unlocked = await this.#unlockWith(departing);
+        if (this.#connectedEditors().length > 0) {
+          if (unlocked) {
+            const editor = this.#connectedEditors()[0];
+            if (editor) {
+              try {
+                await this.#attemptLock(editor.accessToken);
+              } catch {
+                this.#log("warn", "relock after reconnect failed");
               }
             }
-            return;
           }
-          if (this.dirty) continue;
+          return;
         }
-        if (this.#connectedEditors().length > 0) return;
         if (this.dirty) continue;
-        await this.#closeFinal(true);
-        return;
       }
-    })();
-    this.#closingFlow = flow;
-    try {
-      await flow;
-    } finally {
-      if (this.#closingFlow === flow) this.#closingFlow = null;
+      if (this.#connectedEditors().length > 0) return;
+      if (this.dirty) continue;
+      await this.#closeFinal(true);
+      return;
     }
   }
 
@@ -898,14 +925,14 @@ export class FileSession {
     const delay = Math.max(0, base + HOLD_FLUSH_MS - this.#now());
     this.#clearTimer("hold");
     this.#holdTimer = this.#scheduler.setTimeout(() => {
-      void (async () => {
+      this.#enqueueTask(async () => {
         if (!this.#holdPending || this.#state !== "open") return;
         if (this.#connectedEditors().length > 0) return;
         this.#holdPending = false;
         this.#log("error", "lost flush after hold window");
         this.#emit("lostFlush", {});
         await this.#closeFinal(false);
-      })();
+      });
     }, delay);
     this.#log("warn", "no valid token for final flush, holding the session");
   }
@@ -962,8 +989,8 @@ export class FileSession {
   }
 
   /** Closes the session without flushing. Prefer leave for normal shutdown. */
-  async close(): Promise<void> {
-    await this.#closeFinal(false);
+  close(): Promise<void> {
+    return this.#enqueue(() => this.#closeFinal(false));
   }
 }
 

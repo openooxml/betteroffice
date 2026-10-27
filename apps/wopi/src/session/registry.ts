@@ -113,18 +113,25 @@ export class SessionRegistry {
     if (!host) throw new SessionError("unknownHost", "unknown host id");
     const resolved = resolveHost(this.#config, input.wopiSrc);
     if (resolved.id !== host.id) throw new SessionError("notAllowed", "WOPISrc is not allowed for this host");
-    const session = this.create(host.id, input.wopiSrc);
-    try {
-      return await session.join(input);
-    } catch (err) {
-      if (session.users.length === 0 && session.replica === null && !session.hasPendingJoin) {
-        session.abandon();
-        this.#sessions.delete(session.fileKey);
-      } else if (session.users.length === 0 && session.state === "closed" && !session.hasPendingJoin) {
-        this.#sessions.delete(session.fileKey);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const session = this.create(host.id, input.wopiSrc);
+      try {
+        return await session.join(input);
+      } catch (err) {
+        if (err instanceof SessionError && err.kind === "closed" && attempt === 0) {
+          if (this.#sessions.get(session.fileKey) === session) this.#sessions.delete(session.fileKey);
+          continue;
+        }
+        if (session.users.length === 0 && session.replica === null && !session.hasPendingJoin) {
+          session.abandon();
+          this.#sessions.delete(session.fileKey);
+        } else if (session.users.length === 0 && session.state === "closed" && !session.hasPendingJoin) {
+          this.#sessions.delete(session.fileKey);
+        }
+        throw err;
       }
-      throw err;
     }
+    throw new SessionError("closed", "file session is closed");
   }
 
   /** Closes and removes one session. */

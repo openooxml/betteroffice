@@ -699,3 +699,143 @@ describe("review fixes: expiry, fallback and departure races", () => {
     }
   });
 });
+
+describe("review round 2: serialized transitions", () => {
+  test("a join in flight while the last editor leaves keeps one live session and no lost edits", async () => {
+    let releasePut: (() => void) | null = null;
+    let enteredPut: (() => void) | null = null;
+    const putEntered = new Promise<void>((resolve) => {
+      enteredPut = resolve;
+    });
+    let gated = true;
+    const h = makeHarness({
+      beforePut: async () => {
+        if (!gated) return;
+        gated = false;
+        enteredPut?.();
+        await new Promise<void>((resolve) => {
+          releasePut = resolve;
+        });
+      },
+    });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const firstSession = [...h.registry.list()][0]!;
+    const clientA = await clientFor(firstSession, a.joinPayload);
+    let clientB: TestClient | null = null;
+    try {
+      edit(firstSession, a.user.id, clientA, "before-leave ", 0);
+      const leaving = firstSession.leave(a.user.id);
+      await putEntered;
+      const joining = h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      releasePut?.();
+      const b = await joining;
+      await leaving;
+      expect(h.registry.list().length).toBe(1);
+      const live = [...h.registry.list()][0]!;
+      expect(live.state).toBe("open");
+      expect(h.host.files.get("file1")!.lock).toBe(live.lockId);
+      clientB = await clientFor(live, b.joinPayload);
+      expect(clientB.contains("before-leave")).toBe(true);
+      edit(live, b.user.id, clientB, "after-join ", 1);
+      await live.requestSave(b.user.id);
+      expect(await savedContains(h, "before-leave")).toBe(true);
+      expect(await savedContains(h, "after-join")).toBe(true);
+      await live.leave(b.user.id);
+    } finally {
+      clientA.destroy();
+      clientB?.destroy();
+    }
+  });
+
+  test("a reconnect plus edit while the exit unlock is in flight keeps the session and lock", async () => {
+    let releaseUnlock: (() => void) | null = null;
+    let enteredUnlock: (() => void) | null = null;
+    const unlockEntered = new Promise<void>((resolve) => {
+      enteredUnlock = resolve;
+    });
+    let gated = true;
+    const h = makeHarness({
+      beforeUnlock: async () => {
+        if (!gated) return;
+        gated = false;
+        enteredUnlock?.();
+        await new Promise<void>((resolve) => {
+          releaseUnlock = resolve;
+        });
+      },
+    });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      edit(session, a.user.id, client, "saved-first ", 0);
+      await session.requestSave(a.user.id);
+      expect(session.dirty).toBe(false);
+      const leaving = session.disconnect(a.user.id);
+      await unlockEntered;
+      session.heartbeat(a.user.id);
+      expect(a.user.connected).toBe(true);
+      edit(session, a.user.id, client, "during-unlock ", 1);
+      releaseUnlock?.();
+      await leaving;
+      expect(session.state).toBe("open");
+      expect(session.lockHeld).toBe(true);
+      expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
+      await session.requestSave(a.user.id);
+      expect(await savedContains(h, "during-unlock")).toBe(true);
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a resume from hold at twenty five minutes refreshes the lock right away", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      edit(session, a.user.id, client, "held-again ", 0);
+      a.user.expiresAt = h.clock.t - 1000;
+      await session.leave(a.user.id);
+      expect(session.awaitingFlushToken).toBe(true);
+      await h.clock.advance(25 * 60000);
+      expect(session.state).toBe("open");
+      h.calls.length = 0;
+      const b = await joinEditor(h, "tok-b");
+      expect(b.user.canWrite).toBe(true);
+      const refreshes = h.callsFor("REFRESH_LOCK");
+      expect(refreshes.length).toBeGreaterThanOrEqual(1);
+      expect(refreshes[0]?.token).toBe("tok-b");
+      expect(h.host.files.get("file1")!.lockExpiresAt).toBeGreaterThan(h.clock.t + 20 * 60000);
+      expect(await savedContains(h, "held-again")).toBe(true);
+      await session.leave(b.user.id);
+      expect(session.state).toBe("closed");
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test("two concurrent first joins where the first fails in readFile still open the session", async () => {
+    const h = makeHarness({ failFirstRead: true });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const results = await Promise.allSettled([
+      h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" }),
+      h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" }),
+    ]);
+    expect(results[0]?.status).toBe("rejected");
+    expect(results[1]?.status).toBe("fulfilled");
+    expect(h.registry.list().length).toBe(1);
+    const live = [...h.registry.list()][0]!;
+    expect(live.state).toBe("open");
+    expect(h.calls.filter((c) => c.pathname.endsWith("/contents") && c.override === null).length).toBe(2);
+    const ok = results[1]?.status === "fulfilled" ? results[1].value : null;
+    if (ok) await live.leave(ok.user.id).catch(() => {});
+  });
+});

@@ -91,7 +91,9 @@ export function makeHarness(options: {
   quirks?: { timestampConflict?: boolean };
   fileName?: string;
   lockFails?: boolean;
+  failFirstRead?: boolean;
   beforePut?: () => Promise<void>;
+  beforeUnlock?: () => Promise<void>;
 } = {}): Harness {
   const clock = new FakeClock();
   const pair = generateKeyPair();
@@ -99,6 +101,7 @@ export function makeHarness(options: {
   const host = createReferenceHost({ now: clock.now, quirks: options.quirks });
   host.setFile("file1", sourceBytes("xlsx"), { name: options.fileName ?? "book.xlsx" });
   const calls: RecordedCall[] = [];
+  let reads = 0;
   const fetchFn: HostFetch = async (input, init) => {
     const request = new Request(input as string, init as RequestInit);
     const url = new URL(request.url);
@@ -107,7 +110,12 @@ export function makeHarness(options: {
     if (options.lockFails && override === "LOCK" && !request.headers.get("X-WOPI-OldLock")) {
       return new Response(JSON.stringify({ error: "lock boom" }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
+    if (options.failFirstRead && request.method === "GET" && url.pathname.endsWith("/contents")) {
+      reads += 1;
+      if (reads === 1) return new Response(JSON.stringify({ error: "read boom" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
     if (override === "PUT" && options.beforePut) await options.beforePut();
+    if (override === "UNLOCK" && options.beforeUnlock) await options.beforeUnlock();
     return host.fetch(request);
   };
   const client = createHostClient({ signer, maxFileBytes: 64 * 1024 * 1024, fetch: fetchFn, now: clock.now });
