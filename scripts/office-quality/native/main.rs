@@ -130,7 +130,9 @@ fn region_request(package: &Value) -> Value {
         })
         .map(|style| style["styleId"].clone())
         .collect();
-    let doc_default_size = package["styles"]["docDefaults"]["rPr"]["fontSize"].as_f64();
+    let doc_default_size = package["styles"]["docDefaults"]["rPr"]["fontSize"]
+        .as_f64()
+        .unwrap_or(20.0);
     let mut chain_sizes = serde_json::Map::new();
     for style in &styles {
         if style["type"] != "paragraph" {
@@ -158,9 +160,8 @@ fn region_request(package: &Value) -> Value {
                 .as_str()
                 .and_then(|id| styles.iter().find(|style| style["styleId"] == id).copied());
         }
-        if let Some(resolved) = size.or(doc_default_size) {
-            chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
-        }
+        let resolved = size.unwrap_or(doc_default_size);
+        chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
     }
     json!({
         "bodyStory": "body", "options": {"pageGap": 24},
@@ -170,7 +171,7 @@ fn region_request(package: &Value) -> Value {
             "defaultTabStopTwips": package["settings"]["defaultTabStop"],
             "defaultParagraphStyleId": default_style, "tocStyleIds": toc,
             "paragraphStyleFontSizes": chain_sizes,
-            "docDefaultFontSize": doc_default_size.map(|size| size / 2.0)}
+            "docDefaultFontSize": doc_default_size / 2.0}
     })
 }
 
