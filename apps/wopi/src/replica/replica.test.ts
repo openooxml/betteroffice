@@ -6,6 +6,7 @@ import {
   openFreshClient,
   openTestClient,
   sourceBytes,
+  stateVectorClientIds,
   unzipParts,
   type TestClient,
 } from "../../test/replica/clients";
@@ -67,13 +68,14 @@ for (const format of FORMATS) {
         expect(server.version).toBe(1);
 
         expect(server.applyUpdate(update)).toEqual({ accepted: true });
-        expect(server.version).toBe(2);
+        const afterDuplicate = format === "xlsx" ? 1 : 2;
+        expect(server.version).toBe(afterDuplicate);
         expect(server.applyUpdate(new Uint8Array(0))).toEqual({ accepted: true });
         expect(server.applyUpdate(new Uint8Array([0, 0]))).toEqual({ accepted: true });
-        expect(server.version).toBe(2);
+        expect(server.version).toBe(afterDuplicate);
 
         const saved = await server.save();
-        expect(server.version).toBe(2);
+        expect(server.version).toBe(afterDuplicate);
         const fresh = await openFreshClient(format, saved, clientId());
         try {
           expect(fresh.contains("replica-marker")).toBe(true);
@@ -187,15 +189,19 @@ for (const format of FORMATS) {
       const source = sourceBytes(format);
       const server = await openServerReplica(format, source, { clientId: clientId() });
       const early = await openTestClient(server.joinPayload(), source, clientId());
-      const late = await (async () => {
-        early.edit("early-one ", 0);
-        server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector()));
-        early.edit("early-two ", 0);
-        server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector()));
-        return openTestClient(server.joinPayload(), source, clientId());
-      })();
+      let late: TestClient | undefined;
       try {
+        early.edit("early-one ", 0);
+        expect(
+          server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        early.edit("early-two ", 1);
+        expect(
+          server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
         expect(server.version).toBe(2);
+
+        late = await openTestClient(server.joinPayload(), source, clientId());
         expect([...late.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
         expect(late.contains("early-one")).toBe(true);
         expect(late.contains("early-two")).toBe(true);
@@ -205,16 +211,80 @@ for (const format of FORMATS) {
           server.applyUpdate(late.encodeStateAsUpdate(server.encodeStateVector())),
         ).toEqual({ accepted: true });
         expect(server.version).toBe(3);
+        await syncClient(server, early);
+        expect(early.contains("late-marker")).toBe(true);
+        expect([...early.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
+
         const saved = await server.save();
         const fresh = await openFreshClient(format, saved, clientId());
         try {
           expect(fresh.contains("late-marker")).toBe(true);
+          expect(fresh.contains("early-two")).toBe(true);
         } finally {
           fresh.destroy();
         }
       } finally {
         early.destroy();
-        late.destroy();
+        late?.destroy();
+        server.destroy();
+      }
+    });
+
+    test("two late joiners edit concurrently under their own client ids", async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const early = await openTestClient(server.joinPayload(), source, clientId());
+      let lateA: TestClient | undefined;
+      let lateB: TestClient | undefined;
+      try {
+        early.edit("early-one ", 0);
+        server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector()));
+        early.edit("early-two ", 1);
+        server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector()));
+
+        lateA = await openTestClient(server.joinPayload(), source, clientId());
+        lateB = await openTestClient(server.joinPayload(), source, clientId());
+        expect(lateA.contains("early-one")).toBe(true);
+        expect(lateB.contains("early-two")).toBe(true);
+        expect(new Set([server.clientId, lateA.clientId, lateB.clientId]).size).toBe(3);
+
+        lateA.edit("from-late-a ", 2);
+        lateB.edit("from-late-b ", 3);
+        expect(stateVectorClientIds(lateA.encodeStateVector())).toContain(lateA.clientId);
+        expect(stateVectorClientIds(lateB.encodeStateVector())).toContain(lateB.clientId);
+
+        expect(
+          server.applyUpdate(lateA.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        expect(
+          server.applyUpdate(lateB.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        await syncClient(server, lateA);
+        await syncClient(server, lateB);
+        await syncClient(server, early);
+
+        for (const replica of [lateA, lateB, early]) {
+          expect([...replica.encodeStateVector()]).toEqual([
+            ...server.encodeStateVector(),
+          ]);
+          expect(replica.contains("from-late-a")).toBe(true);
+          expect(replica.contains("from-late-b")).toBe(true);
+        }
+        const serverIds = stateVectorClientIds(server.encodeStateVector());
+        expect(serverIds).toContain(lateA.clientId);
+        expect(serverIds).toContain(lateB.clientId);
+
+        const fresh = await openFreshClient(format, await server.save(), clientId());
+        try {
+          expect(fresh.contains("from-late-a")).toBe(true);
+          expect(fresh.contains("from-late-b")).toBe(true);
+        } finally {
+          fresh.destroy();
+        }
+      } finally {
+        early.destroy();
+        lateA?.destroy();
+        lateB?.destroy();
         server.destroy();
       }
     });

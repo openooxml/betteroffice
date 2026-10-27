@@ -86,7 +86,12 @@ function wrapDocx(session: YrsSession, extra?: YrsSession): TestClient {
     },
     edit: (marker, slot = 0) => {
       const paragraphs = session.paragraphs("body");
-      const para = slot === 0 ? paragraphs[0]! : paragraphs.at(-1)!;
+      const para =
+        slot === 0
+          ? paragraphs[0]!
+          : slot === 1
+            ? paragraphs.at(-1)!
+            : paragraphs[slot - 1]!;
       session.insertText({ story: "body", paraId: para.paraId, offset: 0 }, marker);
     },
     remove: (marker) => {
@@ -161,8 +166,14 @@ function wrapPptx(handle: PresentationHandle): TestClient {
     applyUpdate: (update) => {
       handle.applyUpdate(update.slice());
     },
-    edit: (marker) => {
-      handle.insertText(firstStory().id, 0, marker);
+    edit: (marker, slot = 0) => {
+      const stories = handle
+        .snapshot()
+        .slides.flatMap((slide) =>
+          slide.shapes.flatMap((shape) => shape.textStories),
+        );
+      const story = stories[slot % stories.length] ?? firstStory();
+      handle.insertText(story.id, 0, marker);
     },
     remove: (marker) => {
       for (const slide of handle.snapshot().slides) {
@@ -188,6 +199,29 @@ function wrapPptx(handle: PresentationHandle): TestClient {
     save: async () => handle.save(),
     destroy: () => handle.dispose(),
   };
+}
+
+/** Client ids present as keys in an encoded Yrs v1 state vector. */
+export function stateVectorClientIds(stateVector: Uint8Array): number[] {
+  let offset = 0;
+  const readVar = (): number => {
+    let value = 0n;
+    let shift = 0n;
+    for (;;) {
+      const byte = stateVector[offset]!;
+      offset += 1;
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) return Number(value);
+      shift += 7n;
+    }
+  };
+  const count = readVar();
+  const ids: number[] = [];
+  for (let i = 0; i < count; i += 1) {
+    ids.push(readVar());
+    readVar();
+  }
+  return ids;
 }
 
 /** A client hydrated from a server join payload, the way the spike built them. */

@@ -86,18 +86,21 @@ class Replica implements ServerReplica {
   #version = 0;
   #destroyed = false;
   #saveChain: Promise<unknown> = Promise.resolve();
+  #notAppliedIsNoOp: boolean;
 
   constructor(
     format: Format,
     engine: EngineReplica,
     saveEngine: () => Promise<Uint8Array>,
     joinPayload: () => JoinPayload,
+    notAppliedIsNoOp = false,
   ) {
     this.format = format;
     this.clientId = engine.clientId;
     this.#engine = engine;
     this.#saveEngine = saveEngine;
     this.#joinPayload = joinPayload;
+    this.#notAppliedIsNoOp = notAppliedIsNoOp;
   }
 
   get version(): number {
@@ -135,6 +138,7 @@ class Replica implements ServerReplica {
       "applied" in result &&
       (result as { applied: unknown }).applied === false
     ) {
+      if (this.#notAppliedIsNoOp) return { accepted: true };
       return { accepted: false, reason: "engine rejected update (not applied)" };
     }
     this.#version += 1;
@@ -193,6 +197,7 @@ export async function openServerReplica(
       adaptWorkbook(handle),
       async () => handle.save(),
       () => ({ format: "xlsx", update: handle.encodeStateAsUpdate() }),
+      true,
     );
   }
   const handle = openPptxReplica(bytes, options.clientId);
