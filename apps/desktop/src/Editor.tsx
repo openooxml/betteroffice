@@ -15,13 +15,17 @@ import {
 } from "@betteroffice/fonts";
 import { createRoomTransport } from "../../demo/app/collab/createRoomTransport";
 import type { CollaborationReplica } from "../../demo/app/collab/types";
+import { locales as docxLocales } from "@betteroffice/docx-i18n";
+import { locales as xlsxLocales } from "@betteroffice/xlsx-i18n";
+import { locales as pptxLocales } from "@betteroffice/pptx-i18n";
 import type { Format } from "./bridge";
+import { locale, t } from "./i18n";
 import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
 const EDITOR_READY_TIMEOUT_MS = 30_000;
-const WORKBOOK_DISPOSED = "The workbook editor was disposed.";
-const PRESENTATION_DISPOSED = "The presentation editor was disposed.";
+const WORKBOOK_DISPOSED = t("editor.workbookDisposed");
+const PRESENTATION_DISPOSED = t("editor.presentationDisposed");
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
@@ -201,7 +205,7 @@ export default function Editor({
         : new PptxProvider(presentationReplica!, transport, options);
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
-      callbacks.current.onStatus(synced ? "Connected" : status)
+      callbacks.current.onStatus(synced ? t("editor.connected") : status)
     );
     const unsubscribeError = next.onError((error) =>
       callbacks.current.onError(error)
@@ -281,9 +285,7 @@ export default function Editor({
           apiWaiter.current = waiter;
           timeout = setTimeout(() => {
             if (apiWaiter.current !== waiter) return;
-            apiUnavailable(new Error(
-              "The editor is still opening the file. Try again in a moment."
-            ));
+            apiUnavailable(new Error(t("editor.stillOpening")));
           }, EDITOR_READY_TIMEOUT_MS);
         }).finally(() => clearTimeout(timeout));
         api = ref.current;
@@ -294,7 +296,7 @@ export default function Editor({
     callbacks.current.onReady({
       ...(file.format === "docx" ? {
         async flushPendingInput() {
-          if (!active || !docx.current) throw new Error("The document editor was disposed.");
+          if (!active || !docx.current) throw new Error(t("editor.documentDisposed"));
           await docx.current.flushPendingInput();
         },
       } : {}),
@@ -342,10 +344,11 @@ export default function Editor({
     return (
       <>
       {harness && <div data-testid="peerless-harness-mode">
-        <button type="button" aria-pressed={harnessMode === "viewing"} onClick={() => setHarnessMode("viewing")}>Viewing</button>
-        <button type="button" aria-pressed={harnessMode === "editing"} onClick={() => setHarnessMode("editing")}>Editing</button>
+        <button type="button" aria-pressed={harnessMode === "viewing"} onClick={() => setHarnessMode("viewing")}>{t("editor.viewing")}</button>
+        <button type="button" aria-pressed={harnessMode === "editing"} onClick={() => setHarnessMode("editing")}>{t("editor.editing")}</button>
       </div>}
       <DocxEditor
+        i18n={docxLocales[locale]}
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
         trackedChanges={TRACKED_CHANGES}
@@ -383,6 +386,7 @@ export default function Editor({
   if (file.format === "xlsx")
     return (
       <XlsxEditor
+        i18n={xlsxLocales[locale]}
         file={file.bytes}
         fileName={name}
         onSave={(bytes) => {
@@ -406,6 +410,7 @@ export default function Editor({
     );
   return (
     <PptxEditor
+      i18n={pptxLocales[locale]}
       file={file.bytes}
       fileName={name}
       fonts={file.fonts ?? []}

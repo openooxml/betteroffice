@@ -1,0 +1,52 @@
+{
+  "_lang": "nl",
+  "titleBar": {
+    "edited": "Bewerkt",
+    "collaborate": "Samenwerken",
+    "connecting": "Verbinding maken…",
+    "home": "Start",
+    "open": "Openen…",
+    "save": "Opslaan"
+  },
+  "notice": {
+    "dismissError": "Fout sluiten"
+  },
+  "room": {
+    "roomId": "Ruimte-ID",
+    "yourName": "Uw naam",
+    "joinRoom": "Deelnemen aan ruimte",
+    "leaveRoom": "Ruimte verlaten",
+    "hint": "Open hetzelfde bestand en voer dezelfde ruimte-ID in om samen te bewerken.",
+    "saveBeforeJoining": "Sla uw wijzigingen op voordat u deelneemt aan een ruimte. Iedereen moet hetzelfde bestand openen."
+  },
+  "editor": {
+    "opening": "Editor openen…",
+    "viewing": "Weergeven",
+    "editing": "Bewerken",
+    "connected": "Verbonden",
+    "workbookDisposed": "De werkmapeditor is gesloten.",
+    "presentationDisposed": "De presentatie-editor is gesloten.",
+    "documentDisposed": "De documenteditor is gesloten.",
+    "stillOpening": "De editor opent het bestand nog. Probeer het zo opnieuw."
+  },
+  "start": {
+    "dropFileHere": "Zet uw bestand hier neer",
+    "openDocument": "Een document openen",
+    "openSpreadsheet": "Een spreadsheet openen",
+    "openPresentation": "Een presentatie openen",
+    "intro": "Ga verder waar u gebleven was.",
+    "openFile": "Bestand openen…",
+    "opening": "Openen…",
+    "dropHint": "of zet een bestand hier neer",
+    "recentFiles": "Recente bestanden",
+    "recent": "Recent"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Niet-opgeslagen wijzigingen weggooien?"
+  },
+  "errors": {
+    "openInApp": "Open .{ext}-bestanden in BetterOffice {app}.",
+    "couldNotRead": "{name} kan niet worden gelezen.",
+    "chooseFile": "Kies een .{ext}-bestand."
+  }
+}

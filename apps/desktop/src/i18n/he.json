@@ -1,0 +1,52 @@
+{
+  "_lang": "he",
+  "titleBar": {
+    "edited": "נערך",
+    "collaborate": "שיתוף פעולה",
+    "connecting": "מתחבר…",
+    "home": "דף הבית",
+    "open": "פתח…",
+    "save": "שמור"
+  },
+  "notice": {
+    "dismissError": "סגירת השגיאה"
+  },
+  "room": {
+    "roomId": "מזהה חדר",
+    "yourName": "השם שלך",
+    "joinRoom": "הצטרפות לחדר",
+    "leaveRoom": "יציאה מהחדר",
+    "hint": "פתחו את אותו קובץ והזינו את אותו מזהה חדר כדי לערוך יחד.",
+    "saveBeforeJoining": "שמרו את השינויים לפני ההצטרפות לחדר. על כולם לפתוח את אותו קובץ."
+  },
+  "editor": {
+    "opening": "העורך נפתח…",
+    "viewing": "תצוגה",
+    "editing": "עריכה",
+    "connected": "מחובר",
+    "workbookDisposed": "עורך חוברת העבודה נסגר.",
+    "presentationDisposed": "עורך המצגת נסגר.",
+    "documentDisposed": "עורך המסמך נסגר.",
+    "stillOpening": "העורך עדיין פותח את הקובץ. נסו שוב בעוד רגע."
+  },
+  "start": {
+    "dropFileHere": "שחררו את הקובץ כאן",
+    "openDocument": "פתיחת מסמך",
+    "openSpreadsheet": "פתיחת גיליון אלקטרוני",
+    "openPresentation": "פתיחת מצגת",
+    "intro": "המשיכו מהמקום שבו הפסקתם.",
+    "openFile": "פתיחת קובץ…",
+    "opening": "נפתח…",
+    "dropHint": "או שחררו קובץ כאן",
+    "recentFiles": "קבצים אחרונים",
+    "recent": "אחרונים"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "להתעלם משינויים שלא נשמרו?"
+  },
+  "errors": {
+    "openInApp": "פתחו קובצי .{ext} ב-BetterOffice {app}.",
+    "couldNotRead": "לא ניתן היה לקרוא את {name}.",
+    "chooseFile": "בחרו קובץ .{ext}."
+  }
+}

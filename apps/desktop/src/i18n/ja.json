@@ -1,0 +1,52 @@
+{
+  "_lang": "ja",
+  "titleBar": {
+    "edited": "編集済み",
+    "collaborate": "共同編集",
+    "connecting": "接続中…",
+    "home": "ホーム",
+    "open": "開く…",
+    "save": "保存"
+  },
+  "notice": {
+    "dismissError": "エラーを閉じる"
+  },
+  "room": {
+    "roomId": "ルーム ID",
+    "yourName": "名前",
+    "joinRoom": "ルームに参加",
+    "leaveRoom": "ルームから退出",
+    "hint": "同じファイルを開き、同じルーム ID を入力すると共同編集できます。",
+    "saveBeforeJoining": "ルームに参加する前に変更を保存してください。全員が同じファイルを開く必要があります。"
+  },
+  "editor": {
+    "opening": "エディターを開いています…",
+    "viewing": "表示",
+    "editing": "編集",
+    "connected": "接続済み",
+    "workbookDisposed": "ブック エディターは破棄されました。",
+    "presentationDisposed": "プレゼンテーション エディターは破棄されました。",
+    "documentDisposed": "ドキュメント エディターは破棄されました。",
+    "stillOpening": "エディターはまだファイルを開いています。しばらくしてから再試行してください。"
+  },
+  "start": {
+    "dropFileHere": "ここにファイルをドロップ",
+    "openDocument": "ドキュメントを開く",
+    "openSpreadsheet": "スプレッドシートを開く",
+    "openPresentation": "プレゼンテーションを開く",
+    "intro": "前回の続きから再開できます。",
+    "openFile": "ファイルを開く…",
+    "opening": "開いています…",
+    "dropHint": "またはここにファイルをドロップ",
+    "recentFiles": "最近使用したファイル",
+    "recent": "最近使用したファイル"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "保存されていない変更を破棄しますか?"
+  },
+  "errors": {
+    "openInApp": ".{ext} ファイルは BetterOffice {app} で開いてください。",
+    "couldNotRead": "{name} を読み取れませんでした。",
+    "chooseFile": ".{ext} ファイルを選択してください。"
+  }
+}

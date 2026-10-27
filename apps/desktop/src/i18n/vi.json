@@ -1,0 +1,52 @@
+{
+  "_lang": "vi",
+  "titleBar": {
+    "edited": "Đã chỉnh sửa",
+    "collaborate": "Cộng tác",
+    "connecting": "Đang kết nối…",
+    "home": "Trang chủ",
+    "open": "Mở…",
+    "save": "Lưu"
+  },
+  "notice": {
+    "dismissError": "Đóng lỗi"
+  },
+  "room": {
+    "roomId": "ID phòng",
+    "yourName": "Tên của bạn",
+    "joinRoom": "Tham gia phòng",
+    "leaveRoom": "Rời phòng",
+    "hint": "Mở cùng một tệp và nhập cùng ID phòng để chỉnh sửa cùng nhau.",
+    "saveBeforeJoining": "Lưu thay đổi trước khi tham gia phòng. Mọi người nên mở cùng một tệp."
+  },
+  "editor": {
+    "opening": "Đang mở trình soạn thảo…",
+    "viewing": "Xem",
+    "editing": "Chỉnh sửa",
+    "connected": "Đã kết nối",
+    "workbookDisposed": "Trình soạn thảo sổ làm việc đã bị đóng.",
+    "presentationDisposed": "Trình soạn thảo bản trình bày đã bị đóng.",
+    "documentDisposed": "Trình soạn thảo tài liệu đã bị đóng.",
+    "stillOpening": "Trình soạn thảo vẫn đang mở tệp. Hãy thử lại sau giây lát."
+  },
+  "start": {
+    "dropFileHere": "Thả tệp của bạn vào đây",
+    "openDocument": "Mở tài liệu",
+    "openSpreadsheet": "Mở bảng tính",
+    "openPresentation": "Mở bản trình bày",
+    "intro": "Tiếp tục từ nơi bạn đã dừng.",
+    "openFile": "Mở tệp…",
+    "opening": "Đang mở…",
+    "dropHint": "hoặc thả tệp vào đây",
+    "recentFiles": "Tệp gần đây",
+    "recent": "Gần đây"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Hủy các thay đổi chưa lưu?"
+  },
+  "errors": {
+    "openInApp": "Mở tệp .{ext} trong BetterOffice {app}.",
+    "couldNotRead": "Không thể đọc {name}.",
+    "chooseFile": "Chọn tệp .{ext}."
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "_lang": "hi",
+  "titleBar": {
+    "edited": "संपादित",
+    "collaborate": "सहयोग करें",
+    "connecting": "कनेक्ट हो रहा है…",
+    "home": "मुख्य पृष्ठ",
+    "open": "खोलें…",
+    "save": "सहेजें"
+  },
+  "notice": {
+    "dismissError": "त्रुटि खारिज करें"
+  },
+  "room": {
+    "roomId": "रूम ID",
+    "yourName": "आपका नाम",
+    "joinRoom": "रूम से जुड़ें",
+    "leaveRoom": "रूम छोड़ें",
+    "hint": "एक साथ संपादित करने के लिए वही फ़ाइल खोलें और वही रूम ID दर्ज करें।",
+    "saveBeforeJoining": "रूम से जुड़ने से पहले अपने परिवर्तन सहेजें। सभी को वही फ़ाइल खोलनी चाहिए।"
+  },
+  "editor": {
+    "opening": "संपादक खुल रहा है…",
+    "viewing": "देखना",
+    "editing": "संपादन",
+    "connected": "कनेक्ट है",
+    "workbookDisposed": "कार्यपुस्तिका संपादक बंद कर दिया गया था।",
+    "presentationDisposed": "प्रस्तुति संपादक बंद कर दिया गया था।",
+    "documentDisposed": "दस्तावेज़ संपादक बंद कर दिया गया था।",
+    "stillOpening": "संपादक अभी भी फ़ाइल खोल रहा है। कुछ क्षण बाद फिर से प्रयास करें।"
+  },
+  "start": {
+    "dropFileHere": "अपनी फ़ाइल यहाँ छोड़ें",
+    "openDocument": "दस्तावेज़ खोलें",
+    "openSpreadsheet": "स्प्रेडशीट खोलें",
+    "openPresentation": "प्रस्तुति खोलें",
+    "intro": "जहाँ छोड़ा था, वहीं से शुरू करें।",
+    "openFile": "फ़ाइल खोलें…",
+    "opening": "खुल रहा है…",
+    "dropHint": "या यहाँ फ़ाइल छोड़ें",
+    "recentFiles": "हाल की फ़ाइलें",
+    "recent": "हाल की"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "बिना सहेजे परिवर्तन छोड़ें?"
+  },
+  "errors": {
+    "openInApp": "BetterOffice {app} में .{ext} फ़ाइलें खोलें।",
+    "couldNotRead": "{name} को पढ़ा नहीं जा सका।",
+    "chooseFile": ".{ext} फ़ाइल चुनें।"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "_lang": "ko",
+  "titleBar": {
+    "edited": "편집됨",
+    "collaborate": "공동 작업",
+    "connecting": "연결 중…",
+    "home": "홈",
+    "open": "열기…",
+    "save": "저장"
+  },
+  "notice": {
+    "dismissError": "오류 닫기"
+  },
+  "room": {
+    "roomId": "룸 ID",
+    "yourName": "이름",
+    "joinRoom": "룸 참가",
+    "leaveRoom": "룸 나가기",
+    "hint": "같은 파일을 열고 같은 룸 ID를 입력하면 함께 편집할 수 있습니다.",
+    "saveBeforeJoining": "룸에 참가하기 전에 변경 내용을 저장하세요. 모든 사람이 같은 파일을 열어야 합니다."
+  },
+  "editor": {
+    "opening": "편집기를 여는 중…",
+    "viewing": "보기",
+    "editing": "편집",
+    "connected": "연결됨",
+    "workbookDisposed": "통합 문서 편집기가 종료되었습니다.",
+    "presentationDisposed": "프레젠테이션 편집기가 종료되었습니다.",
+    "documentDisposed": "문서 편집기가 종료되었습니다.",
+    "stillOpening": "편집기가 아직 파일을 열고 있습니다. 잠시 후 다시 시도하세요."
+  },
+  "start": {
+    "dropFileHere": "여기에 파일을 놓으세요",
+    "openDocument": "문서 열기",
+    "openSpreadsheet": "스프레드시트 열기",
+    "openPresentation": "프레젠테이션 열기",
+    "intro": "중단한 부분부터 이어서 작업하세요.",
+    "openFile": "파일 열기…",
+    "opening": "여는 중…",
+    "dropHint": "또는 여기에 파일을 놓으세요",
+    "recentFiles": "최근 파일",
+    "recent": "최근 항목"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "저장하지 않은 변경 내용을 버리시겠습니까?"
+  },
+  "errors": {
+    "openInApp": "BetterOffice {app}에서 .{ext} 파일을 여세요.",
+    "couldNotRead": "{name}을(를) 읽을 수 없습니다.",
+    "chooseFile": ".{ext} 파일을 선택하세요."
+  }
+}

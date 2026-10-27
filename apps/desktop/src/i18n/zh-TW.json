@@ -1,0 +1,52 @@
+{
+  "_lang": "zh-TW",
+  "titleBar": {
+    "edited": "已編輯",
+    "collaborate": "共同作業",
+    "connecting": "正在連線…",
+    "home": "首頁",
+    "open": "開啟…",
+    "save": "儲存"
+  },
+  "notice": {
+    "dismissError": "關閉錯誤"
+  },
+  "room": {
+    "roomId": "會議室 ID",
+    "yourName": "您的名稱",
+    "joinRoom": "加入會議室",
+    "leaveRoom": "離開會議室",
+    "hint": "開啟同一檔案並輸入同一會議室 ID，即可共同編輯。",
+    "saveBeforeJoining": "加入會議室前請儲存變更。所有人應開啟同一檔案。"
+  },
+  "editor": {
+    "opening": "正在開啟編輯器…",
+    "viewing": "檢視",
+    "editing": "編輯",
+    "connected": "已連線",
+    "workbookDisposed": "活頁簿編輯器已關閉。",
+    "presentationDisposed": "簡報編輯器已關閉。",
+    "documentDisposed": "文件編輯器已關閉。",
+    "stillOpening": "編輯器仍在開啟檔案。請稍後再試。"
+  },
+  "start": {
+    "dropFileHere": "將檔案拖放到此處",
+    "openDocument": "開啟文件",
+    "openSpreadsheet": "開啟試算表",
+    "openPresentation": "開啟簡報",
+    "intro": "從上次中斷處繼續。",
+    "openFile": "開啟檔案…",
+    "opening": "正在開啟…",
+    "dropHint": "或將檔案拖放到此處",
+    "recentFiles": "最近使用的檔案",
+    "recent": "最近"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "捨棄未儲存的變更？"
+  },
+  "errors": {
+    "openInApp": "請在 BetterOffice {app} 中開啟 .{ext} 檔案。",
+    "couldNotRead": "無法讀取 {name}。",
+    "chooseFile": "選擇 .{ext} 檔案。"
+  }
+}

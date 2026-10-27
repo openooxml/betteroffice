@@ -1,0 +1,52 @@
+{
+  "_lang": "pt-BR",
+  "titleBar": {
+    "edited": "Editado",
+    "collaborate": "Colaborar",
+    "connecting": "Conectando…",
+    "home": "Início",
+    "open": "Abrir…",
+    "save": "Salvar"
+  },
+  "notice": {
+    "dismissError": "Dispensar erro"
+  },
+  "room": {
+    "roomId": "ID da sala",
+    "yourName": "Seu nome",
+    "joinRoom": "Entrar na sala",
+    "leaveRoom": "Sair da sala",
+    "hint": "Abra o mesmo arquivo e insira o mesmo ID de sala para editar em conjunto.",
+    "saveBeforeJoining": "Salve suas alterações antes de entrar em uma sala. Todos devem abrir o mesmo arquivo."
+  },
+  "editor": {
+    "opening": "Abrindo o editor…",
+    "viewing": "Exibição",
+    "editing": "Edição",
+    "connected": "Conectado",
+    "workbookDisposed": "O editor de pasta de trabalho foi fechado.",
+    "presentationDisposed": "O editor de apresentação foi fechado.",
+    "documentDisposed": "O editor de documento foi fechado.",
+    "stillOpening": "O editor ainda está abrindo o arquivo. Tente novamente em instantes."
+  },
+  "start": {
+    "dropFileHere": "Solte seu arquivo aqui",
+    "openDocument": "Abrir um documento",
+    "openSpreadsheet": "Abrir uma planilha",
+    "openPresentation": "Abrir uma apresentação",
+    "intro": "Continue de onde parou.",
+    "openFile": "Abrir arquivo…",
+    "opening": "Abrindo…",
+    "dropHint": "ou solte um arquivo aqui",
+    "recentFiles": "Arquivos recentes",
+    "recent": "Recentes"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Descartar alterações não salvas?"
+  },
+  "errors": {
+    "openInApp": "Abra arquivos .{ext} no BetterOffice {app}.",
+    "couldNotRead": "Não foi possível ler {name}.",
+    "chooseFile": "Escolha um arquivo .{ext}."
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "_lang": "id",
+  "titleBar": {
+    "edited": "Diedit",
+    "collaborate": "Berkolaborasi",
+    "connecting": "Menghubungkan…",
+    "home": "Beranda",
+    "open": "Buka…",
+    "save": "Simpan"
+  },
+  "notice": {
+    "dismissError": "Tutup kesalahan"
+  },
+  "room": {
+    "roomId": "ID Ruangan",
+    "yourName": "Nama Anda",
+    "joinRoom": "Gabung ruangan",
+    "leaveRoom": "Keluar ruangan",
+    "hint": "Buka file yang sama dan masukkan ID ruangan yang sama untuk mengedit bersama.",
+    "saveBeforeJoining": "Simpan perubahan Anda sebelum bergabung ke ruangan. Semua orang harus membuka file yang sama."
+  },
+  "editor": {
+    "opening": "Membuka editor…",
+    "viewing": "Melihat",
+    "editing": "Mengedit",
+    "connected": "Terhubung",
+    "workbookDisposed": "Editor buku kerja telah ditutup.",
+    "presentationDisposed": "Editor presentasi telah ditutup.",
+    "documentDisposed": "Editor dokumen telah ditutup.",
+    "stillOpening": "Editor masih membuka file. Coba lagi sebentar lagi."
+  },
+  "start": {
+    "dropFileHere": "Letakkan file Anda di sini",
+    "openDocument": "Buka dokumen",
+    "openSpreadsheet": "Buka spreadsheet",
+    "openPresentation": "Buka presentasi",
+    "intro": "Lanjutkan dari tempat Anda berhenti.",
+    "openFile": "Buka file…",
+    "opening": "Membuka…",
+    "dropHint": "atau letakkan file di sini",
+    "recentFiles": "File terbaru",
+    "recent": "Terbaru"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Buang perubahan yang belum disimpan?"
+  },
+  "errors": {
+    "openInApp": "Buka file .{ext} di BetterOffice {app}.",
+    "couldNotRead": "Tidak dapat membaca {name}.",
+    "chooseFile": "Pilih file .{ext}."
+  }
+}
