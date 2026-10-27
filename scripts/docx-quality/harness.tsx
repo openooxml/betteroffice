@@ -40,7 +40,7 @@ const track =
   (...args: any[]) => {
     const load = resolve(...args);
     if (!load) return undefined;
-    return async () => {
+    return Object.assign(async () => {
       try {
         const bytes = await load();
         fontLoads.push({ kind, family: String(args[0]), ok: true });
@@ -54,7 +54,7 @@ const track =
         });
         throw error;
       }
-    };
+    }, load);
   };
 const measuredFonts = {
   resolve: track('family', provider.resolve),
