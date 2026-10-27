@@ -1455,7 +1455,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(shape, txn, "_kind").as_deref() == Some("shape") =>
             {
                 let pm_offset = paragraph_pm_units;
-                let Some(block) = lower_shape_block(
+                let Some((block, text_box)) = lower_shape_block(
                     shape,
                     txn,
                     paragraph_pm_start + 1 + u64::from(pm_offset),
@@ -1534,6 +1534,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: formatting.clone(),
+                        text_box,
                     });
                 }
                 story_index += 1;
@@ -1557,6 +1559,8 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: lower_run_formatting(attributes, env),
+                        text_box: true,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1599,6 +1603,8 @@ fn walk_story_chunks<T: ReadTxn>(
                     hidden: mark_bool(attributes, "hidden") == Some(true),
                     revision_hidden: env.revision_hidden(attributes),
                     anchored: false,
+                    formatting: lower_run_formatting(attributes, env),
+                    text_box: false,
                 });
                 story_index += 1;
                 paragraph_pm_units += 1;
@@ -2687,9 +2693,9 @@ fn lower_shape_block<T: ReadTxn>(
     pm_start: u64,
     env: &RenderEnv,
     story_id: &str,
-) -> Option<ShapeBlock> {
+) -> Option<(ShapeBlock, bool)> {
     let values = shared_values(shape, txn);
-    if let Some(block) = values
+    if let Some((block, text_box)) = values
         .get("shapeJson")
         .and_then(|value| match value {
             Any::String(source) => Some(env.media.tokenized_json(source)),
@@ -2700,10 +2706,12 @@ fn lower_shape_block<T: ReadTxn>(
             let projected =
                 group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
             let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
-            shapes::lower_shape_json(&rendered, pm_start, env)
+            let text_box = rendered.get("textBox").and_then(Value::as_bool) == Some(true)
+                || rendered.get("shapeType").and_then(Value::as_str) == Some("textBox");
+            shapes::lower_shape_json(&rendered, pm_start, env).map(|block| (block, text_box))
         })
     {
-        return Some(block);
+        return Some((block, text_box));
     }
     let shape_type = map_string(&values, "shapeType").unwrap_or_else(|| "rect".to_owned());
     let geometry_path = values
@@ -2721,39 +2729,43 @@ fn lower_shape_block<T: ReadTxn>(
             .unwrap_or(80.0),
         env,
     );
-    Some(ShapeBlock {
-        sdt_groups: None,
-        id: BlockId::Str(format!("shape:{pm_start}")),
-        shape_type,
-        geometry_path,
-        fill: shape_fill(&values),
-        stroke: shape_stroke(&values),
-        transform: shape_transform(&values),
-        width,
-        height,
-        x: None,
-        y: None,
-        inner_text: None,
-        nested_sequences: Vec::new(),
-        inner_measures: None,
-        children: Vec::new(),
-        scene: None,
-        effects: None,
-        text_body_properties: None,
-        wrap_distances: None,
-        position: None,
-        wrap_type: None,
-        wrap_text: None,
-        relative_height: None,
-        behind_doc: None,
-        decorative: None,
-        title: None,
-        description: None,
-        doc_start: Some(pm_start as f64),
-        doc_end: Some((pm_start + 1) as f64),
-        pm_start: Some(pm_start as f64),
-        pm_end: Some((pm_start + 1) as f64),
-    })
+    let text_box = map_bool(&values, "textBox") == Some(true) || shape_type == "textBox";
+    Some((
+        ShapeBlock {
+            sdt_groups: None,
+            id: BlockId::Str(format!("shape:{pm_start}")),
+            shape_type,
+            geometry_path,
+            fill: shape_fill(&values),
+            stroke: shape_stroke(&values),
+            transform: shape_transform(&values),
+            width,
+            height,
+            x: None,
+            y: None,
+            inner_text: None,
+            nested_sequences: Vec::new(),
+            inner_measures: None,
+            children: Vec::new(),
+            scene: None,
+            effects: None,
+            text_body_properties: None,
+            wrap_distances: None,
+            position: None,
+            wrap_type: None,
+            wrap_text: None,
+            relative_height: None,
+            behind_doc: None,
+            decorative: None,
+            title: None,
+            description: None,
+            doc_start: Some(pm_start as f64),
+            doc_end: Some((pm_start + 1) as f64),
+            pm_start: Some(pm_start as f64),
+            pm_end: Some((pm_start + 1) as f64),
+        },
+        text_box,
+    ))
 }
 
 fn lower_chart_block(
@@ -3374,6 +3386,9 @@ struct DrawingMarker {
     hidden: bool,
     revision_hidden: bool,
     anchored: bool,
+    formatting: RunFormatting,
+    /// The source drawing is a text box (`txBox`), not a plain text shape.
+    text_box: bool,
 }
 
 impl DrawingMarker {
@@ -3599,6 +3614,173 @@ fn lower_nested_sequences(
         .collect()
 }
 
+/// Whether `run` paints content a shared inline drawing would sit beside
+/// on its line: visible text, an in-line picture or shape carrier, or a field
+/// with visible fallback text. Floating pictures take no room on the line.
+fn run_shares_line(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Image(_) => !run.anchored(),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// The inline image carrier for a chart or shape block, mirroring the
+/// carrier the shape branch builds for a native inline shape.
+fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun {
+    let DrawingMarker {
+        pm_offset,
+        story_index,
+        block,
+        hidden,
+        revision_hidden,
+        formatting,
+        ..
+    } = drawing;
+    let mut formatting = formatting;
+    if show_hidden_text && formatting.hidden == Some(true) {
+        formatting.hidden = None;
+    } else if hidden && formatting.hidden.is_none() {
+        formatting.hidden = Some(true);
+    }
+    let (width, height, alt, shape_type, decorative, inline_shape, inline_chart) = match block {
+        LayoutBlock::Chart(chart) => {
+            let (width, height) = (chart.width, chart.height);
+            (
+                width,
+                height,
+                None,
+                None,
+                None,
+                None,
+                Some(Box::new(chart)),
+            )
+        }
+        LayoutBlock::Shape(shape) => {
+            let (width, height) = (shape.width, shape.height);
+            let alt = shape.description.clone().or_else(|| shape.title.clone());
+            let shape_type = Some(shape.shape_type.clone());
+            let decorative = shape.decorative;
+            (
+                width,
+                height,
+                alt,
+                shape_type,
+                decorative,
+                Some(Box::new(shape)),
+                None,
+            )
+        }
+        _ => unreachable!("only chart and shape drawings convert to inline runs"),
+    };
+    let image = ImageRun {
+        src: String::new(),
+        width,
+        height,
+        alt,
+        shape_type,
+        transform: None,
+        position: None,
+        wrap_type: Some("inline".to_owned()),
+        display_mode: Some("inline".to_owned()),
+        css_float: Some("none".to_owned()),
+        dist_top: None,
+        dist_bottom: None,
+        dist_left: None,
+        dist_right: None,
+        crop_top: None,
+        crop_right: None,
+        crop_bottom: None,
+        crop_left: None,
+        opacity: None,
+        rotation_deg: None,
+        flip_h: None,
+        flip_v: None,
+        rotation_bounds: None,
+        wrap_text: None,
+        wrap_polygon: None,
+        allow_overlap: None,
+        layout_in_cell: None,
+        no_change_aspect: None,
+        effect_extent: None,
+        effects: None,
+        outline: None,
+        decorative,
+        hyperlink: formatting.hyperlink.clone(),
+        inline_shape,
+        inline_chart,
+        horizontal_rule: None,
+        is_insertion: formatting.is_insertion,
+        is_deletion: formatting.is_deletion,
+        change_author: formatting.change_author.clone(),
+        change_date: formatting.change_date.clone(),
+        change_revision_id: formatting.change_revision_id,
+        pm_start: None,
+        pm_end: None,
+    };
+    RawRun {
+        kind: RawRunKind::Image(image),
+        formatting,
+        story_start: story_index,
+        story_end: story_index + 1,
+        pm_start: pm_offset,
+        pm_end: pm_offset + 1,
+        inherited_hyperlink: (false, false),
+        inline_sdt_widget: None,
+        atom: true,
+        revision_hidden,
+    }
+}
+
+/// Flows the in-flow chart and text box drawings of one paragraph as
+/// inline runs of its line when they share that line with another in-flow
+/// drawing or with visible inline content, as Word draws inline pictures.
+/// A lone chart or text box keeps the block lowering, anchored drawings
+/// never convert, and a plain shape with text (no `txBox`) keeps splitting
+/// its paragraph. Converted drawings keep their block ids in the carriers.
+fn inline_shared_drawings(
+    raw_runs: &mut Vec<RawRun>,
+    carried: &[(u32, Vec<RawRun>)],
+    drawings: &mut Vec<DrawingMarker>,
+    show_hidden_text: bool,
+) {
+    let convertible = |drawing: &DrawingMarker| {
+        !drawing.anchored
+            && match &drawing.block {
+                LayoutBlock::Chart(_) => true,
+                LayoutBlock::Shape(shape) => {
+                    drawing.text_box || shape.shape_type == "textBox"
+                }
+                _ => false,
+            }
+    };
+    let count = drawings.iter().filter(|drawing| convertible(drawing)).count();
+    if count == 0 {
+        return;
+    }
+    let shares = count > 1
+        || raw_runs
+            .iter()
+            .chain(carried.iter().flat_map(|(_, runs)| runs.iter()))
+            .any(run_shares_line);
+    if !shares {
+        return;
+    }
+    let mut kept = Vec::new();
+    for drawing in drawings.drain(..) {
+        if convertible(&drawing) {
+            raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
+        } else {
+            kept.push(drawing);
+        }
+    }
+    *drawings = kept;
+    raw_runs.sort_by_key(|run| run.pm_start);
+}
+
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
 /// out ahead of it and leave it whole; in-flow ones break it into the text
 /// segments around them, each carrying the same pilcrow properties.
@@ -3644,6 +3826,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
             }
         }
     }
+    let has_source_content = !drawings.is_empty();
+    inline_shared_drawings(&mut raw_runs, &carried, &mut drawings, env.show_hidden_text);
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
         map.spans.push(SourceSpan {
@@ -3655,7 +3839,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
             atom: true,
         });
     }
-    let has_source_content = !drawings.is_empty();
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();

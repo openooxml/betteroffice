@@ -35,6 +35,31 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+/// Measures the text a shape carried by an inline image run holds, so the
+/// painter finds the inner measures it emits that text from. Textless
+/// carriers keep their absent measures, as before.
+fn measure_inline_shape_text(
+    paragraph: &mut ParagraphBlock,
+    config: &MeasurementConfig,
+) -> Result<(), String> {
+    for run in &mut paragraph.runs {
+        let Run::Image(image) = run else {
+            continue;
+        };
+        let Some(shape) = &mut image.inline_shape else {
+            continue;
+        };
+        if shape
+            .inner_text
+            .as_ref()
+            .is_some_and(|paragraphs| !paragraphs.is_empty())
+        {
+            measure_shape(shape, config)?;
+        }
+    }
+    Ok(())
+}
+
 /// An image run measurement skips as a float: it takes no room on the line.
 fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
     image.position.is_some()
@@ -1413,6 +1438,7 @@ pub fn measure_block(
 ) -> Result<BlockExtent, String> {
     match block {
         LayoutBlock::Paragraph(paragraph) => {
+            measure_inline_shape_text(paragraph, config)?;
             measure_paragraph(paragraph, content_width, config).map(BlockExtent::Paragraph)
         }
         LayoutBlock::Table(table) => {
@@ -1472,14 +1498,17 @@ fn measure_block_with_context(
     cumulative_y: f64,
 ) -> Result<BlockExtent, String> {
     match block {
-        LayoutBlock::Paragraph(paragraph) => measure_paragraph_with_context(
-            paragraph,
-            content_width,
-            config,
-            floating_zones,
-            cumulative_y,
-        )
-        .map(BlockExtent::Paragraph),
+        LayoutBlock::Paragraph(paragraph) => {
+            measure_inline_shape_text(paragraph, config)?;
+            measure_paragraph_with_context(
+                paragraph,
+                content_width,
+                config,
+                floating_zones,
+                cumulative_y,
+            )
+            .map(BlockExtent::Paragraph)
+        }
         _ => measure_block(block, content_width, config),
     }
 }
@@ -3008,6 +3037,9 @@ fn measure_cell_blocks_with_table_floats(
         // `y` tracks the paragraph's top, space-before included, which is the
         // origin the measurer probes float zones from.
         y += (previous_after - before).max(0.0);
+        if let LayoutBlock::Paragraph(paragraph) = &mut *block {
+            measure_inline_shape_text(paragraph, config)?;
+        }
         let extent = match &*block {
             LayoutBlock::Paragraph(paragraph) => {
                 BlockExtent::Paragraph(measure_paragraph_with_context(
