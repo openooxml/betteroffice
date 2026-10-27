@@ -2318,7 +2318,7 @@ fn visit_run_images(
     visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for content in &mut run.content {
-        if let RunContent::Drawing { image } = content {
+        if let RunContent::Drawing { image, .. } = content {
             visit(image)?;
         }
     }
@@ -3085,12 +3085,12 @@ impl<'a> SelectiveParagraphIndex<'a> {
     fn run(&mut self, run: &Run) -> Option<()> {
         for content in &run.content {
             match content {
-                RunContent::Drawing { image } => {
+                RunContent::Drawing { image, .. } => {
                     if image.id.as_deref().is_none_or(str::is_empty) {
                         self.allocates_ids = true;
                     }
                 }
-                RunContent::Shape { shape } => {
+                RunContent::Shape { shape, .. } => {
                     if shape.id.as_deref().is_none_or(str::is_empty) {
                         self.allocates_ids = true;
                     }
@@ -3104,7 +3104,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                     }
                 }
                 RunContent::HorizontalRule { rule } => self.fragment(&rule.xml)?,
-                RunContent::Chart { chart } => {
+                RunContent::Chart { chart, .. } => {
                     self.raw_subtree_required(chart.drawing_xml.as_deref(), "drawing")?;
                 }
                 RunContent::OpaqueDrawing { xml, .. } => self.fragment(xml)?,

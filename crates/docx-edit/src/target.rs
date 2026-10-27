@@ -32,6 +32,8 @@ use crate::{
     PPR_INS, RawOp, StoryRange, map_string, story_ref,
 };
 
+pub use docx_parse::image::DrawingProperties;
+
 /// Paragraphs one read may return.
 const READ_PARAGRAPH_LIMIT: usize = 65_536;
 /// UTF-16 units of text one read may return.
@@ -123,6 +125,46 @@ pub enum AtomKind {
 pub struct TextAtom {
     pub offset: u32,
     pub kind: AtomKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<DrawingProperties>,
+}
+
+fn drawing_properties<T: ReadTxn>(
+    map: Option<&MapRef>,
+    txn: &T,
+) -> Option<DrawingProperties> {
+    let map = map?;
+    let Out::Any(Any::Map(properties)) = map.get(txn, "docPr")? else {
+        return None;
+    };
+    let text = |key: &str| match properties.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
+    let placement = match text("placement").as_deref() {
+        Some("anchor") => docx_parse::image::DrawingPlacement::Anchor,
+        _ => docx_parse::image::DrawingPlacement::Inline,
+    };
+    let drawing_type = match text("type").as_deref() {
+        Some("picture") => docx_parse::image::DrawingType::Picture,
+        Some("shape") => docx_parse::image::DrawingType::Shape,
+        Some("textBox") => docx_parse::image::DrawingType::TextBox,
+        Some("group") => docx_parse::image::DrawingType::Group,
+        Some("chart") => docx_parse::image::DrawingType::Chart,
+        Some("diagram") => docx_parse::image::DrawingType::Diagram,
+        _ => docx_parse::image::DrawingType::Other,
+    };
+    Some(DrawingProperties {
+        doc_pr_id: text("docPrId"),
+        name: text("name"),
+        title: text("title"),
+        descr: text("descr"),
+        hidden: flag("hidden"),
+        decorative: flag("decorative"),
+        placement,
+        drawing_type,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -699,6 +741,7 @@ impl StoryView {
                         current.atoms.push(TextAtom {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
+                            drawing: drawing_properties(map.as_ref(), txn),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);

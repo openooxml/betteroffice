@@ -1181,6 +1181,9 @@ fn parse_run_with_context(
                     _ => true,
                 });
                 if !modeled && !alternate_content_has_text_box(child) {
+                    let fallback_properties = parsed
+                        .iter()
+                        .find_map(|content| content.drawing_properties().cloned());
                     let preview = parsed.into_iter().find_map(|content| match content {
                         RunContent::OpaqueDrawing { preview, .. } => preview,
                         _ => None,
@@ -1191,6 +1194,7 @@ fn parse_run_with_context(
                         preview,
                         previews: Vec::new(),
                         text_box: None,
+                        drawing_properties: fallback_properties,
                     }]);
                 } else {
                     replacements.push(parsed);
@@ -1216,6 +1220,31 @@ fn parse_drawing_owned(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
+    drawing: Option<&mut ComposedDrawingContext<'_>>,
+    in_header_footer: bool,
+) -> Result<Vec<RunContent>, ParseError> {
+    let properties = crate::image::parse_drawing_properties(element);
+    let mut parsed = parse_drawing_owned_inner(
+        element,
+        relationships,
+        budget,
+        drawing,
+        in_header_footer,
+    )?;
+    if properties.is_some() {
+        for content in &mut parsed {
+            if content.drawing_properties().is_none() {
+                content.set_drawing_properties(properties.clone());
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_drawing_owned_inner(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
@@ -1234,6 +1263,7 @@ fn parse_drawing_owned(
                     .map(Box::new),
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }]);
         }
         let images = vml_image_contents(element, relationships, media, Some(budget));
@@ -1242,6 +1272,7 @@ fn parse_drawing_owned(
                 .into_iter()
                 .map(|image| RunContent::Drawing {
                     image: Box::new(image),
+                    drawing_properties: None,
                 })
                 .collect());
         }
@@ -1252,6 +1283,7 @@ fn parse_drawing_owned(
                 preview: None,
                 previews: images,
                 text_box: None,
+                drawing_properties: None,
             }]);
         }
         if !has_vml_image_data(element, 0) || !in_header_footer {
@@ -1261,6 +1293,7 @@ fn parse_drawing_owned(
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1270,7 +1303,12 @@ fn parse_drawing_owned(
     }
     let charts = drawing.as_ref().map(|context| context.charts);
     match parse_chart_from_drawing(element, relationships, charts)? {
-        DrawingChart::Chart(chart) => return Ok(vec![RunContent::Chart { chart }]),
+        DrawingChart::Chart(chart) => {
+            return Ok(vec![RunContent::Chart {
+                chart,
+                drawing_properties: None,
+            }]);
+        }
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
@@ -1278,6 +1316,7 @@ fn parse_drawing_owned(
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1297,6 +1336,7 @@ fn parse_drawing_owned(
                 apply_shape_metadata(&mut shape, element);
                 RunContent::Shape {
                     shape: Box::new(shape),
+                    drawing_properties: None,
                 }
             })
             .into_iter()
@@ -1315,6 +1355,7 @@ fn parse_drawing_owned(
             apply_shape_metadata(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
+                drawing_properties: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1323,6 +1364,7 @@ fn parse_drawing_owned(
     Ok(parse_drawing(element, relationships, media)
         .map(|image| RunContent::Drawing {
             image: Box::new(image),
+            drawing_properties: None,
         })
         .into_iter()
         .collect())
@@ -1402,7 +1444,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                     };
                     if !child_parsed.is_empty() {
                         unsupported_drawings_only &= child_parsed.iter().all(|content| {
-                            matches!(content, RunContent::Drawing { image }
+                            matches!(content, RunContent::Drawing { image, .. }
                                 if !is_resolved_image(image))
                         });
                     }
@@ -1426,10 +1468,13 @@ fn parse_alternate_content_branch_with_context<'a>(
                     let grouped = parsed.iter().any(|content| {
                         matches!(content, RunContent::OpaqueDrawing { previews, .. } if !previews.is_empty())
                     });
+                    let grouped_properties = parsed
+                        .iter()
+                        .find_map(|content| content.drawing_properties().cloned());
                     let mut images = parsed
                         .into_iter()
                         .flat_map(|content| match content {
-                            RunContent::Drawing { image } => vec![*image],
+                            RunContent::Drawing { image, .. } => vec![*image],
                             RunContent::OpaqueDrawing {
                                 preview, previews, ..
                             } => preview
@@ -1454,6 +1499,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                                 preview,
                                 previews,
                                 text_box: None,
+                                drawing_properties: grouped_properties,
                             }],
                         )));
                     }
@@ -2045,7 +2091,7 @@ mod tests {
             ] {
                 let parsed = alternate_run(content);
                 assert_eq!(parsed.len(), 1);
-                let RunContent::Drawing { image } = &parsed[0] else {
+                let RunContent::Drawing { image, .. } = &parsed[0] else {
                     panic!("expected standalone ChartEx image");
                 };
                 assert_eq!(image.image_type, "image");
@@ -2100,7 +2146,7 @@ mod tests {
             .unwrap();
             assert_eq!(branch.local_name(), "Choice");
             assert_eq!(parsed.len(), 1);
-            let RunContent::Drawing { image } = &parsed[0] else {
+            let RunContent::Drawing { image, .. } = &parsed[0] else {
                 panic!("expected original unsupported image");
             };
             assert!(image.relationship_id.is_empty());
@@ -2180,7 +2226,7 @@ mod tests {
             ] {
                 let parsed = alternate_run(content);
                 assert_eq!(parsed.len(), 1);
-                let RunContent::Drawing { image } = &parsed[0] else {
+                let RunContent::Drawing { image, .. } = &parsed[0] else {
                     panic!("expected original unsupported image");
                 };
                 assert!(image.relationship_id.is_empty());
@@ -2240,7 +2286,7 @@ mod tests {
             ] {
                 let parsed = alternate_run(content);
                 assert_eq!(parsed.len(), 1);
-                let RunContent::Drawing { image } = &parsed[0] else {
+                let RunContent::Drawing { image, .. } = &parsed[0] else {
                     panic!("expected original unsupported image");
                 };
                 assert!(image.relationship_id.is_empty());
@@ -2294,7 +2340,7 @@ mod tests {
             assert_eq!(parsed.len(), 1);
             assert!(matches!(
                 &parsed[0],
-                RunContent::Drawing { image }
+                RunContent::Drawing { image, .. }
                     if image.relationship_id.is_empty() && image.src.is_none()
             ));
         }
@@ -2424,14 +2470,14 @@ mod tests {
                 let parsed = alternate_run(&wire.document.package.document.content);
                 assert_eq!(parsed.len(), 1);
                 match (&parsed[0], expected) {
-                    (RunContent::Chart { chart }, "chart") => {
+                    (RunContent::Chart { chart, .. }, "chart") => {
                         assert_eq!(chart.relationship_id.as_deref(), Some("rIdChart"));
                         assert_eq!(chart.chart_type, "column");
                     }
-                    (RunContent::Shape { shape }, "shape") => {
+                    (RunContent::Shape { shape, .. }, "shape") => {
                         assert_eq!(shape.shape_type, "rect");
                     }
-                    (RunContent::Drawing { image }, "picture") => {
+                    (RunContent::Drawing { image, .. }, "picture") => {
                         assert_eq!(image.relationship_id, "rIdChoice");
                         assert!(image.src.is_some());
                     }
@@ -2567,7 +2613,7 @@ mod tests {
             .content
             .iter()
             .flat_map(|content| match content {
-                RunContent::Drawing { image } => vec![&**image],
+                RunContent::Drawing { image, .. } => vec![&**image],
                 RunContent::OpaqueDrawing { previews, .. } => previews.iter().collect(),
                 _ => Vec::new(),
             })
@@ -2610,7 +2656,7 @@ mod tests {
         let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
             panic!("expected picture run");
         };
-        let [RunContent::Drawing { image }] = run.content.as_slice() else {
+        let [RunContent::Drawing { image, .. }] = run.content.as_slice() else {
             panic!("expected one drawing, got {:?}", run.content);
         };
         assert_eq!(image.relationship_id, "rId4");

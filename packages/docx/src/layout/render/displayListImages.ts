@@ -73,6 +73,89 @@ export function findImagePrimitiveByDocPos(
   return null;
 }
 
+export interface LocatedDrawingRect {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function drawingPrimitivesForRegion(
+  page: DisplayPage,
+  region: DisplayListImageRegion,
+  rId?: string
+): DisplayPrimitive[] {
+  if (region === 'body') return page.primitives ?? [];
+  const band = region === 'header' ? page.header : page.footer;
+  if (!band || (rId !== undefined && band.rId !== rId)) return [];
+  return band.primitives ?? [];
+}
+
+type DisplayPrimitive = DisplayPage['primitives'][number];
+
+/**
+ * The drawn frame box of the drawing atom at `pos`, one per page that paints
+ * it: the placed extent rectangle, unrotated, without effect extent. Pictures
+ * and shapes paint their own primitive; a group or chart paints several
+ * primitives at the same atom position and their union is the frame.
+ */
+export function findDrawingRectsByDocPos(
+  list: DisplayList,
+  pos: number,
+  region: DisplayListImageRegion = 'body',
+  rId?: string
+): LocatedDrawingRect[] {
+  const rects: LocatedDrawingRect[] = [];
+  for (const page of list.pages) {
+    if (page.unbuilt) continue;
+    const primitives = drawingPrimitivesForRegion(page, region, rId).filter(
+      (primitive) => primitive.docStart === pos
+    );
+    const image = primitives.find(
+      (primitive): primitive is ImagePrimitive => primitive.kind === 'image'
+    );
+    if (image) {
+      const frame = image.contentFrame;
+      rects.push({
+        pageIndex: page.pageIndex,
+        x: frame?.x ?? image.x,
+        y: frame?.y ?? image.y,
+        width: frame?.w ?? image.w,
+        height: frame?.h ?? image.h,
+      });
+      continue;
+    }
+    const shapes = primitives.filter(
+      (primitive) =>
+        primitive.kind === 'shape' || (primitive.chart !== undefined && 'w' in primitive)
+    );
+    const candidates = shapes.length
+      ? shapes
+      : primitives.filter(
+          (primitive) => primitive.kind === 'rect' && primitive.docEnd === pos + 1
+        );
+    if (!candidates.length) continue;
+    let x = Infinity;
+    let y = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const primitive of candidates) {
+      if (!('x' in primitive) || typeof primitive.x !== 'number') continue;
+      const w = 'w' in primitive && typeof primitive.w === 'number' ? primitive.w : 0;
+      const h = 'h' in primitive && typeof primitive.h === 'number' ? primitive.h : 0;
+      x = Math.min(x, primitive.x);
+      y = Math.min(y, primitive.y);
+      right = Math.max(right, primitive.x + w);
+      bottom = Math.max(bottom, primitive.y + h);
+    }
+    if (Number.isFinite(x)) {
+      rects.push({ pageIndex: page.pageIndex, x, y, width: right - x, height: bottom - y });
+    }
+  }
+  return rects;
+}
+
 /** Topmost positioned image painted under a page-local point, or null. */
 export function findImagePrimitiveAtPoint(
   list: DisplayList,

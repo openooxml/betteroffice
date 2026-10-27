@@ -1,5 +1,6 @@
 import {
   effectiveZoom,
+  findDrawingRectsByDocPos,
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
@@ -541,6 +542,65 @@ export function placeRepeated(
 }
 
 /**
+ * @internal The drawn frame box of the drawing atom at display position `pos`, on every
+ * built page that paints it. `routed` names the header or footer bands when the atom lives
+ * in one; without it the atom is in the body.
+ */
+export function placeDrawing(
+  { queries, complete, pending, respond, unavailable }: RepeatedPlacement,
+  pos: number,
+  routed?: readonly string[]
+): DocxAnchorGeometryResult {
+  const list = queries.displayList;
+  if (!list) return unavailable();
+  let rects: DisplayListRect[] = [];
+  let unbuiltPages: number[] = [];
+  if (routed) {
+    const rIds = new Set(routed);
+    const bands = list.pages.flatMap(({ header, footer, hfParts, unbuilt }, pageIndex) => {
+      for (const [region, rId] of [
+        ['header', header?.rId ?? hfParts?.header],
+        ['footer', footer?.rId ?? hfParts?.footer],
+      ] as const) {
+        if (rId !== undefined && rIds.has(rId)) return [{ region, rId, pageIndex, unbuilt: !!unbuilt }];
+      }
+      return [];
+    });
+    if (!bands.length) {
+      return complete()
+        ? anchorFailure('missing-target', 'No page paints this header or footer')
+        : anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
+    }
+    if (bands.some(({ pageIndex }) => pending(pageIndex))) return unavailable();
+    unbuiltPages = [...new Set(bands.filter((band) => band.unbuilt).map((band) => band.pageIndex))];
+    const seen = new Set<string>();
+    for (const band of bands) {
+      if (band.unbuilt) continue;
+      for (const rect of findDrawingRectsByDocPos(list, pos, band.region, band.rId)) {
+        const key = `${rect.pageIndex}:${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rects.push(rect);
+      }
+    }
+  } else {
+    rects = findDrawingRectsByDocPos(list, pos);
+    unbuiltPages = (list.pages ?? []).flatMap(({ unbuilt, positionSpan, pageIndex }) =>
+      unbuilt && positionSpan && pos >= positionSpan[0] && pos <= positionSpan[1] ? [pageIndex] : []
+    );
+  }
+  if (rects.length) {
+    if (rects.some((rect) => pending(rect.pageIndex))) return unavailable();
+    const sorted = [...rects].sort((a, b) => a.pageIndex - b.pageIndex);
+    return respond(sorted, sorted[0]!, unbuiltPages);
+  }
+  if (unbuiltPages.length && !complete()) return unavailable();
+  return complete()
+    ? anchorFailure('missing-target', 'No page paints this drawing')
+    : anchorFailure('layout-unavailable', 'No laid-out page paints this drawing');
+}
+
+/**
  * Geometry of the current frame; visible unbuilt pages wait for exact content. While `held`,
  * overlays still draw this layout until geometry for the next one exists, so `toOverlayRect`
  * answers; hit tests and anchors wait for the new layout.
@@ -658,6 +718,13 @@ export function createPluginGeometry(
     if (repeated?.root) {
       const { root: story, rIds, ranges, hidden = [], paragraph } = repeated;
       const routed = rIds ?? headerFooterDisplayRIds(session, story.slice('hf:'.length));
+      if ((repeated.drawing || target?.kind === 'drawing') && ranges[0]) {
+        return placeDrawing(
+          { queries, complete, pending: pendingPage, respond, unavailable },
+          ranges[0].from,
+          routed
+        );
+      }
       return placeRepeated(
         { queries, complete, pending: pendingPage, respond, unavailable },
         routed,
@@ -679,6 +746,17 @@ export function createPluginGeometry(
       ranges.push(mapped);
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    if (
+      (target?.kind === 'drawing' ||
+        (mirrored?.ok && mirrored.drawing) ||
+        (resolved?.ok && resolved.drawing)) &&
+      ranges[0]
+    ) {
+      return placeDrawing(
+        { queries, complete, pending: pendingPage, respond, unavailable },
+        ranges[0].from
+      );
+    }
     if (
       window &&
       queries.displayList?.pages.slice(window[0], window[1]).some(

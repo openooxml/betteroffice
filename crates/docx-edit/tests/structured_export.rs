@@ -616,7 +616,7 @@ fn unsupported_content_keeps_placeholders_and_source_provenance() {
     let elements: Vec<(String, Option<String>)> = inlines(block(&content, "00000015"))
         .iter()
         .filter_map(|inline| match &inline.content {
-            InlineKind::Unsupported { element, alt_text } => {
+            InlineKind::Unsupported { element, alt_text, .. } => {
                 Some((element.clone(), alt_text.clone()))
             }
             _ => None,

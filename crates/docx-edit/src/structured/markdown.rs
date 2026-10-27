@@ -999,7 +999,7 @@ impl Renderer {
                 format!("<img alt=\"{}\">", attribute(alt))
             }
             InlineKind::ContentControl { inlines, .. } => self.html_inlines(inlines),
-            InlineKind::Unsupported { element, alt_text } => format!(
+            InlineKind::Unsupported { element, alt_text, .. } => format!(
                 "<!-- docx-unsupported: {} -->{}",
                 comment_text(element),
                 alt_text.as_deref().map(html_text).unwrap_or_default()
@@ -1111,7 +1111,7 @@ impl Renderer {
                 format!("![{}]()", escape(alt))
             }
             InlineKind::ContentControl { inlines, .. } => self.inlines(inlines),
-            InlineKind::Unsupported { element, alt_text } => match alt_text {
+            InlineKind::Unsupported { element, alt_text, .. } => match alt_text {
                 Some(alt) => format!(
                     "<!-- docx-unsupported: {} -->{}",
                     comment_text(element),
@@ -1391,6 +1391,7 @@ mod tests {
                 relationship_id: None,
                 part: None,
                 external_target: None,
+                drawing: None,
             },
             ..text("", None)
         };

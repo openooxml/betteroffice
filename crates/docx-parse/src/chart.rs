@@ -617,7 +617,7 @@ mod tests {
             })
             .flat_map(|run| &run.content)
             .filter_map(|item| match item {
-                RunContent::Chart { chart } => chart.path.clone(),
+                RunContent::Chart { chart, .. } => chart.path.clone(),
                 _ => None,
             })
             .collect()
