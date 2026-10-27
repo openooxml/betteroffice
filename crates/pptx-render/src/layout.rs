@@ -2899,11 +2899,7 @@ fn content_from_story(
             .map(|paragraph| {
                 let source_para =
                     source.and_then(|body| source_paragraph(body, &story.id, &paragraph.id));
-                let live: Vec<&str> = paragraph
-                    .runs
-                    .iter()
-                    .map(|run| run.text.as_str())
-                    .collect();
+                let live: Vec<&str> = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
                 let replacements =
                     source_para.map(|source| slide_number_run_texts(source, &live, slide_number));
                 let insertions = source_para
@@ -2919,10 +2915,7 @@ fn content_from_story(
                         let source_run = insertions[insertion_index].1;
                         runs.push(ContentRun {
                             text: slide_number.to_string(),
-                            style: style_from_run_properties(
-                                &source_run.properties,
-                                Some(theme),
-                            ),
+                            style: style_from_run_properties(&source_run.properties, Some(theme)),
                         });
                         insertion_index += 1;
                     }
@@ -8415,8 +8408,8 @@ mod tests {
             assert_eq!(line, number);
             if index == 1 {
                 let (runs, line) = drawn_text(&rendered, &slide_probe.id);
-                assert_eq!(runs, [run("77", 19.0, false, "#AA5500")]);
-                assert_eq!(line, "77");
+                assert_eq!(runs, [run(number, 19.0, false, "#AA5500")]);
+                assert_eq!(line, number);
             }
         }
     }

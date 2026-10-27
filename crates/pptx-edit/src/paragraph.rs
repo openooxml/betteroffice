@@ -499,10 +499,9 @@ pub fn field_spans(
     })
 }
 
-fn field_spans_with_runs<'a>(
-    source: &'a TextParagraph,
-    text: &str,
-) -> Option<Vec<(std::ops::Range<usize>, Option<String>, &'a TextRun)>> {
+type FieldSpan<'a> = (std::ops::Range<usize>, Option<String>, &'a TextRun);
+
+fn field_spans_with_runs<'a>(source: &'a TextParagraph, text: &str) -> Option<Vec<FieldSpan<'a>>> {
     let mut seeded = String::new();
     let mut fields = Vec::new();
     for run in &source.runs {
@@ -643,12 +642,14 @@ pub fn slide_number_insertions<'a>(
         if field_type.as_deref() != Some("slidenum") || !span.is_empty() {
             continue;
         }
-        if live_runs.iter().enumerate().any(|(index, _)| {
-            boundaries[index] < span.start && span.start < boundaries[index + 1]
-        }) {
+        if live_runs
+            .iter()
+            .enumerate()
+            .any(|(index, _)| boundaries[index] < span.start && span.start < boundaries[index + 1])
+        {
             continue;
         }
-        if boundaries.iter().any(|bound| *bound == span.start) {
+        if boundaries.contains(&span.start) {
             insertions.push((span.start, *run));
         }
     }
