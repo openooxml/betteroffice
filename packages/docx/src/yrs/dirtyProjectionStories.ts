@@ -14,13 +14,16 @@ export class DirtyProjectionStories {
   private nextMark = 0;
 
   add(story: string): void {
-    this.stories.set(dirtyProjectionStory(story), ++this.nextMark);
+    this.stories.set(story, ++this.nextMark);
   }
 
   projectionOptions(): YrsToDocumentOptions | undefined {
-    return this.stories.size > 0 ? { storyIds: new Set(this.stories.keys()) } : undefined;
+    return this.stories.size > 0
+      ? { storyIds: new Set([...this.stories.keys()].map(dirtyProjectionStory)) }
+      : undefined;
   }
 
+  /** The marked stories by their own ids, nested ones included, as the projection memo keys them. */
   capture(): { stories: string[]; clear(): void } {
     const captured = new Map(this.stories);
     return {

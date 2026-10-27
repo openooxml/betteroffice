@@ -33,7 +33,7 @@ const toolbarGroups: Record<Format, [string, string[]][]> = {
   ],
   xlsx: [
     ['History', ['Undo', 'Redo']],
-    ['Search', ['Search menus']],
+    ['File', ['Save', 'Export PNG']],
     ['Print', ['Print']],
     ['Paint format', ['Paint format']],
     ['Zoom', ['Zoom']],
@@ -64,7 +64,7 @@ function demo(format: Format) {
 }
 
 function canvas(page: Page, format: Format) {
-  if (format === 'docx') return page.locator('[data-peerless-docx] .canvas-page canvas').first();
+  if (format === 'docx') return page.locator('[data-docx-worker-editor] .canvas-page canvas').first();
   if (format === 'xlsx') return page.getByTestId('xlsx-scroll').locator('canvas').first();
   return page.getByTestId('pptx-slide-canvas');
 }
@@ -89,7 +89,7 @@ async function open(page: Page, format: Format, file: string = demo(format)) {
     await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A1');
     await expect(page.getByTestId('xlsx-selection')).toBeVisible();
   } else {
-    await expect(page.getByTestId('pptx-peerless-editor')).toBeVisible();
+    await expect(page.getByTestId('pptx-worker-editor')).toBeVisible();
     await expect(page.locator('aside[aria-label="Slides"] button[aria-current="page"]')).toHaveCount(1);
   }
 }
@@ -211,11 +211,11 @@ async function tapDocument(page: Page, format: Format, double = false) {
     if (double) {
       const selected = format === 'docx'
         ? page.locator('.oox-canvas-live-region')
-        : page.getByTestId('pptx-peerless-editor').getByRole('status').filter({ hasText: 'Text selected' });
+        : page.getByTestId('pptx-worker-editor').getByRole('status').filter({ hasText: 'Text selected' });
       await expect(selected).toContainText(/selected/i);
     } else if (format === 'pptx') {
       await expect(page.getByTestId('pptx-text-edit-outline')).toBeVisible();
-      await expect(page.getByTestId('pptx-peerless-caret')).toBeAttached();
+      await expect(page.getByTestId('pptx-caret')).toBeAttached();
     }
   }
 }
@@ -227,7 +227,7 @@ async function visibleEdit(page: Page, format: Format) {
     await expect(page.getByRole('gridcell').filter({ hasText: marker })).toHaveCount(1);
   } else {
     await expect(page.getByTestId('pptx-text-edit-outline')).toBeVisible();
-    await expect(page.getByTestId('pptx-peerless-caret')).toBeAttached();
+    await expect(page.getByTestId('pptx-caret')).toBeAttached();
   }
 }
 
@@ -249,7 +249,7 @@ async function cellValue(page: Page, xml: Record<string, string>) {
 }
 
 const slidePixels = (page: Page) => canvas(page, 'pptx').screenshot({
-  style: '[data-testid="pptx-text-edit-outline"], [data-testid="pptx-peerless-caret-clip"], [data-testid="pptx-shape-selection"] { visibility: hidden !important; }',
+  style: '[data-testid="pptx-text-edit-outline"], [data-testid="pptx-caret-clip"], [data-testid="pptx-shape-selection"] { visibility: hidden !important; }',
 });
 
 async function editRotateSave(page: Page, format: Format, info: TestInfo, double: boolean) {

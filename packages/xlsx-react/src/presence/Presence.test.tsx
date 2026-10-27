@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { GridMeta, MergedRange } from '@betteroffice/xlsx';
 import { colorForClientId, type AwarenessPeer } from '@betteroffice/xlsx/collaboration';
+import { LocaleProvider } from '../i18n';
 import { expandRangeToMergedCells, PresenceStrip, RemoteSelections } from './Presence';
 
 const grid: GridMeta = {
@@ -27,6 +28,26 @@ function peer(clientId: number, color = '#0B57D0'): AwarenessPeer {
 }
 
 describe('xlsx presence rendering', () => {
+  it('labels the strip and peers on other sheets in the editor locale', () => {
+    const away = { ...peer(7), cursor: { ...peer(7).cursor!, sheet: 'sheet:1' } };
+    const gone = { ...peer(8), cursor: { ...peer(8).cursor!, sheet: 'sheet:9' } };
+    const strip = (i18n?: Parameters<typeof LocaleProvider>[0]['i18n']) => renderToStaticMarkup(
+      <LocaleProvider i18n={i18n}>
+        <PresenceStrip peers={[away, gone]} sheetIds={['sheet:0', 'sheet:1']} sheetNames={['Sheet 1', 'Budget']}
+          activeSheet={0} />
+      </LocaleProvider>
+    );
+    const english = strip();
+    expect(english).toContain('aria-label="Collaborators"');
+    expect(english).toContain('title="Peer 7 (Budget)"');
+    expect(english).toContain('title="Peer 8 (Unavailable sheet)"');
+    expect(english).not.toContain('\u2014');
+    const localized = strip({ presence: { label: 'Mitwirkende', unavailableSheet: 'Fehlendes Blatt', peerOnSheet: '{name} auf {sheet}' } });
+    expect(localized).toContain('aria-label="Mitwirkende"');
+    expect(localized).toContain('title="Peer 7 auf Budget"');
+    expect(localized).toContain('title="Peer 8 auf Fehlendes Blatt"');
+  });
+
   it('expands local and remote geometry through intersecting merged cells', () => {
     const chained: MergedRange[] = [
       { start: { row: 2, col: 0 }, end: { row: 3, col: 0 } },

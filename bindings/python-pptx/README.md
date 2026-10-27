@@ -1,8 +1,8 @@
 # betteroffice-pptx
 
 Read, edit, and lay out PPTX presentations from Python. `python-pptx` reads a
-deck and writes one back; this also *lays slides out* — line breaking, text
-metrics, a display list — and merges edits across replicas, because the Rust
+deck and writes one back; this also *lays slides out* (line breaking, text
+metrics, a display list) and merges edits across replicas, because the Rust
 [BetterOffice](https://betteroffice.dev) PPTX core is compiled into the wheel:
 no PowerPoint, no LibreOffice subprocess, no COM.
 
@@ -27,12 +27,12 @@ if shape is not None:
     print(shape.kind, shape.geometry, shape.x, shape.y, shape.width, shape.height)
 ```
 
-Geometry is in English Metric Units — 914400 to the inch. The module exports
+Geometry is in English Metric Units (914400 to the inch). The module exports
 `EMU_PER_INCH`, `EMU_PER_CENTIMETER`, and `EMU_PER_POINT` so you rarely have to
 type the constant.
 
 `snapshot()` returns the whole deck as plain data in one call; `slide(key)`
-returns one slide by index or by ID. Both are values, not live views — read
+returns one slide by index or by ID. Both are values, not live views. Read
 them again after an edit.
 
 ## Edit shapes and slides
@@ -66,7 +66,7 @@ guide raises `ValueError` instead of writing a shape PowerPoint would reject.
 
 ## Edit text
 
-Text lives in *stories* — one editable flow per text-bearing shape. Offsets are
+Text lives in *stories*: one editable flow per text-bearing shape. Offsets are
 UTF-16 code units, and every paragraph ends with a pilcrow occupying one of
 them.
 
@@ -120,7 +120,7 @@ Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
 `setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
 `setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
 Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
-geometry uses EMU. A group has 1–256 edits, applied in order, with up to 64
+geometry uses EMU. A group has 1 to 256 edits, applied in order, with up to 64
 pending groups per session.
 
 `accept_proposal` applies the entire validated group as one local undo step,
@@ -212,7 +212,7 @@ deck.render_slide(0)
 # RenderError: no font has been registered for slide text
 ```
 
-Register the faces the deck uses — one call per family, weight, and slant — and
+Register the faces the deck uses (one call per family, weight, and slant), and
 it lays out:
 
 ```python
@@ -231,8 +231,8 @@ Font selection tries the requested family's style, then that family without
 italic, without bold and plain, then the closest style in the first registered
 family. Known requested families supply their measured metrics.
 
-`render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON — for hosts that paint it themselves. `render_png`
+`render_slide` returns the display list (the same drawing contract the browser
+editor paints, as JSON) for hosts that paint it themselves. `render_png`
 rasterizes a slide instead, resolving pictures out of the package so only fonts
 need registering:
 
@@ -295,7 +295,7 @@ in local history, so undo will not revert someone else's work. Consecutive edits
 inside half a second coalesce into one step; `add_undo_barrier()` splits them.
 
 Setting `origin` to `"agent"`, `"remote"`, or `"system"` tags edits for
-attribution — and takes them out of the local undo stack, which is the point:
+attribution and takes them out of the local undo stack, which is the point:
 an agent's write is not something the user undoes by accident.
 
 ## Writing
@@ -323,7 +323,7 @@ the flag untouched.
 | | `python-pptx` | `betteroffice-pptx` |
 | --- | --- | --- |
 | Read shapes and text | yes | yes |
-| Write shapes and text back to a file | yes | yes — see *Writing* |
+| Write shapes and text back to a file | yes | yes (see *Writing*) |
 | Lay slides out (line breaking, text metrics) | no | yes, display list |
 | Collaborative editing (CRDT) | no | yes, Yrs |
 | Undo/redo | no | yes |
@@ -361,13 +361,13 @@ Use `betteroffice-pptx` for slide layout and collaborative editing.
 | `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
 | `deck.is_edited` | whether the engine has accepted an edit since open |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
-| `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
+| `deck.save()` / `save_path(path)` | serialize to PPTX (see *Writing*) |
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
 `NotCollaborativeError`, `StaleProposalError`, `ExportError`.
-An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
-unsupported geometry, an out-of-range client ID, an unknown parse limit —
+An unknown slide, shape, or story ID raises `KeyError`; a bad argument (an
+unsupported geometry, an out-of-range client ID, an unknown parse limit)
 raises `ValueError`.
 
 Parser bounds can be tightened for untrusted input:
@@ -386,7 +386,7 @@ declared `unsendable`, and pyo3 enforces that in two ways worth knowing about:
 
 - **Touching one from another thread raises `pyo3_runtime.PanicException`.**
   That is a direct `BaseException` subclass, so `except Exception` does *not*
-  catch it — a worker that guards its work with `except Exception` will die
+  catch it. A worker that guards its work with `except Exception` will die
   anyway.
 - **Releasing one on another thread leaks it.** pyo3 skips the Rust destructor
   and writes an *unraisable* `RuntimeError` instead (visible only through
@@ -404,16 +404,16 @@ with ThreadPoolExecutor() as pool:
 ```
 
 The cyclic garbage collector counts too. If a `Presentation` is caught in a
-reference cycle — a traceback that reaches it, an object graph that points back
-at itself — the collector frees it wherever it happens to run, which may be any
+reference cycle (a traceback that reaches it, an object graph that points back
+at itself), the collector frees it wherever it happens to run, which may be any
 thread. Giving each worker its own `Presentation` therefore is *not* enough on
 its own; the deck must also become garbage on its owning thread. Open, use, and
 drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
-The heavy operations release the GIL while they run — `open`, `open_path`,
+The heavy operations release the GIL while they run (`open`, `open_path`,
 `open_collaborative`, `render_slide`, `render_png`, `save`, `save_path`,
-`register_font`, and `apply_update` — as do the file writes in `Media.write`,
+`register_font`, and `apply_update`), as do the file writes in `Media.write`,
 `DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
 ## Status
@@ -426,9 +426,9 @@ Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 
 ## Links
 
-- [BetterOffice](https://betteroffice.dev) — the project
+- [BetterOffice](https://betteroffice.dev): the project
 - [Documentation](https://docs.betteroffice.dev/docs/python)
-- [Source](https://github.com/openooxml/betteroffice) — `bindings/python-pptx`
-- [betteroffice-pptx on crates.io](https://crates.io/crates/betteroffice-pptx) — the engine this wraps
+- [Source](https://github.com/openooxml/betteroffice): `bindings/python-pptx`
+- [betteroffice-pptx on crates.io](https://crates.io/crates/betteroffice-pptx): the engine this wraps
 
 Apache-2.0.

@@ -92,6 +92,21 @@ export function placeEchoGlyphs(glyphs: EchoGlyphIndex, text: string, next: stri
   return placement;
 }
 
+/**
+ * Places `text` on a line starting at `x`; with `center`, the pen starts where the engine centers
+ * the line's width in that space, at half the free width and never left of `x`.
+ */
+export function placeEchoLine(
+  glyphs: EchoGlyphIndex, text: string, next: string, x: number, center?: number
+): EchoGlyphPlacement | undefined {
+  if (center === undefined) return placeEchoGlyphs(glyphs, text, next, x);
+  const measured = placeEchoGlyphs(glyphs, text, next, 0);
+  if (!measured) return undefined;
+  let width = 0;
+  for (const advance of measured.advances) width += advance;
+  return placeEchoGlyphs(glyphs, text, next, x + Math.max(0, (center - width) / 2));
+}
+
 /** Width of the leading letters and digits, which no line break can split. */
 export function leadingWordWidth(text: string, advances: readonly number[]): number {
   let width = 0;

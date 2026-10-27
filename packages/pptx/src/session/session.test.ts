@@ -716,3 +716,22 @@ describe('presentation sessions', () => {
     expect(closed).toBe(1);
   });
 });
+
+test('a session with zero registered fonts renders every slide', async () => {
+  const pair = createInProcessPair();
+  createPresentationSessionHost(pair.host);
+  const worker = await createPresentationSession(fixture, { fonts: [] }, pair.client);
+  const main = openPresentation(fixture, { fonts: [] });
+  try {
+    const count = main.snapshot().slides.length;
+    expect(count).toBeGreaterThan(0);
+    for (let index = 0; index < count; index++) {
+      const frame = await worker.call.frame(index);
+      expect(frame.displayList).toEqual(main.layoutSlide(index));
+      expect(frame.displayList.primitives.length).toBeGreaterThan(0);
+    }
+  } finally {
+    main.dispose();
+    await worker.dispose();
+  }
+});

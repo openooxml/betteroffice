@@ -114,6 +114,7 @@ mod tests {
     /// a 15-row chart hanging off column h, `row` rows down the sheet.
     fn chart_at_row(row: u32) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".into(),
             drawing: "xl/drawings/drawing1.xml".into(),
             anchor_index: 0,

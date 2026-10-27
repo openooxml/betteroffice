@@ -61,6 +61,7 @@ fn authored(wb: &mut xlsx_model::Workbook) {
                 format: DifferentialFormat {
                     font_color: Some("#FF0000".into()),
                     bold: Some(true),
+                    italic: None,
                     fill: Some("#00FF00".into()),
                 },
                 raw_xml: None,
@@ -241,4 +242,33 @@ fn differential_colors_resolve_theme_tint_and_indexed_palettes() {
         part(&saved, "xl/styles.xml"),
         part(&source, "xl/styles.xml")
     );
+}
+
+#[test]
+fn authored_italic_differential_formats_round_trip() {
+    for italic in [true, false] {
+        let font = if italic {
+            r#"<font><b/><i/><color rgb="FF9C0006"/></font>"#
+        } else {
+            r#"<font><b/><i val="0"/><color rgb="FF9C0006"/></font>"#
+        };
+        let source = parts(
+            "<sheetData/>",
+            Some(&format!(
+                r#"<dxfs count="1"><dxf>{font}<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs>"#
+            )),
+        );
+        let parsed = parse_workbook_with_package(&source).unwrap();
+        let mut workbook = parsed.workbook.clone();
+        authored(&mut workbook);
+        workbook.sheets[0].conditional_formats[0].rules[0].format = workbook.styles.dxfs[0].clone();
+        let saved = save(&parsed, &workbook);
+        let styles = std::str::from_utf8(part(&saved, "xl/styles.xml")).unwrap();
+        assert_eq!(styles.matches(font).count(), 2, "{styles}");
+        let reopened = parse_workbook(&saved).unwrap();
+        assert_eq!(
+            reopened.sheets[0].conditional_formats[0].rules[0].format,
+            workbook.styles.dxfs[0]
+        );
+    }
 }

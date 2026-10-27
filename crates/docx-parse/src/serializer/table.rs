@@ -5,17 +5,18 @@ use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
     TableMeasurement, TableRowFormatting,
 };
-use crate::paragraph::TrackedChangeInfo;
+use crate::paragraph::{RawAttribute, TrackedChangeInfo};
 use crate::table::{
     Table, TableCell, TableCellPropertyChange, TablePropertyChange, TableRow,
     TableRowPropertyChange, TableStructuralChangeInfo,
 };
-use crate::xml::ParseError;
+use crate::xml::{ParseError, canonical_namespace};
 
 use super::context::SerializerContext;
 use super::foundation::{
     BorderSide, serialize_conditional_format_style, serialize_table_grid, write_border,
 };
+use super::paragraph::is_safe_attribute_name;
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
@@ -100,6 +101,76 @@ pub fn serialize_table_formatting(
     wrap_properties("w:tblPr", body.finish())
 }
 
+/// Attributes listing namespace prefixes, renamed with the prefixes they name.
+const PREFIX_LISTS: [&str; 5] = [
+    "Ignorable",
+    "MustUnderstand",
+    "ProcessContent",
+    "PreserveElements",
+    "PreserveAttributes",
+];
+
+/// The row's own attributes. A standard prefix the row binds to another
+/// namespace is renamed on the row, so cell content written under that prefix
+/// keeps resolving to the standard namespace. The alias occurs nowhere in the
+/// row or in `taken` (its serialized content and the bindings in scope), so it
+/// shadows no prefix the content resolves.
+fn row_attributes(attributes: &[RawAttribute], taken: &[&str]) -> Vec<(String, String)> {
+    let used = |candidate: &str| {
+        taken.iter().any(|text| text.contains(candidate))
+            || attributes.iter().any(|attribute| {
+                attribute.name.contains(candidate) || attribute.value.contains(candidate)
+            })
+    };
+    let mut renamed = std::collections::HashMap::new();
+    for attribute in attributes {
+        if let Some(prefix) = attribute.name.strip_prefix("xmlns:")
+            && canonical_namespace(prefix)
+                .is_some_and(|namespace| namespace != attribute.value.trim())
+        {
+            let alias = (0..)
+                .map(|index| format!("{prefix}r{index}"))
+                .find(|candidate| {
+                    !used(candidate) && !renamed.values().any(|alias| alias == candidate)
+                })
+                .unwrap_or_default();
+            renamed.insert(prefix, alias);
+        }
+    }
+    let rename = |name: &str| match name.split_once(':') {
+        Some(("xmlns", prefix)) => renamed.get(prefix).map(|alias| format!("xmlns:{alias}")),
+        Some((prefix, local)) => renamed.get(prefix).map(|alias| format!("{alias}:{local}")),
+        None => renamed.get(name).cloned(),
+    };
+    attributes
+        .iter()
+        .filter(|attribute| is_safe_attribute_name(&attribute.name))
+        .map(|attribute| {
+            let lists_prefixes = !renamed.is_empty()
+                && attribute
+                    .name
+                    .split_once(':')
+                    .is_some_and(|(_, local)| PREFIX_LISTS.contains(&local));
+            let value = if lists_prefixes {
+                attribute
+                    .value
+                    .split_whitespace()
+                    .map(|token| rename(token).unwrap_or_else(|| token.to_owned()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                attribute.value.clone()
+            };
+            let name = if attribute.name.contains(':') {
+                rename(&attribute.name)
+            } else {
+                None
+            };
+            (name.unwrap_or_else(|| attribute.name.clone()), value)
+        })
+        .collect()
+}
+
 pub fn serialize_table_row(
     row: &TableRow,
     context: &mut SerializerContext,
@@ -109,12 +180,20 @@ pub fn serialize_table_row(
         row.property_changes.as_deref(),
         row.structural_change.as_ref(),
     );
-    let mut writer = XmlWriter::with_capacity(512);
-    writer.start_element("w:tr");
-    append_generated(&mut writer, &properties);
+    let mut content = properties;
     for cell in &row.cells {
-        append_generated(&mut writer, &serialize_table_cell(cell, context)?);
+        content.push_str(&serialize_table_cell(cell, context)?);
     }
+    let attributes = row_attributes(
+        row.extra_attributes.as_deref().unwrap_or_default(),
+        &[&content, context.document_root().unwrap_or_default()],
+    );
+    let mut writer = XmlWriter::with_capacity(512 + content.len());
+    writer.start_element("w:tr");
+    for (name, value) in &attributes {
+        writer.dynamic_attribute(name, value);
+    }
+    append_generated(&mut writer, &content);
     writer.end_element();
     Ok(writer.finish())
 }
@@ -541,6 +620,7 @@ mod tests {
             property_changes: None,
             column_widths: Some(vec![1008.0000000000001]),
             rows: vec![TableRow {
+                extra_attributes: None,
                 node_type: "tableRow".to_owned(),
                 formatting: None,
                 property_changes: None,
@@ -560,6 +640,131 @@ mod tests {
         assert_eq!(
             serialize_table(&table, &mut context()).unwrap(),
             "<w:tbl><w:tblPr><w:tblStyle w:val=\"bad&quot;/&gt;&lt;evil&amp;\"/><w:tblW w:w=\"1008\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"1008\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"
+        );
+    }
+
+    #[test]
+    fn a_row_rebinding_a_standard_prefix_keeps_it_off_cell_content() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14", "value": "urn:custom"},
+                {"name": "w14:keep", "value": "row"}
+            ],
+            "cells": [{"type": "tableCell", "content": [
+                {"type": "paragraph", "paraId": "1A2B3C4D", "content": []}
+            ]}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(r#"<w:tr xmlns:w14r0="urn:custom" w14r0:keep="row">"#),
+            "{xml}"
+        );
+        assert!(xml.contains(r#"<w:p w14:paraId="1A2B3C4D""#), "{xml}");
+        assert!(!xml.contains("xmlns:w14="), "{xml}");
+    }
+
+    #[test]
+    fn a_row_alias_skips_prefixes_its_cells_use_from_an_ancestor() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14", "value": "urn:row"},
+                {"name": "w14:keep", "value": "row"}
+            ],
+            "cells": [{"type": "tableCell", "content": [{
+                "type": "paragraph",
+                "extraAttributes": [{"name": "w14r0:tag", "value": "cell"}],
+                "content": []
+            }]}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(r#"<w:tr xmlns:w14r1="urn:row" w14r1:keep="row">"#),
+            "{xml}"
+        );
+        assert!(xml.contains(r#"w14r0:tag="cell""#), "{xml}");
+        assert!(!xml.contains("xmlns:w14r0="), "{xml}");
+    }
+
+    #[test]
+    fn a_nested_row_alias_skips_an_outer_row_binding_its_cells_use() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14r0", "value": "urn:outer"},
+                {"name": "w14r0:keep", "value": "outer"}
+            ],
+            "cells": [{"type": "tableCell", "content": [{
+                "type": "table",
+                "rows": [{
+                    "type": "tableRow",
+                    "extraAttributes": [
+                        {"name": "xmlns:w14", "value": "urn:inner"},
+                        {"name": "w14:keep", "value": "inner"}
+                    ],
+                    "cells": [{"type": "tableCell", "content": [{
+                        "type": "paragraph",
+                        "extraAttributes": [{"name": "w14r0:from", "value": "outer"}],
+                        "content": []
+                    }]}]
+                }]
+            }]}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(r#"<w:tr xmlns:w14r0="urn:outer" w14r0:keep="outer">"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<w:tr xmlns:w14r1="urn:inner" w14r1:keep="inner">"#),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("xmlns:w14r0=").count(), 1, "{xml}");
+    }
+
+    #[test]
+    fn a_renamed_row_prefix_is_renamed_in_its_compatibility_lists() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14", "value": "urn:row"},
+                {"name": "mc:Ignorable", "value": "w14 x"},
+                {"name": "mc:ProcessContent", "value": "w14:wrap"},
+                {"name": "w14:keep", "value": "row"}
+            ],
+            "cells": [{"type": "tableCell", "content": []}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(
+                r#"<w:tr xmlns:w14r0="urn:row" mc:Ignorable="w14r0 x" mc:ProcessContent="w14r0:wrap" w14r0:keep="row">"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_saved_row_alias_is_written_back_unchanged() {
+        let row: TableRow = serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "extraAttributes": [
+                {"name": "xmlns:w14r0", "value": "urn:custom"},
+                {"name": "w14r0:keep", "value": "row"}
+            ],
+            "cells": [{"type": "tableCell", "content": [
+                {"type": "paragraph", "paraId": "1A2B3C4D", "content": []}
+            ]}]
+        }))
+        .unwrap();
+        let xml = serialize_table_row(&row, &mut context()).unwrap();
+        assert!(
+            xml.starts_with(r#"<w:tr xmlns:w14r0="urn:custom" w14r0:keep="row">"#),
+            "{xml}"
         );
     }
 

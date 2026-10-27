@@ -1,5 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { toast } from 'sonner';
+import { createT, deepMerge, en } from '@betteroffice/docx-i18n';
+import type { LocaleStrings, Translations } from '@betteroffice/docx-i18n';
 import type { HyperlinkData, useHyperlinkDialog } from '../../dialogs/HyperlinkDialog';
 import type { HyperlinkPopupData } from '../../ui/HyperlinkPopup';
 import type { YrsEditorCommand } from '../yrsCommands';
@@ -19,12 +21,18 @@ export function useHyperlinkActions({
   openPopup,
   applyCommand,
   focusActiveEditor,
+  i18n,
 }: {
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
   openPopup: () => void;
   applyCommand: (source: HyperlinkSource, command: YrsEditorCommand) => void;
   focusActiveEditor: () => void;
+  i18n?: Translations;
 }) {
+  const t = useMemo(() => createT(
+    deepMerge(en as Record<string, unknown>, i18n as Record<string, unknown> | undefined) as LocaleStrings,
+    typeof i18n?._lang === 'string' ? i18n._lang : 'en'
+  ), [i18n]);
   const [hyperlinkPopupData, setHyperlinkPopupData] = useState<HyperlinkPopupData | null>(null);
 
   const handleHyperlinkSubmit = useCallback(
@@ -101,8 +109,8 @@ export function useHyperlinkActions({
     });
     setHyperlinkPopupData(null);
     focusActiveEditor();
-    toast('Link removed');
-  }, [applyCommand, focusActiveEditor, hyperlinkPopupData]);
+    toast(t('editor.linkRemoved'));
+  }, [applyCommand, focusActiveEditor, hyperlinkPopupData, t]);
 
   const handleHyperlinkPopupClose = useCallback(() => {
     setHyperlinkPopupData(null);

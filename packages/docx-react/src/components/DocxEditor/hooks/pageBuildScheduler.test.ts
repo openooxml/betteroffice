@@ -74,16 +74,21 @@ test('the frame fallback skips busy frames and cancellation stops the deferred f
 test('urgent work runs from a timer within the budget without waiting for idle time', async () => {
   let idleRequests = 0;
   globalThis.requestIdleCallback = (() => ++idleRequests) as typeof requestIdleCallback;
+  const clock = spyOn(performance, 'now').mockReturnValue(100);
   const remaining: number[] = [];
-  await new Promise<void>((resolve) => {
-    scheduleIdlePageBuild((deadline) => {
-      remaining.push(deadline.timeRemaining());
-      resolve();
-    }, true);
-  });
-  expect(idleRequests).toBe(0);
-  expect(remaining[0]).toBeGreaterThan(0);
-  expect(remaining[0]).toBeLessThanOrEqual(8);
+  try {
+    await new Promise<void>((resolve) => {
+      scheduleIdlePageBuild((deadline) => {
+        remaining.push(deadline.timeRemaining());
+        resolve();
+      }, true);
+    });
+    expect(idleRequests).toBe(0);
+    expect(remaining[0]).toBeGreaterThan(0);
+    expect(remaining[0]).toBeLessThanOrEqual(8);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 test('the frame fallback still runs, within the budget, when animation frames are held', async () => {
@@ -96,14 +101,21 @@ test('the frame fallback still runs, within the budget, when animation frames ar
     return id;
   };
   globalThis.cancelAnimationFrame = (id) => { held.delete(id); };
-  const remaining = await new Promise<number>((resolve) => {
-    scheduleIdlePageBuild((deadline) => resolve(deadline.timeRemaining()));
-  });
-  expect(remaining).toBeGreaterThan(0);
-  expect(remaining).toBeLessThanOrEqual(8);
-  expect(held.size).toBe(0);
-  let runs = 0;
-  scheduleIdlePageBuild(() => { runs += 1; }).cancel();
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  expect(runs).toBe(0);
+  let now = 100;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  try {
+    const remaining = await new Promise<number>((resolve) => {
+      scheduleIdlePageBuild((deadline) => resolve(deadline.timeRemaining()));
+      now += 200;
+    });
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(8);
+    expect(held.size).toBe(0);
+    let runs = 0;
+    scheduleIdlePageBuild(() => { runs += 1; }).cancel();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(runs).toBe(0);
+  } finally {
+    clock.mockRestore();
+  }
 });

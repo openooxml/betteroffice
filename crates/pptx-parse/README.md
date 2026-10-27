@@ -10,7 +10,7 @@ relationship graph resolved. `parse_pptx_with_limits` takes explicit
 `write_pptx` re-zips the retained parts, so every part's bytes survive a round
 trip unchanged and parts the engine does not model are carried through as-is.
 The ZIP container itself is rebuilt, so the output is not byte-identical to the
-input — do not rely on it for package hashes or signature validation.
+input. Do not rely on it for package hashes or signature validation.
 
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx).
 

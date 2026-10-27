@@ -17,7 +17,7 @@ globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
   }
   return realSetTimeout(...args);
 }) as typeof setTimeout;
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 globalThis.setTimeout = realSetTimeout;
 const originalLoad = pptxPeerlessEditorLoader.load;
 const capabilities = new Map<string, PropertyDescriptor | undefined>();
@@ -47,7 +47,7 @@ afterAll(async () => {
 });
 
 function surface(label: string): SurfaceModule {
-  return { PeerlessPptxSurface: () => <div data-testid="loaded-peerless-surface">{label}</div> };
+  return { PeerlessPptxSurface: () => <div data-testid="loaded-worker-surface">{label}</div> };
 }
 
 function chunk() {
@@ -67,14 +67,14 @@ test('a cold chunk commits the surface without advancing reveal timers', async (
   document.body.append(container);
   const commits: string[] = [];
   const view = render(<Profiler id="cold" onRender={() => {
-    commits.push(container.querySelector('[data-testid="loaded-peerless-surface"]') ? 'surface' : 'loading');
+    commits.push(container.querySelector('[data-testid="loaded-worker-surface"]') ? 'surface' : 'loading');
   }}><PptxEditor {...props} className="cold-editor" /></Profiler>, { container });
   expect(view.getByRole('status').outerHTML).toBe('<div class="cold-editor" role="status">Preparing test editor</div>');
   expect(commits.every((commit) => commit === 'loading')).toBe(true);
   const loadingCommits = commits.length;
   pending.resolve(surface('Cold editor'));
   for (let turn = 0; turn < 6; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
-  expect(view.queryByTestId('loaded-peerless-surface')?.textContent).toBe('Cold editor');
+  expect(view.queryByTestId('loaded-worker-surface')?.textContent).toBe('Cold editor');
   expect(commits.slice(loadingCommits)).toEqual(['surface']);
   expect(revealDelays).toEqual([]);
   expect(load).toHaveBeenCalledTimes(1);
@@ -96,7 +96,7 @@ for (const outcome of ['resolve', 'reject'] as const) {
         update(next);
       }];
     }) as typeof React.useState);
-    const Surface = mock(() => <span data-testid="loaded-peerless-surface">Unmounted editor</span>);
+    const Surface = mock(() => <span data-testid="loaded-worker-surface">Unmounted editor</span>);
     const view = render(<PptxEditor {...props} onError={onError} />);
     expect(view.getByRole('status').textContent).toBe('Preparing test editor');
     view.unmount();
@@ -120,8 +120,8 @@ test('StrictMode chunk loading renders one surface', async () => {
   expect(load.mock.calls.length).toBeGreaterThanOrEqual(1);
   expect(load.mock.calls.length).toBeLessThanOrEqual(2);
   await act(async () => { pending.resolve(surface('Strict editor')); });
-  expect(view.queryAllByTestId('loaded-peerless-surface')).toHaveLength(1);
-  expect(view.getByTestId('loaded-peerless-surface').textContent).toBe('Strict editor');
+  expect(view.queryAllByTestId('loaded-worker-surface')).toHaveLength(1);
+  expect(view.getByTestId('loaded-worker-surface').textContent).toBe('Strict editor');
 });
 
 for (const change of ['loader', 'file'] as const) {
@@ -137,13 +137,13 @@ for (const change of ['loader', 'file'] as const) {
     view.rerender(<PptxEditor {...next} onError={onError} />);
     expect(view.getByRole('status').textContent).toBe('Preparing test editor');
     await act(async () => { current.resolve(surface('Current editor')); });
-    expect(view.queryByTestId('loaded-peerless-surface')?.textContent).toBe('Current editor');
+    expect(view.queryByTestId('loaded-worker-surface')?.textContent).toBe('Current editor');
     await act(async () => { stale.reject(new TypeError('Stale chunk failure')); });
-    expect(view.queryByTestId('loaded-peerless-surface')?.textContent).toBe('Current editor');
+    expect(view.queryByTestId('loaded-worker-surface')?.textContent).toBe('Current editor');
     expect(onError).not.toHaveBeenCalled();
     view.unmount();
     const remount = render(<PptxEditor {...next} onError={onError} />);
-    expect(remount.queryByTestId('loaded-peerless-surface')?.textContent).toBe('Current editor');
+    expect(remount.queryByTestId('loaded-worker-surface')?.textContent).toBe('Current editor');
     expect(load).toHaveBeenCalledTimes(change === 'file' ? 2 : 1);
   });
 }
@@ -154,7 +154,7 @@ test('a successful chunk renders synchronously on remount without a preparing fa
   const first = render(<PptxEditor {...props} />);
   expect(first.getByRole('status').textContent).toBe('Preparing test editor');
   await act(async () => { pending.resolve(surface('Loaded editor')); });
-  expect(first.getByTestId('loaded-peerless-surface').textContent).toBe('Loaded editor');
+  expect(first.getByTestId('loaded-worker-surface').textContent).toBe('Loaded editor');
   first.unmount();
 
   const container = document.createElement('div');
@@ -165,7 +165,7 @@ test('a successful chunk renders synchronously on remount without a preparing fa
     if (status) preparingCommits.push(status.textContent ?? '');
   }}><PptxEditor {...props} /></Profiler>, { container });
   expect(preparingCommits).toEqual([]);
-  expect(second.queryByTestId('loaded-peerless-surface') !== null).toBe(true);
+  expect(second.queryByTestId('loaded-worker-surface') !== null).toBe(true);
   expect(second.queryByRole('status') === null).toBe(true);
   await act(async () => {});
   expect(preparingCommits).toEqual([]);
@@ -180,22 +180,57 @@ test('a failed chunk reports its error and retries the same loader on remount', 
   spyOn(console, 'error').mockImplementation(() => {});
   const failed = render(<StrictMode><PptxEditor {...props} onError={onError} /></StrictMode>);
   await waitFor(() => expect(failed.queryByRole('alert') !== null).toBe(true));
-  expect(failed.getByRole('alert').textContent).toContain('Remount the editor to retry');
+  expect(failed.getByRole('alert').textContent).toContain('Reload the page to retry');
   expect(onError).toHaveBeenCalledTimes(1);
   expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
   expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'chunk-load-failed', cause });
   failed.unmount();
 
   const retry = render(<PptxEditor {...props} onError={onError} />);
-  await waitFor(() => expect(retry.queryByTestId('loaded-peerless-surface')?.textContent).toBe('Retry opened'));
+  await waitFor(() => expect(retry.queryByTestId('loaded-worker-surface')?.textContent).toBe('Retry opened'));
   expect(load).toHaveBeenCalledTimes(2);
   expect(onError).toHaveBeenCalledTimes(1);
+});
+
+test('a failed chunk offers a page reload, since the browser keeps failing the same chunk URL', async () => {
+  const specifier = './worker/PeerlessPptxSurface.js';
+  const failedFetches = new Set<string>();
+  const imported: string[] = [];
+  let online = false;
+  const importModule = (url: string): Promise<SurfaceModule> => {
+    imported.push(url);
+    if (!online || failedFetches.has(url)) {
+      failedFetches.add(url);
+      return Promise.reject(new TypeError(`Failed to fetch dynamically imported module: ${url}`));
+    }
+    return Promise.resolve(surface('Loaded editor'));
+  };
+  spyOn(pptxPeerlessEditorLoader, 'load').mockImplementation(() => importModule(specifier));
+  const reload = spyOn(window.location, 'reload').mockImplementation(() => {});
+  const onError = mock((_error: Error) => {});
+  spyOn(console, 'error').mockImplementation(() => {});
+  const view = render(<PptxEditor {...props} onError={onError} />);
+  await waitFor(() => expect(view.queryByTestId('pptx-error') !== null).toBe(true));
+  const alert = view.getByTestId('pptx-error');
+  expect(alert.dataset.failure).toBe('load');
+  expect(alert.querySelector('strong')?.textContent).toBe("The editor couldn't load");
+  expect(alert.textContent).toContain('Check your connection, then reload the page.');
+  expect(alert.querySelector('pre')?.textContent).toBe('Failed to load the editor code. Reload the page to retry.');
+  expect(view.queryByRole('button', { name: 'Retry' })).toBeNull();
+  online = true;
+  await expect(importModule(specifier)).rejects.toThrow(specifier);
+  imported.length = 0;
+  await act(async () => { fireEvent.click(view.getByRole('button', { name: 'Reload page' })); });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(imported).toEqual([]);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
 });
 
 test('a replacement loader gets a fresh chunk after an earlier loader succeeds', async () => {
   const firstLoad = spyOn(pptxPeerlessEditorLoader, 'load').mockResolvedValue(surface('First loader'));
   const first = render(<PptxEditor {...props} />);
-  await waitFor(() => expect(first.queryByTestId('loaded-peerless-surface')?.textContent).toBe('First loader'));
+  await waitFor(() => expect(first.queryByTestId('loaded-worker-surface')?.textContent).toBe('First loader'));
   first.unmount();
 
   const pending = chunk();
@@ -203,9 +238,9 @@ test('a replacement loader gets a fresh chunk after an earlier loader succeeds',
   pptxPeerlessEditorLoader.load = replacement;
   const second = render(<PptxEditor {...props} />);
   expect(second.getByRole('status').textContent).toBe('Preparing test editor');
-  expect(second.queryByTestId('loaded-peerless-surface') === null).toBe(true);
+  expect(second.queryByTestId('loaded-worker-surface') === null).toBe(true);
   expect(replacement).toHaveBeenCalledTimes(1);
   await act(async () => { pending.resolve(surface('Replacement loader')); });
-  expect(second.getByTestId('loaded-peerless-surface').textContent).toBe('Replacement loader');
+  expect(second.getByTestId('loaded-worker-surface').textContent).toBe('Replacement loader');
   expect(firstLoad).toHaveBeenCalledTimes(1);
 });

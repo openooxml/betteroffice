@@ -23,7 +23,7 @@ export function Editor({ file }: { file: File }) {
 ```
 
 Import the stylesheet once at the application entry, page, or layout level. Use a browser-only
-component when integrating with server rendering.
+component when integrating with server rendering. See [hosting](https://docs.betteroffice.dev/docs/migrating-to-0-5#hosting) for worker, chunk and CSP needs.
 
 ## Key options
 
@@ -58,11 +58,13 @@ All props below are optional. Omit the document source to show the placeholder.
 | `memoryBudget` | `DocxMemoryBudget` | Memory pressure thresholds and an optional worker allocation limit. |
 | `onMemoryPressure` | `(pressure: DocxMemoryPressure) => void` | Receive memory pressure level changes. |
 
-Deprecated: `legacySyncApi` opts into the synchronous hybrid runtime and is removed in 0.6.0;
+Deprecated: `legacySyncApi` keeps the synchronous API and is removed in 0.6.0;
 omit it to use the default async editor.
 
-Deprecated: `onChange`; use `onDocumentChange` for version notifications. `experimentalWorkerOpen` is
-deprecated too; the worker editor is the default.
+`onChange` receives a full `Document` and works only with `legacySyncApi`. The default worker editor
+refuses it, shows an error in place of the document, and reports the error through `onError`. Use
+`onDocumentChange` for version notifications. `experimentalWorkerOpen={false}` is deprecated; the
+worker editor is the default.
 
 ## Editor ref
 
@@ -77,8 +79,8 @@ Use `readPositionAtPoint(clientX, clientY)` for a versioned text target at viewp
 Use `scrollToParagraph(paraId)` for async paragraph navigation. Both support the default worker
 runtime.
 
-Deprecated: `getPositionAtPoint` and `scrollToParaId`; use `readPositionAtPoint` and
-`scrollToParagraph`, respectively.
+`getPositionAtPoint` and `scrollToParaId` throw `DocxSyncApiError` on the default editor; use
+`readPositionAtPoint` and `scrollToParagraph`.
 
 ## Host saves
 

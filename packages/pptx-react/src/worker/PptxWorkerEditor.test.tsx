@@ -1,11 +1,14 @@
+import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { StrictMode } from 'react';
-import * as pptx from '@betteroffice/pptx/editor';
+import * as pptx from '@betteroffice/pptx';
+import * as pptxWorker from '@betteroffice/pptx/worker';
+import type { DeckSnapshot, SlideDisplayList, StorySnapshot } from '@betteroffice/pptx';
 import type {
-  DeckSnapshot, PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation,
-  PptxWorkerEditorSession, PptxWorkerEditorState, SlideDisplayList, StorySnapshot,
-} from '@betteroffice/pptx';
+  PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorSession,
+  PptxWorkerEditorState,
+} from '@betteroffice/pptx/worker';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxWorkerViewerApi } from '../PptxEditor';
 import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
@@ -292,7 +295,7 @@ test('readOnly_flip_during_hydration_keeps_preparing_input_visibly_refused', asy
   const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
   await waitFor(() => expect(view.getByTestId('pptx-worker-status')).toBeDefined());
   fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
-  expect(errors).toHaveBeenCalledWith(expect.any(pptx.PptxPeerNotReadyError));
+  expect(errors).toHaveBeenCalledWith(expect.any(pptxWorker.PptxPeerNotReadyError));
   expect(value.methods).toEqual([]);
   view.rerender(<PptxEditor legacySyncApi fonts={[]} file={file} experimentalWorkerOpen readOnly onReady={ready} onError={errors} />);
   expect(ready).not.toHaveBeenCalled();
@@ -660,7 +663,7 @@ test('replacement_preserves_old_recovery', async () => {
   view.rerender(<PptxEditor legacySyncApi fonts={[]} file={new Uint8Array([2])} experimentalWorkerOpen onReady={(ready) => { api = ready; }} />);
   await waitFor(() => expect(api).not.toBe(retired));
   expect(await act(() => retired.recoverySave())).toEqual({ bytes: new TextEncoder().encode('xold'), recovery: true });
-  await act(() => expect(retired.saveAsync()).rejects.toBeInstanceOf(pptx.PptxWorkerEditorDisposedError));
+  await act(() => expect(retired.saveAsync()).rejects.toBeInstanceOf(pptxWorker.PptxWorkerEditorDisposedError));
   view.unmount();
   expect((await act(() => retired.recoverySave())).bytes).toEqual(new TextEncoder().encode('xold'));
 });
@@ -695,4 +698,87 @@ test('proposal_visuals_and_slideshow_refuse_with_reason', async () => {
   expect(view.queryByTestId('pptx-canvas-review-toolbar')).toBeNull();
   expect(value.access).not.toHaveProperty('exportMarkdown');
   expect(value.access).not.toHaveProperty('exportStructured');
+});
+
+for (const change of ['unmount', 'file'] as const) {
+  test(`pending font failures belong to the open worker editor after ${change}`, async () => {
+    const first = session();
+    const next = session();
+    open(first).mockReturnValueOnce(first.owner).mockReturnValue(next.owner);
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+    const failures: (() => void)[] = [];
+    class PendingFace {
+      load() {
+        return new Promise<never>((_resolve, reject) => {
+          failures.push(() => reject(new Error('Font blocked')));
+        });
+      }
+    }
+    Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: PendingFace });
+    const errors = mock((_error: Error) => {});
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const ready = mock(() => {});
+    const fonts = [{ family: 'Pending', bytes: Uint8Array.of(1) }];
+    const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
+      experimentalWorkerOpen onError={errors} onReady={ready} />;
+    const replacement = file.slice();
+    const view = render(ui(file));
+    try {
+      await waitFor(() => expect(failures).toHaveLength(1));
+      if (change === 'unmount') view.unmount();
+      else {
+        view.rerender(ui(replacement));
+        await waitFor(() => expect(failures).toHaveLength(2));
+      }
+      await act(async () => { failures[0]!(); });
+      expect(errors).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      if (change === 'file') {
+        await act(async () => { failures[1]!(); });
+        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+        await act(async () => { view.rerender(ui(replacement)); });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(errors).not.toHaveBeenCalled();
+      }
+    } finally {
+      warn.mockRestore();
+      view.unmount();
+      for (const fail of failures) fail();
+      if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+      else Reflect.deleteProperty(globalThis, 'FontFace');
+    }
+  });
+}
+
+test('failed fonts warn once per file across rerenders', async () => {
+  const value = session();
+  const next = session();
+  open(value).mockReturnValueOnce(value.owner).mockReturnValue(next.owner);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'FontFace');
+  class FailedFace {
+    async load() { throw new Error('Font blocked'); }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: FailedFace });
+  const fonts = [{ family: 'Failed', bytes: Uint8Array.of(1) }];
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const errors = mock((_error: Error) => {});
+  const ui = (bytes: Uint8Array) => <PptxEditor legacySyncApi file={bytes} fonts={fonts}
+    experimentalWorkerOpen onError={errors} />;
+  const view = render(ui(file));
+  try {
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+    expect(warn).toHaveBeenCalledWith(FONT_FALLBACK_MESSAGE);
+    await act(async () => { view.rerender(ui(file)); });
+    expect(warn).toHaveBeenCalledTimes(1);
+    await act(async () => { view.rerender(ui(file.slice())); });
+    await waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    warn.mockRestore();
+    if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
+    else Reflect.deleteProperty(globalThis, 'FontFace');
+  }
 });

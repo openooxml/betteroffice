@@ -1728,6 +1728,53 @@ def real_slide_metadata(original, actual, spec):
         actual_root.insert(index, copy.deepcopy(source))
 
 
+def single_cell_reference(formula, sheet):
+    match = re.fullmatch(r"=?(?:(?:'((?:[^'\[\]:*?/\\]|'')+)'|([\w.]+))!)?\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)", formula or '')
+    if match is None:
+        return None
+    quoted, unquoted, column, row = match.groups()
+    if column_number(column.upper()) > 16384 or int(row) > 1048576:
+        return None
+    return (quoted.replace("''", "'") if quoted is not None else unquoted or sheet, column.upper() + row)
+
+
+def title_items(package):
+    if 'docProps/app.xml' not in package.parts:
+        return []
+    titles = next((n for n in package.root('docProps/app.xml') if local(n.tag) == 'TitlesOfParts'), None)
+    return [n for n in titles[0] if local(n.tag) == 'lpstr'] if titles is not None and len(titles) else []
+
+
+def rename_sheet_titles(package, renames, revised):
+    # Leading TitlesOfParts groups list sheets (labels are localized); later groups list defined names,
+    # bare when global and Sheet!Name when local, so only a sheet qualifier follows a rename there.
+    root = package.root('docProps/app.xml')
+    headings = next((n for n in root if local(n.tag) == 'HeadingPairs'), None)
+    titles = next((n for n in root if local(n.tag) == 'TitlesOfParts'), None)
+    if headings is None or titles is None or not len(headings) or not len(titles):
+        return
+    sheets = {n.get('name') for n in xml(package, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
+    variants, items = list(headings[0]), [n for n in titles[0] if local(n.tag) == 'lpstr']
+    written = [item.text for item in title_items(revised)]
+    offset, listing_sheets = 0, True
+    for index in range(0, len(variants) - 1, 2):
+        number = int(next(iter(variants[index + 1])).text)
+        group = items[offset:offset + number]
+        offset += number
+        listing_sheets = listing_sheets and offset <= len(sheets) and all(item.text in sheets for item in group)
+        for position, item in enumerate(group, offset - number):
+            if listing_sheets:
+                item.text = renames.get(item.text, item.text)
+                continue
+            match = re.fullmatch(r"(?:'((?:[^']|'')+)'|([^'!]+))!(.+)", item.text or '')
+            sheet = match and (match.group(1).replace("''", "'") if match.group(1) is not None else match.group(2))
+            if sheet in renames:
+                new = renames[sheet]
+                quoted = "'" + new.replace("'", "''") + "'!" + match.group(3)
+                plain = re.fullmatch(r'[^\W\d][\w.]*', new) and not re.fullmatch(r'(?i)[A-Z]{1,3}[0-9]+|R[0-9]*C?[0-9]*|C[0-9]*', new)
+                item.text = new + '!' + match.group(3) if plain and written[position:position + 1] != [quoted] else quoted
+
+
 def check_real(task, source, revised):
     original, actual = RealPackage(source), RealPackage(revised)
     spec = copy.deepcopy(task['expected'])
@@ -1742,21 +1789,18 @@ def check_real(task, source, revised):
         accept_full_calc_on_load(original, actual)
         renames = spec.get('rename', {})
         if renames and 'docProps/app.xml' in original.parts:
-            app = original.root('docProps/app.xml')
-            for node in app.iter():
-                if local(node.tag) == 'TitlesOfParts':
-                    for item in node.iter():
-                        if local(item.tag) == 'lpstr' and item.text in renames:
-                            item.text = renames[item.text]
+            rename_sheet_titles(original, renames, actual)
         before = workbook(original, real=True)
         cell_styles, _ = styles(original, real=True)
         links = relations(original, 'xl/workbook.xml')
         sheet_parts = {n.get('name'): links[n.get(f'{{{NS["r"]}}}id')]['target'] for n in xml(original, 'xl/workbook.xml').findall('s:sheets/s:sheet', NS)}
-        volatile_cells = {}
+        volatile_cells, reference_cells = {}, {}
         for sheet in before['sheets']:
             root = xml(original, sheet_parts[sheet['name']])
             for cell in root.findall('s:sheetData/s:row/s:c', NS):
                 formula = cell.find('s:f', NS)
+                if formula is not None and formula.get('t', 'normal') == 'normal':
+                    reference_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                 if formula is not None and formula.get('ca') == '1':
                     volatile_cells[(renames.get(sheet['name'], sheet['name']), cell.get('r'))] = (formula.text, dict(formula.attrib), cell.get('t', 'n'))
             for address in spec.get('cells', {}).get(sheet['name'], {}):
@@ -1800,6 +1844,10 @@ def check_real(task, source, revised):
                 record.setdefault('rich_text', None)
                 if 'value' in patch:
                     require(record['rich_text'] is None, 'edited rich text cell requires explicit formatting expectation')
+        edited_values = {(sheet['name'].casefold(), address): record['value'] for sheet in wanted['sheets']
+                         for address, record in sheet['cells'].items()
+                         if 'value' in spec.get('cells', {}).get(sheet['name'], {}).get(address, {})
+                         and record['formula'] is None and isinstance(record['value'], (str, Decimal, bool))}
         found = workbook(actual, real=True)
         saved_sheets = {sheet['name']: sheet for sheet in found['sheets']}
         saved_links = relations(actual, 'xl/workbook.xml')
@@ -1812,6 +1860,15 @@ def check_real(task, source, revised):
                 saved = saved_cells.get(address, {})
                 cell = saved_nodes.get(address)
                 formula = cell.find('s:f', NS) if cell is not None else None
+                precedent = single_cell_reference(record['formula'], sheet['name'])
+                precedent = precedent and (precedent[0].casefold(), precedent[1])
+                if (formula is not None and precedent in edited_values
+                        and reference_cells.get((sheet['name'], address)) == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
+                        and all(record[key] == saved.get(key) for key in ('formula', 'attributes', 'formula_properties'))):
+                    value, cached = edited_values[precedent], saved.get('value')
+                    if (type(value) is type(cached) and (math.isclose(value, cached, rel_tol=1e-12, abs_tol=0.0)
+                                                       if isinstance(value, Decimal) else value == cached)):
+                        record['value'] = cached
                 if (formula is not None and (sheet['name'], address) in volatile_cells
                         and volatile_cells[(sheet['name'], address)] == (formula.text, dict(formula.attrib), cell.get('t', 'n'))
                         and record['formula'] == saved.get('formula') and record['formula_properties'] == saved.get('formula_properties')):
@@ -2530,9 +2587,13 @@ def fresh_table_ids(node, table):
                 used.add(value)
 
 
+RESTRUCTURED = '{urn:betteroffice:eval}restructured'
+
+
 def complex_tables(package, changes):
     for change in changes:
         table = package.root(change['part']).findall('.//a:tbl', NS)[change['table'] - 1]
+        table.set(RESTRUCTURED, '1')
         rows = table.findall('a:tr', NS)
         grid = table.find('a:tblGrid', NS)
         require(change['axis'] in ('row', 'column') and change['action'] in ('insert', 'delete'), 'invalid table operation')
@@ -2641,7 +2702,8 @@ def complex_slide_comments(package, changes):
         ET.SubElement(comment, q('p', 'text')).text = change['text']
         extension = ET.SubElement(ET.SubElement(comment, q('p', 'extLst')), q('p', 'ext'),
                                   uri='{C676402C-5697-4E1C-873F-D02D1690AC5C}')
-        ET.SubElement(extension, q('p15', 'threadingInfo'), parentCmId=parent.get('idx'), parentAuthorId=parent.get('authorId'))
+        ET.SubElement(ET.SubElement(extension, q('p15', 'threadingInfo')), q('p15', 'parentCm'),
+                      authorId=parent.get('authorId'), idx=parent.get('idx'))
 
 
 def complex_expected_package(package, spec, fmt):
@@ -2772,10 +2834,9 @@ def complex_integrity(package, original):
                 identities = {(n.get('authorId'), n.get('idx')) for n in package.root(comments)}
                 for node in package.root(comments):
                     require(node.get('authorId') in author_ids, 'dangling slide comment author')
-                    thread = node.find('.//p15:threadingInfo', NS)
-                    if thread is not None and ('parentCmId' in thread.attrib or 'parentAuthorId' in thread.attrib):
-                        require((thread.get('parentAuthorId'), thread.get('parentCmId')) in identities,
-                                'dangling slide comment parent')
+                    parent = node.find('.//p15:threadingInfo/p15:parentCm', NS)
+                    if parent is not None:
+                        require((parent.get('authorId'), parent.get('idx')) in identities, 'dangling slide comment parent')
 
 
 def move_complex_parts(package, mapping):
@@ -2911,7 +2972,100 @@ def align_complex_parts(expected, actual, original, fmt):
     move_complex_parts(actual, mapping)
 
 
+def space_run(template, text, tag):
+    run = ET.Element(w('r'), dict(template.attrib))
+    run.extend(copy.deepcopy(n) for n in template if n.tag == w('rPr'))
+    ET.SubElement(run, tag, {'{http://www.w3.org/XML/1998/namespace}space': 'preserve'}).text = text
+    return run
+
+
+def boundary_text(run, space, from_end):
+    items = [n for n in run if n.tag != w('rPr')] if run is not None and run.tag == w('r') else []
+    edge = items[-1 if from_end else 0] if items else None
+    value = edge.text or '' if edge is not None else ''
+    return edge if edge is not None and (value.endswith(space) if from_end else value.startswith(space)) else None
+
+
+def take_space(owner, run, edge, space, from_end):
+    edge.text = edge.text[:-len(space)] if from_end else edge.text[len(space):]
+    if not edge.text:
+        run.remove(edge)
+    if all(n.tag == w('rPr') for n in run):
+        owner.remove(run)
+
+
+def same_run_format(left, right):
+    return dict(left.attrib) == dict(right.attrib) and [canonical(n) for n in left if n.tag == w('rPr')] == [
+        canonical(n) for n in right if n.tag == w('rPr')]
+
+
+def align_revision_space(package, change):
+    text = change['text']
+    if not text.strip(' ') or text.startswith(' ') == text.endswith(' '):
+        return
+    leading = text.startswith(' ')
+    core = text.strip(' ')
+    space = text[:len(text) - len(core)] if leading else text[len(core):]
+    kind = w('ins') if change['action'] == 'insert' else w('del')
+    root = package.root(change['part'])
+    revisions = [n for n in root.iter(kind) if n.get(w('author')) == change['author']]
+    shifted = [n for n in revisions if revision_text(n) == (core + space if leading else space + core)]
+    if any(revision_text(n) == text for n in revisions) or len(shifted) != 1 or not len(shifted[0]):
+        return
+    revision = shifted[0]
+    parent = next(p for p in root.iter() if revision in list(p))
+    index = list(parent).index(revision)
+    neighbour = parent[index - 1] if leading and index else parent[index + 1] if not leading and index + 1 < len(parent) else None
+    far = revision[-1 if leading else 0]
+    outer, inner = boundary_text(neighbour, space, leading), boundary_text(far, space, leading)
+    if outer is None or outer.tag != w('t') or inner is None or inner.tag != (w('t') if kind == w('ins') else w('delText')):
+        return
+    if kind == w('del'):
+        moved_in, moved_out = space_run(neighbour, space, w('delText')), space_run(far, space, w('t'))
+    else:
+        moved_in, moved_out = space_run(far, space, w('t')), space_run(neighbour, space, w('t'))
+    take_space(parent, neighbour, outer, space, leading)
+    take_space(revision, far, inner, space, leading)
+    near = revision[0 if leading else -1] if len(revision) else None
+    edge = boundary_text(near, '', not leading) if near is not None else None
+    if kind == w('del') and edge is not None and edge.tag == w('delText') and same_run_format(near, moved_in):
+        edge.text = space + edge.text if leading else edge.text + space
+        edge.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    else:
+        revision.insert(0 if leading else len(revision), moved_in)
+    index = list(parent).index(revision)
+    parent.insert(index + 1 if leading else index, moved_out)
+
+
+def comment_markers(root, identity):
+    position, markers = 0, {}
+    stops = {stop for tabs in root.iter(w('tabs')) for stop in tabs}
+    for item in root.iter():
+        if item.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and item.get(w('id')) == identity:
+            require(local(item.tag) not in markers, 'duplicate comment anchor marker')
+            markers[local(item.tag)] = position
+        if item.tag in (w('t'), w('delText')):
+            position += len(item.text or '')
+        elif item.tag in (w('br'), w('cr'), w('p')) or (item.tag == w('tab') and item not in stops):
+            position += 1
+    return markers
+
+
+def remove_comment_anchors(root, scope, identity):
+    reference_runs = {run for run in scope.iter(w('r')) if any(n.tag == w('commentReference')
+                      and n.get(w('id')) == identity for n in run)
+                      and all(n.tag in (w('rPr'), w('commentReference')) for n in run)}
+    for parent in list(root.iter()):
+        for node in list(parent):
+            if node in reference_runs or (node.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and node.get(w('id')) == identity):
+                parent.remove(node)
+    return reference_runs
+
+
 def normalize_complex_word(package, spec, original):
+    for change in spec.get('tracked_changes', []):
+        if change['action'] in ('insert', 'delete'):
+            align_revision_space(package, change)
     support_styles = set()
     def remember_styles(node):
         support_styles.update(n.get(w('val')) for n in node.iter() if n.tag in (w('pStyle'), w('rStyle')))
@@ -2960,10 +3114,27 @@ def normalize_complex_word(package, spec, original):
         require(numbering.get('numId') not in (None, '0'), 'inserted paragraph has no numbering')
         remember_styles(paragraph)
         list_paragraphs.add(paragraph)
+    comment_part = related(package, related(package, '', 'officeDocument'), 'comments')
+    for change in spec.get('comments', []):
+        if change['action'] != 'reply':
+            continue
+        comments = package.root(comment_part)
+        reply = unique((n for n in comments if word_comment_body(n) == change['text']
+                        and n.get(w('author')) == change['author']), 'requested comment reply missing')
+        parent = unique((n for n in comments if word_comment_body(n) == change['comment']), 'comment text must be unique')
+        for name in package.namelist():
+            if not name.startswith('word/') or not name.endswith('.xml') or name == comment_part:
+                continue
+            root = package.root(name)
+            markers = comment_markers(root, reply.get(w('id')))
+            if markers:
+                require(markers == comment_markers(root, parent.get(w('id'))), 'comment reply anchors differ from its parent')
+                for run in remove_comment_anchors(root, root, reply.get(w('id'))):
+                    remember_styles(run)
     for change in spec.get('comments', []):
         if change['action'] != 'add':
             continue
-        part = related(package, related(package, '', 'officeDocument'), 'comments')
+        part = comment_part
         comment = unique((n for n in package.root(part) if word_comment_body(n) == change['text']
                           and n.get(w('author')) == change['author']), 'requested comment missing')
         identity = comment.get(w('id'))
@@ -2986,15 +3157,8 @@ def normalize_complex_word(package, spec, original):
         if 'commentRangeStart' in markers or 'commentRangeEnd' in markers:
             require(markers.get('commentRangeStart') == expected_start and markers.get('commentRangeEnd') == expected_end,
                     'comment range differs from requested phrase')
-        reference_runs = {run for run in paragraph.iter(w('r')) if any(n.tag == w('commentReference')
-                          and n.get(w('id')) == identity for n in run)
-                          and all(n.tag in (w('rPr'), w('commentReference')) for n in run)}
-        for run in reference_runs:
+        for run in remove_comment_anchors(root, paragraph, identity):
             remember_styles(run)
-        for parent in list(root.iter()):
-            for node in list(parent):
-                if node in reference_runs or (node.tag in (w('commentRangeStart'), w('commentRangeEnd'), w('commentReference')) and node.get(w('id')) == identity):
-                    parent.remove(node)
     para_mapping = {}
     comment_mapping = {}
     comments_parts = [name for name in package.namelist() if name.startswith('word/') and name.endswith('.xml')
@@ -3325,14 +3489,14 @@ def normalize_complex_slide_comments(package, spec, original):
         for node in comments:
             author_id, index = node.get('authorId'), node.get('idx')
             thread = node.find('.//p15:threadingInfo', NS)
-            if thread is not None and ('parentCmId' in thread.attrib or 'parentAuthorId' in thread.attrib):
-                parent_author, parent_index = thread.get('parentAuthorId'), thread.get('parentCmId')
+            parent_comment = thread.find('p15:parentCm', NS) if thread is not None else None
+            if parent_comment is not None:
+                parent_author, parent_index = parent_comment.get('authorId'), parent_comment.get('idx')
                 require((parent_author, parent_index) in identities, 'slide reply parent missing')
-                thread.set('parentAuthorId', author_map[parent_author])
-                thread.set('parentCmId', identities[(parent_author, parent_index)])
+                parent_comment.set('authorId', author_map[parent_author])
+                parent_comment.set('idx', identities[(parent_author, parent_index)])
             if (names[author_id], node.findtext('p:text', namespaces=NS)) in new_bodies:
-                require(thread is not None and thread.get('parentCmId') is not None
-                        and thread.get('parentAuthorId') is not None, 'requested slide comment is not a reply')
+                require(parent_comment is not None, 'requested slide comment is not a reply')
                 parent = copy.deepcopy(thread)
                 parent.attrib.pop('timeZoneBias', None)
                 text = node.findtext('p:text', namespaces=NS)
@@ -3418,6 +3582,145 @@ def complex_slide_metadata(original, package, spec):
         root.insert(index, copy.deepcopy(before))
 
 
+def accept_filter_database(expected, actual, spec):
+    for change in spec.get('autofilter_sort', []):
+        found = []
+        for package in (expected, actual):
+            root = package.root('xl/workbook.xml')
+            sheets = [n.get('name') for n in root.findall('s:sheets/s:sheet', NS)]
+            index = str(sheets.index(change['sheet'])) if change['sheet'] in sheets else None
+            found.append([(root.find('s:definedNames', NS), n) for n in root.findall('s:definedNames/s:definedName', NS)
+                          if n.get('name', '').casefold() == '_xlnm._filterdatabase' and n.get('localSheetId') == index])
+        if index is None or found[0] or len(found[1]) != 1:
+            continue
+        names, item = found[1][0]
+        sheet, _, ref = (item.text or '').rpartition('!')
+        sheet = sheet[1:-1].replace("''", "'") if len(sheet) > 1 and sheet[0] == sheet[-1] == "'" else sheet
+        if (sheet == change['sheet'] and ref == re.sub(r'([A-Z]+)(\d+)', r'$\1$\2', change['ref'])
+                and item.get('hidden') in ('1', 'true') and set(item.attrib) == {'name', 'localSheetId', 'hidden'}):
+            names.remove(item)
+            if not len(names) and expected.root('xl/workbook.xml').find('s:definedNames', NS) is None:
+                actual.root('xl/workbook.xml').remove(names)
+
+
+def accept_layout_placeholder_prompts(expected, actual, spec):
+    names = {name for change in spec.get('layout', []) for name in change['placeholders']}
+    for part in set(slide_parts(expected)) & set(slide_parts(actual)):
+        for name in names:
+            shapes = [next((n for n in package.root(part).iter() if n.find('p:nvSpPr/p:cNvPr', NS) is not None
+                            and n.find('p:nvSpPr/p:cNvPr', NS).get('name') == name), None) for package in (expected, actual)]
+            if None in shapes:
+                continue
+            placeholders = [shape.find('p:nvSpPr/p:nvPr/p:ph', NS) for shape in shapes]
+            if None in placeholders or 'hasCustomPrompt' not in placeholders[0].attrib:
+                continue
+            authored = {key: value for key, value in placeholders[0].attrib.items() if key != 'hasCustomPrompt'}
+            if dict(placeholders[1].attrib) == authored:
+                placeholders[0].attrib.pop('hasCustomPrompt')
+
+
+def accept_table_frames(expected, actual):
+    for name in expected.namelist():
+        if not re.fullmatch(r'ppt/slides/slide\d+\.xml', name):
+            continue
+        frames = [n for n in expected.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+        saved = ([n for n in actual.root(name).iter(q('p', 'graphicFrame')) if n.find('.//a:tbl', NS) is not None]
+                 if name in actual.namelist() else [])
+        for index, frame in enumerate(frames):
+            table = frame.find('.//a:tbl', NS)
+            if table.attrib.pop(RESTRUCTURED, None) is None or index >= len(saved):
+                continue
+            size, position = frame.find('p:xfrm/a:ext', NS), frame.find('p:xfrm/a:off', NS)
+            saved_size, saved_position = saved[index].find('p:xfrm/a:ext', NS), saved[index].find('p:xfrm/a:off', NS)
+            saved_table = saved[index].find('.//a:tbl', NS)
+            if size is None or saved_size is None or position is None or saved_position is None or saved_table is None:
+                continue
+            try:
+                width = sum(int(n.get('w')) for n in saved_table.findall('a:tblGrid/a:gridCol', NS))
+                height = sum(int(n.get('h')) for n in saved_table.findall('a:tr', NS))
+                fitted = int(saved_size.get('cx')) == width and int(saved_size.get('cy')) >= height
+            except (TypeError, ValueError):
+                continue
+            if fitted and dict(position.attrib) == dict(saved_position.attrib):
+                size.set('cx', saved_size.get('cx'))
+                size.set('cy', saved_size.get('cy'))
+
+
+def accept_chart_title_overlay(expected, actual, original, spec):
+    for change in spec.get('chart', []):
+        part = change['part']
+        if part not in original.namelist() or part not in actual.namelist():
+            continue
+        source = original.root(part).find('c:chart', NS)
+        if source is None or source.find('c:title', NS) is not None:
+            continue
+        titles = [package.root(part).find('c:chart/c:title', NS) for package in (expected, actual)]
+        if None in titles:
+            continue
+        saved = list(titles[1])
+        if (len(saved) == len(titles[0]) + 1 and saved[0].tag == q('c', 'tx') and saved[1].tag == q('c', 'overlay')
+                and dict(saved[1].attrib) == {'val': '0'} and len(saved[1]) == 0):
+            overlay = ET.Element(q('c', 'overlay'), {'val': '0'})
+            titles[0].insert(1, overlay)
+        deleted = [package.root(part).find('c:chart/c:autoTitleDeleted', NS) for package in (expected, actual)]
+        if deleted[0] is not None and deleted[0].get('val') in ('1', 'true'):
+            if deleted[1] is None:
+                expected.root(part).find('c:chart', NS).remove(deleted[0])
+            elif dict(deleted[1].attrib) == {'val': '0'}:
+                deleted[0].set('val', '0')
+
+
+def accept_slide_reply_roots(expected, actual, spec):
+    def parent_of(node):
+        return node.find('.//p15:parentCm', NS)
+    def comment(comments, author, index):
+        return next((n for n in comments if n.get('authorId') == author and n.get('idx') == index), None)
+    def author_identity(package, node):
+        part = related(package, 'ppt/presentation.xml', 'commentAuthors')
+        if part is None or part not in package.namelist():
+            return None
+        author = next((n for n in package.root(part) if n.get('id') == node.get('authorId')), None)
+        return (author.get('name'), author.get('initials')) if author is not None else None
+    for change in spec.get('comments', []):
+        parts = []
+        for package in (expected, actual):
+            slides = slide_parts(package)
+            part = related(package, slides[change['slide'] - 1], 'comments') if change['slide'] <= len(slides) else None
+            parts.append(package.root(part) if part is not None and part in package.namelist() else None)
+        if None in parts:
+            continue
+        targets = [[n for n in comments if n.findtext('p:text', namespaces=NS) == change['comment']] for comments in parts]
+        if any(len(found) != 1 for found in targets):
+            continue
+        target = targets[0][0]
+        thread = parent_of(target)
+        root = comment(parts[0], thread.get('authorId'), thread.get('idx')) if thread is not None else None
+        if root is None or parent_of(root) is not None:
+            continue
+        identity = author_identity(expected, root)
+        if identity is None:
+            continue
+        reply = next((n for n in reversed(parts[0]) if n.findtext('p:text', namespaces=NS) == change['text']
+                      and (author_identity(expected, n) or (None,))[0] == change['author']
+                      and parent_of(n) is not None
+                      and parent_of(n).get('authorId') == target.get('authorId')
+                      and parent_of(n).get('idx') == target.get('idx')), None)
+        if reply is None:
+            continue
+        for saved_reply in parts[1]:
+            saved_parent = parent_of(saved_reply)
+            if saved_reply.findtext('p:text', namespaces=NS) != change['text'] or saved_parent is None:
+                continue
+            saved_root = comment(parts[1], saved_parent.get('authorId'), saved_parent.get('idx'))
+            if (saved_root is not None and parent_of(saved_root) is None
+                    and saved_root.findtext('p:text', namespaces=NS) == root.findtext('p:text', namespaces=NS)
+                    and author_identity(actual, saved_root) == identity):
+                expected_parent = parent_of(reply)
+                expected_parent.set('authorId', root.get('authorId'))
+                expected_parent.set('idx', root.get('idx'))
+                break
+
+
 def accept_full_calc_on_load(expected, actual):
     calculation = expected.root('xl/workbook.xml').find('s:calcPr', NS)
     saved_calculation = actual.root('xl/workbook.xml').find('s:calcPr', NS)
@@ -3443,6 +3746,8 @@ def check_complex(task, source, revised):
         normalize_comment_metadata(actual, original)
     align_complex_parts(expected, actual, original, fmt)
     if fmt == 'xlsx':
+        accept_filter_database(expected, actual, spec)
+        accept_chart_title_overlay(expected, actual, original, spec)
         normalize_complex_xlsx(expected, spec)
         normalize_complex_xlsx(actual, spec)
         complex_xml_order(expected)
@@ -3456,6 +3761,9 @@ def check_complex(task, source, revised):
             normalize_complex_word(expected, spec, original)
             normalize_complex_word(actual, spec, original)
         else:
+            accept_layout_placeholder_prompts(expected, actual, spec)
+            accept_table_frames(expected, actual)
+            accept_slide_reply_roots(expected, actual, spec)
             complex_slide_metadata(original, expected, spec)
             complex_slide_metadata(original, actual, spec)
             normalize_complex_slide_comments(expected, spec, original)

@@ -167,7 +167,7 @@ fn optional(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<f64, E
     match args.get(index) {
         Some(arg) if !omitted(arg) => match crate::eval::evaluate(arg, ctx) {
             CellValue::Empty => Ok(0.0),
-            value => crate::eval::to_number(&value),
+            value => ctx.number(&value),
         },
         _ => Ok(0.0),
     }

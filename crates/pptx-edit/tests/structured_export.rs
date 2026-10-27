@@ -818,6 +818,7 @@ fn text_anchors_agree_with_batch_reads() {
             };
             assert_eq!((range.start, range.end), (expected.start, expected.end));
             assert_eq!(paragraph.paragraph_id, expected.paragraph_id);
+            assert_eq!(paragraph.list, expected.list);
             for run in &paragraph.runs {
                 let PptxAnchor::Range(range) = &run.anchor else {
                     panic!("run anchors are text ranges")
@@ -1820,4 +1821,259 @@ fn text_and_metadata_stay_inert_in_markdown_and_html_tables() {
     assert!(markdown.contains(
         "<p>Tall&lt;/a&gt;&lt;script&gt;alert(1)&lt;/script&gt;<br> <br> &lt;img src=x onerror=alert(1)&gt;</p>"
     ));
+}
+
+fn read_facts_deck(shapes: &str, show: &str) -> Vec<u8> {
+    let mut entries = parts();
+    let slide = format!(
+        r#"<p:sld {NS} {show}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld></p:sld>"#
+    );
+    entries
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap()
+        .1 = slide.into_bytes();
+    ooxml_opc::rezip_parts(&entries).unwrap()
+}
+
+#[test]
+fn read_content_effective_lists_match_export() {
+    let mut shapes = String::new();
+    for (id, name, paragraphs) in [
+        (
+            2,
+            "Decimal",
+            (0..3)
+                .map(|_| numbered("arabicPeriod", None, "item"))
+                .collect::<String>(),
+        ),
+        (
+            3,
+            "Alpha",
+            (0..2)
+                .map(|_| numbered("alphaLcParenR", None, "item"))
+                .collect(),
+        ),
+        (
+            4,
+            "Roman",
+            (0..2)
+                .map(|_| numbered("romanUcPeriod", Some(4), "item"))
+                .collect(),
+        ),
+        (
+            5,
+            "Levels",
+            [0, 1, 1, 0, 1]
+                .into_iter()
+                .map(|level| {
+                    numbered("arabicPeriod", None, "item")
+                        .replace("<a:pPr>", &format!(r#"<a:pPr lvl="{level}">"#))
+                })
+                .collect(),
+        ),
+        (
+            6,
+            "Bullet",
+            format!(
+                r#"<a:p><a:pPr><a:buChar char="•"/></a:pPr>{}</a:p><a:p><a:pPr><a:buNone/></a:pPr>{}</a:p>"#,
+                run("bullet"),
+                run("plain")
+            ),
+        ),
+    ] {
+        shapes.push_str(&text_shape(id, name, "", &paragraphs));
+    }
+    let bytes = read_facts_deck(&shapes, "");
+    let session = DeckSession::open(&bytes, 901).unwrap();
+    let read = session
+        .read_content(&ReadRequest::default())
+        .unwrap()
+        .unwrap();
+    let exported = session_export(&session, json!({}));
+    for (name, scheme, start_at, values, markers) in [
+        (
+            "Decimal",
+            "arabicPeriod",
+            1,
+            vec![1, 2, 3],
+            vec!["1.", "2.", "3."],
+        ),
+        ("Alpha", "alphaLcParenR", 1, vec![1, 2], vec!["a)", "b)"]),
+        ("Roman", "romanUcPeriod", 4, vec![4, 5], vec!["IV.", "V."]),
+        (
+            "Levels",
+            "arabicPeriod",
+            1,
+            vec![1, 1, 2, 2, 1],
+            vec!["1.", "1.", "2.", "2.", "1."],
+        ),
+    ] {
+        let shape = read.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap();
+        let story = read
+            .stories
+            .iter()
+            .find(|story| story.shape_id == shape.id)
+            .unwrap();
+        let expected = find(&exported.slides[0].shapes, name).unwrap();
+        for ((paragraph, exported), (value, marker)) in story
+            .paragraphs
+            .iter()
+            .zip(&expected.stories[0].paragraphs)
+            .zip(values.into_iter().zip(markers))
+        {
+            assert_eq!(
+                paragraph.list,
+                Some(ExportList::Number {
+                    scheme: scheme.to_owned(),
+                    start_at,
+                    value,
+                    marker: Some(marker.to_owned())
+                })
+            );
+            assert_eq!(paragraph.paragraph_id, exported.paragraph_id);
+            assert_eq!(paragraph.list, exported.list);
+        }
+        assert_eq!(story.paragraphs.len(), expected.stories[0].paragraphs.len());
+    }
+    let shape = read.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Bullet")
+        .unwrap();
+    let story = read
+        .stories
+        .iter()
+        .find(|story| story.shape_id == shape.id)
+        .unwrap();
+    assert_eq!(
+        story.paragraphs[0].list,
+        Some(ExportList::Bullet {
+            character: "•".to_owned(),
+            font: None
+        })
+    );
+    assert_eq!(story.paragraphs[1].list, None);
+    for (paragraph, expected) in story
+        .paragraphs
+        .iter()
+        .zip(&find(&exported.slides[0].shapes, "Bullet").unwrap().stories[0].paragraphs)
+    {
+        assert_eq!(paragraph.list, expected.list);
+    }
+}
+
+#[test]
+fn read_content_inherits_layout_and_master_numbering() {
+    for from_layout in [false, true] {
+        let shape = placeholder_shape(
+            2,
+            "Inherited",
+            r#"<p:ph type="body" idx="1"/>"#,
+            &format!("<a:p>{}</a:p><a:p>{}</a:p>", run("one"), run("two")),
+        );
+        let mut entries = ooxml_opc::unzip_parts(&read_facts_deck(&shape, ""))
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let path = if from_layout {
+            "ppt/slideLayouts/slideLayout1.xml"
+        } else {
+            "ppt/slideMasters/slideMaster1.xml"
+        };
+        let xml = String::from_utf8(entries.get(path).unwrap().clone()).unwrap();
+        let xml = if from_layout {
+            xml.replace("<a:lstStyle/>", r#"<a:lstStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod"/></a:lvl1pPr></a:lstStyle>"#)
+        } else {
+            xml.replace(
+                r#"<a:buChar char="•"/>"#,
+                r#"<a:buAutoNum type="arabicPeriod"/>"#,
+            )
+        };
+        entries.insert(path.to_owned(), xml.into_bytes());
+        let bytes = ooxml_opc::rezip_parts(&entries.into_iter().collect::<Vec<_>>()).unwrap();
+        let session = DeckSession::open(&bytes, 902).unwrap();
+        let read = session
+            .read_content(&ReadRequest::default())
+            .unwrap()
+            .unwrap();
+        let exported = session_export(&session, json!({}));
+        let expected = find(&exported.slides[0].shapes, "Inherited").unwrap();
+        let story = read
+            .stories
+            .iter()
+            .find(|story| story.slide_id == read.slides[0].id)
+            .unwrap();
+        assert_eq!(story.paragraphs.len(), 2);
+        for (index, (paragraph, expected)) in story
+            .paragraphs
+            .iter()
+            .zip(&expected.stories[0].paragraphs)
+            .enumerate()
+        {
+            assert_eq!(
+                paragraph.list,
+                Some(ExportList::Number {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 1,
+                    value: index as u32 + 1,
+                    marker: Some(format!("{}.", index + 1))
+                })
+            );
+            assert_eq!(paragraph.list, expected.list);
+        }
+    }
+}
+
+#[test]
+fn read_content_slide_title_visibility_and_layout() {
+    for (placeholder, text, expected_title) in [
+        (Some("title"), "Heading", Some("Heading")),
+        (Some("ctrTitle"), "Centered", Some("Centered")),
+        (Some("title"), "First\nSecond", Some("First\nSecond")),
+        (None, "Text", None),
+        (Some("title"), "", None),
+        (Some("title"), "\n", None),
+    ] {
+        for (show, hidden) in [(r#"show="0""#, Some(true)), (r#"show="1""#, Some(false))] {
+            let paragraphs = text
+                .split('\n')
+                .map(|text| format!("<a:p>{}</a:p>", run(text)))
+                .collect::<String>();
+            let shape = match placeholder {
+                Some(kind) => placeholder_shape(
+                    2,
+                    "Heading",
+                    &format!(r#"<p:ph type="{kind}"/>"#),
+                    &paragraphs,
+                ),
+                None => text_shape(2, "Text", "", &paragraphs),
+            };
+            let session = DeckSession::open(&read_facts_deck(&shape, show), 903).unwrap();
+            let state = session.encode_state_as_update_v1();
+            let read = session
+                .read_content(&ReadRequest::default())
+                .unwrap()
+                .unwrap();
+            let slide = &read.slides[0];
+            assert_eq!(slide.title.as_deref(), expected_title);
+            assert_eq!(slide.hidden, hidden);
+            assert_eq!(
+                slide.hidden,
+                session_export(&session, json!({"includeHiddenSlides": true})).slides[0].hidden
+            );
+            let layout = slide.layout.as_ref().unwrap();
+            assert_eq!(layout.name.as_deref(), Some("Content"));
+            assert_eq!(layout.r#type.as_deref(), Some("obj"));
+            let json = serde_json::to_value(slide).unwrap();
+            assert_eq!(json["title"], json!(expected_title));
+            assert_eq!(json["hidden"], json!(hidden));
+            assert_eq!(json["layout"], json!({"name": "Content", "type": "obj"}));
+            assert_eq!(session.encode_state_as_update_v1(), state);
+        }
+    }
 }

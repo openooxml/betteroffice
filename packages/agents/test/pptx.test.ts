@@ -438,7 +438,7 @@ test('PPTX maps layout placeholders atomically and preview matches export', asyn
     expect(() => apply(deck, [{ op: 'set_notes', slide: target.slide, text: 'rollback' }, { op: 'set_slide_layout', slide: target.slide, layout: layout.id, placeholders: [{ shape: target.shape, layoutPlaceholder: 'missing' }] }])).toThrow();
     expect(deck.overview().version).toBe(outline.version);
     const result = apply(deck, [{ op: 'set_slide_layout', slide: target.slide, layout: 'Title Only', placeholders: [{ shape: target.shape, layoutPlaceholder: 'Heading' }] }]);
-    expect(result.results[0]).toMatchObject({ layoutId: layout.id, layoutName: 'Title Only', mapping: [{ shape: target.shape, layoutPlaceholder: '8' }] });
+    expect(result.results[0]).toMatchObject({ layoutId: layout.id, layoutName: 'Title Only', placeholders: [{ shape: target.shape, layoutPlaceholder: '8' }] });
     expect(() => deck.edit({ version: outline.version, edits: [{ op: 'set_slide_layout', slide: target.slide, layout: layout.id }] })).toThrow('Deck changed');
     const preview = await deck.preview(target.slide);
     const reopened = await openPptx(await deck.export());

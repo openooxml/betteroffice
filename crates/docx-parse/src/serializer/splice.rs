@@ -1104,7 +1104,7 @@ pub(crate) fn splice_section_story_part(
             replace_reasons,
         },
     )?;
-    super::section_patch::restore_sections(source, &spliced, &recorded.order)
+    super::section_patch::restore_sections(source, serialized, &spliced, recorded)
 }
 
 fn splice_story_part_inner(

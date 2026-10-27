@@ -4,7 +4,8 @@ import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { EditorToolbar, XlsxEditor, defineXlsxPlugin, type XlsxAsyncEditorApi, type XlsxPluginContext, type XlsxPluginSelection, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
-import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
+import { cellRect, openWorkbookSession, rangeRect, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import {
   CollaborationProvider,
   createAsyncCollaborationReplica,

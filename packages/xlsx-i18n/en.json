@@ -34,6 +34,7 @@
     "groups": {
       "search": "Search",
       "history": "History",
+      "file": "File",
       "print": "Print",
       "paintFormat": "Paint format",
       "zoom": "Zoom",
@@ -152,7 +153,20 @@
     "appLabel": "Spreadsheet editor",
     "demoCellText": "OpenOOXML xlsx",
     "openError": "Couldn't open this workbook",
+    "openErrorDescription": "The file may be damaged, or it uses something this editor can't read yet.",
+    "stoppedError": "The editor ran into a problem",
+    "stoppedErrorDescription": "Reopen the workbook to keep editing.",
+    "loadError": "The editor couldn't load",
+    "loadErrorDescription": "Check your connection, then reload the page.",
+    "reloadPage": "Reload page",
+    "showDetails": "Show details",
+    "openPrompt": "Open an XLSX file",
     "sheetTabsLabel": "Sheets"
+  },
+  "presence": {
+    "label": "Collaborators",
+    "unavailableSheet": "Unavailable sheet",
+    "peerOnSheet": "{name} ({sheet})"
   },
   "proposals": {
     "panelLabel": "Agent proposals",

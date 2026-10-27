@@ -632,6 +632,31 @@ describe('comment threads', () => {
     expect(again.listComments().find(comment => comment.id === reply.id)?.parentId).toBe('1');
   });
 
+  it('recovers reference formatting by comment id after loading existing state', async () => {
+    for (const style of ['CommentReference', 'NoteReference', undefined]) {
+      const properties = style ? `<w:rPr><w:rStyle w:val="${style}"/></w:rPr>` : '';
+      const body = BODY.replace('<w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>', properties);
+      const bytes = docx(body);
+      const session = await open(bytes, 91301);
+      const { commentId } = session.addComment([range(session, 0, 0, 5)], 'Editor', '', 'Reply');
+      session.updateComment(commentId, { parentId: '1' });
+      const fork = await createYrsSession({ clientId: 91302 });
+      sessions.push(fork);
+      fork.openDocx(bytes, false);
+      fork.loadState(session.encodeState());
+      for (const saver of [session, fork]) {
+        const saved = (await saveYrsDocx(saver)).bytes;
+        const xml = new TextDecoder().decode(unzipContainer(saved)['word/document.xml']);
+        const reopened = await open(saved, 91303);
+        const reply = reopened.listComments().find(comment => comment.parentId === '1')!;
+        for (const id of ['1', reply.id]) {
+          expect(xml).toContain(`<w:r>${properties}<w:commentReference w:id="${id}"/></w:r>`);
+        }
+        expect(xml).toContain(`<w:p w14:paraId="0C000003">${t('Closing words')}</w:p>`);
+      }
+    }
+  });
+
   it('maps replies to a parent added in the same session', async () => {
     const session = await open(docx(), 91206);
     const anchor = [range(session, 0, 0, 5)];

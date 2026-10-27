@@ -27,7 +27,7 @@ async function expectNoSelection(page: Page) {
   await expect(selectionBox(page)).toHaveCount(0);
   await expect(page.locator('[data-testid^="pptx-resize-"]')).toHaveCount(0);
   await expect(page.getByTestId('pptx-text-edit-outline')).toHaveCount(0);
-  await expect(page.getByTestId('pptx-peerless-caret')).toBeHidden();
+  await expect(page.getByTestId('pptx-caret')).toBeHidden();
   await expect(page.getByTestId('pptx-shape-fill')).toBeDisabled();
 }
 

@@ -307,7 +307,7 @@ describe('docx wasm collaboration', () => {
     }
   });
 
-  it('adapts remote provider updates into the resident worker protocol', async () => {
+  it('adapts remote provider updates into the document worker protocol', async () => {
     const [host, source] = await seededPair();
     const invalidations: Array<{ update: Uint8Array; selection: unknown }> = [];
     const workerReplica = createWorkerCollaborationReplica(host, {

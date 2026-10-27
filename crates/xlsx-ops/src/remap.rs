@@ -8,6 +8,7 @@ use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
 use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
+use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
     Workbook,
@@ -266,6 +267,9 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
     }
     if rewritten == previous {
         return Ok(None);
+    }
+    if defined_names_bytes(&rewritten) > MAX_DEFINED_NAME_BYTES {
+        return Err(OpError::TooManyDefinedNames);
     }
     wb.defined_names = rewritten;
     Ok(Some(Op::SetDefinedNames {
@@ -1974,18 +1978,18 @@ fn is_function_call(source: &str, token: &ParsedSheetToken) -> bool {
 
 /// Rewrites defined names through a sheet rename, dropping any whose formula
 /// names the old sheet as a bare token, where the intent cannot be resolved.
-/// Returns the inverse op when the list changed.
+/// Returns the rewritten list when it changed, leaving the workbook as is.
 pub(crate) fn rename_defined_names(
-    wb: &mut Workbook,
+    wb: &Workbook,
     old_name: &str,
     new_name: &str,
-) -> Option<Op> {
+) -> Result<Option<Vec<DefinedName>>, OpError> {
     if old_name == new_name || wb.defined_names.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let previous = wb.defined_names.clone();
+    let previous = &wb.defined_names;
     let mut rewritten: Vec<DefinedName> = Vec::with_capacity(previous.len());
-    for defined in &previous {
+    for defined in previous {
         let renamed = scan_sheet_rename(&defined.formula, old_name, new_name);
         if renamed.ambiguous {
             continue;
@@ -1994,13 +1998,13 @@ pub(crate) fn rename_defined_names(
         defined.formula = renamed.formula;
         rewritten.push(defined);
     }
-    if rewritten == previous {
-        return None;
+    if rewritten == *previous {
+        return Ok(None);
     }
-    wb.defined_names = rewritten;
-    Some(Op::SetDefinedNames {
-        defined_names: previous,
-    })
+    if defined_names_bytes(&rewritten) > MAX_DEFINED_NAME_BYTES {
+        return Err(OpError::TooManyDefinedNames);
+    }
+    Ok(Some(rewritten))
 }
 
 fn next_char_len(source: &str, index: usize) -> usize {
@@ -2610,6 +2614,7 @@ mod tests {
 
     fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
         wb.sheet_mut(sheet).unwrap().charts = vec![xlsx_model::SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
@@ -3782,9 +3787,8 @@ mod tests {
             let formula = format!("{function}(A1:A10)");
             let mut workbook = wb(&[function, "Other"]);
             workbook.defined_names = vec![defined("Total", &formula)];
-            let inverse = rename_defined_names(&mut workbook, function, "Renamed");
-            assert!(inverse.is_none(), "{formula} must not change");
-            assert_eq!(workbook.defined_names, vec![defined("Total", &formula)]);
+            let renamed = rename_defined_names(&workbook, function, "Renamed").unwrap();
+            assert!(renamed.is_none(), "{formula} must not change");
         }
     }
 
@@ -3799,10 +3803,9 @@ mod tests {
             defined("Quoted", "\"Data\""),
             defined("External", "[Book.xlsx]Data!$A$1"),
         ];
-        let inverse = rename_defined_names(&mut workbook, "Data", "New Data");
-        assert!(inverse.is_some());
+        let renamed = rename_defined_names(&workbook, "Data", "New Data").unwrap();
         assert_eq!(
-            workbook.defined_names,
+            renamed.unwrap(),
             vec![
                 defined("Qualified", "'New Data'!$A$1"),
                 defined("ThreeD", "'New Data:Other'!$A$1"),
@@ -3822,9 +3825,9 @@ mod tests {
             defined("Spaced", "SUM (A1:A10)"),
             defined("Quoted", "'SUM'"),
         ];
-        rename_defined_names(&mut workbook, "SUM", "Renamed");
+        let renamed = rename_defined_names(&workbook, "SUM", "Renamed").unwrap();
         assert_eq!(
-            workbook.defined_names,
+            renamed.unwrap(),
             vec![
                 defined("Callable", "SUM(Renamed!A1:A10)"),
                 defined("Spaced", "SUM (A1:A10)"),

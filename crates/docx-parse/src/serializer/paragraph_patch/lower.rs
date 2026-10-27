@@ -52,11 +52,15 @@ pub(super) struct Xml {
 
 impl Xml {
     pub fn parse(source: &str, namespaces: &BTreeMap<String, String>) -> Result<Self, Failure> {
+        #[cfg(test)]
+        super::work::add(source.len());
         let scanned = tags(source).ok_or_else(|| Failure::structure("malformed XML"))?;
         let mut nodes: Vec<Node> = Vec::new();
         let mut stack: Vec<(usize, BTreeMap<String, String>)> = Vec::new();
         let mut root_namespaces = BTreeMap::new();
         for tag in scanned {
+            #[cfg(test)]
+            super::work::add(1);
             if tag.end {
                 let (at, _) = stack
                     .pop()
@@ -135,7 +139,11 @@ impl Xml {
             .children
             .iter()
             .copied()
-            .filter(|at| self.nodes[*at].word(name))
+            .filter(|at| {
+                #[cfg(test)]
+                super::work::add(1);
+                self.nodes[*at].word(name)
+            })
             .collect();
         if children.len() > 1 {
             return Err(Failure::new(
@@ -206,6 +214,8 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
         return Err(Failure::structure("paragraph is not an editable w:p"));
     }
     for node in &xml.nodes {
+        #[cfg(test)]
+        super::work::add(1);
         let unsupported_word = node.namespace == WORD
             && matches!(
                 node.local.as_str(),
@@ -259,6 +269,8 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
 
 fn visit(source: &str, parent: usize, scope: usize, result: &mut Lowered) -> Result<(), Failure> {
     for at in result.xml.nodes[parent].children.clone() {
+        #[cfg(test)]
+        super::work::add(1);
         let node = &result.xml.nodes[at];
         if node.word("pPr") {
             continue;
@@ -298,6 +310,8 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
     let properties = result.xml.child(at, "rPr")?;
     let from = result.len;
     for child in result.xml.nodes[at].children.clone() {
+        #[cfg(test)]
+        super::work::add(1);
         let node = &result.xml.nodes[child];
         if node.word("rPr") {
             continue;
@@ -440,6 +454,8 @@ fn decoded_scalars(
     let mut cursor = span.start;
     let mut carriage_return = false;
     while cursor < span.end {
+        #[cfg(test)]
+        super::work::add(1);
         let end = if source.as_bytes()[cursor] == b'&' {
             cursor
                 + source[cursor..span.end]

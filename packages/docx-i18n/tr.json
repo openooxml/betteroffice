@@ -643,6 +643,7 @@
   },
   "errors": {
     "loadingDocument": "Belge yükleniyor...",
+    "stillOpening": null,
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "unableToParse": "Belge ayrıştırılamadı",

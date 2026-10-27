@@ -19,6 +19,7 @@ import type {
 } from '../display-list/types';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
+import { wrapLines, wrappedLineY } from './wrap';
 
 const PX_PER_PT = 96 / 72;
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
@@ -256,6 +257,14 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     paintRotatedText(ctx, cmd, cmd.rotationDeg);
   } else if (cmd.numberFormat) {
     paintNumberFormat(ctx, cmd, cmd.numberFormat, paintRun);
+  } else if (cmd.wrap) {
+    const wrap = cmd.wrap;
+    const align = cmd.align ?? 'left';
+    ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
+    const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
+    lines.forEach((line, index) => {
+      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, lines.length, wrap) }, line, cmd.x, align);
+    });
   } else {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];

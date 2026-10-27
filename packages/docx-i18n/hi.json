@@ -643,6 +643,7 @@
   },
   "errors": {
     "loadingDocument": "दस्तावेज़ लोड हो रहा है...",
+    "stillOpening": null,
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "unableToParse": "दस्तावेज़ का विश्लेषण करने में असमर्थ",

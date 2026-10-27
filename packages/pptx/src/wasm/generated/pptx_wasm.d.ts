@@ -27,9 +27,12 @@ export class PptxDocument {
     bringShapeToFrontJson(args: string): string;
     canRedo(): boolean;
     canUndo(): boolean;
+    checkTableEditJson(args: string): void;
     clearUpdateObservation(): void;
     commentsJson(): string;
     deleteSlideJson(args: string): string;
+    deleteTableColumnJson(args: string): string;
+    deleteTableRowJson(args: string): string;
     deleteTextJson(args: string): string;
     deleteTextProfiledJson(args: string): string;
     /**
@@ -60,6 +63,8 @@ export class PptxDocument {
     insertParagraphBreakJson(args: string): string;
     insertSlideJson(args: string): string;
     insertSlideProfiledJson(args: string): string;
+    insertTableColumnJson(args: string): string;
+    insertTableRowJson(args: string): string;
     insertTextJson(args: string): string;
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
@@ -75,6 +80,10 @@ export class PptxDocument {
      * fails — joining a room must not depend on carrying the right file.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    /**
+     * Opens a session that can exchange updates. It is not marked collaborative until
+     * `setCollaborative` is called.
+     */
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     static openPeerDeckJson(source: Uint8Array, identity_json: string, initial_update?: Uint8Array | null): PptxDocument;
     static openReplayBaseline(source: Uint8Array, client_id?: number | null, initial_update?: Uint8Array | null): PptxDocument;
@@ -107,6 +116,7 @@ export class PptxDocument {
     sendShapeBackwardJson(args: string): string;
     sendShapeToBackJson(args: string): string;
     sessionMetadataJson(): string;
+    setCollaborative(): void;
     setCommentFlavorJson(args: string): string;
     setCommentPositionJson(args: string): string;
     setCommentStatusJson(args: string): string;
@@ -224,10 +234,13 @@ export interface InitOutput {
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
+    readonly pptxdocument_checkTableEditJson: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
     readonly pptxdocument_clientId: (a: number) => number;
     readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_deleteTableColumnJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_deleteTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_documentVersion: (a: number) => [number, number];
@@ -243,6 +256,8 @@ export interface InitOutput {
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_insertTableColumnJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_insertTableRowJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
@@ -274,6 +289,7 @@ export interface InitOutput {
     readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sessionMetadataJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_setCollaborative: (a: number) => [number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];

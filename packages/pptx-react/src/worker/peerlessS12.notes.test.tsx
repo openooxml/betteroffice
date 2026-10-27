@@ -31,6 +31,26 @@ test('notes drafts queue behind typing in input order', async () => {
   expect(error).not.toHaveBeenCalled();
 });
 
+test('notes typed before a slide switch is acknowledged stay on their slide', async () => {
+  const error = mock(() => {});
+  const value = await open({ onError: error });
+  const second = value.client.state.slides[1]!.id;
+  const notes = () => value.view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement;
+  replyControl.hold();
+  try {
+    act(() => { void value.api.goToSlide(2); });
+    await waitFor(() => expect(replyControl.count()).toBe(1));
+    act(() => { fireEvent.change(notes(), { target: { value: 'First' } }); });
+    act(() => { replyControl.releaseNext(); });
+    await waitFor(() => expect(value.client.state.activeSlideId).toBe(second));
+    act(() => { fireEvent.change(notes(), { target: { value: `${notes().value}x` } }); });
+  } finally { replyControl.release(); }
+  await act(async () => { await value.api.flushPendingInput(); });
+  expect((await (await value.api.handleAsync()).snapshot()).slides.map((slide) => slide.notes ?? '')).toEqual(['First', 'x']);
+  await waitFor(() => expect(notes().value).toBe('x'));
+  expect(error).not.toHaveBeenCalled();
+});
+
 for (const method of ['setSlideNotes', 'addComment'] as const) {
   test(`typing queues behind an unacknowledged ${method}`, async () => {
     const error = mock(() => {});

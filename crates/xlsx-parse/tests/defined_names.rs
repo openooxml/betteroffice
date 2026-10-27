@@ -202,3 +202,83 @@ fn writer_preserves_inherited_namespaces_when_entries_redeclare_them() {
         }
     }
 }
+
+fn junk_names(count: usize) -> String {
+    (0..count)
+        .map(|index| match index % 3 {
+            0 => format!(r#"<definedName name="_junk{index}" hidden="1">#REF!</definedName>"#),
+            1 => format!(
+                r#"<definedName name="Area{index}" localSheetId="1" comment="a &amp; b">Other!$A${}</definedName>"#,
+                index % 1000 + 1
+            ),
+            _ => format!(r#"<definedName name="Wide{index}">Data!$A$1:$B$2</definedName>"#),
+        })
+        .collect()
+}
+
+fn entries(xml: &str) -> Vec<&str> {
+    let start = xml.find("<definedNames>").unwrap() + "<definedNames>".len();
+    let end = xml.find("</definedNames>").unwrap();
+    xml[start..end].split_inclusive("</definedName>").collect()
+}
+
+#[test]
+fn a_name_table_past_the_old_count_cap_opens_and_saves_every_entry_verbatim() {
+    const COUNT: usize = 66_391;
+    let names = junk_names(COUNT);
+    let (mut model, package) = source(Some(&names), false);
+    assert_eq!(model.defined_names.len(), COUNT);
+    assert!(model.defined_names[0].hidden);
+    assert_eq!(model.defined_names[1].local_sheet, Some(SheetId(1)));
+
+    let saved = save(&model, &package, &[Some(0), Some(1)], true).unwrap();
+    let xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+    assert!(xml.contains(&format!("<definedNames>{names}</definedNames>")));
+
+    model.defined_names[1].formula = "Other!$C$3".into();
+    let saved = save(&model, &package, &[Some(0), Some(1)], true).unwrap();
+    let xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+    let written = entries(&xml);
+    let source = names.split_inclusive("</definedName>").collect::<Vec<_>>();
+    assert_eq!(written.len(), source.len());
+    for (index, (written, source)) in written.iter().zip(&source).enumerate() {
+        if index != 1 {
+            assert_eq!(written, source, "entry {index}");
+        }
+    }
+    assert!(written[1].contains("comment=\"a &amp; b\""));
+    assert!(written[1].contains("Other!$C$3"));
+    let reopened = xlsx_parse::parse_workbook(&saved.into_iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(reopened.defined_names, model.defined_names);
+}
+
+#[test]
+fn a_name_table_past_the_byte_bound_is_refused() {
+    let formula = "1".repeat(64 * 1024);
+    let count = xlsx_parse::MAX_DEFINED_NAME_BYTES / formula.len() + 1;
+    let names = (0..count)
+        .map(|index| format!(r#"<definedName name="Big{index}">{formula}</definedName>"#))
+        .collect::<String>();
+    let mut model = Workbook::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let workbook = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap();
+    workbook.1 = String::from_utf8(workbook.1.clone())
+        .unwrap()
+        .replace(
+            "</workbook>",
+            &format!("<definedNames>{names}</definedNames></workbook>"),
+        )
+        .into_bytes();
+    assert_eq!(
+        xlsx_parse::parse_workbook(&parts).unwrap_err(),
+        ParseError::TooManyDefinedNames
+    );
+    assert!(matches!(
+        xlsx_parse::parse_workbook_with_package(&parts),
+        Err(ParseError::TooManyDefinedNames)
+    ));
+}

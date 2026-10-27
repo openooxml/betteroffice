@@ -253,6 +253,7 @@ field_key!(
     "anchorIndex" => AnchorIndex,
     "anchor" => Anchor,
     "refs" => Refs,
+    "rawXml" => RawXml,
 );
 
 field_key!(
@@ -340,6 +341,7 @@ impl<'de> Visitor<'de> for ChartSeed {
         let mut anchor_index = None;
         let mut anchor = None;
         let mut refs = None;
+        let mut raw_xml = None;
         while let Some(field) = map.next_key::<ChartField>()? {
             match field {
                 ChartField::Part => {
@@ -378,6 +380,15 @@ impl<'de> Visitor<'de> for ChartSeed {
                     }
                     refs = Some(map.next_value_seed(ChartRefsSeed)?);
                 }
+                ChartField::RawXml => {
+                    if raw_xml.is_some() {
+                        return Err(A::Error::duplicate_field("rawXml"));
+                    }
+                    raw_xml = Some(map.next_value_seed(BoundedOptionString {
+                        limit: xlsx_parse::MAX_TREE_BYTES,
+                        message: CHART_TOO_LARGE,
+                    })?);
+                }
                 ChartField::Other => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -389,6 +400,7 @@ impl<'de> Visitor<'de> for ChartSeed {
             return Err(A::Error::custom(CHART_UNNAMED));
         }
         Ok(SheetChart {
+            raw_xml: raw_xml.flatten(),
             part,
             drawing,
             anchor_index: anchor_index.ok_or_else(|| A::Error::missing_field("anchorIndex"))?,
@@ -732,6 +744,7 @@ mod tests {
 
     fn chart(refs: usize) -> SheetChart {
         SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_string(),
             drawing: "xl/drawings/drawing1.xml".to_string(),
             anchor_index: 0,
@@ -809,6 +822,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, anchor)| SheetChart {
+                raw_xml: None,
                 anchor,
                 anchor_index: index,
                 refs: kinds
@@ -911,6 +925,7 @@ mod tests {
     fn oversized_fields_are_refused() {
         let long = "a".repeat(MAX_CHART_FIELD_BYTES + 1);
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: long.clone(),
             ..chart(0)
         }];
@@ -918,6 +933,7 @@ mod tests {
         assert!(decode_charts(&json).unwrap_err().contains(CHART_TOO_LARGE));
 
         let charts = vec![SheetChart {
+            raw_xml: None,
             refs: vec![ChartRef {
                 kind: ChartRefKind::Values,
                 formula: long.clone(),
@@ -946,6 +962,7 @@ mod tests {
     #[test]
     fn malformed_and_semantically_invalid_payloads_are_refused() {
         let charts = vec![SheetChart {
+            raw_xml: None,
             part: String::new(),
             ..chart(0)
         }];

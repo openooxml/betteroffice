@@ -46,13 +46,14 @@ import type { Comment } from '../types/content';
 import type { Document, SectionProperties } from '../types/document';
 import type { DocxListStoriesResult } from './stories';
 import type { DocxCommentPatch } from './residentReview';
+import type { DocxSvgMedia } from './residentCommandProtocol';
 import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
-import { decodeDocxHostJson, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
+import { decodeDocxHostJson, forgetMaterializedSource, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
-import { tokenizeResidentDocument } from './residentSource';
+import { residentSvgSources, tokenizeResidentDocument } from './residentSource';
 import { partMetadata, withPartMetadata, readPartGeometry, type ResidentPartMetadata, type ResidentPartGeometry } from './residentParts';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
@@ -179,7 +180,7 @@ export type ResidentEngineSession = Pick<
    * A paragraph's `length` counts story units; its inline `controls` give each node's story
    * offset and display range. `selection` maps both ends to display positions.
    */
-  residentGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
+  storyGeometry(root: string, ranges: Array<[number, number]>, selection?: [YrsLoc, YrsLoc]): {
     paragraphs: Array<{ story: string; paraId: string; index: number; from: number; to: number; leading: number; length: number;
       controls?: Array<{ offset: number; from: number; to: number }> }>;
     tables: Array<{ story: string; tableIndex: number; from: number; to: number; at: YrsLoc;
@@ -188,7 +189,7 @@ export type ResidentEngineSession = Pick<
     selection: [number, number] | null;
   };
   /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
-  residentRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
+  storyRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
   clearCellSelection(): YrsLoc | null;
   controlTargets(): ResidentControlTarget[];
   repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
@@ -198,6 +199,8 @@ export type ResidentEngineSession = Pick<
   partStory(relationshipId: string): string;
   partGeometry(frame: RetainedFrame): ResidentPartGeometry[];
   propertyDocument(): Document;
+  /** The `w:next` style a paragraph break at `at` gives the new paragraph, or null to keep the split's own. */
+  nextParagraphStyle(at: YrsLoc): string | null;
   setPropertyDocument(document: Document): boolean;
   sectionProperties(): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
@@ -207,6 +210,8 @@ export type ResidentEngineSession = Pick<
   initializeComments(recovery?: ResidentCommentRecoveryState): void;
   commentRecoveryState?(): ResidentCommentRecoveryState;
   mediaDataUrl(token: string): string | null;
+  /** The pictures whose display copy is SVG, which a worker cannot decode. */
+  svgMedia?(): DocxSvgMedia[];
   /** @internal Typing echo model of one font at one shaping size; see `echo_glyph_set_json`. */
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
   /** @internal */
@@ -290,7 +295,11 @@ export async function createResidentEngineSession(
   let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
+  /** SVG pictures of a parsed document opened without media tokens, named by data URL. */
+  let parsedSvg: string[] = [];
   let parsedFacade: YrsSession | undefined;
+  /** The story revision the parsed document's projection memo last saw. */
+  let parsedStoryRevision = 0;
   const initializeComments = (recovery?: ResidentCommentRecoveryState) => {
     if (recovery) {
       commentAliases.clear();
@@ -618,8 +627,8 @@ export async function createResidentEngineSession(
       }
       return split.at;
     },
-    residentGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
-    residentRangeRects: (region, partId, ranges) => {
+    storyGeometry: (root, ranges, selection) => JSON.parse(session.resident_geometry_json(root, JSON.stringify({ ranges, selection }))),
+    storyRangeRects: (region, partId, ranges) => {
       const flat = session.display_range_rects_batch(region, partId, Float64Array.from(ranges.flat()));
       const batches: DisplayListRect[][] = [];
       for (let at = 0; at < flat.length;) {
@@ -813,6 +822,7 @@ export async function createResidentEngineSession(
       : session.edit_text_resident(...rangeArgs(range), undefined))),
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
+    nextParagraphStyle: at => session.next_paragraph_style(at.story, at.paraId, at.offset) ?? null,
     toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
       session.toggle_mark(...rangeArgs(range), JSON.stringify(mark))),
     formatRange: (range, delta) => applyCommandMutation(range.story, () =>
@@ -913,6 +923,7 @@ export async function createResidentEngineSession(
       geometryStories.clear();
       projectionStories.clear();
       parsedMedia.clear();
+      parsedSvg = options.mediaTokens && !options.initialUpdate ? [] : residentSvgSources(document);
       partBase = document;
       parsedFacade = wrapSession(session, clientId);
       const nativeMediaDataUrl = parsedFacade.mediaDataUrl;
@@ -930,18 +941,22 @@ export async function createResidentEngineSession(
       sectionsTouched = false;
       sectionLayout = null;
       markProjectionStories(session.story_ids());
+      parsedStoryRevision = syncStoryRevisions();
     },
     saveDocument: async (host, comments, record) => {
-      if (!parsedFacade || !partBase) throw new Error('The resident worker holds no parsed document');
+      if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
       const { noteYrsStoriesDirty, yrsToDocument } = await import('./yrsToDocument');
       const pending = projectionStories.capture();
-      noteYrsStoriesDirty(parsedFacade, pending.stories);
+      // The native stamps name each nested story a remote update, undo or redo changed.
+      const changed = storiesChangedSince(parsedStoryRevision);
+      noteYrsStoriesDirty(parsedFacade, [...pending.stories, ...changed.stories]);
       const document = yrsToDocument(parsedFacade, mergeDocxHostMetadata(record.base ?? partBase, host ?? partDocument()));
       const saved = await saveEditorDocument(parsedFacade, document, comments, record);
       document.originalBuffer = saved;
       record.base = document;
       pending.clear();
+      parsedStoryRevision = changed.revision;
       return saved;
     },
     openDocx: (bytes, digest, generation, seedStories = true) => {
@@ -950,6 +965,7 @@ export async function createResidentEngineSession(
       commentsImported = seedStories;
       geometryStories.clear();
       projectionStories.clear();
+      forgetMaterializedSource(session);
       const opened = session.open_docx(bytes, seedStories, generation, digest);
       const host = decodeDocxHostJson(opened, bytes).document;
       if (seedStories) seedDocxCommentMetadata(session, host.package.document.comments);
@@ -970,6 +986,7 @@ export async function createResidentEngineSession(
       commentsImported = true;
       geometryStories.clear();
       projectionStories.clear();
+      forgetMaterializedSource(session);
       const json =
         paragraphBudget === undefined
           ? session.open_docx_preview(bytes, blocks)
@@ -982,6 +999,21 @@ export async function createResidentEngineSession(
           );
     },
     mediaDataUrl: (token) => parsedMedia.get(token) ?? session.media_data_url(token) ?? null,
+    svgMedia: () => {
+      const svg = (url: string | undefined) => url?.startsWith('data:image/svg+xml') ? url : undefined;
+      const found: DocxSvgMedia[] = [];
+      for (const [source, url] of parsedMedia) if (svg(url)) found.push({ source, url });
+      for (const url of parsedSvg) found.push({ source: url, url });
+      for (let index = 0; ; index += 1) {
+        const source = `media:${index}`;
+        const type = session.media_type(source);
+        if (type === undefined) break;
+        if (type !== 'image/svg+xml' || parsedMedia.has(source)) continue;
+        const url = svg(session.media_data_url(source));
+        if (url) found.push({ source, url });
+      }
+      return found;
+    },
     encodeState: () => session.encode_state(),
     encodePeerMetadata: () => {
       const peerSession = session as typeof session & { encode_peer_metadata?: () => Uint8Array };
@@ -1136,6 +1168,7 @@ export async function createResidentEngineSession(
       storyRevisions.clear();
       projectionStories.clear();
       parsedMedia.clear();
+      parsedSvg = [];
       parsedFacade = undefined;
       partBase = undefined;
       if (dispatchingUpdates) queueMicrotask(destroyNative);

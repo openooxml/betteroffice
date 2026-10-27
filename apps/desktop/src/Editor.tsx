@@ -6,11 +6,8 @@ import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
 import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
 import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collaboration";
-import {
-  CollaborationProvider as PptxProvider,
-  type PptxFontFace,
-  type AsyncCollaborationReplica,
-} from "@betteroffice/pptx/editor";
+import { CollaborationProvider as PptxProvider, type AsyncCollaborationReplica } from "@betteroffice/pptx/collaboration";
+import type { PptxFontFace } from "@betteroffice/pptx";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -85,7 +82,7 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const fonts = await Promise.all(
+  const results = await Promise.allSettled(
     [false, true].flatMap((bold) =>
       [false, true].map(async (italic) => {
         const face =
@@ -100,12 +97,15 @@ export async function prepareFile(
       })
     )
   );
+  const fonts = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const failed = results.length - fonts.length;
+  if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);
   if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
-    const { openPresentationSession } = await import("@betteroffice/pptx/editor");
+    const { openPresentationSession } = await import("@betteroffice/pptx/worker");
     const session = await openPresentationSession(bytes, { fonts });
     await session.dispose();
   } else {
-    const { initWasm, openPresentation } = await import("@betteroffice/pptx/editor");
+    const { initWasm, openPresentation } = await import("@betteroffice/pptx");
     await initWasm();
     openPresentation(bytes, { fonts }).dispose();
   }

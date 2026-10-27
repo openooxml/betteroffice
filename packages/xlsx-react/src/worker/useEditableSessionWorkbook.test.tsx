@@ -1,9 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
-import type { WorkbookCommand, WorkbookCommandFrame, WorkbookEditState, WorkbookHandle, WorkbookSession, WorkbookSheetView } from '@betteroffice/xlsx';
+import type { WorkbookHandle, WorkbookSession, WorkbookSheetView } from '@betteroffice/xlsx';
+import type { WorkbookCommand, WorkbookCommandFrame, WorkbookEditState } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
-import type { WorkbookEditPeer } from '@betteroffice/xlsx';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import { PLAIN_FORMATTING, testBinding, testSessionCommands } from '../commands/testing';
 import type { InputDraft } from '../commands/inputCoordinator';

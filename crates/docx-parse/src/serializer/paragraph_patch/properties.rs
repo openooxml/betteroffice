@@ -107,6 +107,8 @@ pub(super) fn run_properties(
     }
     let mut changes = Change::default();
     for delta in deltas {
+        #[cfg(test)]
+        super::work::add(1);
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if matches!(key, "ins" | "del" | "insertion" | "deletion" | "hyperlink") {
             let kind = if key == "hyperlink" {

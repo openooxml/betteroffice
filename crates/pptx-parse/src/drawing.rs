@@ -1517,6 +1517,7 @@ fn parse_shape_style(
             .and_then(parse_color_container),
         fill: reference("fillRef"),
         line: reference("lnRef"),
+        effect: reference("effectRef"),
         fill_disabled: unsupported(
             properties,
             &["solidFill", "gradFill", "blipFill", "noFill", "grpFill"],
@@ -1704,7 +1705,7 @@ fn parse_line_element(line: &XmlElement) -> Option<ShapeOutline> {
     })
 }
 
-fn parse_effects(element: &XmlElement) -> Option<ShapeEffects> {
+pub(crate) fn parse_effects(element: &XmlElement) -> Option<ShapeEffects> {
     let list = element.child("effectLst")?;
     let Some(shadow) = list.child("outerShdw") else {
         return Some(ShapeEffects::default());

@@ -1019,3 +1019,52 @@ describe('session host and cloned transport', () => {
     }
   });
 });
+
+describe('session host trap causes', () => {
+  it('fails the session with the cause trapFailure names, and as trap when it names none', async () => {
+    type Methods = { trap(): string };
+    const thrown: Array<[string, () => Error, string]> = [
+      ['raw', () => new WebAssembly.RuntimeError('unreachable'), 'unreachable'],
+      ['wrapped', () => new SessionFailure('trap', 'Command failed', 'unreachable'), 'Command failed'],
+    ];
+    for (const [, error, message] of thrown) {
+      for (const named of [true, false]) {
+        const pair = createInProcessPair();
+        const traps: SessionFailure[] = [];
+        createSessionHost<Methods, {}, null>(pair.host, {
+          context: null,
+          policies: { trap: { lane: 'interactive' } },
+          handlers: { trap: () => { throw error(); } },
+          trapFailure: (trap) => {
+            traps.push(trap);
+            return named ? new SessionFailure('out-of-memory', 'Engine ran out of memory', 'diag') : undefined;
+          },
+        });
+        const client = createSessionClient<Methods, {}>(pair.client, { methods: { trap: true } });
+        const failure = await client.call.trap().catch((reason) => reason);
+        expect(failure).toBe(client.failure);
+        expect(traps).toEqual([expect.objectContaining({ code: 'trap', message })]);
+        expect(client.failure).toMatchObject(named
+          ? { code: 'out-of-memory', message: 'Engine ran out of memory', diagnostics: 'diag' }
+          : { code: 'trap', message });
+        await client.dispose();
+      }
+    }
+  });
+
+  it('leaves failures other than traps to their own code', async () => {
+    const pair = createInProcessPair();
+    let asked = 0;
+    createSessionHost<{ crash(): string }, {}, null>(pair.host, {
+      context: null,
+      policies: { crash: { lane: 'interactive' } },
+      handlers: { crash: () => { throw new SessionFailure('crash', 'Worker stopped'); } },
+      trapFailure: () => { asked += 1; return new SessionFailure('out-of-memory', 'never'); },
+    });
+    const client = createSessionClient<{ crash(): string }, {}>(pair.client, { methods: { crash: true } });
+    await client.call.crash().catch(() => {});
+    expect(asked).toBe(0);
+    expect(client.failure).toMatchObject({ code: 'crash', message: 'Worker stopped' });
+    await client.dispose();
+  });
+});

@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
 import { createElement, createRef, useState } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import { ViewerInput } from '../ViewerInput';
 import { stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import type { YrsInputRef } from '../YrsInput';
@@ -129,8 +129,8 @@ test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection
     font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 80, href: '#target',
   }];
   stampWorkerFrameVersion(linked, 'A', false, false);
-  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
-  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+  const pending: Array<{ request: DocxDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: DocxDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
     pending.push({ request, resolve });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
@@ -166,8 +166,8 @@ test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection
 test('a right-click inside a viewer selection keeps it for the context-menu copy', async () => {
   const queries = fakeQueries();
   stampWorkerFrameVersion(queries, 'A', false, false);
-  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
-  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+  const pending: Array<{ request: DocxDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: DocxDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
     pending.push({ request, resolve });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();

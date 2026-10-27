@@ -3,15 +3,18 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
-import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
-  PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
-import { decodeCommandDisplayList } from '@betteroffice/pptx';
+import type { TextBoxPrimitive } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import * as wasm from '../../../pptx/src/wasm/loader';
-import { PEERLESS_FLAG, PptxEditor } from '../PptxEditor';
+import { PptxEditor } from '../PptxEditor';
 import { peerlessPainterFactories, peerlessSessionOpener } from './usePeerlessPresentation';
 import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import type { PptxAsyncEditorProps } from '../PptxEditor';
@@ -135,7 +138,7 @@ async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   let api!: PptxAsyncEditorApi;
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
-  const view = render(<PptxEditor fonts={[]} file={bytes} {...{ [PEERLESS_FLAG]: true as const }} onReady={ready} {...options} />);
+  const view = render(<PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} />);
   await waitFor(() => expect(owner).toBeDefined());
   await act(async () => { await owner!.ready; });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -223,7 +226,7 @@ test('retired_api_rejects_access_after_await', async () => {
   const pending = api.readContent();
   void pending.catch(() => {});
   await waitFor(() => expect(typeof release).toBe('function'));
-  view.rerender(<PptxEditor fonts={[]} file={await deck(true)} {...{ [PEERLESS_FLAG]: true as const }} />);
+  view.rerender(<PptxEditor fonts={[]} file={await deck(true)} />);
   release();
   await expect(pending).rejects.toThrow();
   await expect(access.snapshot()).rejects.toThrow();

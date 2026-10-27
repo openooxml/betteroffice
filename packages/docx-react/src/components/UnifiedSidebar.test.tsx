@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { StrictMode } from 'react';
 import type { ReactSidebarItem } from '../plugin-api/types';
 
@@ -50,4 +50,25 @@ test('a card that grows pushes the next card down, also after a StrictMode effec
   expect(watching.length).toBeGreaterThan(0);
   act(() => { for (const observer of watching) observer.callback([], {} as ResizeObserver); });
   await waitFor(() => expect(top('b')).toBeGreaterThanOrEqual(300));
+});
+
+test('position updates move sidebar wrappers without rendering unchanged card content', () => {
+  const renderCard = mock(({ measureRef, isExpanded, onToggleExpand }: Parameters<ReactSidebarItem['render']>[0]) =>
+    <div ref={measureRef} onClick={onToggleExpand}>{String(isExpanded)}</div>);
+  const items: ReactSidebarItem[] = Array.from({ length: 120 }, (_, index) => ({
+    id: `revision-${index}`, anchorPos: index, anchorKey: `revision-${index}`, render: renderCard,
+  }));
+  const props = { renderedDomContext: null, pageWidth: 800, zoom: 1, editorContainerRef: { current: null } };
+  const positions = (offset: number) => new Map(items.map((item, index) => [item.id, index * 100 + offset]));
+  const view = render(<UnifiedSidebar {...props} items={items} anchorPositions={positions(100)} />);
+  const renders = renderCard.mock.calls.length;
+  expect(renders).toBe(120);
+  const firstWrapper = () => view.container.querySelector<HTMLElement>('aside > div > div')!;
+  expect(firstWrapper().style.top).toBe('100px');
+  view.rerender(<UnifiedSidebar {...props} items={items.map(item => ({ ...item }))} anchorPositions={positions(300)} />);
+  expect(firstWrapper().style.top).toBe('300px');
+  expect(renderCard.mock.calls.length).toBe(renders);
+  view.rerender(<UnifiedSidebar {...props} items={items} anchorPositions={positions(300)} activeItemId={items[0]!.id} />);
+  expect(renderCard.mock.calls.length).toBe(renders + 1);
+  expect(firstWrapper().textContent).toBe('true');
 });

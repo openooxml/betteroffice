@@ -3,16 +3,15 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import JSZip from 'jszip';
 import { PptxEditor, type PptxWorkerEditorApi } from '@betteroffice/pptx-react';
+import { openPresentation, paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import {
-  openPresentation, paintSlide, sizeCanvasForSlide, PptxPeerNotReadyError, PptxWorkerEditorFailedError,
-  type PptxWorkerEditorAccess, type PptxWorkerEditorSession,
-} from '@betteroffice/pptx';
+  PptxPeerNotReadyError, PptxWorkerEditorFailedError, type PptxWorkerEditorAccess, type PptxWorkerEditorSession,
+} from '@betteroffice/pptx/worker';
 import { createPresentationEditorSession } from '../../../packages/pptx/src/session/editorSession';
 import { workerEditorSessionOpener } from '../../../packages/pptx-react/src/worker/useEditableSessionPresentation';
 import { createWorkerTransport } from '../../../shared/office-session/transport';
 import { isClientMessage, isHostMessage } from '../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../shared/office-session/types';
-import { PEERLESS_FLAG } from '../../../packages/pptx-react/src/PptxEditor';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import { difference, installPaintProbe, pixels, until, type WorkerEditorProbe } from './pptx-worker-editor-probe';
 
@@ -295,7 +294,7 @@ void (async () => {
   fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(await response.arrayBuffer()) }];
   file = await deck();
   await document.fonts.ready;
-  if (new URLSearchParams(location.search).has(PEERLESS_FLAG)) {
+  if (new URLSearchParams(location.search).has('asyncApi')) {
     const { mountPeerlessEditor } = await import('./pptx-peerless-editor-harness');
     await mountPeerlessEditor(root, file, fonts);
     return;

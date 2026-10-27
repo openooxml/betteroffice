@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ColorValue, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme};
+use crate::{
+    ColorValue, ShapeEffects, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
+};
 
 /// Line width applied to a style reference the theme does not define.
 const DEFAULT_STYLE_LINE_WIDTH_EMU: f64 = 9_525.0;
@@ -18,6 +20,8 @@ pub struct ThemeFormatScheme {
     pub fills: Vec<Option<ShapeFill>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lines: Vec<Option<ShapeOutline>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Option<ShapeEffects>>,
     /// `a:bgFillStyleLst`, which `a:fillRef` indices from 1001 name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_fills: Vec<Option<ShapeFill>>,
@@ -25,7 +29,10 @@ pub struct ThemeFormatScheme {
 
 impl ThemeFormatScheme {
     pub fn is_empty(&self) -> bool {
-        self.fills.is_empty() && self.lines.is_empty() && self.background_fills.is_empty()
+        self.fills.is_empty()
+            && self.lines.is_empty()
+            && self.effects.is_empty()
+            && self.background_fills.is_empty()
     }
 
     fn fill(&self, index: u32) -> Option<&ShapeFill> {
@@ -61,6 +68,8 @@ pub struct ShapeStyle {
     pub fill: Option<StyleReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<StyleReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<StyleReference>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fill_disabled: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -76,6 +85,7 @@ impl ShapeStyle {
         self.font_color.is_none()
             && self.fill.is_none()
             && self.line.is_none()
+            && self.effect.is_none()
             && !self.fill_disabled
             && !self.line_disabled
     }
@@ -140,6 +150,23 @@ pub fn style_outline(
         }
     }
     Some(resolved)
+}
+
+/// Resolves `a:effectRef`; index 0 means no effects.
+pub fn style_effects(
+    scheme: &ThemeFormatScheme,
+    reference: &StyleReference,
+    theme: &Theme,
+) -> Option<ShapeEffects> {
+    let index = reference.index.checked_sub(1)? as usize;
+    let mut effects = scheme.effects.get(index)?.as_ref()?.clone();
+    if let Some(shadow) = &mut effects.outer_shadow {
+        shadow.color = substitute_color(
+            shadow.color.as_ref(),
+            placeholder_color(reference, theme).as_ref(),
+        );
+    }
+    Some(effects)
 }
 
 /// Resolves a `phClr` colour against the reference's colour, as a style fill does.

@@ -7,16 +7,16 @@ The goldens pin current behavior so changes receive deliberate review.
 
 ## What's here
 
-- `factories.ts` — DOM-free builders for display lists (fills, lines, clipped
+- `factories.ts`: DOM-free builders for display lists (fills, lines, clipped
   aligned text, gridlines) and viewport states / track offsets.
-- `corpus.ts` — named `{ name, pins, build() }` scenarios. `build()` returns a
+- `corpus.ts`: named `{ name, pins, build() }` scenarios. `build()` returns a
   `{ displayList, viewport, visible }` snapshot; `visible` is computed by the
   real `visibleCells` math, so the goldens exercise virtualization for real.
-- `serialize.ts` — deterministic canonicalizer: sorted keys, `undefined`
+- `serialize.ts`: deterministic canonicalizer: sorted keys, `undefined`
   dropped, every number rounded to `GOLDEN_PRECISION` (3) decimals, `-0`
   collapsed.
-- `golden/<name>.json` — one committed baseline per scenario.
-- `golden.test.ts` — builds each scenario, serializes, asserts equality.
+- `golden/<name>.json`: one committed baseline per scenario.
+- `golden.test.ts`: builds each scenario, serializes, asserts equality.
 
 ## Scenarios
 

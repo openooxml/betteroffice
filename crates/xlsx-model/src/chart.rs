@@ -145,6 +145,9 @@ pub struct SheetChart {
     pub anchor: ChartAnchor,
     /// every `c:f` in the chart part, in document order.
     pub refs: Vec<ChartRef>,
+    #[doc(hidden)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_xml: Option<String>,
 }
 
 impl SheetChart {
@@ -165,4 +168,56 @@ impl SheetChart {
     pub fn is_recorded_frame(&self, part: &str, from: ChartAnchor) -> bool {
         self.part == part && self.anchor == from
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChartEdit {
+    SetChartTitle {
+        #[serde(deserialize_with = "Option::deserialize")]
+        title: Option<String>,
+    },
+    SetSeries {
+        series: usize,
+        #[serde(default)]
+        name: Option<ChartSeriesName>,
+        #[serde(default)]
+        categories: Option<String>,
+        #[serde(default)]
+        values: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ChartSeriesName {
+    Literal {
+        text: String,
+    },
+    Reference {
+        #[serde(rename = "ref")]
+        reference: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartMetadata {
+    #[serde(rename = "type")]
+    pub chart_type: String,
+    pub title: Option<String>,
+    /// a title element without text of its own, which Excel fills in.
+    pub auto_title: bool,
+    pub rich_title: bool,
+    pub series: Vec<ChartSeriesInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSeriesInfo {
+    pub index: usize,
+    pub name: Option<String>,
+    pub name_ref: Option<String>,
+    pub category_ref: Option<String>,
+    pub value_ref: Option<String>,
 }

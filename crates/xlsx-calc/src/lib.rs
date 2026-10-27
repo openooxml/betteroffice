@@ -13,6 +13,7 @@
 //! ```
 
 pub mod array;
+mod coercion;
 pub mod deps;
 pub mod engine;
 pub mod eval;
@@ -33,3 +34,12 @@ pub use eval::{EvalContext, evaluate};
 pub use lexer::{ParseError, TokKind, Token, lex};
 pub use parser::{BinaryOp, Expr, MAX_DEPTH, UnaryOp, parse_formula};
 pub use reference::{ColumnRange, RowRange, TableBand, TableSpec};
+
+/// the currency symbols whose text arithmetic coerces in `wb`; an edit that
+/// changes them changes formula results anywhere in the workbook.
+#[doc(hidden)]
+pub fn currency_symbols(wb: &xlsx_model::Workbook) -> Vec<char> {
+    coercion::CurrencyCoercion::from_workbook(wb)
+        .symbols()
+        .to_vec()
+}

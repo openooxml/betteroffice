@@ -4,9 +4,12 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { Suspense } from 'react';
-import type { PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope,
-  PresentationCommandEvents, PresentationCommandMethods, TextBoxPrimitive } from '@betteroffice/pptx';
-import { decodeCommandDisplayList } from '@betteroffice/pptx';
+import type { TextBoxPrimitive } from '@betteroffice/pptx';
+import type {
+  PptxWorkerSession, PresentationCommandClient, PresentationCommandEnvelope, PresentationCommandEvents,
+  PresentationCommandMethods,
+} from '@betteroffice/pptx/worker';
+import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 import { createSessionHost } from '../../../../shared/office-session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { createPptxWorkerSession } from '../../../pptx/src/session/commandSession';
@@ -169,8 +172,10 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   let api!: PptxAsyncEditorApi;
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
+  const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+  const fonts = [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }];
   const ui = (readOnly = options.readOnly, suspend = false) => <Suspense fallback={<div>Waiting</div>}>
-    <PptxEditor fonts={[]} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
+    <PptxEditor fonts={fonts} file={bytes} onReady={ready} {...options} readOnly={readOnly} />
     <Suspend active={suspend} />
   </Suspense>;
   const mounted = render(ui());
@@ -206,6 +211,7 @@ export function type(input: HTMLElement, text: string): void {
   input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true }));
 }
 
-export const replyControl = { hold() { holding = true; }, count() { return held.length; }, release() { releaseReplies(); } };
+export const replyControl = { hold() { holding = true; }, count() { return held.length; }, release() { releaseReplies(); },
+  releaseNext() { (held.shift() as (() => void) | undefined)?.(); } };
 
 export const faultControl = { unknown() { unknownNext = true; }, crash() { crashWorker(); } };

@@ -15,6 +15,27 @@ pub struct SurfaceDisplayList {
     pub primitives: Vec<Primitive>,
 }
 
+impl SurfaceDisplayList {
+    /// Reports glyph text at any depth in the display list.
+    pub fn has_glyphs(&self) -> bool {
+        fn has_glyphs(primitive: &Primitive) -> bool {
+            match primitive {
+                Primitive::TextBox { lines, .. } => lines
+                    .iter()
+                    .flat_map(|line| &line.runs)
+                    .any(|run| !run.glyphs.is_empty()),
+                Primitive::Chart { primitives, .. } | Primitive::Table { primitives, .. } => {
+                    primitives.iter().any(has_glyphs)
+                }
+                Primitive::Shape { .. }
+                | Primitive::Image { .. }
+                | Primitive::Placeholder { .. } => false,
+            }
+        }
+        self.primitives.iter().any(has_glyphs)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -490,6 +511,49 @@ fn is_zero(value: &f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glyph_detection_walks_tables_and_charts() {
+        let text: Primitive = serde_json::from_str(concat!(
+            r##"{"kind":"textBox","objectId":1,"x":0,"y":0,"w":10,"h":10,"anchor":"top","##,
+            r##""paragraphs":[],"lines":[{"x":0,"y":0,"width":10,"height":10,"baseline":8,"##,
+            r##""start":0,"end":1,"caretStops":[],"runs":[{"text":"a","start":0,"end":1,"##,
+            r##""x":0,"width":5,"fontId":0,"fontFamily":"Arial","fontSizePx":10,"bold":false,"##,
+            r##""italic":false,"underline":false,"color":"#000000","glyphs":[{"glyphId":1,"##,
+            r##""cluster":0,"x":0,"advance":5,"xOffset":0,"yOffset":0}]}]}]}"##
+        ))
+        .unwrap();
+        let container = |kind: &str, child: Primitive| -> Primitive {
+            serde_json::from_value(serde_json::json!({
+                "kind": kind, "objectId": 2, "name": "Container", "label": "Container",
+                "x": 0, "y": 0, "w": 10, "h": 10, "primitives": [child]
+            }))
+            .unwrap()
+        };
+        let mut list = SurfaceDisplayList {
+            contract_version: CONTRACT_VERSION,
+            width: 10.0,
+            height: 10.0,
+            background: None,
+            primitives: Vec::new(),
+        };
+        assert!(!list.has_glyphs());
+        for primitive in [
+            text.clone(),
+            container("table", text.clone()),
+            container("chart", text.clone()),
+            container("chart", container("table", text.clone())),
+        ] {
+            list.primitives = vec![primitive];
+            assert!(list.has_glyphs());
+        }
+        let mut empty = text;
+        if let Primitive::TextBox { lines, .. } = &mut empty {
+            lines[0].runs[0].glyphs.clear();
+        }
+        list.primitives = vec![container("table", container("chart", empty))];
+        assert!(!list.has_glyphs());
+    }
 
     #[test]
     fn solid_stroke_keeps_legacy_json_and_reads_missing_paint() {

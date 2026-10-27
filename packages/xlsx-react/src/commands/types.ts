@@ -57,7 +57,7 @@ export interface XlsxCommandArgs {
   print: null;
   undo: null;
   redo: null;
-  /** 1 is 100%; 0.25 to 4. */
+  /** 1 is 100%; 0.1 to 5. */
   zoom: { scale: number };
   /** `null` toggles the panel. */
   proposalsPanel: { open: boolean } | null;

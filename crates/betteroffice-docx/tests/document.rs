@@ -474,6 +474,78 @@ fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
     assert_eq!(resaved, xml);
 }
 
+#[test]
+fn saving_keeps_vml_text_box_xml_byte_identical() {
+    const PICT: &str = r#"<w:pict><v:shape id="Text Box 1" o:spid="_x0000_s1026" style="position:absolute;margin-left:36pt;margin-top:72pt;width:144pt;height:72pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;v-text-anchor:top" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>VML label</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#;
+    let package = story_docx(
+        &format!("<w:p><w:r><w:t>Host before</w:t></w:r><w:r>{PICT}</w:r></w:p>"),
+        None,
+    );
+    let xml = saved_document(&package);
+    assert!(xml.contains(PICT), "{xml}");
+
+    let session = docx_edit::EditingDoc::new(11);
+    docx_edit::seed_from_docx(&session, &package).unwrap();
+    let canonical =
+        docx_edit::to_canonical_bytes(&docx_edit::project_story(&session, "body").unwrap());
+    let canonical = String::from_utf8(canonical).unwrap();
+    assert!(!canonical.contains("textBox"), "{canonical}");
+
+    let mut document = Document::open(&package).unwrap();
+    let BlockContent::Paragraph(host) = &mut document.model_mut().body.content[0] else {
+        panic!("host paragraph");
+    };
+    let mut edited = false;
+    for content in std::sync::Arc::make_mut(host).content.iter_mut() {
+        let ParagraphContent::Inline(InlineNode::Run(run)) = content else {
+            continue;
+        };
+        for item in run.content.iter_mut() {
+            if let RunContent::Text { text, .. } = item {
+                assert_eq!(text, "Host before");
+                *text = "Host after".to_owned();
+                edited = true;
+            }
+        }
+    }
+    assert!(edited);
+    let edited_xml = saved_part(
+        &ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap(),
+        "word/document.xml",
+    );
+    assert!(edited_xml.contains("Host after"), "{edited_xml}");
+    assert!(!edited_xml.contains("Host before"), "{edited_xml}");
+    assert!(edited_xml.contains(PICT), "{edited_xml}");
+
+    let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+    assert_eq!(resaved, xml);
+}
+
+#[test]
+fn a_vml_text_box_leaves_later_paragraph_ids_as_without_it() {
+    let text_id = |text_box: &str| {
+        let body = format!(
+            r#"<w:p><w:r><w:pict><v:shape style="width:72pt;height:36pt">{text_box}</v:shape></w:pict></w:r></w:p><w:p w:textId="80000001"><w:r><w:t>Body</w:t></w:r></w:p>"#
+        );
+        // One seed for both packages, so ids differ only by what the parse allocates.
+        let options = docx_parse::S9ParseOptions {
+            determinism_seed: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            ),
+            ..Default::default()
+        };
+        let parsed = docx_parse::parse_docx_s9_wire(&story_docx(&body, None), options).unwrap();
+        let BlockContent::Paragraph(paragraph) = &parsed.document.package.document.content[1]
+        else {
+            panic!("body paragraph");
+        };
+        paragraph.text_id.clone()
+    };
+    let boxed = r#"<v:textbox><w:txbxContent><w:p w:textId="80000000"><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox>"#;
+    assert!(text_id("").is_some());
+    assert_eq!(text_id(boxed), text_id(""));
+}
+
 /// A minimal package holding `body`, plus `word/numbering.xml` when given.
 fn story_docx(body: &str, numbering: Option<&str>) -> Vec<u8> {
     let numbering_override = if numbering.is_some() {

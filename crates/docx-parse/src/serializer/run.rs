@@ -271,10 +271,12 @@ fn serialize_run_content(
                 Some("column") => {
                     writer.attribute("w:type", "column");
                 }
-                Some("textWrapping") => {
-                    writer.attribute("w:type", "textWrapping");
-                    if let Some(clear) = nonempty(clear.as_deref()).filter(|value| *value != "none")
-                    {
+                None | Some("textWrapping") => {
+                    let clear = nonempty(clear.as_deref()).filter(|value| *value != "none");
+                    if break_type.is_some() || clear.is_some() {
+                        writer.attribute("w:type", "textWrapping");
+                    }
+                    if let Some(clear) = clear {
                         writer.attribute("w:clear", clear);
                     }
                 }
@@ -1296,6 +1298,29 @@ mod tests {
     }
 
     #[test]
+    fn line_breaks_preserve_explicit_types_and_type_clearing_breaks() {
+        for break_type in [None, Some("textWrapping")] {
+            for clear in [None, Some("all")] {
+                let content = RunContent::Break {
+                    break_type: break_type.map(str::to_owned),
+                    clear: clear.map(str::to_owned),
+                };
+                let expected = if clear.is_some() {
+                    "<w:br w:type=\"textWrapping\" w:clear=\"all\"/>"
+                } else if break_type.is_some() {
+                    "<w:br w:type=\"textWrapping\"/>"
+                } else {
+                    "<w:br/>"
+                };
+                assert_eq!(
+                    serialize_run_content(&content, &mut context()).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn drawing_color_serialization_preserves_order_and_exact_percentages() {
         for source in [
             r#"<a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/></a:srgbClr>"#,
@@ -1581,6 +1606,7 @@ mod tests {
                 xml: xml.to_owned(),
                 preview: None,
                 previews: vec![crate::image::placeholder_image("rId1")],
+                text_box: None,
             }],
         };
         let saved = serialize_deleted_run(&run, &mut context()).unwrap();

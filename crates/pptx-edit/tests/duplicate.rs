@@ -358,7 +358,7 @@ fn set_story_paragraphs_replaces_multiple_paragraphs_and_preserves_story_identit
         bullet: None,
         alignment: None,
         runs: vec![TextRunDraft {
-            text: "invalid\nrun".into(),
+            text: "invalid\rrun".into(),
             style: TextStyle::default(),
         }],
     }];

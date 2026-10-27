@@ -524,7 +524,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
           invalidateRetainedLayout();
-          if (!isViewerSession(session)) console.error('[PagedEditor] Resident font preflight error:', error);
+          if (!isViewerSession(session)) console.error('[PagedEditor] Worker font preflight error:', error);
           markLayoutQueued(session, false);
           releaseWorkerPrewarm(session);
           reportLayoutError(session, error);
@@ -744,7 +744,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               syncCoordinator.onLayoutComplete(currentEpoch);
               return;
             }
-            if (!isViewerSession(session)) console.error('[PagedEditor] Resident worker layout could not start:', error);
+            if (!isViewerSession(session)) console.error('[PagedEditor] Document worker layout could not start:', error);
             if (isViewerSession(session) || registeredWorkerProposalAuthority(session)?.holdsWorkerState()) {
               reportLayoutError(session, error);
               syncCoordinator.onLayoutComplete(currentEpoch);

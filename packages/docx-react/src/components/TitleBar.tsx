@@ -196,7 +196,7 @@ function useCommandMenuItem<K extends DocxCommandId>(
       description: state.enabled ? undefined : state.disabledReason.message,
       onClick: () => void command.execute(),
     },
-    hidden: !state.enabled && state.disabledReason.code === 'host-disabled',
+    hidden: !state.enabled && (state.disabledReason.code === 'host-disabled' || state.disabledReason.code === 'unsupported-command'),
   };
 }
 

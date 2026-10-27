@@ -51,6 +51,16 @@ export function validatePageBounds(
   };
 }
 
+export function extentMatches(
+  profile: OfficePageBounds | null,
+  index: number,
+  width: number,
+  height: number
+) {
+  const target = profile?.pages[index];
+  return !target || (Math.abs(target.width_px - width) <= 1 && Math.abs(target.height_px - height) <= 1);
+}
+
 export function capturePageExtent(
   profile: OfficePageBounds | null,
   index: number,
@@ -66,9 +76,7 @@ export function capturePageExtent(
     throw new Error('Invalid native canvas extent');
   const raw = { width_px: width, height_px: height };
   const target = profile?.pages[index];
-  const mismatched =
-    target &&
-    (Math.abs(target.width_px - width) > 1 || Math.abs(target.height_px - height) > 1);
+  const mismatched = !extentMatches(profile, index, width, height);
   if (mismatched && !keepMismatchedPages)
     throw new Error(`Page ${index + 1}: Office and native canvas extents differ by more than 1 pixel`);
   const output =

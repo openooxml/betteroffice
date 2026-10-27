@@ -1,3 +1,4 @@
+import type { ChartInfo, ChartMutation } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -283,6 +284,7 @@ export interface WorkbookHyperlink {
 export interface DifferentialFormatInput {
   fontColor?: string;
   bold?: boolean;
+  italic?: boolean;
   fill?: string;
 }
 
@@ -316,7 +318,18 @@ export interface HistoryState {
 }
 
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
-export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
+/**
+ * `fromPeer` is true for every event a peer update caused through `applyUpdate`, including
+ * the `'local'` re-encoding a replica forwards after adopting a whole-document state.
+ */
+export interface WorkbookUpdateInfo {
+  fromPeer: boolean;
+}
+export type WorkbookUpdateListener = (
+  update: Uint8Array,
+  origin: WorkbookUpdateOrigin,
+  info: WorkbookUpdateInfo
+) => void;
 
 export interface WorkbookCalculationContext {
   nowSerial: number;
@@ -537,6 +550,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   moveRange(sheet: number, source: string, destination: string): EditResult;
   setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
   removeHyperlink(sheet: number, range: MergedRange): EditResult;
+  charts(sheet: number): ChartInfo[];
+  editCharts(edits: ChartMutation[]): EditResult;
   conditionalFormats(sheet: number): ConditionalFormatInfo[];
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
@@ -628,6 +643,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+let engineMemory: WebAssembly.Memory | undefined;
 let initialization: Promise<void> | undefined;
 const displayListJsonReaders = new WeakMap<
   WorkbookHandle, (viewport: Viewport, sheet?: number) => string
@@ -651,7 +667,8 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   initialization = initWasmModule({ module_or_path: input }).then(
-    () => {
+    (output) => {
+      engineMemory = output.memory;
       initialized = true;
     },
     (error: unknown) => {
@@ -671,6 +688,16 @@ function toError(e: unknown): Error {
   if (e instanceof Error) return e;
   const message = typeof e === 'string' ? e : String(e);
   return displayErrorFrom(message) ?? new Error(message);
+}
+
+/**
+ * The allocation the engine could not get, if any. The core aborts when an
+ * allocation fails, so a trap after one means the engine ran out of memory.
+ */
+export function engineAllocationFailure(): { bytes: number; memoryBytes: number } | null {
+  if (!initialized) return null;
+  const bytes = xlsxWasm.allocationFailure();
+  return bytes > 0 ? { bytes, memoryBytes: engineMemory?.buffer.byteLength ?? 0 } : null;
 }
 
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
@@ -840,7 +867,8 @@ function wrapWorkbookDocument(
 ): WorkbookHandle {
   const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
-  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
+  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin; fromPeer: boolean }> = [];
+  let applyingPeerUpdate = 0;
   let nextListenerId = 0;
   let disposed = false;
   let hasCalculationContext = options.calculation !== undefined ||
@@ -871,7 +899,7 @@ function wrapWorkbookDocument(
           if (disposed) return;
           if (listeners.get(id) !== listener) continue;
           try {
-            listener(event.update.slice(), event.origin);
+            listener(event.update.slice(), event.origin, { fromPeer: event.fromPeer });
           } catch {}
         }
       }
@@ -893,6 +921,7 @@ function wrapWorkbookDocument(
       pendingUpdates.push({
         update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
+        fromPeer: origin === 1 || applyingPeerUpdate > 0,
       });
     }
   }
@@ -980,7 +1009,12 @@ function wrapWorkbookDocument(
       );
     },
     applyUpdate(update: Uint8Array): EditResult {
-      return parseJson(() => doc.applyUpdateJson(update), true);
+      applyingPeerUpdate += 1;
+      try {
+        return parseJson(() => doc.applyUpdateJson(update), true);
+      } finally {
+        applyingPeerUpdate -= 1;
+      }
     },
     onUpdate(listener: WorkbookUpdateListener): () => void {
       assertAlive();
@@ -1072,6 +1106,12 @@ function wrapWorkbookDocument(
     },
     removeHyperlink(sheet: number, range: MergedRange): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops: [{ type: 'removeHyperlink', sheet, range }] })), true);
+    },
+    charts(sheet: number): ChartInfo[] {
+      return parseJson(() => doc.chartsJson(sheet));
+    },
+    editCharts(edits: ChartMutation[]): EditResult {
+      return parseJson(() => doc.editChartsJson(JSON.stringify(edits)), true);
     },
     conditionalFormats(sheet: number): ConditionalFormatInfo[] {
       return parseJson(() => doc.conditionalFormatsJson(sheet));

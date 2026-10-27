@@ -1,5 +1,7 @@
+import { useContext } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import { getCommentText, formatDate, getInitials, avatarStyle } from './cardUtils';
+import { getCommentText, formatDate } from './cardUtils';
+import { resolveReviewAuthor, ReviewAvatar, TrackedChangesContext } from './trackedChanges';
 import { useTranslation } from '../../i18n';
 
 export interface ReplyThreadProps {
@@ -9,68 +11,34 @@ export interface ReplyThreadProps {
 
 export function ReplyThread({ replies, isExpanded }: ReplyThreadProps) {
   const { t } = useTranslation();
+  const context = useContext(TrackedChangesContext);
   if (replies.length === 0) return null;
   const visibleReplies = isExpanded ? replies : replies.slice(-1);
   const hiddenCount = isExpanded ? 0 : replies.length - 1;
 
   return (
-    <div style={{ marginTop: 8 }}>
+    <div className="docx-review-thread">
       {hiddenCount > 0 && (
-        <div
-          style={{
-            fontSize: 12,
-            fontWeight: 500,
-            color: 'var(--doc-primary)',
-            paddingTop: 6,
-            paddingBottom: 6,
-            borderTop: '1px solid var(--doc-border-light)',
-          }}
-        >
+        <div className="docx-review-thread__more">
           {t('comments.replyCount', { count: hiddenCount })}
         </div>
       )}
-      {visibleReplies.map((reply) => (
-        <div
-          key={reply.id}
-          style={{
-            marginBottom: isExpanded ? 8 : 0,
-            paddingTop: 8,
-            borderTop: '1px solid var(--doc-border-light)',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-            <div style={avatarStyle(reply.author || 'U', 28)}>
-              {getInitials(reply.author || 'U')}
+      {visibleReplies.map((reply) => {
+        const author = resolveReviewAuthor(reply.author || t('comments.unknown'), 'human', context.options,
+          context.peers, context.user, context.clientId);
+        return (
+          <div key={reply.id} className="docx-review-reply">
+            <div className="docx-review-reply__header">
+              <ReviewAvatar author={author} />
+              <span className="docx-review-card__name">{author.name}</span>
+              <span className="docx-review-card__meta">{formatDate(reply.date)}</span>
             </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--doc-text)' }}>
-                {reply.author || t('comments.unknown')}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--doc-text-muted)' }}>
-                {formatDate(reply.date)}
-              </div>
+            <div className="docx-review-reply__body" data-clamped={!isExpanded}>
+              {getCommentText(reply.content)}
             </div>
           </div>
-          <div
-            style={{
-              fontSize: 13,
-              color: 'var(--doc-text)',
-              lineHeight: '20px',
-              marginTop: 4,
-              ...(!isExpanded
-                ? {
-                    overflow: 'hidden',
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical' as const,
-                  }
-                : {}),
-            }}
-          >
-            {getCommentText(reply.content)}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

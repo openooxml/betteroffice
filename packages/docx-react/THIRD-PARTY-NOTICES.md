@@ -1,10 +1,11 @@
 # Third-party notices
 
-## Lucide icons (check, x)
+## Lucide icons (check, x, undo-2, ellipsis-vertical, message-square-check)
 
 `src/components/sidebar/reviewIcons.tsx` (bundled into `dist`) inlines the SVG
-path data of the `check` and `x` icons from `lucide-static` 1.61.0
-(`icons/check.svg`, `icons/x.svg`; upstream https://github.com/lucide-icons/lucide).
+path data of the `check`, `x`, `undo-2`, `ellipsis-vertical` and
+`message-square-check` icons from `lucide-static` 1.61.0 (`icons/<name>.svg`;
+upstream https://github.com/lucide-icons/lucide).
 
 Copyright (c) 2026 Lucide Icons and Contributors. License: ISC.
 

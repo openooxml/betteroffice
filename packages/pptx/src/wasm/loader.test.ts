@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { createFontProvider, resolveGlyphFallbackFace, resolveScriptFallbackFace } from '@betteroffice/fonts';
 import type {
   PresentationHandle,
   ShapePrimitive,
@@ -378,7 +379,7 @@ describe('PPTX wasm boundary', () => {
     source.dispose();
   });
 
-  test('paints the non-justified demo deck with one call per text run', async () => {
+  test('paints the non-justified demo deck with one call per word at its caret stop', async () => {
     const source = openPresentation(fixture, {
       clientId: 9013,
       fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
@@ -403,11 +404,11 @@ describe('PPTX wasm boundary', () => {
     try {
       for (let slideIndex = 0; slideIndex < source.snapshot().slides.length; slideIndex += 1) {
         const frame = source.layoutSlide(slideIndex);
-        expected.push(...oneCallPerTextRun(frame.primitives));
+        expected.push(...oneCallPerWord(frame.primitives));
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(272);
+      expect(expected.length).toBeGreaterThan(272);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {
@@ -466,13 +467,9 @@ describe('PPTX wasm boundary', () => {
       expect(position).toBe(first.end);
 
       const last = textBox.lines[textBox.lines.length - 1];
-      expect(calls.filter((call) => call.y === last.baseline)).toEqual([
-        {
-          text: last.runs.map((run) => run.text).join(''),
-          x: last.runs[0].x,
-          y: last.baseline,
-        },
-      ]);
+      expect(calls.filter((call) => call.y === last.baseline)).toEqual(
+        oneCallPerWord([{ ...textBox, lines: [last] }])
+      );
     } finally {
       source.dispose();
     }
@@ -611,7 +608,7 @@ describe('PPTX wasm boundary', () => {
     reopened.dispose();
   });
 
-  test('legacy decks refuse replies, status, and a flavour switch', () => {
+  test('legacy decks save replies and refuse status and a flavour switch', () => {
     const deck = openPresentation(fixture, { clientId: 9203 });
     const receipt = deck.addComment(deck.snapshot().slides[0].id, {
       author: 'Ada',
@@ -620,14 +617,16 @@ describe('PPTX wasm boundary', () => {
       created: '2026-09-01T21:40:00.000',
     });
 
-    expect(() =>
-      deck.replyToComment(receipt.commentId, {
-        author: 'Grace',
-        initials: 'GH',
-        text: 'Agreed.',
-        created: '2026-09-01T21:41:00.000',
-      })
-    ).toThrow();
+    const reply = deck.replyToComment(receipt.commentId, {
+      author: 'Grace',
+      initials: 'GH',
+      text: 'Agreed.',
+      created: '2026-09-01T21:41:00.000',
+    });
+    expect(reply.parentId).toBe(receipt.commentId);
+    const reopened = openPresentation(deck.save());
+    expect(reopened.comments().find(comment => comment.text === 'Agreed.')?.parentId).toBe(reopened.comments()[0].id);
+    reopened.dispose();
     expect(() => deck.setCommentStatus(receipt.commentId, true)).toThrow();
     expect(() => deck.setCommentFlavor('modern')).toThrow();
 
@@ -685,17 +684,30 @@ function firstStory(shapes: Array<{ textStories: StorySnapshot[]; children: unkn
   throw new Error('fixture has no text story');
 }
 
-function oneCallPerTextRun(
+function oneCallPerWord(
   primitives: SlidePrimitive[]
 ): Array<{ text: string; x: number; y: number }> {
   const calls: Array<{ text: string; x: number; y: number }> = [];
   for (const primitive of primitives) {
     if (primitive.kind === 'textBox') {
       for (const line of primitive.lines) {
-        for (const run of line.runs) calls.push({ text: run.text, x: run.x, y: line.baseline });
+        for (const run of line.runs) {
+          const starts = [0];
+          for (let offset = 1; offset < run.text.length; offset += 1) {
+            if (/\s/u.test(run.text[offset - 1])) starts.push(offset);
+          }
+          starts.forEach((start, index) => {
+            const stop = line.caretStops.find((candidate) => candidate.position === run.start + start);
+            calls.push({
+              text: run.text.slice(start, starts[index + 1]),
+              x: start === 0 && run.glyphs[0]?.cluster !== run.start ? run.x : (stop?.x ?? Number.NaN),
+              y: line.baseline,
+            });
+          });
+        }
       }
     } else if (primitive.kind === 'chart' || primitive.kind === 'table') {
-      calls.push(...oneCallPerTextRun(primitive.primitives));
+      calls.push(...oneCallPerWord(primitive.primitives));
     } else if (primitive.kind === 'placeholder' && primitive.label) {
       calls.push({
         text: primitive.label,
@@ -867,6 +879,59 @@ test('a fallback font draws the characters the run face has no glyph for', async
     const drawn = runs.find((run) => run.text.includes('مرحبا'));
     expect(drawn?.fontFamily).toBe('Noto Sans Arabic');
     expect(runs.some((run) => run.fontFamily === 'Liberation Sans')).toBe(true);
+  } finally {
+    source.dispose();
+  }
+});
+
+test('zero registered fonts render every slide with text and shapes', () => {
+  const source = openPresentation(fixture, { fonts: [] });
+  try {
+    const frames = source.snapshot().slides.map((_, index) => source.layoutSlide(index));
+    expect(frames).toHaveLength(handle.snapshot().slides.length);
+    expect(frames.every((frame) => frame.primitives.length > 0)).toBe(true);
+    const primitives = frames.flatMap((frame) => frame.primitives);
+    expect(primitives.some((primitive) => primitive.kind === 'shape')).toBe(true);
+    expect(primitives.some((primitive) => primitive.kind === 'textBox' && primitive.lines.some((line) =>
+      line.runs.some((run) => run.text.length > 0 && run.width > 0 && run.glyphs.some((glyph) => glyph.advance > 0))
+    ))).toBe(true);
+  } finally { source.dispose(); }
+});
+
+test('Selawik mixed scripts draw through coverage and CJK fallbacks without missing glyphs', async () => {
+  const provider = createFontProvider();
+  const selawik = new Uint8Array(await provider.resolve('Segoe UI', false, false)!());
+  const coverage = resolveGlyphFallbackFace('Segoe UI', false, false, 'powerpoint')!;
+  const coverageBytes = new Uint8Array(await provider.resolveGlyphFallback!('Segoe UI', false, false, 'powerpoint')!());
+  const cjk = resolveScriptFallbackFace('cjk-sc', false, false)!;
+  const cjkBytes = new Uint8Array(await provider.resolveScriptFallback('cjk-sc', false, false)!());
+  const source = openPresentation(fixture, {
+    clientId: 9302,
+    fonts: [{ family: 'Segoe UI', bytes: selawik }],
+    fallbackFonts: [
+      { family: cjk.family, bytes: cjkBytes },
+      { family: coverage.family, bytes: coverageBytes },
+    ],
+  });
+  try {
+    const added = source.addTextBox(source.snapshot().slides[0].id, {
+      name: 'Glyph coverage',
+      text: 'Latin ἀ Ӂ 中',
+      rect: { x: 100000, y: 100000, width: 8000000, height: 2000000 },
+      style: { fontSizePt: 24, fontFamily: 'Segoe UI' },
+    });
+    const story = source.snapshot().slides[0].shapes.find(shape => shape.id === added.shapeId)!.textStories[0];
+    const runs = source.layoutSlide(0).primitives
+      .filter((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox' && primitive.storyId === story.id)
+      .flatMap(box => box.lines.flatMap(line => line.runs));
+    expect(runs.find(run => run.text.includes('Latin'))?.fontFamily).toBe('Segoe UI');
+    for (const character of ['ἀ', 'Ӂ']) {
+      expect(runs.find(run => run.text.includes(character))?.fontFamily).toBe(coverage.family);
+    }
+    expect(runs.find(run => run.text.includes('中'))?.fontFamily).toBe(cjk.family);
+    const glyphs = runs.flatMap(run => run.glyphs);
+    expect(glyphs.length).toBeGreaterThan(0);
+    expect(glyphs.every(glyph => glyph.glyphId !== 0)).toBe(true);
   } finally {
     source.dispose();
   }

@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod hit;
 pub mod number_format;
 pub mod region;
+pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub use chart::{
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, TextValign, border_dash, scaled,
+    PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
@@ -59,8 +60,6 @@ const GRIDLINE_WIDTH: f32 = 1.0;
 const PANE_DIVIDER_WIDTH: f32 = 2.0;
 const FONT_SIZE_PT: f32 = 11.0;
 const TEXT_PAD_PX: f32 = 2.0;
-/// one indent level (3 default-font spaces, §18.8.1); space width approximated as a fraction of `MAX_DIGIT_WIDTH_PX`.
-const INDENT_WIDTH_PX: f32 = 3.0 * (geometry::MAX_DIGIT_WIDTH_PX as f32 * 0.5);
 /// Excel's largest indent level.
 const MAX_INDENT: u32 = 255;
 // rough calibri-like ascent/descent as fractions of the font size.
@@ -765,6 +764,7 @@ where
     .into();
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
+    let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
     let mut fx = FrameStyles::new(styles, sheet_ref);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
@@ -990,6 +990,7 @@ where
             .unwrap_or_else(|| print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt));
         let align = resolve_align(xf.h, &cell.value);
         let valign = xf.v;
+        let wraps = xf.wrap;
         let bold = font.is_some_and(|f| f.bold);
         let italic = font.is_some_and(|f| f.italic);
         let underline = font.is_some_and(|f| f.underline);
@@ -1001,8 +1002,7 @@ where
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
         let pad_width = print.map_or(2.0 * TEXT_PAD_PX, |(m, _)| 5.0 * 96.0 / m.dpi);
-        let indent_scale = print.map_or(1.0, |(m, _)| 96.0 / m.dpi);
-        let indent = xf.indent as f32 * INDENT_WIDTH_PX * indent_scale;
+        let indent = xf.indent as f32 * indent_step;
         let (left_indent, right_indent) = match xf.h {
             Some(HAlign::Left) => (indent, 0.0),
             Some(HAlign::Right) => (0.0, indent),
@@ -1014,10 +1014,11 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let text_width = (cell_box.w - pad_width - left_indent - right_indent).max(0.0);
         let number_format = (!parts.is_empty() || matches!(cell.value, CellValue::Number { .. }))
             .then(|| NumberFormatLayout {
                 left: cell_box.x + left_pad + left_indent,
-                width: (cell_box.w - pad_width - left_indent - right_indent).max(0.0),
+                width: text_width,
                 parts,
                 general: match cell.value {
                     CellValue::Number { value }
@@ -1078,6 +1079,24 @@ where
             }
         }
         let rotation_box = rotated.then_some(text_box);
+        let wrap = (wraps
+            && !rotated
+            && matches!(cell.value, CellValue::Text { .. })
+            && number_format.as_ref().is_none_or(|layout| {
+                layout
+                    .parts
+                    .iter()
+                    .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
+            }))
+        .then(|| TextWrap {
+            width: text_width,
+            line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
+                f64::from(size),
+                print.map(|(m, _)| f64::from(m.dpi)),
+            )),
+            valign: resolve_rotation_valign(valign),
+        });
+        let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {
             (
                 cell_box.x + cell_box.w / 2.0,
@@ -1122,6 +1141,7 @@ where
             rotation_box,
             rotation_valign,
             stacked,
+            wrap,
         });
     }
 
@@ -1161,6 +1181,7 @@ where
             rotation_box: None,
             rotation_valign: None,
             stacked: false,
+            wrap: None,
         });
     }
 
@@ -1295,6 +1316,7 @@ fn emit_ghost(
             rotation_box: None,
             rotation_valign: None,
             stacked: false,
+            wrap: None,
         });
     };
 
@@ -1930,6 +1952,7 @@ struct ResolvedXf {
     indent: u32,
     /// wrap_text or shrink_to_fit — both suppress text spill.
     wrap_or_shrink: bool,
+    wrap: bool,
     text_rotation: Option<u16>,
 }
 
@@ -2093,9 +2116,9 @@ impl<'a> FrameStyles<'a> {
                     .as_ref()
                     .map(|edge| Self::resolve_edge(styles, edge)),
             });
-        let (h, v, indent, wrap_or_shrink, text_rotation) = style
+        let (h, v, indent, wrap_or_shrink, wrap, text_rotation) = style
             .and_then(|s| styles.alignment_for(s))
-            .map_or((None, None, 0, false, None), |a| {
+            .map_or((None, None, 0, false, false, None), |a| {
                 let indent = match a.h {
                     Some(HAlign::Left | HAlign::Right) => a.indent.unwrap_or(0).min(MAX_INDENT),
                     _ => 0,
@@ -2105,6 +2128,7 @@ impl<'a> FrameStyles<'a> {
                     a.v,
                     indent,
                     a.wrap_text || a.shrink_to_fit,
+                    wrap::wraps(a),
                     a.text_rotation,
                 )
             });
@@ -2117,6 +2141,7 @@ impl<'a> FrameStyles<'a> {
             v,
             indent,
             wrap_or_shrink,
+            wrap,
             text_rotation,
         }
     }
@@ -2164,7 +2189,12 @@ fn cell_display_text(
 
 /// The cell's number-format code; absent `s` uses xf 0.
 pub fn format_code_for_cell(styles: &Stylesheet, cell: &xlsx_model::Cell) -> String {
-    match styles.format_code_for(cell.style.unwrap_or(0)) {
+    format_code_for_style(styles, cell.style.unwrap_or(0))
+}
+
+/// The number-format code of xf `style`.
+pub(crate) fn format_code_for_style(styles: &Stylesheet, style: u32) -> String {
+    match styles.format_code_for(style) {
         FormatCode::Custom(c) => c.to_string(),
         FormatCode::Builtin(id) => builtin_format_code(id).unwrap_or("General").to_string(),
     }
@@ -2378,6 +2408,9 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
 mod merged_grid_tests;
 
 #[cfg(test)]
+mod wrap_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn pattern_border_display_list_preserves_pattern_and_dash_styles() {
@@ -2530,7 +2563,7 @@ mod tests {
     }
     use super::*;
     use xlsx_model::Hyperlink;
-    use xlsx_model::styles::{Alignment, HAlign, Xf};
+    use xlsx_model::styles::{Alignment, Font, HAlign, Xf};
     use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
@@ -4008,7 +4041,7 @@ mod tests {
             })
             .collect();
         assert_eq!(texts.len(), 3);
-        assert_eq!(texts[1].0, texts[0].0 + 2.0 * INDENT_WIDTH_PX);
+        assert_eq!(texts[1].0, texts[0].0 + 2.0 * 9.0);
         assert_eq!(texts[2].0, texts[0].0);
         assert_eq!(texts[1].1.w, texts[0].1.w);
         assert_eq!(texts[2].1.w, texts[0].1.w);
@@ -4057,9 +4090,9 @@ mod tests {
             })
             .collect();
         assert_eq!(nums.len(), 2);
-        assert_eq!(nums[1].0, nums[0].0 - INDENT_WIDTH_PX);
+        assert_eq!(nums[1].0, nums[0].0 - 9.0);
         assert_eq!(nums[1].1.left, nums[0].1.left);
-        assert_eq!(nums[1].1.width, nums[0].1.width - INDENT_WIDTH_PX);
+        assert_eq!(nums[1].1.width, nums[0].1.width - 9.0);
     }
 
     #[test]
@@ -4189,7 +4222,132 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // calibri 11's space is 6.63 device pixels at 192dpi, snapped to 7.
         let scale = 96.0 / metrics.dpi;
-        assert_eq!(xs, vec![3.0 * scale, (3.0 + 2.0 * INDENT_WIDTH_PX) * scale]);
+        assert_eq!(xs, vec![3.0 * scale, (3.0 + 2.0 * 3.0 * 7.0) * scale]);
+    }
+
+    /// x of a plain text cell, a left-indented one, a plain number, a
+    /// right-indented number and a left-indented cell in its own font.
+    fn indent_xs(
+        normal: Option<(&str, f64)>,
+        indent: u32,
+        print: Option<&PrintMetrics>,
+    ) -> Vec<f32> {
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let mut wb = Workbook::default();
+        wb.styles.fonts = vec![
+            normal.map_or_else(Font::default, |(family, size)| Font {
+                name: Some(family.into()),
+                size_pt: Some(size),
+                ..Font::default()
+            }),
+            Font {
+                name: Some("Verdana".into()),
+                size_pt: Some(14.0),
+                ..Font::default()
+            },
+        ];
+        let aligned = |h, indent, font| Xf {
+            font,
+            alignment: Some(Alignment {
+                h: Some(h),
+                indent: Some(indent),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        };
+        wb.styles.cell_xfs = vec![
+            Xf::default(),
+            aligned(HAlign::Left, indent, None),
+            aligned(HAlign::Right, 1, None),
+            aligned(HAlign::Left, indent, Some(1)),
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        let styled = |style, cell: Cell| Cell {
+            style: Some(style),
+            ..cell
+        };
+        sheet.set_cell(CellRef::new(0, 0), text_cell("plain"));
+        sheet.set_cell(CellRef::new(1, 0), styled(1, text_cell("indented")));
+        sheet.set_cell(CellRef::new(2, 0), num_cell(42.0));
+        sheet.set_cell(CellRef::new(3, 0), styled(2, num_cell(42.0)));
+        sheet.set_cell(CellRef::new(4, 0), styled(3, text_cell("own font")));
+        wb.sheets.push(sheet);
+        let dl = build_frame(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[],
+            |chart| {
+                Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
+                    part: chart.part.clone(),
+                })
+            },
+            print.map(|metrics| (metrics, false)),
+        )
+        .unwrap();
+        dl.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text { x, .. } => Some(*x),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn print_metrics_72(family: &str, size: f32) -> PrintMetrics {
+        PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: size,
+            font_family: family.into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        }
+    }
+
+    fn assert_px(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+    }
+
+    /// excel for mac's 72dpi print of the public corpus: a calibri 11
+    /// workbook indents 6pt (8px) a level, an arial 10 one 9pt (12px), on
+    /// either side and whatever font the cell itself uses.
+    #[test]
+    fn print_indent_is_three_normal_font_spaces_like_excel() {
+        let calibri = print_metrics_72("Calibri", 11.0);
+        let xs = indent_xs(Some(("Calibri", 11.0)), 2, Some(&calibri));
+        assert_eq!(xs.len(), 5);
+        assert_px(xs[1] - xs[0], 16.0);
+        assert_px(xs[2] - xs[3], 8.0);
+        assert_px(xs[4], xs[1]);
+
+        let arial = print_metrics_72("Arial", 10.0);
+        let xs = indent_xs(Some(("Arial", 10.0)), 5, Some(&arial));
+        assert_px(xs[1] - xs[0], 60.0);
+        assert_px(xs[2] - xs[3], 12.0);
+        assert_px(xs[4], xs[1]);
+    }
+
+    #[test]
+    fn screen_indent_follows_the_normal_font() {
+        let xs = indent_xs(None, 1, None);
+        assert_eq!(xs.len(), 5);
+        assert_px(xs[1] - xs[0], 9.0);
+        assert_px(xs[2] - xs[3], 9.0);
+        assert_px(xs[4], xs[1]);
+        let xs = indent_xs(Some(("Arial", 10.0)), 1, None);
+        assert_px(xs[1] - xs[0], 12.0);
+        assert_px(xs[2] - xs[3], 12.0);
+        let xs = indent_xs(Some(("Courier New", 11.0)), 1, None);
+        assert_px(xs[1] - xs[0], 27.0);
     }
 }
