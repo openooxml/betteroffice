@@ -1,3 +1,5 @@
+import { decodeStateVector, parseUpdateMeta } from "yjs";
+
 import {
   initEngines,
   openDocxReplica,
@@ -16,6 +18,11 @@ export interface JoinPayload {
   initialUpdate: Uint8Array;
 }
 
+export interface SaveResult {
+  bytes: Uint8Array;
+  update: Uint8Array | null;
+}
+
 export interface ServerReplica {
   readonly format: Format;
   readonly clientId: number;
@@ -26,7 +33,8 @@ export interface ServerReplica {
     update: Uint8Array,
   ): { accepted: true } | { accepted: false; reason: string };
   joinPayload(): JoinPayload;
-  save(): Promise<Uint8Array>;
+  save(): Promise<SaveResult>;
+  onLocalUpdate(listener: (update: Uint8Array) => void): () => void;
   destroy(): void;
 }
 
@@ -35,6 +43,7 @@ interface EngineReplica {
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): unknown;
+  engineVersion(): string;
   dispose(): void;
 }
 
@@ -44,6 +53,7 @@ function adaptDocx(session: YrsSession): EngineReplica {
     encodeStateVector: () => session.encodeStateVector(),
     encodeStateAsUpdate: (remote) => session.encodeStateAsUpdate(remote),
     applyUpdate: (update) => session.applyUpdate(update),
+    engineVersion: () => session.version(),
     dispose: () => session.destroy(),
   };
 }
@@ -54,6 +64,7 @@ function adaptWorkbook(handle: WorkbookHandle): EngineReplica {
     encodeStateVector: () => handle.encodeStateVector(),
     encodeStateAsUpdate: (remote) => handle.encodeStateAsUpdate(remote),
     applyUpdate: (update) => handle.applyUpdate(update),
+    engineVersion: () => handle.version(),
     dispose: () => handle.dispose(),
   };
 }
@@ -64,18 +75,35 @@ function adaptPresentation(handle: PresentationHandle): EngineReplica {
     encodeStateVector: () => handle.encodeStateVector(),
     encodeStateAsUpdate: (remote) => handle.encodeStateAsUpdate(remote),
     applyUpdate: (update) => handle.applyUpdate(update),
+    engineVersion: () => handle.version(),
     dispose: () => handle.dispose(),
   };
 }
 
-function isEmptyUpdate(update: Uint8Array): boolean {
-  return update.length === 0 || (update.length === 2 && update[0] === 0 && update[1] === 0);
+const FINGERPRINT_TAG = new TextEncoder().encode(
+  "\0betteroffice-document-fingerprint-v1\0",
+);
+
+function stripFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
 }
 
 function rejected(error: unknown): { accepted: false; reason: string } {
   const name = error instanceof Error ? error.name : "Error";
   return { accepted: false, reason: `engine rejected update (${name})` };
 }
+
+type ApplyResult = { accepted: true } | { accepted: false; reason: string };
 
 class Replica implements ServerReplica {
   readonly format: Format;
@@ -86,21 +114,19 @@ class Replica implements ServerReplica {
   #version = 0;
   #destroyed = false;
   #saveChain: Promise<unknown> = Promise.resolve();
-  #notAppliedIsNoOp: boolean;
+  #listeners = new Set<(update: Uint8Array) => void>();
 
   constructor(
     format: Format,
     engine: EngineReplica,
     saveEngine: () => Promise<Uint8Array>,
     joinPayload: () => JoinPayload,
-    notAppliedIsNoOp = false,
   ) {
     this.format = format;
     this.clientId = engine.clientId;
     this.#engine = engine;
     this.#saveEngine = saveEngine;
     this.#joinPayload = joinPayload;
-    this.#notAppliedIsNoOp = notAppliedIsNoOp;
   }
 
   get version(): number {
@@ -121,28 +147,48 @@ class Replica implements ServerReplica {
     return this.#engine.encodeStateAsUpdate(remoteStateVector);
   }
 
-  applyUpdate(
-    update: Uint8Array,
-  ): { accepted: true } | { accepted: false; reason: string } {
+  applyUpdate(update: Uint8Array): ApplyResult {
     this.#assertAlive();
-    if (isEmptyUpdate(update)) return { accepted: true };
+    if (update.length === 0) return { accepted: true };
+    return this.#applyNow(update);
+  }
+
+  #applyNow(update: Uint8Array): ApplyResult {
+    const versionBefore = this.#engine.engineVersion();
     let result: unknown;
     try {
       result = this.#engine.applyUpdate(update.slice());
     } catch (error) {
       return rejected(error);
     }
+    if (this.#engine.engineVersion() !== versionBefore) {
+      this.#version += 1;
+      return { accepted: true };
+    }
     if (
+      this.format === "xlsx" &&
       result !== null &&
       typeof result === "object" &&
       "applied" in result &&
-      (result as { applied: unknown }).applied === false
+      (result as { applied: unknown }).applied === false &&
+      this.#isCausalGap(update)
     ) {
-      if (this.#notAppliedIsNoOp) return { accepted: true };
-      return { accepted: false, reason: "engine rejected update (not applied)" };
+      return { accepted: false, reason: "causalGap" };
     }
-    this.#version += 1;
     return { accepted: true };
+  }
+
+  #isCausalGap(update: Uint8Array): boolean {
+    try {
+      const meta = parseUpdateMeta(stripFingerprint(update.slice()));
+      const serverVector = decodeStateVector(this.#engine.encodeStateVector());
+      for (const [client, from] of meta.from) {
+        if (from > (serverVector.get(client) ?? 0)) return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   joinPayload(): JoinPayload {
@@ -150,11 +196,30 @@ class Replica implements ServerReplica {
     return this.#joinPayload();
   }
 
-  save(): Promise<Uint8Array> {
+  onLocalUpdate(listener: (update: Uint8Array) => void): () => void {
     this.#assertAlive();
-    const run = this.#saveChain.then(() => {
+    this.#listeners.add(listener);
+    return () => {
+      this.#listeners.delete(listener);
+    };
+  }
+
+  save(): Promise<SaveResult> {
+    this.#assertAlive();
+    const run = this.#saveChain.then(async (): Promise<SaveResult> => {
       this.#assertAlive();
-      return this.#saveEngine();
+      const vectorBefore = this.#engine.encodeStateVector();
+      const bytes = await this.#saveEngine();
+      let update: Uint8Array | null = null;
+      if (!sameBytes(vectorBefore, this.#engine.encodeStateVector())) {
+        update = this.#engine.encodeStateAsUpdate(vectorBefore);
+        for (const listener of [...this.#listeners]) {
+          try {
+            listener(update.slice());
+          } catch {}
+        }
+      }
+      return { bytes, update };
     });
     this.#saveChain = run.then(
       () => undefined,
@@ -166,7 +231,11 @@ class Replica implements ServerReplica {
   destroy(): void {
     this.#assertAlive();
     this.#destroyed = true;
-    this.#engine.dispose();
+    void this.#saveChain.then(() => {
+      try {
+        this.#engine.dispose();
+      } catch {}
+    });
   }
 }
 
@@ -196,7 +265,6 @@ export async function openServerReplica(
       adaptWorkbook(handle),
       async () => handle.save(),
       () => ({ format: "xlsx", initialUpdate: handle.encodeStateAsUpdate() }),
-      true,
     );
   }
   const handle = openPptxReplica(bytes, options.clientId);

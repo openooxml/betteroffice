@@ -61,6 +61,7 @@ export interface TestClient {
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): void;
   edit(marker: string, slot?: number): void;
+  splitFirstParagraph(): void;
   remove(marker: string): void;
   contains(marker: string): boolean;
   save(): Promise<Uint8Array>;
@@ -93,6 +94,14 @@ function wrapDocx(session: YrsSession, extra?: YrsSession): TestClient {
             ? paragraphs.at(-1)!
             : paragraphs[slot - 1]!;
       session.insertText({ story: "body", paraId: para.paraId, offset: 0 }, marker);
+    },
+    splitFirstParagraph: () => {
+      const para = session.paragraphs("body")[0]!;
+      session.splitParagraph({
+        story: "body",
+        paraId: para.paraId,
+        offset: Math.min(1, para.text.length),
+      });
     },
     remove: (marker) => {
       for (const para of session.paragraphs("body")) {
@@ -129,6 +138,9 @@ function wrapXlsx(handle: WorkbookHandle): TestClient {
     edit: (marker, slot = 0) => {
       lastCell = { row: 25 + slot, col: 0 };
       handle.editCell(0, lastCell.row, lastCell.col, marker);
+    },
+    splitFirstParagraph: () => {
+      throw new Error("splitFirstParagraph is docx only");
     },
     remove: (marker) => {
       for (let row = 20; row <= 32; row += 1) {
@@ -175,6 +187,9 @@ function wrapPptx(handle: PresentationHandle): TestClient {
       const story = stories[slot % stories.length] ?? firstStory();
       handle.insertText(story.id, 0, marker);
     },
+    splitFirstParagraph: () => {
+      throw new Error("splitFirstParagraph is docx only");
+    },
     remove: (marker) => {
       for (const slide of handle.snapshot().slides) {
         for (const shape of slide.shapes) {
@@ -201,8 +216,8 @@ function wrapPptx(handle: PresentationHandle): TestClient {
   };
 }
 
-/** Client ids present as keys in an encoded Yrs v1 state vector. */
-export function stateVectorClientIds(stateVector: Uint8Array): number[] {
+/** Client id to clock map decoded from an encoded Yrs v1 state vector. */
+export function stateVectorMap(stateVector: Uint8Array): Map<number, number> {
   let offset = 0;
   const readVar = (): number => {
     let value = 0n;
@@ -216,12 +231,17 @@ export function stateVectorClientIds(stateVector: Uint8Array): number[] {
     }
   };
   const count = readVar();
-  const ids: number[] = [];
+  const map = new Map<number, number>();
   for (let i = 0; i < count; i += 1) {
-    ids.push(readVar());
-    readVar();
+    const id = readVar();
+    map.set(id, readVar());
   }
-  return ids;
+  return map;
+}
+
+/** Client ids present as keys in an encoded Yrs v1 state vector. */
+export function stateVectorClientIds(stateVector: Uint8Array): number[] {
+  return [...stateVectorMap(stateVector).keys()];
 }
 
 /** A client hydrated from a server join payload, the way the spike built them. */

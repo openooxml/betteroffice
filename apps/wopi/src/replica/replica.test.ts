@@ -7,6 +7,7 @@ import {
   openTestClient,
   sourceBytes,
   stateVectorClientIds,
+  stateVectorMap,
   unzipParts,
   type TestClient,
 } from "../../test/replica/clients";
@@ -72,15 +73,16 @@ for (const format of FORMATS) {
         expect(server.version).toBe(1);
 
         expect(server.applyUpdate(update)).toEqual({ accepted: true });
-        const afterDuplicate = format === "xlsx" ? 1 : 2;
-        expect(server.version).toBe(afterDuplicate);
+        expect(server.version).toBe(1);
         expect(server.applyUpdate(new Uint8Array(0))).toEqual({ accepted: true });
-        expect(server.applyUpdate(new Uint8Array([0, 0]))).toEqual({ accepted: true });
-        expect(server.version).toBe(afterDuplicate);
+        expect(
+          server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        expect(server.version).toBe(1);
 
         const saved = await server.save();
-        expect(server.version).toBe(afterDuplicate);
-        const fresh = await openFreshClient(format, saved, clientId());
+        expect(server.version).toBe(1);
+        const fresh = await openFreshClient(format, saved.bytes, clientId());
         try {
           expect(fresh.contains("replica-marker")).toBe(true);
         } finally {
@@ -88,7 +90,7 @@ for (const format of FORMATS) {
         }
 
         const [saveA, saveB] = await Promise.all([server.save(), server.save()]);
-        expectSavesEqual(format, saveA, saveB);
+        expectSavesEqual(format, saveA.bytes, saveB.bytes);
         expect([...client.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
       } finally {
         client.destroy();
@@ -116,7 +118,7 @@ for (const format of FORMATS) {
         expect(a.contains("BBB")).toBe(true);
         expect(b.contains("AAA")).toBe(true);
 
-        const serverSave = await server.save();
+        const serverSave = (await server.save()).bytes;
         expectSavesEqual(format, serverSave, await a.save());
         expectSavesEqual(format, serverSave, await b.save());
       } finally {
@@ -136,7 +138,7 @@ for (const format of FORMATS) {
           server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
         ).toEqual({ accepted: true });
         expect(server.version).toBe(1);
-        const before = await openFreshClient(format, await server.save(), clientId());
+        const before = await openFreshClient(format, (await server.save()).bytes, clientId());
         try {
           expect(before.contains("DELETE-ME")).toBe(true);
         } finally {
@@ -148,7 +150,7 @@ for (const format of FORMATS) {
         expect(server.applyUpdate(deletion)).toEqual({ accepted: true });
         expect(server.version).toBe(2);
 
-        const after = await openFreshClient(format, await server.save(), clientId());
+        const after = await openFreshClient(format, (await server.save()).bytes, clientId());
         try {
           expect(after.contains("DELETE-ME")).toBe(false);
         } finally {
@@ -175,13 +177,13 @@ for (const format of FORMATS) {
         for (const bad of corrupt) {
           const vectorBefore = server.encodeStateVector();
           const versionBefore = server.version;
-          const saveBefore = await server.save();
+          const saveBefore = (await server.save()).bytes;
           const result = server.applyUpdate(bad);
           expect(result.accepted).toBe(false);
           if (!result.accepted) expect(result.reason.length).toBeGreaterThan(0);
           expect([...server.encodeStateVector()]).toEqual([...vectorBefore]);
           expect(server.version).toBe(versionBefore);
-          expectSavesEqual(format, await server.save(), saveBefore);
+          expectSavesEqual(format, (await server.save()).bytes, saveBefore);
         }
       } finally {
         client.destroy();
@@ -220,7 +222,7 @@ for (const format of FORMATS) {
         expect([...early.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
 
         const saved = await server.save();
-        const fresh = await openFreshClient(format, saved, clientId());
+        const fresh = await openFreshClient(format, saved.bytes, clientId());
         try {
           expect(fresh.contains("late-marker")).toBe(true);
           expect(fresh.contains("early-two")).toBe(true);
@@ -237,6 +239,7 @@ for (const format of FORMATS) {
     test("two late joiners edit concurrently under their own client ids", async () => {
       const source = sourceBytes(format);
       const server = await openServerReplica(format, source, { clientId: clientId() });
+      const atOpen = stateVectorMap(server.encodeStateVector());
       const early = await openTestClient(server.joinPayload(), source, clientId());
       let lateA: TestClient | undefined;
       let lateB: TestClient | undefined;
@@ -278,17 +281,68 @@ for (const format of FORMATS) {
         expect(serverIds).toContain(lateA.clientId);
         expect(serverIds).toContain(lateB.clientId);
 
-        const fresh = await openFreshClient(format, await server.save(), clientId());
+        const fresh = await openFreshClient(format, (await server.save()).bytes, clientId());
         try {
           expect(fresh.contains("from-late-a")).toBe(true);
           expect(fresh.contains("from-late-b")).toBe(true);
         } finally {
           fresh.destroy();
         }
+        const after = stateVectorMap(server.encodeStateVector());
+        expect(after.get(server.clientId)).toBe(atOpen.get(server.clientId));
+        const newIds = [...after.keys()].filter((id) => !atOpen.has(id)).sort((x, y) => x - y);
+        expect(newIds).toEqual(
+          [early.clientId, lateA.clientId, lateB.clientId].sort((x, y) => x - y),
+        );
       } finally {
         early.destroy();
         lateA?.destroy();
         lateB?.destroy();
+        server.destroy();
+      }
+    });
+
+    test("destroy waits for an in-flight save and rejects queued saves", async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const started = server.save();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const queued = server.save();
+      server.destroy();
+      await expect(started).resolves.toBeDefined();
+      await expect(queued).rejects.toThrow();
+    });
+
+    test("applyUpdate during an in-flight save applies immediately", async () => {
+      const source = sourceBytes(format);
+      const server = await openServerReplica(format, source, { clientId: clientId() });
+      const client = await openTestClient(server.joinPayload(), source, clientId());
+      try {
+        client.edit("before-save ", 0);
+        expect(
+          server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+        ).toEqual({ accepted: true });
+        client.edit("during-save ", 0);
+        const during = client.encodeStateAsUpdate(server.encodeStateVector());
+
+        const pending = server.save();
+        expect(server.applyUpdate(during)).toEqual({ accepted: true });
+        expect([...server.encodeStateVector()]).toEqual([
+          ...client.encodeStateVector(),
+        ]);
+        await pending;
+        const after = await openFreshClient(
+          format,
+          (await server.save()).bytes,
+          clientId(),
+        );
+        try {
+          expect(after.contains("during-save")).toBe(true);
+        } finally {
+          after.destroy();
+        }
+      } finally {
+        client.destroy();
         server.destroy();
       }
     });
@@ -306,3 +360,129 @@ for (const format of FORMATS) {
     });
   });
 }
+
+describe("docx save update", () => {
+  test("save returns and emits the paragraph id update, then is byte-stable", async () => {
+    const source = sourceBytes("docx");
+    const server = await openServerReplica("docx", source, { clientId: clientId() });
+    const client = await openTestClient(server.joinPayload(), source, clientId());
+    const emitted: Uint8Array[] = [];
+    const off = server.onLocalUpdate((update) => emitted.push(update));
+    try {
+      client.splitFirstParagraph();
+      expect(
+        server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+      expect([...server.encodeStateVector()]).toEqual([...client.encodeStateVector()]);
+      const versionBefore = server.version;
+
+      const first = await server.save();
+      expect(server.version).toBe(versionBefore);
+      expect(first.update).not.toBeNull();
+      expect(emitted.length).toBe(1);
+      expect(byteEqual(emitted[0]!, first.update!)).toBe(true);
+      client.applyUpdate(first.update!);
+      expect([...server.encodeStateVector()]).toEqual([...client.encodeStateVector()]);
+
+      const second = await server.save();
+      expect(second.update).toBeNull();
+      expect(emitted.length).toBe(1);
+      expect(byteEqual(second.bytes, first.bytes)).toBe(true);
+    } finally {
+      off();
+      client.destroy();
+      server.destroy();
+    }
+  });
+
+  test("update applied during a save is in the next save and publication converges", async () => {
+    const source = sourceBytes("docx");
+    const server = await openServerReplica("docx", source, { clientId: clientId() });
+    const client = await openTestClient(server.joinPayload(), source, clientId());
+    try {
+      client.splitFirstParagraph();
+      expect(
+        server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+
+      const pending = server.save();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      client.edit("during-save ", 0);
+      expect(
+        server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
+      ).toEqual({ accepted: true });
+
+      const first = await pending;
+      const fresh = await openFreshClient("docx", first.bytes, clientId());
+      try {
+        expect(fresh.contains("during-save")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+      expect(first.update).not.toBeNull();
+      client.applyUpdate(first.update!);
+      expect([...server.encodeStateVector()]).toEqual([...client.encodeStateVector()]);
+
+      const next = await openFreshClient(
+        "docx",
+        (await server.save()).bytes,
+        clientId(),
+      );
+      try {
+        expect(next.contains("during-save")).toBe(true);
+      } finally {
+        next.destroy();
+      }
+    } finally {
+      client.destroy();
+      server.destroy();
+    }
+  });
+});
+
+describe("xlsx causal gap", () => {
+  test("out-of-order update is a causalGap until the missing update arrives", async () => {
+    const source = sourceBytes("xlsx");
+    const server = await openServerReplica("xlsx", source, { clientId: clientId() });
+    const client = await openTestClient(server.joinPayload(), source, clientId());
+    try {
+      client.edit("gap-first ", 0);
+      const afterFirst = client.encodeStateVector();
+      const first = client.encodeStateAsUpdate(server.encodeStateVector());
+      client.edit("gap-second ", 1);
+      const second = client.encodeStateAsUpdate(afterFirst);
+
+      expect(server.applyUpdate(second)).toEqual({
+        accepted: false,
+        reason: "causalGap",
+      });
+      expect(server.version).toBe(0);
+      const freshBefore = await openFreshClient(
+        "xlsx",
+        (await server.save()).bytes,
+        clientId(),
+      );
+      try {
+        expect(freshBefore.contains("gap-second")).toBe(false);
+      } finally {
+        freshBefore.destroy();
+      }
+
+      expect(server.applyUpdate(first)).toEqual({ accepted: true });
+      const freshAfter = await openFreshClient(
+        "xlsx",
+        (await server.save()).bytes,
+        clientId(),
+      );
+      try {
+        expect(freshAfter.contains("gap-first")).toBe(true);
+        expect(freshAfter.contains("gap-second")).toBe(true);
+      } finally {
+        freshAfter.destroy();
+      }
+    } finally {
+      client.destroy();
+      server.destroy();
+    }
+  });
+});
