@@ -922,6 +922,36 @@ fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<S
         .flatten()
 }
 
+fn continuous_horizontal_frame(plan: &LayoutPlan, section_index: usize) -> bool {
+    let mut changed = false;
+    for index in 1..=section_index {
+        if break_type_after_section(plan, index - 1) != Some(SectionBreakType::Continuous) {
+            changed = false;
+            continue;
+        }
+        let previous = &plan.section_configs[index - 1];
+        let current = &plan.section_configs[index];
+        let previous_columns = previous.columns.clone().unwrap_or_else(default_columns);
+        let current_columns = current.columns.clone().unwrap_or_else(default_columns);
+        changed |= previous.margins.left != current.margins.left
+            || previous.margins.right != current.margins.right
+            || previous_columns.count != current_columns.count
+            || (0..current_columns.count as usize).any(|column| {
+                let rectangle = |columns: &crate::types::ColumnLayout| {
+                    crate::page_flow::column_rectangle_at(
+                        current.page_size.w,
+                        current.margins.left,
+                        current.margins.right,
+                        columns,
+                        column,
+                    )
+                };
+                rectangle(&previous_columns) != rectangle(&current_columns)
+            });
+    }
+    changed
+}
+
 fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
     plan.break_indices.get(section_index).is_some()
         && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
@@ -966,6 +996,7 @@ fn place<F: PartialEq>(
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
+    paginator.continuous_horizontal_frame = continuous_horizontal_frame(plan, section_idx);
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -1236,6 +1267,8 @@ fn place<F: PartialEq>(
                 }
 
                 section_idx += 1;
+                paginator.continuous_horizontal_frame =
+                    continuous_horizontal_frame(plan, section_idx);
             }
 
             LayoutBlock::Unsupported => {

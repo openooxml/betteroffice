@@ -1467,11 +1467,12 @@ where
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
-    let mut visited = if has_unequal {
+    let mut visited = if has_unequal || has_continuous_floats {
         vec![(
             previous_offsets.clone(),
             widths.clone(),
             previous_bands.clone(),
+            table_wrap_frames.clone(),
         )]
     } else {
         Vec::new()
@@ -1543,8 +1544,11 @@ where
         }
         let repeated = visited
             .iter()
-            .position(|(seen_offsets, seen_widths, seen_bands)| {
-                *seen_offsets == offsets && *seen_widths == next_widths && *seen_bands == bands
+            .position(|(seen_offsets, seen_widths, seen_bands, seen_frames)| {
+                *seen_offsets == offsets
+                    && *seen_widths == next_widths
+                    && *seen_bands == bands
+                    && *seen_frames == next_wrap_frames
             });
         let accept = has_unequal
             && !frames_changed
@@ -1555,14 +1559,14 @@ where
                     continue;
                 }
                 let candidates = &visited[repeated.unwrap_or(0)..];
-                if !candidates.iter().any(|(_, widths, previous_bands)| {
+                if !candidates.iter().any(|(_, widths, previous_bands, _)| {
                     widths[index] != next_widths[index]
                         || previous_bands.get(&index) != bands.get(&index)
                 }) {
                     continue;
                 }
                 let mut narrowest = next_widths[index];
-                for (_, widths, bands) in candidates {
+                for (_, widths, bands, _) in candidates {
                     narrowest = narrowest.min(widths[index]);
                     for band in bands.get(&index).into_iter().flatten() {
                         narrowest = narrowest.min(band.width);
@@ -1574,8 +1578,13 @@ where
                 next_widths[index] = narrowest;
             }
         }
-        if has_unequal {
-            visited.push((offsets.clone(), next_widths.clone(), bands.clone()));
+        if has_unequal || has_continuous_floats {
+            visited.push((
+                offsets.clone(),
+                next_widths.clone(),
+                bands.clone(),
+                next_wrap_frames.clone(),
+            ));
         }
         widths = next_widths;
         table_wrap_frames = next_wrap_frames;
@@ -23192,6 +23201,165 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     #[test]
     fn continuous_section_behind_float_uses_new_frame() {
         continuous_section_float_frame("margin", "right", false, true, true);
+    }
+
+    fn boundary_float_anchor(relative_to: &str, align: &str) -> String {
+        preview_pagination_anchor()
+            .replace(
+                "<w:drawing>",
+                r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">"#,
+            )
+            .replace(
+                r#"<wp:positionH relativeFrom="margin"><wp:align>left</wp:align>"#,
+                &format!(r#"<wp:positionH relativeFrom="{relative_to}"><wp:align>{align}</wp:align>"#),
+            )
+            .replace(r#"simplePos="0""#, r#"distL="0" distR="0" simplePos="0""#)
+    }
+
+    fn boundary_float_document(body: &str) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(&docx_bytes("", body)).unwrap();
+        let relationships = parts
+            .iter_mut()
+            .find(|(path, _)| path == "word/_rels/document.xml.rels")
+            .unwrap();
+        relationships.1 = String::from_utf8(relationships.1.clone())
+            .unwrap()
+            .replace(
+                "</Relationships>",
+                r#"<Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#,
+            )
+            .into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn assert_boundary_float(
+        engine: &EngineSession,
+        request: &serde_json::Value,
+        expected_x: f64,
+        expected_column_x: f64,
+        expected_column_width: f64,
+        expected_left: f64,
+    ) -> usize {
+        let display: serde_json::Value =
+            serde_json::from_str(&preview_pagination_display(engine, request)).unwrap();
+        let pagination = engine.pagination.borrow();
+        let layout = pagination.layout.as_ref().unwrap();
+        let input = pagination.input.as_ref().unwrap();
+        let (page_index, paragraph, measure) = layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    input.measured.iter().find_map(|measured| {
+                        match (&measured.block, &measured.measure) {
+                            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                                if block.id == paragraph.block_id
+                                    && block.runs.iter().any(|run| matches!(run, Run::Image(_))) =>
+                            {
+                                Some((page_index, paragraph, measure))
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+            })
+            .next()
+            .unwrap();
+        let frame = paragraph.horizontal_frame.unwrap();
+        assert_eq!(frame.margin_left, 48.0);
+        assert_eq!(frame.content_width, 696.0);
+        assert_eq!(frame.column_x, expected_column_x);
+        assert_eq!(frame.column_width, expected_column_width);
+        assert_eq!(paragraph.x, expected_column_x);
+        let line = &measure.lines[paragraph.from_line];
+        assert_eq!(line.left_offset.unwrap_or(0.0), expected_left);
+        assert_eq!(line.right_offset.unwrap_or(0.0), 0.0);
+        let image = display["pages"][page_index]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "image")
+            .unwrap();
+        assert_eq!(image["x"].as_f64(), Some(expected_x));
+        page_index
+    }
+
+    #[test]
+    fn continuous_margin_float_at_page_boundary_converges_with_matching_paint_and_wrap() {
+        let section =
+            continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+                .replace(r#"w:right="720""#, r#"w:right="1080""#);
+        let anchor = boundary_float_anchor("rightMargin", "right");
+        let mut destinations = Vec::new();
+        for height in [12000, 12300, 12600] {
+            let body = format!(
+                r#"{}<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{height}" w:lineRule="exact"/></w:pPr><w:r><w:t>Filler</w:t></w:r></w:p><w:p><w:pPr><w:keepLines/><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr>{anchor}<w:r><w:t>Boundary float</w:t></w:r></w:p>{section}"#,
+                ending("Old", &continuous_margin_section("", 1440, 1440, 0)),
+            );
+            let bytes = boundary_float_document(&body);
+            let (engine, request) = lowering_pages::laid_out(&bytes, 75233);
+            let request = serde_json::from_str(&request).unwrap();
+            destinations.push(assert_boundary_float(
+                &engine, &request, 786.0, 48.0, 696.0, 0.0,
+            ));
+            assert!(engine.pagination.borrow().layout.as_ref().unwrap().pages.len() <= 2);
+        }
+        assert!(destinations.contains(&0));
+        assert!(destinations.contains(&1));
+    }
+
+    #[test]
+    fn balanced_continuous_float_on_pristine_page_paints_in_column_one() {
+        for old in ["", "Old"] {
+            let section =
+                continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+                    .replace(r#"w:right="720""#, r#"w:right="1080""#);
+            let columns = section.replace(
+                "</w:sectPr>",
+                r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#,
+            );
+            let anchor = boundary_float_anchor("column", "left");
+            let spacing = r#"<w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/>"#;
+            let body = format!(
+                r#"{}<w:p><w:pPr>{spacing}</w:pPr><w:r><w:t>First column</w:t></w:r></w:p><w:p><w:pPr>{spacing}</w:pPr>{anchor}<w:r><w:t>Second column</w:t></w:r></w:p>{}{section}"#,
+                ending(old, &continuous_margin_section("", 1440, 1440, 0)),
+                ending("", &columns),
+            );
+            let bytes = boundary_float_document(&body);
+            let (engine, request) = lowering_pages::laid_out(&bytes, 75234);
+            let request = serde_json::from_str(&request).unwrap();
+            assert_eq!(
+                assert_boundary_float(&engine, &request, 408.0, 408.0, 336.0, 30.0),
+                0
+            );
+            let pagination = engine.pagination.borrow();
+            assert_eq!(pagination.layout.as_ref().unwrap().pages.len(), 1);
+            let first = pagination.layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph)
+                        if paragraph.x == 48.0 && paragraph.height == 40.0 =>
+                    {
+                        Some(paragraph)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let second = pagination.layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph) if paragraph.x == 408.0 => Some(paragraph),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(second.y, first.y);
+        }
     }
 
     #[test]

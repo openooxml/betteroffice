@@ -210,7 +210,7 @@ pub(crate) fn unequal_column_rectangles(
         .collect()
 }
 
-fn column_rectangle_at(
+pub(crate) fn column_rectangle_at(
     page_width: f64,
     left_margin: f64,
     right_margin: f64,
@@ -316,6 +316,7 @@ pub struct Paginator {
     columns: ColumnLayout,
     opening_margins: Vec<PageMargins>,
     opening_columns: Vec<ColumnLayout>,
+    pub(crate) continuous_horizontal_frame: bool,
     pending_page_size: Option<Size>,
     pending_margins: Option<PageMargins>,
     pending_columns: Option<ColumnLayout>,
@@ -378,6 +379,7 @@ impl Paginator {
             columns,
             opening_margins: Vec::new(),
             opening_columns: Vec::new(),
+            continuous_horizontal_frame: false,
             pending_page_size: None,
             pending_margins: None,
             pending_columns: None,
@@ -1169,7 +1171,8 @@ impl Paginator {
                 column_x: x,
                 column_width: self.get_column_width(column_index),
             };
-            paragraph.horizontal_frame = (frame != opening_frame).then_some(frame);
+            paragraph.horizontal_frame =
+                (self.continuous_horizontal_frame || frame != opening_frame).then_some(frame);
         }
         if self.columns.count > 1.0
             && self.columns.equal_width == Some(false)
