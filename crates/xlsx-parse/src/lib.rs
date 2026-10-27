@@ -5,6 +5,9 @@ mod axis;
 mod chart;
 mod facts_codec;
 mod formula;
+mod header_footer;
+#[cfg(test)]
+mod header_footer_tests;
 mod inventory;
 mod package;
 mod package_facts;
@@ -30,6 +33,10 @@ pub use chart::{
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
+pub use header_footer::{
+    HeaderFooterPair, HeaderFooterText, SheetHeaderFooter, parse_header_footer,
+    parse_header_footer_text,
+};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };

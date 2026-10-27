@@ -100,12 +100,16 @@ impl XlsxEditor {
             );
         }
         let sheet = SheetId(u32::try_from(sheet_index).context("sheet index is too large")?);
-        let viewport = viewport_for_used_range_within(workbook.sheet(sheet)?, |viewport| {
-            viewport.width.is_finite()
-                && viewport.height.is_finite()
-                && viewport.width.ceil() <= max_texture_dimension_2d as f32
-                && viewport.height.ceil() <= max_texture_dimension_2d as f32
-        });
+        let viewport = viewport_for_used_range_within(
+            workbook.sheet(sheet)?,
+            &workbook.model().styles,
+            |viewport| {
+                viewport.width.is_finite()
+                    && viewport.height.is_finite()
+                    && viewport.width.ceil() <= max_texture_dimension_2d as f32
+                    && viewport.height.ceil() <= max_texture_dimension_2d as f32
+            },
+        );
         let requested_width = viewport.width.ceil();
         let requested_height = viewport.height.ceil();
         if requested_width > max_texture_dimension_2d as f32

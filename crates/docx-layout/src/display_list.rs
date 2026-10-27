@@ -3235,6 +3235,8 @@ struct ReservedFragmentIn {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParagraphFragmentIn {
+    #[serde(default)]
+    pub(crate) horizontal_frame: Option<crate::types::HorizontalFrame>,
     pub(crate) block_id: Value,
     #[serde(default)]
     pub(crate) x: f64,
@@ -4756,6 +4758,7 @@ fn emit_note_item(
                     .unwrap_or(0.0);
                 cursor += before;
                 let fragment = ParagraphFragmentIn {
+                    horizontal_frame: None,
                     block_id: block.id.clone(),
                     x,
                     y: y + cursor,
@@ -5129,6 +5132,7 @@ fn recompose_hf_region(
         }
     };
     let geom = PageFloatGeom {
+        horizontal_frame: None,
         page_width: page.size.w,
         page_height: page.size.h,
         margin_left: page.margins.left,
@@ -5160,6 +5164,7 @@ fn recompose_hf_region(
                 let y = origin_y + hf_flow.place(content_height, before, after);
                 emit_paragraph_floating_images(&mut behind, block, origin_y + cursor, &geom, true);
                 let fragment = ParagraphFragmentIn {
+                    horizontal_frame: None,
                     block_id: block.id.clone(),
                     x: page.margins.left,
                     y,
@@ -5384,6 +5389,7 @@ fn build_display_list_selected(
         // Page coordinate frame for anchored-float resolution.
         let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
         let float_geom = PageFloatGeom {
+            horizontal_frame: None,
             page_width: page.size.w,
             page_height: page.size.h,
             margin_left: margins.left,
@@ -5417,6 +5423,7 @@ fn build_display_list_selected(
                                 block,
                                 image,
                                 fragment_y: fragment.y,
+                                horizontal_frame: fragment.horizontal_frame,
                             });
                         }
                     }
@@ -5442,8 +5449,10 @@ fn build_display_list_selected(
                     block,
                     image,
                     fragment_y,
+                    horizontal_frame,
                 } => {
-                    emit_floating_image(&mut prims, block, image, fragment_y, &float_geom);
+                    let geom = float_geom.with_horizontal_frame(horizontal_frame);
+                    emit_floating_image(&mut prims, block, image, fragment_y, &geom);
                 }
                 BehindObject::Shape { fragment, block } => {
                     emit_shape_fragment(&mut prims, fragment, block, &ctx);
@@ -5623,7 +5632,8 @@ fn build_display_list_selected(
                 && let Some(mb) = by_id.get(block_key(&pf.block_id).as_ref())
                 && let BlockIn::Paragraph(block) = &mb.block
             {
-                emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, false);
+                let geom = float_geom.with_horizontal_frame(pf.horizontal_frame);
+                emit_paragraph_floating_images(&mut prims, block, pf.y, &geom, false);
             }
         }
 
@@ -8325,13 +8335,26 @@ fn emit_paragraph_borders(
 // ---------------------------------------------------------------------------
 
 /// Page coordinate frame for anchored floats, in pixels.
+#[derive(Clone, Copy)]
 pub(crate) struct PageFloatGeom {
+    pub(crate) horizontal_frame: Option<crate::types::HorizontalFrame>,
     pub(crate) page_width: f64,
     pub(crate) page_height: f64,
     pub(crate) margin_left: f64,
     pub(crate) margin_top: f64,
     pub(crate) content_width: f64,
     pub(crate) content_height: f64,
+}
+
+impl PageFloatGeom {
+    fn with_horizontal_frame(mut self, frame: Option<crate::types::HorizontalFrame>) -> Self {
+        if let Some(frame) = frame {
+            self.margin_left = frame.margin_left;
+            self.content_width = frame.content_width;
+            self.horizontal_frame = Some(frame);
+        }
+        self
+    }
 }
 
 /// an anchor band: `base` is the band's origin (content-relative px) and `size`
@@ -8359,13 +8382,29 @@ fn horizontal_anchor_band(relative_to: Option<&str>, geom: &PageFloatGeom) -> An
         },
         Some("rightMargin") => AnchorBand {
             base: geom.content_width,
-            size: geom.margin_left,
+            size: if geom.horizontal_frame.is_some() {
+                geom.page_width - geom.margin_left - geom.content_width
+            } else {
+                geom.margin_left
+            },
         },
+        Some("column") => geom.horizontal_frame.map_or(
+            AnchorBand {
+                base: 0.0,
+                size: geom.content_width,
+            },
+            |frame| AnchorBand {
+                base: frame.column_x - geom.margin_left,
+                size: frame.column_width,
+            },
+        ),
         Some("character") => AnchorBand {
-            base: 0.0,
+            base: geom
+                .horizontal_frame
+                .map_or(0.0, |frame| frame.column_x - geom.margin_left),
             size: 0.0,
         },
-        // column / margin / insideMargin / outsideMargin / default
+        // margin / insideMargin / outsideMargin / default
         _ => AnchorBand {
             base: 0.0,
             size: geom.content_width,
@@ -8421,10 +8460,11 @@ pub(crate) fn resolve_anchored_position(
 ) -> (f64, f64) {
     let x = match position.and_then(|p| p.horizontal.as_ref()) {
         None => {
+            let band = horizontal_anchor_band(Some("column"), geom);
             if css_float == Some("right") {
-                geom.content_width - width
+                band.base + band.size - width
             } else {
-                0.0
+                band.base
             }
         }
         Some(h) => {
@@ -8495,6 +8535,7 @@ enum BehindObject<'a> {
         block: &'a ParagraphBlockIn,
         image: &'a ImageRunIn,
         fragment_y: f64,
+        horizontal_frame: Option<crate::types::HorizontalFrame>,
     },
     Shape {
         fragment: &'a ShapeFragmentIn,
@@ -8809,6 +8850,7 @@ fn emit_shape_fragment_with_clip(
                 break;
             }
             let synthetic = ParagraphFragmentIn {
+                horizontal_frame: None,
                 block_id: para.id.clone(),
                 x: content_x,
                 y: para_y,
@@ -9619,6 +9661,7 @@ fn emit_text_box_fragment(
         };
         let para_y = content_top + y_offset;
         let synthetic = ParagraphFragmentIn {
+            horizontal_frame: None,
             block_id: para.id.clone(),
             x: content_x,
             y: para_y,
@@ -11039,6 +11082,7 @@ fn emit_cell_content(
                 (0..pm.lines.len(), para_y, total_height)
             };
             let synthetic = ParagraphFragmentIn {
+                horizontal_frame: None,
                 block_id: pb.id.clone(),
                 x: content_x,
                 y: para_y,

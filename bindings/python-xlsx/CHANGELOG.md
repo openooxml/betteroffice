@@ -1,5 +1,14 @@
 # @betteroffice/python-xlsx
 
+## 0.2.2
+
+### Patch Changes
+
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+
 ## 0.2.1
 
 ### Patch Changes

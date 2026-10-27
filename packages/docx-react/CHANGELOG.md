@@ -1,5 +1,35 @@
 # @betteroffice/docx-react
 
+## 0.5.1
+
+### Patch Changes
+
+- f9f560c: Comment cards now match the tracked change cards: the same header with avatar, name and time, icon buttons for resolve and more options, a compact reply field and matching buttons. Resolving, the menu and replies work as before.
+- 6f2d16b: In the default editor, a drag selection keeps up with the pointer on large documents, and the add-comment button stays put while selecting instead of flickering.
+- 03591d5: Paragraph reads now include resolved outline levels and list markers in accepted and original views. Story reads report header and footer visibility when a complete layout of the current version is available.
+- a7a89c8: Scrolling a document with many tracked changes is smooth again: review cards, dots and the summary no longer re-render on every scroll frame, only when their change, position or selection changes.
+- 03e77d1: Scrolling documents with many tracked changes is smoother, and page details appear sooner after scrolling stops.
+- 2669fa5: Documents with many EMF, WMF or SVG pictures show their first page sooner: the default editor rasterizes those pictures one at a time between other work and hands each finished picture to the page right away.
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [eb6df55]
+- Updated dependencies [673dea7]
+- Updated dependencies [c3eaf80]
+- Updated dependencies [d211451]
+- Updated dependencies [f9f560c]
+- Updated dependencies [3fe4c80]
+- Updated dependencies [cc9f38c]
+- Updated dependencies [03591d5]
+- Updated dependencies [c8c5d64]
+- Updated dependencies [e4cf080]
+- Updated dependencies [8c056d3]
+- Updated dependencies [5f4a899]
+- Updated dependencies [b2fa7b8]
+  - @betteroffice/docx@0.5.1
+  - @betteroffice/docx-i18n@0.5.1
+
 ## 0.5.0
 
 ### Minor Changes

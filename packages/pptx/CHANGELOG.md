@@ -1,5 +1,21 @@
 # @betteroffice/pptx
 
+## 0.5.1
+
+### Patch Changes
+
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+- 27590d9: Duplicating slides now preserves legacy and modern comment extensions, including reply threading information. Replies added to copied comments remain attached to the copied discussion.
+- d9c0a82: Adds opt-in `width: "copy"` to `insert_table_column` and `insertTableColumn` to preserve existing column widths and refit the table frame. Omitting `width` or choosing `"split"` keeps the current behavior.
+- 70e3441: Presentations open and show every slide when font downloads fail. Text falls back to available fonts and the editor logs one console warning.
+- 375cbc3: Adds effective paragraph lists and slide titles, visibility and layout details to plugin content reads. Available by default with optional fields for compatibility with older engines.
+- 4eaba8b: Table cell text without its own size or formatting now takes the slide master's other text style, and the presentation default text style only for levels the master leaves out, so table text matches PowerPoint's size and weight.
+- 59deeda: Slide text is drawn word by word at its layout positions, so lines keep PowerPoint's word placement instead of drifting when the browser's font metrics differ. Shaping, combining marks and right-to-left text stay intact.
+- 02818de: Shapes styled with a theme effect reference now draw the theme's outer shadow, as PowerPoint does. Sessions stored by earlier versions recover these shadows when their source is attached, without changing the stored format.
+
 ## 0.5.0
 
 ### Minor Changes
