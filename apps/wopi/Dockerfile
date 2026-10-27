@@ -26,7 +26,7 @@ WORKDIR /app
 COPY . .
 RUN bun install --frozen-lockfile
 RUN bun run build:xlsx-wasm && bun run build:docx-wasm && bun run build:pptx-wasm
-RUN bun run build:fonts && bun run build:xlsx && bun run build:docx && bun run build:pptx
+RUN bun run build:packages
 RUN bun run --filter @betteroffice/wopi build:web
 RUN mkdir -p /manifests \
   && find apps packages bindings crates -name package.json -not -path "*/node_modules/*" -exec cp --parents {} /manifests/ \; \

@@ -186,7 +186,10 @@ describe("apps/wopi/Dockerfile", () => {
     expect(source).toContain("build:xlsx-wasm");
     expect(source).toContain("build:docx-wasm");
     expect(source).toContain("build:pptx-wasm");
+    expect(source).toContain("build:packages");
     expect(source).toContain("build:web");
+    expect(source.indexOf("build:pptx-wasm")).toBeLessThan(source.indexOf("build:packages"));
+    expect(source.indexOf("build:packages")).toBeLessThan(source.indexOf("build:web"));
     expect(source).toContain("wasm32-unknown-unknown");
   });
 
