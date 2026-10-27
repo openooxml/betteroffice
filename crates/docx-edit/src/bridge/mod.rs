@@ -3323,7 +3323,7 @@ enum RawRunKind {
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
-    inherited_hyperlink: (bool, bool),
+    inherited_hyperlink: (bool, bool, bool),
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -3829,11 +3829,27 @@ fn flush_paragraph<T: ReadTxn>(
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
 
+    let toc_entry = semantic_toc || style_id.as_deref().is_some_and(is_toc_style);
+    // Entry runs in a generated TOC entry sit beside a PAGEREF field
+    // result in the same paragraph, whatever the entry style is named.
+    let pageref_entry = raw_runs.iter().any(|run| {
+        matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
+            if instruction.contains("PAGEREF"))
+    });
+    // The paragraph mark size is the mark's own: no run inherits it, in
+    // body paragraphs or in TOC entries. Unsized runs take the style
+    // chain size the seed resolved, or the measurement default.
+    let mut run_defaults = defaults.clone();
+    run_defaults.font_size = None;
+    run_defaults.font_size_cs = None;
     for run in &mut raw_runs {
-        apply_run_defaults(&mut run.formatting, &defaults);
-        if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
+        apply_run_defaults(&mut run.formatting, &run_defaults);
+        if toc_entry || pageref_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
+    }
+    if toc_entry {
+        clamp_toc_auxiliary_sizes(&mut raw_runs);
     }
     let raw_runs = coalesce_runs(raw_runs);
     map.paragraph_blocks.push((paragraph_pm_start, source));
@@ -4969,15 +4985,19 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool) {
+fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool, bool) {
     let inherited = |key| {
         attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
             == Some(true)
     };
-    (inherited("textColor"), inherited("underline"))
+    (
+        inherited("textColor"),
+        inherited("underline"),
+        inherited("fontSize"),
+    )
 }
 
-fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool)) {
+fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool, bool)) {
     if let Some(hyperlink) = &mut formatting.hyperlink {
         hyperlink.no_default_style = Some(true);
         if inherited.0 {
@@ -4985,6 +5005,62 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
         }
         if inherited.1 {
             formatting.underline = None;
+        }
+        if inherited.2 {
+            formatting.font_size = None;
+            formatting.font_size_cs = None;
+        }
+    }
+}
+
+/// Caps the runs that share a TOC entry line without carrying entry text
+/// (tabs, field results, whitespace only runs) at the entry text size. Word
+/// renders the leader and page number at the entry size even when a tab or
+/// field run carries a larger one, and sizes the line from the entry text.
+fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun]) {
+    let entry_size = raw_runs
+        .iter()
+        .filter_map(|run| match &run.kind {
+            RawRunKind::Text(text) if text.chars().any(|c| !c.is_whitespace()) => {
+                run.formatting.font_size
+            }
+            _ => None,
+        })
+        .fold(None::<f64>, |size, next| {
+            Some(size.map_or(next, |current| current.max(next)))
+        });
+    let Some(entry_size) = entry_size else {
+        // No entry run carries a size: tabs and whitespace runs take the
+        // same default the entry text takes, never a size of their own.
+        for run in raw_runs.iter_mut() {
+            let auxiliary = match &run.kind {
+                RawRunKind::Tab => true,
+                RawRunKind::Text(text) => text.chars().all(|c| c.is_whitespace()),
+                _ => false,
+            };
+            if auxiliary {
+                run.formatting.font_size = None;
+                run.formatting.font_size_cs = None;
+            }
+        }
+        return;
+    };
+    for run in raw_runs.iter_mut() {
+        let auxiliary = match &run.kind {
+            RawRunKind::Tab | RawRunKind::Field { .. } => true,
+            RawRunKind::Text(text) => text.chars().all(|c| c.is_whitespace()),
+            _ => false,
+        };
+        if !auxiliary {
+            continue;
+        }
+        run.formatting.font_size = Some(
+            run.formatting
+                .font_size
+                .map_or(entry_size, |size| size.min(entry_size)),
+        );
+        if let Some(size_cs) = run.formatting.font_size_cs {
+            run.formatting.font_size_cs = Some(size_cs.min(entry_size));
         }
     }
 }
