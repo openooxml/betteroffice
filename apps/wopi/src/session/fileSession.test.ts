@@ -843,6 +843,38 @@ describe("review round 2: serialized transitions", () => {
 });
 
 describe("replica api adaptation", () => {
+  test("an accepted docx edit marks dirty and autosaves after thirty seconds", async () => {
+    const h = makeHarness({ format: "docx" });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await openTestClient(a.joinPayload, sourceBytes("docx"), nextId());
+    const failures: unknown[] = [];
+    session.on("saveFailed", (e) => failures.push(e));
+    try {
+      client.edit("autosave-docx ", 0);
+      const replica = session.replica!;
+      const result = session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector()));
+      expect(result).toEqual({ accepted: true });
+      expect(session.replica!.version).toBe(1);
+      expect(session.dirty).toBe(true);
+      await h.clock.advance(30000);
+      expect(failures).toEqual([]);
+      expect(h.putCount()).toBe(1);
+      expect(session.dirty).toBe(false);
+      const fresh = await openFreshClient("docx", h.host.files.get("file1")!.bytes, nextId());
+      try {
+        expect(fresh.contains("autosave-docx")).toBe(true);
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+
   test("a docx save that publishes paragraph ids emits replicaUpdate once and stays clean", async () => {
     const h = makeHarness({ format: "docx" });
     addToken(h, "tok-a", "user-a");
