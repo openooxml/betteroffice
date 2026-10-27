@@ -12,7 +12,7 @@ const BASIC = parseAgentEvals(README, ["basic"]);
 const COMPLEX = parseAgentEvals(README, ["complex"]);
 const FORMATS = parseFidelity(README);
 
-const altOf = (name) => README.match(new RegExp(`<img src="https://betteroffice\\.dev/api/charts/${name}\\.svg" alt="([^"]+)" width="100%">`))?.[1];
+const altOf = (name) => README.match(new RegExp(`<img src="https://betteroffice\\.dev/api/charts/${name}\\.svg" alt="([^"]+)" width="70%">`))?.[1];
 
 const SVGS = () => {
   const out = [];
