@@ -171,6 +171,10 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
                         carriers.insert(key.to_owned(), value);
                     }
                 }
+                // Seed owned chain defaults: never snapshotted into a
+                // patch plan, so a rebuilt paragraph falls back to
+                // `defaultTextFormatting` and no save can carry the key.
+                properties.remove("runDefaultTextFormatting");
                 if !attributes.is_empty() {
                     carriers.insert("pilcrowAttrs".to_owned(), json!(attributes));
                 }

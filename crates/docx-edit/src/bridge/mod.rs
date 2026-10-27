@@ -3836,14 +3836,11 @@ fn flush_paragraph<T: ReadTxn>(
         matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
             if instruction.contains("PAGEREF"))
     });
-    // The paragraph mark size is the mark's own: no run inherits it, in
-    // body paragraphs or in TOC entries. Unsized runs take the style
-    // chain size the seed resolved, or the measurement default.
-    let mut run_defaults = defaults.clone();
-    run_defaults.font_size = None;
-    run_defaults.font_size_cs = None;
+    // Unsized runs take the style chain defaults the seed resolved in
+    // `paragraph_run_defaults`: the chain size fills them, and a size
+    // that comes only from the paragraph mark's direct rPr never does.
     for run in &mut raw_runs {
-        apply_run_defaults(&mut run.formatting, &run_defaults);
+        apply_run_defaults(&mut run.formatting, &defaults);
         if toc_entry || pageref_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
@@ -4910,12 +4907,36 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
     }
 }
 
+/// The formatting unsized runs inherit: the style chain defaults the
+/// seed resolved (`runDefaultTextFormatting`), which never carries a
+/// size that comes only from the paragraph mark's direct rPr. Pilcrows
+/// built without that key fall back to `defaultTextFormatting`.
+fn run_default_formatting<'a>(
+    values: &'a BTreeMap<String, Any>,
+) -> Option<&'a std::collections::HashMap<String, Any>> {
+    if values.contains_key("runDefaultTextFormatting") {
+        values.get("runDefaultTextFormatting").and_then(any_map)
+    } else {
+        values.get("defaultTextFormatting").and_then(any_map)
+    }
+}
+
+fn run_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
+    if values.contains_key("runDefaultTextFormatting") {
+        run_default_formatting(values)
+            .and_then(|defaults| map_number(defaults, "fontSize"))
+            .map_or(10.0, font_size_pt)
+    } else {
+        paragraph_default_font_size(values)
+    }
+}
+
 fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: Some(paragraph_default_font_size(values)),
+        font_size: Some(run_default_font_size(values)),
         ..RunFormatting::default()
     };
-    let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
+    let Some(defaults) = run_default_formatting(values) else {
         return result;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
