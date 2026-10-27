@@ -1819,35 +1819,76 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   test('installing plugins materializes no compatibility document', async () => {
     const yrs = await import('@betteroffice/docx/yrs');
     const materialized = spyOn(yrs, 'yrsToDocument');
-    const edit = async (props: Partial<DocxEditorBaseProps>) => {
-      const { ref } = await mount(props);
-      await settle(300);
-      materialized.mockClear();
-      const { version, paragraph } = await firstParagraph(ref);
-      await act(async () => {
-        await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
+    let host!: pluginHosts.DocxPluginHost;
+    const createHost = pluginHosts.createDocxPluginHost;
+    const capture = spyOn(pluginHosts, 'createDocxPluginHost').mockImplementation((access) => {
+      host = createHost(access);
+      return host;
+    });
+    const edit = async (
+      props: Partial<DocxEditorBaseProps>,
+      ready: () => boolean = () => true,
+      changed: () => boolean = () => true
+    ) => {
+      let compatibilityChanges = 0;
+      const { ref, view } = await mount({
+        ...props,
+        ...(props.onChange ? {
+          onChange: (document) => {
+            compatibilityChanges += 1;
+            props.onChange!(document);
+          },
+        } : {}),
       });
-      await settle(300);
-      const count = materialized.mock.calls.length;
-      cleanup();
-      return count;
+      await until(ready);
+      await act(async () => { await host.notificationsIdle(); });
+      const versions: string[] = [];
+      const unsubscribe = ref.current!.onDocumentChange(({ version }) => versions.push(version));
+      try {
+        materialized.mockClear();
+        compatibilityChanges = 0;
+        const { version, paragraph } = await firstParagraph(ref);
+        let applied!: Awaited<ReturnType<DocxEditorRef['applyEdits']>>;
+        await act(async () => {
+          applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
+        });
+        expect(applied).toMatchObject({ ok: true, applied: true });
+        if (!applied.ok) throw new Error(applied.failure.message);
+        const committedVersion = applied.version;
+        await until(() => versions.includes(committedVersion) && changed()
+          && (!props.onChange || compatibilityChanges > 0));
+        await act(async () => {
+          await ref.current!.flushPendingInput();
+          await ref.current!.readParagraphs({ view: 'accepted', paraIds: [] });
+          await host.notificationsIdle();
+        });
+        return materialized.mock.calls.length;
+      } finally {
+        unsubscribe();
+        view.unmount();
+      }
     };
     try {
       const plain = await edit({});
       const reads: string[] = [];
+      let loaded = false;
       const reader = defineDocxPlugin({
         id: 'reader',
         createState: () => null,
         async onEvent(context, event) {
+          if (event.type === 'load') loaded = true;
           if (event.type !== 'document-change') return;
           const read = await context.read.readParagraphs({ view: 'accepted' });
           if (read.ok) reads.push(read.version);
         },
       });
-      expect(await edit({ plugins: [reader] })).toBe(plain);
+      expect(await edit({ plugins: [reader] }, () => loaded, () => reads.length > 0)).toBe(plain);
       expect(reads).toHaveLength(1);
-      expect(await edit({ onChange: () => {} })).toBeGreaterThan(plain);
+      let changes = 0;
+      expect(await edit({ onChange: () => { changes += 1; } }, undefined, () => changes > 0))
+        .toBeGreaterThan(plain);
     } finally {
+      capture.mockRestore();
       materialized.mockRestore();
     }
   });
