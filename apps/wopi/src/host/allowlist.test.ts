@@ -52,6 +52,10 @@ describe("resolveHost", () => {
     expect(resolveHost(config(["https://xn--mnchen-3ya.example"]), "https://münchen.example/wopi/files/1").id).toBe("cloud");
   });
 
+  test("rejects a WOPISrc with a fragment", () => {
+    expect(kindOf(() => resolveHost(config(["https://cloud.example.com"]), "https://cloud.example.com/wopi/files/1#frag"))).toBe("notAllowed");
+  });
+
   test("rejects an invalid URL", () => {
     expect(kindOf(() => resolveHost(config(["https://cloud.example.com"]), "not a url"))).toBe("notAllowed");
   });

@@ -65,6 +65,3 @@ export function decodeUtf7(value: string): string {
   }
   return out;
 }
-
-export const encodeUTF7 = encodeUtf7;
-export const decodeUTF7 = decodeUtf7;

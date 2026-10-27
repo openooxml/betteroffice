@@ -20,6 +20,7 @@ export function resolveHost(config: HostsInput, wopiSrc: string): WopiHostConfig
   } catch {
     throw notAllowed(wopiSrc);
   }
+  if (url.hash !== "") throw notAllowed(wopiSrc);
   if (url.username !== "" || url.password !== "") throw notAllowed(wopiSrc);
   if (url.protocol !== "https:" && url.protocol !== "http:") throw notAllowed(wopiSrc);
   for (const host of hostsOf(config)) {

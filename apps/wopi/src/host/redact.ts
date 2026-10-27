@@ -2,7 +2,10 @@ import { WopiHostError } from "./errors";
 
 /** Redacts access_token values from text. */
 export function redactText(text: string): string {
-  return text.replace(/([?&]access_token=)[^&#\s'"]+/g, "$1***").replace(/(access_token=)[^&#\s'"]+/g, "$1***");
+  return text
+    .replace(/([?&]access_token=)[^&#\s'"]+/gi, "$1***")
+    .replace(/(access_token%3D)[^&#\s'"]+/gi, "$1***")
+    .replace(/(access_token=)[^&#\s'"]+/gi, "$1***");
 }
 
 /** Returns a URL string with the access_token query value replaced. */
@@ -10,8 +13,11 @@ export function redactUrl(url: string | URL): string {
   const raw = typeof url === "string" ? url : url.toString();
   try {
     const parsed = new URL(raw);
-    if (parsed.searchParams.has("access_token")) parsed.searchParams.set("access_token", "***");
-    return parsed.toString();
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (key.toLowerCase() === "access_token") parsed.searchParams.set(key, "***");
+    }
+    if (parsed.hash) parsed.hash = redactText(parsed.hash);
+    return redactText(parsed.toString());
   } catch {
     return redactText(raw);
   }
@@ -22,8 +28,8 @@ export function redactError(err: unknown): Error {
   if (err instanceof WopiHostError) {
     return new WopiHostError(err.kind, redactText(err.message), {
       status: err.status,
-      currentLock: err.currentLock,
-      reason: err.reason,
+      currentLock: err.currentLock ? redactText(err.currentLock) : err.currentLock,
+      reason: err.reason !== undefined ? redactText(err.reason) : err.reason,
     });
   }
   if (err instanceof Error) {

@@ -14,6 +14,7 @@ export interface ReferenceToken {
   userName?: string;
   canWrite?: boolean;
   userCanWrite?: boolean;
+  expiresAt?: number;
 }
 
 export interface ReferenceFile {
@@ -151,6 +152,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     const entry = tokens.get(token);
     if (entry !== undefined) {
       if (typeof entry === "string") return { userId: entry, canWrite: true };
+      if (entry.expiresAt !== undefined && now() >= entry.expiresAt) return null;
       return entry;
     }
     if (tokens.size === 0) return { userId: "user1", userName: "User One", canWrite: true };
@@ -212,21 +214,49 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   async function readBody(request: Request): Promise<Uint8Array> {
     if (!request.body) return new Uint8Array(await request.arrayBuffer());
     const reader = request.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
+    const lengthHeader = request.headers.get("Content-Length");
+    const announced = lengthHeader !== null && /^\d+$/.test(lengthHeader.trim()) ? Number(lengthHeader.trim()) : null;
+    if (announced === null || !Number.isSafeInteger(announced)) {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        chunks.push(chunk.value);
+        total += chunk.value.byteLength;
+      }
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return out;
+    }
+    const out = new Uint8Array(announced);
+    const extra: Uint8Array[] = [];
+    let offset = 0;
+    let extraTotal = 0;
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      chunks.push(chunk.value);
-      total += chunk.value.byteLength;
+      if (offset + chunk.value.byteLength <= out.length) {
+        out.set(chunk.value, offset);
+        offset += chunk.value.byteLength;
+      } else {
+        extra.push(chunk.value);
+        extraTotal += chunk.value.byteLength;
+      }
     }
-    const out = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      out.set(chunk, offset);
-      offset += chunk.byteLength;
+    if (extraTotal === 0) return offset === out.length ? out : out.subarray(0, offset);
+    const combined = new Uint8Array(offset + extraTotal);
+    combined.set(out.subarray(0, offset), 0);
+    let extraOffset = offset;
+    for (const chunk of extra) {
+      combined.set(chunk, extraOffset);
+      extraOffset += chunk.byteLength;
     }
-    return out;
+    return combined;
   }
 
   function chunkedBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
@@ -285,6 +315,10 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     }
 
     if (isContents && request.method === "GET") {
+      const maxExpected = request.headers.get("X-WOPI-MaxExpectedSize");
+      if (maxExpected !== null && /^\d+$/.test(maxExpected.trim()) && file.bytes.byteLength > Number(maxExpected.trim())) {
+        return json({ error: "file exceeds X-WOPI-MaxExpectedSize" }, 412);
+      }
       const headers: Record<string, string> = { "X-WOPI-ItemVersion": file.itemVersion };
       if (quirks.noContentLength || quirks.slowBody) {
         return new Response(chunkedBody(file.bytes), { status: 200, headers });
@@ -294,6 +328,8 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     }
 
     if (isContents && request.method === "POST") {
+      if (override !== "PUT") return json({ error: "X-WOPI-Override PUT is required" }, 400);
+      if (!canWrite) return json({ error: "unauthorized" }, 401);
       if (quirks.timestampConflict) {
         const stamp = request.headers.get("X-COOL-WOPI-Timestamp");
         if (stamp !== null && stamp !== file.lastModifiedTime) {
@@ -318,8 +354,11 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         return empty(200, { "X-WOPI-Lock": currentLock ?? "" });
       }
       if (override === "LOCK") {
+        if (!canWrite) return json({ error: "unauthorized" }, 401);
         const newLock = request.headers.get("X-WOPI-Lock") ?? "";
         const oldLock = request.headers.get("X-WOPI-OldLock");
+        if (newLock === "") return json({ error: "X-WOPI-Lock is required" }, 400);
+        if (oldLock !== null && oldLock === "") return json({ error: "X-WOPI-OldLock is required" }, 400);
         if (oldLock !== null) {
           if (currentLock !== oldLock) return lockConflict(currentLock);
           file.lock = newLock;
@@ -332,29 +371,52 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         return empty(200);
       }
       if (override === "REFRESH_LOCK") {
+        if (!canWrite) return json({ error: "unauthorized" }, 401);
         const requestLock = request.headers.get("X-WOPI-Lock") ?? "";
+        if (requestLock === "") return json({ error: "X-WOPI-Lock is required" }, 400);
         if (currentLock === null || requestLock !== currentLock) return lockConflict(currentLock);
         file.lockExpiresAt = now() + LOCK_TTL_MS;
         return empty(200);
       }
       if (override === "UNLOCK") {
+        if (!canWrite) return json({ error: "unauthorized" }, 401);
         const requestLock = request.headers.get("X-WOPI-Lock") ?? "";
+        if (requestLock === "") return json({ error: "X-WOPI-Lock is required" }, 400);
         if (currentLock === null || requestLock !== currentLock) return lockConflict(currentLock);
         file.lock = null;
         file.lockExpiresAt = null;
         return empty(200);
       }
       if (override === "PUT_RELATIVE") {
+        if (!canWrite) return json({ error: "unauthorized" }, 401);
         const suggested = request.headers.get("X-WOPI-SuggestedTarget");
         const relative = request.headers.get("X-WOPI-RelativeTarget");
+        if ((suggested === null && relative === null) || (suggested !== null && relative !== null) || suggested === "" || relative === "") {
+          return json({ error: "exactly one target header is required" }, 400);
+        }
         const overwrite = (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
         const targetName = decodeUtf7(relative ?? suggested ?? "copy");
-        const body = await readBody(request);
+        if (targetName === "") return json({ error: "target header is required" }, 400);
         let finalName = targetName;
         const existing = [...files.values()].find((entry) => entry.name === targetName);
         if (existing && relative && !overwrite) {
           return json({ error: "target exists" }, 412);
         }
+        if (existing && overwrite) {
+          const targetLock = liveLock(existing);
+          const requestLock = request.headers.get("X-WOPI-Lock");
+          if (targetLock !== null && requestLock !== targetLock) return lockConflict(targetLock);
+          const body = await readBody(request);
+          existing.bytes = body;
+          existing.version += 1;
+          existing.itemVersion = String(existing.version);
+          existing.lastModifiedTime = new Date(now()).toISOString();
+          const existingUrl = new URL(request.url);
+          existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(existing.id));
+          existingUrl.search = "";
+          return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": existing.itemVersion });
+        }
+        const body = await readBody(request);
         if (existing && suggested && !overwrite) {
           const ext = extensionOf(targetName);
           const stem = ext ? targetName.slice(0, -ext.length) : targetName;
@@ -384,9 +446,13 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         return json({ Name: finalName, Url: newUrl.toString() }, 200, headers);
       }
       if (override === "RENAME_FILE") {
+        if (!canWrite) return json({ error: "unauthorized" }, 401);
+        const requestedHeader = request.headers.get("X-WOPI-RequestedName");
+        if (requestedHeader === null || requestedHeader === "") return json({ error: "X-WOPI-RequestedName is required" }, 400);
         const requestLock = request.headers.get("X-WOPI-Lock");
         if (currentLock !== null && requestLock !== currentLock) return lockConflict(currentLock);
-        const requested = decodeUtf7(request.headers.get("X-WOPI-RequestedName") ?? "");
+        const requested = decodeUtf7(requestedHeader);
+        if (requested === "") return json({ error: "X-WOPI-RequestedName is required" }, 400);
         const ext = extensionOf(file.name);
         const newName = requested.includes(".") ? requested : `${requested}${ext}`;
         file.name = newName;

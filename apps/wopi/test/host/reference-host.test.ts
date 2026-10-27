@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createProofSigner, generateKeyPair, proofKeyAttributes } from "../../src/proof";
+import { createProofSigner, dotnetTicks, generateKeyPair, proofKeyAttributes, type ProofSigner } from "../../src/proof";
 import { createHostClient, type HostFetch } from "../../src/host/client";
 import { WopiHostError } from "../../src/host/errors";
 import { encodeUtf7 } from "../../src/host/utf7";
@@ -30,11 +30,24 @@ function setup(quirks?: { timestampConflict?: boolean; tokenExpired?: boolean; s
     host,
     client,
     signer,
+    fetchFn,
     recorded,
+    nowMs: () => nowMs,
     advance: (ms: number) => {
       nowMs += ms;
     },
   };
+}
+
+function rawRequest(signer: ProofSigner, url: string, token: string, nowMs: number, init: RequestInit = {}): Request {
+  const full = new URL(url);
+  full.searchParams.set("access_token", token);
+  const signed = signer.signProof({ accessToken: token, url: full.toString(), ticks: dotnetTicks(new Date(nowMs)) });
+  const headers = new Headers(init.headers);
+  headers.set("X-WOPI-Proof", signed.proof);
+  headers.set("X-WOPI-ProofOld", signed.proofOld);
+  headers.set("X-WOPI-TimeStamp", signed.timestamp);
+  return new Request(full.toString(), { ...init, headers });
 }
 
 async function kindOf(promise: Promise<unknown>): Promise<WopiHostError> {
@@ -180,6 +193,101 @@ describe("reference host quirks", () => {
     expect(new TextDecoder().decode(await noLength.client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).toBe("hello");
     const slow = setup({ slowBody: true });
     expect(new TextDecoder().decode(await slow.client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).toBe("hello");
+  });
+});
+
+describe("reference host strictness", () => {
+  test("a proof signed 21 minutes off the host clock is rejected", async () => {
+    const { host, signer } = setup();
+    const staleClient = createHostClient({
+      signer,
+      maxFileBytes: 1024,
+      fetch: async (input, init) => host.fetch(new Request(input as string, init as RequestInit)),
+      now: () => 1700000000000 + 21 * 60 * 1000,
+    });
+    expect((await kindOf(staleClient.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("unauthorized");
+  });
+
+  test("a rotated key is accepted through X-WOPI-ProofOld", async () => {
+    const current = generateKeyPair();
+    const old = generateKeyPair();
+    const untrusted = generateKeyPair();
+    const host = createReferenceHost({
+      verifyProof: { current: proofKeyAttributes(current.publicKey), old: proofKeyAttributes(old.publicKey) },
+      now: () => 1700000000000,
+    });
+    host.tokens.set(TOKEN, { userId: "user1", canWrite: true });
+    host.setFile("file1", new TextEncoder().encode("hi"), { name: "hi.docx" });
+    const rotatingSigner = createProofSigner(untrusted, old);
+    const client = createHostClient({
+      signer: rotatingSigner,
+      maxFileBytes: 1024,
+      fetch: async (input, init) => host.fetch(new Request(input as string, init as RequestInit)),
+      now: () => 1700000000000,
+    });
+    const info = await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN });
+    expect(info.BaseFileName).toBe("hi.docx");
+  });
+
+  test("a viewer token can read but every mutating and lock op is unauthorized", async () => {
+    const { host, client, signer, fetchFn } = setup();
+    host.tokens.set("viewer-token", { userId: "viewer", userName: "Viewer", canWrite: false });
+    const viewer = createHostClient({ signer, maxFileBytes: 1024 * 1024, fetch: fetchFn, now: () => 1700000000000 });
+    const info = await viewer.checkFileInfo({ wopiSrc: SRC, accessToken: "viewer-token" });
+    expect(info.UserCanWrite).toBe(false);
+    expect((await kindOf(viewer.lock({ wopiSrc: SRC, accessToken: "viewer-token", lock: "x" }))).kind).toBe("unauthorized");
+    expect((await kindOf(viewer.refreshLock({ wopiSrc: SRC, accessToken: "viewer-token", lock: "x" }))).kind).toBe("unauthorized");
+    expect((await kindOf(viewer.unlock({ wopiSrc: SRC, accessToken: "viewer-token", lock: "x" }))).kind).toBe("unauthorized");
+    expect((await kindOf(viewer.unlockAndRelock({ wopiSrc: SRC, accessToken: "viewer-token", lock: "y", oldLock: "x" }))).kind).toBe("unauthorized");
+    expect((await kindOf(viewer.putFile({ wopiSrc: SRC, accessToken: "viewer-token", body: new Uint8Array([1]) }))).kind).toBe("unauthorized");
+    expect((await kindOf(viewer.putRelativeFile({ wopiSrc: SRC, accessToken: "viewer-token", body: new Uint8Array([1]), suggestedTarget: "c.docx" }))).kind).toBe("unauthorized");
+    await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "lock-a" });
+    expect((await kindOf(viewer.renameFile({ wopiSrc: SRC, accessToken: "viewer-token", requestedName: "Nope", lock: "lock-a" }))).kind).toBe("unauthorized");
+  });
+
+  test("per token expiresAt expires only that token on the host clock", async () => {
+    const second = setup();
+    second.host.tokens.set("short-token", { userId: "user2", canWrite: true, expiresAt: 1700000000000 + 10 * 60 * 1000 });
+    const shortLived = createHostClient({ signer: second.signer, maxFileBytes: 1024, fetch: second.fetchFn, now: second.nowMs });
+    const before = await shortLived.checkFileInfo({ wopiSrc: SRC, accessToken: "short-token" });
+    expect(before.UserId).toBe("user2");
+    second.advance(11 * 60 * 1000);
+    expect((await kindOf(shortLived.checkFileInfo({ wopiSrc: SRC, accessToken: "short-token" }))).kind).toBe("unauthorized");
+    const stillValid = await second.client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN });
+    expect(stillValid.UserId).toBe("user1");
+  });
+
+  test("raw requests enforce PUT override, MaxExpectedSize and lock headers", async () => {
+    const { host, signer, nowMs } = setup();
+    const noOverride = await host.fetch(rawRequest(signer, `${SRC}/contents`, TOKEN, nowMs(), { method: "POST", body: new Uint8Array([1]) }));
+    expect(noOverride.status).toBe(400);
+    const wrongOverride = await host.fetch(rawRequest(signer, `${SRC}/contents`, TOKEN, nowMs(), { method: "POST", headers: { "X-WOPI-Override": "LOCK" }, body: new Uint8Array([1]) }));
+    expect(wrongOverride.status).toBe(400);
+    const tooBig = await host.fetch(rawRequest(signer, `${SRC}/contents`, TOKEN, nowMs(), { method: "GET", headers: { "X-WOPI-MaxExpectedSize": "3" } }));
+    expect(tooBig.status).toBe(412);
+    const missingLock = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), { method: "POST", headers: { "X-WOPI-Override": "LOCK" } }));
+    expect(missingLock.status).toBe(400);
+    const missingRequested = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), { method: "POST", headers: { "X-WOPI-Override": "RENAME_FILE" } }));
+    expect(missingRequested.status).toBe(400);
+    const noTarget = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), { method: "POST", headers: { "X-WOPI-Override": "PUT_RELATIVE" }, body: new Uint8Array([1]) }));
+    expect(noTarget.status).toBe(400);
+    const bothTargets = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), { method: "POST", headers: { "X-WOPI-Override": "PUT_RELATIVE", "X-WOPI-SuggestedTarget": "a.docx", "X-WOPI-RelativeTarget": "b.docx" }, body: new Uint8Array([1]) }));
+    expect(bothTargets.status).toBe(400);
+  });
+
+  test("putRelativeFile overwrite respects the target lock and keeps one file entry", async () => {
+    const { host, client } = setup();
+    host.setFile("doc1", new TextEncoder().encode("v1"), { name: "doc.docx" });
+    const docSrc = "https://cloud.example.com/wopi/files/doc1";
+    await client.lock({ wopiSrc: docSrc, accessToken: TOKEN, lock: "holder" });
+    const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite: true }));
+    expect(err.kind).toBe("lockMismatch");
+    expect(err.currentLock).toBe("holder");
+    const ok = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite: true, lock: "holder" });
+    expect(ok.name).toBe("doc.docx");
+    const named = [...host.files.values()].filter((entry) => entry.name === "doc.docx");
+    expect(named.length).toBe(1);
+    expect(named[0]?.id).toBe("doc1");
   });
 });
 

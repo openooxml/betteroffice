@@ -15,6 +15,25 @@ describe("redactUrl", () => {
   test("accepts a URL object and leaves token free URLs unchanged", () => {
     expect(redactUrl(new URL("https://cloud.example.com/a?x=1"))).toBe("https://cloud.example.com/a?x=1");
   });
+
+  test("redacts uppercase, encoded and fragment token forms", () => {
+    expect(redactUrl(`https://cloud.example.com/a?ACCESS_TOKEN=${TOKEN}`)).not.toContain(TOKEN);
+    expect(redactUrl(`https://cloud.example.com/a#access_token=${TOKEN}`)).not.toContain(TOKEN);
+    expect(redactUrl(`https://cloud.example.com/a?next=%3Faccess_token%3D${TOKEN}`)).not.toContain(TOKEN);
+    const redacted = redactError(new Error(`see https://h/a?ACCESS_TOKEN=${TOKEN} and access_token%3D${TOKEN}`));
+    expect(redacted.message).not.toContain(TOKEN);
+  });
+
+  test("scrubs reason and currentLock on a WopiHostError", () => {
+    const err = new WopiHostError("lockMismatch", "mismatch", {
+      status: 409,
+      currentLock: `lock https://h/a?access_token=${TOKEN}`,
+      reason: `held https://h/a?ACCESS_TOKEN=${TOKEN}`,
+    });
+    const redacted = redactError(err) as WopiHostError;
+    expect(redacted.currentLock).not.toContain(TOKEN);
+    expect(redacted.reason).not.toContain(TOKEN);
+  });
 });
 
 describe("redactError", () => {

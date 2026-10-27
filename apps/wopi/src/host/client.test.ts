@@ -21,8 +21,8 @@ function validInfo(overrides: Record<string, unknown> = {}): Record<string, unkn
   return { BaseFileName: "a.docx", Size: 3, UserId: "user1", UserCanWrite: true, ...overrides };
 }
 
-function makeClient(fetchFn: HostFetch, maxFileBytes = 1024 * 1024) {
-  return createHostClient({ signer, maxFileBytes, fetch: fetchFn, now: () => 1700000000000 });
+function makeClient(fetchFn: HostFetch, maxFileBytes = 1024 * 1024, extra: { timeoutMs?: number; bodyIdleTimeoutMs?: number } = {}) {
+  return createHostClient({ signer, maxFileBytes, fetch: fetchFn, now: () => 1700000000000, ...extra });
 }
 
 async function kindOf(promise: Promise<unknown>): Promise<WopiHostError> {
@@ -212,9 +212,13 @@ describe("streaming", () => {
   });
 
   test("putFile enforces the cap mid stream", async () => {
+    let sourceCancelled = false;
     const source = new ReadableStream<Uint8Array>({
       pull(controller) {
         controller.enqueue(new Uint8Array(64).fill(2));
+      },
+      cancel() {
+        sourceCancelled = true;
       },
     });
     const client = makeClient(async (_input, init) => {
@@ -231,6 +235,7 @@ describe("streaming", () => {
       return new Response(null, { status: 200 });
     }, 100);
     expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }))).kind).toBe("tooLarge");
+    expect(sourceCancelled).toBe(true);
   });
 
   test("a 64 MiB generated body streams through getFile and readFile by checksum", async () => {
@@ -273,6 +278,166 @@ describe("streaming", () => {
     expect(data.length).toBe(total);
     expect(data[123456]).toBe(123456 % 251);
     expect(data[total - 1]).toBe((total - 1) % 251);
+  });
+});
+
+describe("timeouts and body reads", () => {
+  test("a stalled file body fails with an idle timeout, not a hang", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    const client = makeClient(async () => new Response(stream, { status: 200 }), 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 20 });
+    expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
+  });
+
+  test("a stalled CheckFileInfo body uses the header timeout as its total budget", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    const client = makeClient(async () => new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } }), 1024, { timeoutMs: 20, bodyIdleTimeoutMs: 60000 });
+    expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
+  });
+
+  test("a steady stream longer than the header timeout still completes", async () => {
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        sent += 1;
+        if (sent > 10) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([sent]));
+      },
+    });
+    const client = makeClient(async () => new Response(stream, { status: 200 }), 1024, { timeoutMs: 30, bodyIdleTimeoutMs: 5000 });
+    const data = await client.readFile({ wopiSrc: SRC, accessToken: TOKEN });
+    expect(data.length).toBe(10);
+  });
+
+  test("a mid stream error maps to a redacted WopiHostError", async () => {
+    let step = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        step += 1;
+        if (step === 1) {
+          controller.enqueue(new Uint8Array([1]));
+          return;
+        }
+        controller.error(new Error(`reset https://h/f?access_token=${TOKEN}`));
+      },
+    });
+    const client = makeClient(async () => new Response(stream, { status: 200 }));
+    const err = await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }));
+    expect(err.kind).toBe("network");
+    expect(err.message).not.toContain(TOKEN);
+    expect(String(err)).not.toContain(TOKEN);
+  });
+});
+
+describe("content length and truncation", () => {
+  test("readFile fails on premature EOF instead of returning a truncated file", async () => {
+    const client = makeClient(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Length": "10" } }));
+    expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+  });
+
+  test("invalid Content-Length values are treated as unknown", async () => {
+    for (const value of ["", "-5", "1.5", "999999999999999999999999"]) {
+      const client = makeClient(async () => new Response(new Uint8Array([7]), { status: 200, headers: { "Content-Length": value } }));
+      const result = await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+      expect(result.size).toBeNull();
+      const reader = result.stream.getReader();
+      await reader.read();
+      await reader.cancel();
+    }
+  });
+
+  test("getFile sends X-WOPI-MaxExpectedSize", async () => {
+    const recorded: Recorded[] = [];
+    const client = makeClient(async (input, init) => {
+      const req = new Request(input as string, init as RequestInit);
+      recorded.push({ url: req.url, method: req.method, headers: req.headers });
+      return new Response(new Uint8Array([1]), { status: 200, headers: { "Content-Length": "1" } });
+    }, 4242);
+    await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+    expect(recorded[0]?.headers.get("X-WOPI-MaxExpectedSize")).toBe("4242");
+  });
+
+  test("a WOPISrc fragment is rejected before any fetch or signing", async () => {
+    let calls = 0;
+    const client = makeClient(async () => {
+      calls += 1;
+      return jsonResponse(validInfo());
+    });
+    expect((await kindOf(client.checkFileInfo({ wopiSrc: `${SRC}#frag`, accessToken: TOKEN }))).kind).toBe("notAllowed");
+    expect(calls).toBe(0);
+  });
+});
+
+describe("409 details", () => {
+  test("an empty X-WOPI-Lock maps currentLock to null", async () => {
+    const client = makeClient(async () =>
+      new Response("x", { status: 409, headers: { "X-WOPI-Lock": "", "X-WOPI-LockFailureReason": "not locked" } }),
+    );
+    const err = await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]) }));
+    expect(err.kind).toBe("lockMismatch");
+    expect(err.currentLock).toBeNull();
+  });
+
+  test("COOLStatusCode past 200 body characters still maps to conflict", async () => {
+    const body = JSON.stringify({ padding: "x".repeat(300), COOLStatusCode: 1010 });
+    const client = makeClient(async () =>
+      new Response(body, { status: 409, headers: { "X-WOPI-Lock": "someone", "Content-Type": "application/json" } }),
+    );
+    expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), lock: "l" }))).kind).toBe("conflict");
+  });
+});
+
+describe("putRelativeFile and renameFile validation", () => {
+  test("rejects both targets, sends the lock, and requires a valid JSON reply", async () => {
+    const recorded: Recorded[] = [];
+    const client = makeClient(async (input, init) => {
+      const req = new Request(input as string, init as RequestInit);
+      recorded.push({ url: req.url, method: req.method, headers: req.headers });
+      return jsonResponse({ Name: "copy.docx", Url: "https://cloud.example.com/wopi/files/copy" });
+    });
+    const both = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: "a.docx", relativeTarget: "b.docx" }));
+    expect(both.kind).toBe("invalidResponse");
+    expect(recorded.length).toBe(0);
+    const ok = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), relativeTarget: "b.docx", lock: "lock-9" });
+    expect(ok.name).toBe("copy.docx");
+    expect(ok.url).toContain("copy");
+    expect(recorded[0]?.headers.get("X-WOPI-Lock")).toBe("lock-9");
+
+    const htmlClient = makeClient(async () => new Response("<html>nope</html>", { status: 200 }));
+    expect((await kindOf(htmlClient.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: "a.docx" }))).kind).toBe("invalidResponse");
+    const emptyClient = makeClient(async () => new Response(null, { status: 200 }));
+    expect((await kindOf(emptyClient.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "New" }))).kind).toBe("invalidResponse");
+  });
+
+  test("an oversize stream body is cancelled before any fetch", async () => {
+    let cancelled = false;
+    let calls = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = makeClient(async () => {
+      calls += 1;
+      return new Response(null, { status: 200 });
+    }, 10);
+    expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 11 }))).kind).toBe("tooLarge");
+    expect(cancelled).toBe(true);
+    expect(calls).toBe(0);
   });
 });
 
