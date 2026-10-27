@@ -32,8 +32,29 @@ async function exportedXml(bytes: Uint8Array, part = 'word/document.xml'): Promi
   return (await JSZip.loadAsync(bytes)).file(part)!.async('string');
 }
 
-function expectUntouched(sourceXml: string, outputXml: string, paragraphs: string[]) {
-  for (const paragraph of paragraphs) expect(outputXml).toContain(paragraph);
+function paragraphsOf(xml: string): string[] {
+  const found: Array<[number, string]> = [];
+  const open: number[] = [];
+  for (const match of xml.matchAll(/<(\/?)([A-Za-z0-9:.-]+)((?:[^>"']|"[^"]*"|'[^']*')*)(\/?)>/g)) {
+    if (match[2] !== 'w:p') continue;
+    const at = match.index!;
+    if (match[1]) {
+      const start = open.pop();
+      if (start !== undefined) found.push([start, xml.slice(start, at + match[0].length)]);
+    } else if (match[4]) {
+      found.push([at, match[0]]);
+    } else {
+      open.push(at);
+    }
+  }
+  return found.sort((a, b) => a[0] - b[0]).map(([, xml]) => xml);
+}
+
+function expectUntouched(sourceXml: string, outputXml: string, edited: string[] = []) {
+  for (const paragraph of paragraphsOf(sourceXml)) {
+    if (edited.includes(paragraph)) continue;
+    expect(outputXml).toContain(paragraph);
+  }
 }
 
 test('comment range spanning table cells keeps untouched paragraphs byte for byte', async () => {
@@ -49,7 +70,8 @@ test('comment range spanning table cells keeps untouched paragraphs byte for byt
     const item = doc.list().items.find(entry => entry.text.includes('Title words'))!;
     await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Inserted paragraph.' }] }] });
     const xml = await exportedXml(await doc.export());
-    expectUntouched(source.xml, xml, [heading, second, cellA, cellB, table]);
+    expectUntouched(source.xml, xml);
+    expect(xml).toContain(table);
     const reopened = await openDocx(await doc.export());
     try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
   } finally { doc.close(); }
@@ -71,7 +93,7 @@ test('merge_cells keeps untouched paragraphs byte for byte', async () => {
     await doc.edit({ version: doc.list().version, edits: [{ op: 'merge_cells', from: from.ref, to: to.ref }] });
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml, [title, head, after]);
+    expectUntouched(source.xml, xml, [cellA, cellB]);
     expect(xml).toContain('<w:gridSpan w:val="2"/>');
     const reopened = await openDocx(bytes);
     try {
@@ -94,7 +116,8 @@ test('block level sdt keeps untouched paragraphs byte for byte', async () => {
     await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Inserted paragraph.' }] }] });
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml, [heading, after, sdt]);
+    expectUntouched(source.xml, xml);
+    expect(xml).toContain(sdt);
     const reopened = await openDocx(bytes);
     try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
   } finally { doc.close(); }
@@ -111,7 +134,7 @@ test('bookmarks spanning paragraphs keep untouched paragraphs byte for byte', as
     await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Inserted paragraph.' }] }] });
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml, [first, second, third]);
+    expectUntouched(source.xml, xml);
     expect(xml).toContain('<w:bookmarkEnd w:id="0"/>');
     const reopened = await openDocx(bytes);
     try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
@@ -131,7 +154,7 @@ test('gridAfter table cell insert keeps untouched paragraphs byte for byte', asy
     await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Cell note.' }] }] });
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml, [title, other, spanned]);
+    expectUntouched(source.xml, xml);
     expect(xml).toContain('<w:gridAfter w:val="1"/>');
     const reopened = await openDocx(bytes);
     try { expect(reopened.list().items.map(entry => entry.text)).toContain('Cell note.'); } finally { reopened.close(); }
@@ -154,6 +177,7 @@ test('edited footnote keeps direct color auto and untouched runs byte for byte',
     await doc.accept(proposal.id);
     const bytes = await doc.export();
     const xml = await exportedXml(bytes, 'word/footnotes.xml');
+    expectUntouched(footnotes, xml, [footnote]);
     expect(xml).toContain('<w:color w:val="auto"/>');
     expect(xml).toContain(runA);
     expect(xml).toContain(runC);

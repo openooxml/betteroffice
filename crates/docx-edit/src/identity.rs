@@ -3052,14 +3052,58 @@ fn simple_table_payload(
     let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
         return false;
     };
+    let columns = rows[0]["cells"].as_array().map_or(0, Vec::len);
+    columns > 0
+        && rows.iter().all(|row| {
+            let tr_pr = &row["trPr"];
+            let offsets = [tr_pr, &tr_pr["_originalFormatting"]].iter().any(|attrs| {
+                ["gridBefore", "gridAfter"]
+                    .iter()
+                    .any(|key| attrs.get(*key).is_some_and(|value| !value.is_null()))
+            });
+            !offsets
+                && row["cells"].as_array().is_some_and(|cells| {
+                    cells.len() == columns
+                        && cells.iter().all(|cell| {
+                            let tc_pr = &cell["tcPr"];
+                            let merged =
+                                [tc_pr, &tc_pr["_originalFormatting"]].iter().any(|attrs| {
+                                    attrs.get("vMerge").is_some_and(|value| !value.is_null())
+                                        || ["colspan", "rowspan", "gridSpan"].iter().any(|key| {
+                                            attrs
+                                                .get(*key)
+                                                .and_then(serde_json::Value::as_f64)
+                                                .is_some_and(|value| value > 1.0)
+                                        })
+                                });
+                            !merged
+                                && cell["story"].as_str().is_some_and(|story| {
+                                    stories.get(&story.to_owned()).is_some_and(|state| {
+                                        state.units.iter().all(|unit| !unit.has_blocks())
+                                    })
+                                })
+                        })
+                })
+        })
+}
+
+/// `simple_table_payload` without the merged and offset exclusions: the shape a
+/// merge may produce from a simple table, never a shape it may start from.
+fn shaped_table_payload(
+    payload: &serde_json::Value,
+    stories: &BTreeMap<&String, &StoryState>,
+) -> bool {
+    let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
+        return false;
+    };
     rows.iter().all(|row| {
         row["cells"].as_array().is_some_and(|cells| {
             !cells.is_empty()
                 && cells.iter().all(|cell| {
                     cell["story"].as_str().is_some_and(|story| {
-                        stories.get(&story.to_owned()).is_some_and(|state| {
-                            state.units.iter().all(|unit| !unit.has_blocks())
-                        })
+                        stories
+                            .get(&story.to_owned())
+                            .is_some_and(|state| state.units.iter().all(|unit| !unit.has_blocks()))
                     })
                 })
         })
@@ -3151,7 +3195,7 @@ fn admit_row_splices(
                     })
             })
             && simple_table_payload(&was[0]["payload"], before)
-            && simple_table_payload(&now[0]["payload"], after);
+            && shaped_table_payload(&now[0]["payload"], after);
         if simple || merged {
             for story in old_keys.iter().flatten() {
                 if !new_keys.iter().flatten().any(|kept| kept == story) {

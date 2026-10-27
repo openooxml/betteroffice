@@ -1,5 +1,4 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import JSZip from 'jszip';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
@@ -133,28 +132,6 @@ function literal(query: string, caseSensitive: boolean): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
 }
 
-function sourceParagraphs(xml: string): string[] {
-  const found: Array<[number, string]> = [];
-  const open: number[] = [];
-  for (const match of xml.matchAll(/<(\/?)([A-Za-z0-9:.-]+)((?:[^>"']|"[^"]*"|'[^']*')*)(\/?)>/g)) {
-    if (match[2] !== 'w:p') continue;
-    const at = match.index!;
-    if (match[1]) {
-      const start = open.pop();
-      if (start !== undefined) found.push([start, xml.slice(start, at + match[0].length)]);
-    } else if (match[4]) {
-      found.push([at, match[0]]);
-    } else {
-      open.push(at);
-    }
-  }
-  return found.sort((a, b) => a[0] - b[0]).map(([, xml]) => xml);
-}
-
-function paragraphText(xml: string): string {
-  return xml.replace(/<[^>]+>/g, '');
-}
-
 export class DocxAgentDocument {
   readonly name: string;
   private epoch = 0;
@@ -170,7 +147,6 @@ export class DocxAgentDocument {
   private nextCursor = 1;
   private nextMatch = 1;
   private closed = false;
-  private readonly editKinds = new Set<string>();
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
   private resolvedComments = new Map<string, boolean>();
@@ -433,7 +409,6 @@ export class DocxAgentDocument {
       try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
       finally { this.session.addUndoBoundary(); }
       held.value.status = 'accepted';
-      this.editKinds.add('replace_text');
       return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
     } finally { draft.destroy(); }
   }
@@ -467,53 +442,11 @@ export class DocxAgentDocument {
     try {
       if (held) { this.checkPending(held); this.apply(draft, held); }
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
-      const bytes = (await saveYrsDocx(draft)).bytes;
-      await this.refuseRewrittenParagraphs(draft, bytes, held !== undefined);
-      return bytes;
+      return (await saveYrsDocx(draft)).bytes;
     } catch (error) {
       if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
       throw error;
     } finally { draft.destroy(); }
-  }
-
-  private async refuseRewrittenParagraphs(draft: YrsSession, bytes: Uint8Array, proposal: boolean): Promise<void> {
-    const original = draft.materializeDocx()?.originalBuffer;
-    if (!original) return;
-    const plan = draft.paragraphSavePlan();
-    const covered = new Set([
-      ...(plan.splicedParts ?? []),
-      ...(plan.sectionSplicedParts ?? []),
-    ].map(part => part.part));
-    for (const part of plan.patchedParts ?? []) covered.add(part.part);
-    const parts = new Set(draft.paragraphIdentities().paragraphs.flatMap(identity =>
-      identity.source ? [identity.source.partUri.replace(/^\//, '')] : []));
-    const uncovered = [...parts].filter(part => !covered.has(part));
-    if (!uncovered.length) return;
-    const [sourceZip, outputZip] = await Promise.all([
-      JSZip.loadAsync(new Uint8Array(original)),
-      JSZip.loadAsync(bytes),
-    ]);
-    const kinds = proposal ? 'replace_text' : [...this.editKinds].join(', ') || 'this edit';
-    for (const part of uncovered) {
-      const sourceFile = sourceZip.file(part);
-      const outputFile = outputZip.file(part);
-      if (!sourceFile || !outputFile) continue;
-      const [sourceXml, outputXml] = await Promise.all([sourceFile.async('string'), outputFile.async('string')]);
-      const written = new Set(sourceParagraphs(outputXml));
-      const writtenTexts = new Set(sourceParagraphs(outputXml).map(paragraphText));
-      const rewritten = sourceParagraphs(sourceXml).filter(xml => {
-        if (written.has(xml)) return false;
-        const text = paragraphText(xml);
-        if (!text && !xml.includes('AlternateContent') && !xml.includes('<w:drawing') && !xml.includes('<w:pict')) return false;
-        return writtenTexts.has(text);
-      }).length;
-      if (rewritten) {
-        throw new DocumentToolError('UNSUPPORTED',
-          `Export would rewrite ${rewritten} unedited paragraph(s) in ${part} while applying ${kinds}. ` +
-          'The save cannot keep those paragraphs byte for byte, so nothing was exported. ' +
-          'Edit one of those paragraphs directly or open the document in the editor instead.');
-      }
-    }
   }
 
   async verify(proposalId?: string) {
@@ -704,7 +637,6 @@ export class DocxAgentDocument {
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
-        for (const edit of edits) this.editKinds.add(edit.op);
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {

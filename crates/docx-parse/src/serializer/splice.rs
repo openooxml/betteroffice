@@ -1561,7 +1561,9 @@ pub(crate) fn replace_story_part(
 /// from its source in range markers the model re-anchors (a comment range or bookmark
 /// spanning paragraphs or cells, a paragraph inside a block content control): keeping the
 /// source bytes preserves those ranges exactly. `None` when a changed paragraph has no
-/// precise patch, so the caller falls back and the agents path can refuse the save.
+/// precise patch, or the edit is structural inside a complex field, a table row or a
+/// part the parser does not read as written, so the caller keeps its previous
+/// behaviour for those parts.
 pub(crate) fn splice_source_direct(
     source: &str,
     serialized: &str,
@@ -1592,8 +1594,14 @@ pub(crate) fn splice_source_direct(
     {
         return None;
     }
+    if !crate::xml::reads_as_written(source.as_bytes()) {
+        return None;
+    }
     let inserted = placed(recorded, &part.inserted)?;
     let occurrences = paragraph_occurrences(source)?;
+    if occurrences.len() != part.paragraphs.len() + removed.len() {
+        return None;
+    }
     let mut spans = BTreeMap::new();
     for &ordinal in recorded.written.keys().chain(&removed) {
         let occurrence = occurrences
@@ -1613,22 +1621,65 @@ pub(crate) fn splice_source_direct(
         .map(|(anchor, _)| anchor.ordinal())
         .collect();
     let layout = layout(source, &spans, &anchors)?;
+    let in_story = |ordinal: &u32| {
+        layout
+            .parents
+            .get(ordinal)
+            .is_some_and(|parent| PARENTS.contains(parent))
+    };
+    if changed.iter().chain(&removed).any(|ordinal| !in_story(ordinal)) {
+        return None;
+    }
     for ordinal in &removed {
-        if layout.parents.get(ordinal).copied() == Some("w:tc") {
-            let span = &spans[ordinal];
-            let cell = tags(source)?
-                .into_iter()
-                .filter(|tag| tag.name == "w:tc" && !tag.end && tag.range.start < span.start)
-                .last()?;
-            let cell_span = element_span(&source[cell.range.start..], &[])?;
-            let cell_span = cell.range.start + cell_span.start..cell.range.start + cell_span.end;
-            let siblings = occurrences
-                .iter()
-                .filter(|occurrence| cell_span.contains(&occurrence.tag.start))
-                .count();
-            if siblings <= 1 {
-                return None;
+        if layout.parents.get(ordinal).copied() == Some("w:tc")
+            || !simple(&source[spans[ordinal].clone()])?
+        {
+            return None;
+        }
+    }
+    const MARKERS: [&str; 7] = [
+        "w:bookmarkStart",
+        "w:bookmarkEnd",
+        "w:commentRangeStart",
+        "w:commentRangeEnd",
+        "w:commentReference",
+        "w:permStart",
+        "w:permEnd",
+    ];
+    for (anchor, xml) in &inserted {
+        let ordinal = anchor.ordinal();
+        if !in_story(&ordinal)
+            || layout.parents.get(&ordinal).copied() == Some("w:tc")
+            || !simple(xml)?
+        {
+            return None;
+        }
+        let edges = layout.edges.get(&ordinal)?;
+        let admitted = match anchor {
+            S13SpliceAnchor::After(_) => {
+                !edges.field_after
+                    && match edges.after {
+                        Some((name, true)) => PARENTS.contains(&name),
+                        Some((name, false)) => {
+                            matches!(name, "w:p" | "w:tbl" | "w:sectPr" | "w:sdt")
+                        }
+                        None => false,
+                    }
             }
+            S13SpliceAnchor::Before(_) => match edges.before {
+                Some((name, false)) => PARENTS.contains(&name),
+                Some((name, true)) => matches!(name, "w:tcPr" | "w:sdt"),
+                None => false,
+            },
+        };
+        let neighbour = match anchor {
+            S13SpliceAnchor::After(_) => edges.after,
+            S13SpliceAnchor::Before(_) => edges.before,
+        };
+        if !admitted
+            || neighbour.is_some_and(|(name, _)| MARKERS.contains(&name))
+        {
+            return None;
         }
     }
     let mut prefixes = BTreeSet::new();
@@ -1678,10 +1729,9 @@ pub(crate) fn splice_source_direct(
     for &ordinal in &changed {
         let xml = &patched[&ordinal];
         let projected = &recorded.written[&ordinal];
-        let id = assignments
-            .get(&ordinal)
-            .cloned()
-            .or_else(|| paragraph_occurrences(projected).and_then(|all| all.first()?.para_id.clone()));
+        let id = assignments.get(&ordinal).cloned().or_else(|| {
+            paragraph_occurrences(projected).and_then(|all| all.first()?.para_id.clone())
+        });
         let xml = if let Some(id) = id {
             patch_paragraph_ids(xml, &BTreeMap::from([(0, id)]), false)?
         } else {
@@ -1839,7 +1889,14 @@ mod tests {
             table_patches: Vec::new(),
         };
         assert_eq!(
-            splice_source_direct(&source, &serialized, &recorded, &part, &BTreeMap::new(), &BTreeMap::new()),
+            splice_source_direct(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &BTreeMap::new()
+            ),
             Some(body(&format!("{heading}{inserted}{start}{end}")))
         );
     }
