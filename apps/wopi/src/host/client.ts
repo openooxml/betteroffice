@@ -345,7 +345,23 @@ export function createHostClient(options: HostClientOptions): HostClient {
     });
   }
 
-  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void }, op: string, accessToken: string): ReadableStream<Uint8Array> {
+  function streamFromBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
+    const chunkSize = 64 * 1024;
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        const next = Math.min(bytes.byteLength, offset + chunkSize);
+        controller.enqueue(bytes.subarray(offset, next));
+        offset = next;
+      },
+    });
+  }
+
+  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; progress?: boolean }, op: string, accessToken: string): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
     return new ReadableStream<Uint8Array>({
@@ -372,6 +388,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
           controller.error(tooLarge(op));
           return;
         }
+        state.progress = true;
         controller.enqueue(chunk.value);
       },
       async cancel(reason) {
@@ -393,13 +410,15 @@ export function createHostClient(options: HostClientOptions): HostClient {
       headers.set("X-WOPI-TimeStamp", signed.timestamp);
       if (spec.override) headers.set("X-WOPI-Override", spec.override);
       if (spec.op === "GetFile") headers.set("X-WOPI-MaxExpectedSize", String(maxFileBytes));
-      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void } = { exceeded: false };
+      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; progress?: boolean } = { exceeded: false };
       let body: BodyInit | undefined;
       let streamed = false;
-      let largeBody = false;
-      if (spec.body instanceof Uint8Array) {
+      if (spec.body instanceof Uint8Array && spec.body.byteLength > 1024 * 1024) {
+        streamed = true;
+        headers.set("Content-Length", String(spec.body.byteLength));
+        body = wrapUpload(streamFromBytes(spec.body), uploadState, spec.op, input.accessToken) as BodyInit;
+      } else if (spec.body instanceof Uint8Array) {
         body = spec.body as BodyInit;
-        largeBody = spec.body.byteLength > 1024 * 1024;
         headers.set("Content-Length", String(spec.body.byteLength));
       } else if (isStream(spec.body)) {
         streamed = true;
@@ -409,12 +428,16 @@ export function createHostClient(options: HostClientOptions): HostClient {
       const exceeded = () => uploadState.exceeded || (spec.exceeded ? spec.exceeded() : false);
       const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let connectTimer: ReturnType<typeof setTimeout> | undefined;
       const armHeaderTimeout = () => {
         if (timer === undefined) timer = setTimeout(() => controller.abort(), timeoutMs);
       };
       if (streamed) {
         uploadState.onDone = armHeaderTimeout;
-      } else if (!largeBody) {
+        connectTimer = setTimeout(() => {
+          if (!uploadState.progress) controller.abort();
+        }, timeoutMs);
+      } else {
         armHeaderTimeout();
       }
       let response: Response;
@@ -426,10 +449,11 @@ export function createHostClient(options: HostClientOptions): HostClient {
           redirect: "manual",
           signal: controller.signal,
         };
-        if (isStream(spec.body)) init.duplex = "half";
+        if (streamed) init.duplex = "half";
         response = await fetchFn(url, init);
       } catch (err) {
         if (timer) clearTimeout(timer);
+        if (connectTimer) clearTimeout(connectTimer);
         if (exceeded()) throw tooLarge(spec.op);
         if (uploadState.error) throw uploadState.error;
         const timedOut = controller.signal.aborted;
@@ -441,6 +465,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         throw mapped;
       }
       if (timer) clearTimeout(timer);
+      if (connectTimer) clearTimeout(connectTimer);
       if (exceeded()) {
         try {
           await response.body?.cancel();

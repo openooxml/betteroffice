@@ -401,6 +401,41 @@ describe("upload header timeout", () => {
     const client = makeClient(consumingFetch(false), 1024 * 1024, { timeoutMs: 5000, bodyIdleTimeoutMs: 20 });
     expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source }))).kind).toBe("timeout");
   });
+
+  test("a stalled large buffered upload times out instead of hanging", async () => {
+    let sawStream = false;
+    const stalledFetch: HostFetch = (_input, init) => {
+      sawStream = (init as RequestInit).body instanceof ReadableStream;
+      const signal = (init as RequestInit).signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted by signal")));
+      });
+    };
+    const client = makeClient(stalledFetch, 4 * 1024 * 1024, { timeoutMs: 30, bodyIdleTimeoutMs: 5000 });
+    const err = await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array(2 * 1024 * 1024) }));
+    expect(err.kind).toBe("timeout");
+    expect(sawStream).toBe(true);
+  });
+
+  test("a slow but progressing large buffered upload succeeds", async () => {
+    let received = 0;
+    const slowFetch: HostFetch = async (_input, init) => {
+      const body = (init as RequestInit).body as ReadableStream<Uint8Array>;
+      const reader = body.getReader();
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        received += chunk.value.byteLength;
+      }
+      return new Response(null, { status: 200, headers: { "X-WOPI-ItemVersion": "9" } });
+    };
+    const client = makeClient(slowFetch, 4 * 1024 * 1024, { timeoutMs: 50, bodyIdleTimeoutMs: 5000 });
+    const body = new Uint8Array(2 * 1024 * 1024);
+    const result = await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body });
+    expect(result.itemVersion).toBe("9");
+    expect(received).toBe(body.byteLength);
+  });
 });
 
 describe("body caps", () => {
