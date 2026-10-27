@@ -3838,17 +3838,32 @@ fn flush_paragraph<T: ReadTxn>(
         matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
             if instruction.contains("PAGEREF"))
     });
+    let field_chain_size = raw_runs
+        .iter()
+        .filter_map(|run| match &run.kind {
+            RawRunKind::Field { .. } => run.formatting.font_size,
+            _ => None,
+        })
+        .fold(None::<f64>, |size, next| {
+            Some(size.map_or(next, |current| current.max(next)))
+        });
     // Unsized runs take the style chain defaults the seed resolved in
     // `paragraph_run_defaults`: the chain size fills them, and a size
     // that comes only from the paragraph mark's direct rPr never does.
     for run in &mut raw_runs {
-        apply_run_defaults(&mut run.formatting, &defaults);
+        let hyperlink_sized = (toc_entry || pageref_entry)
+            && run.formatting.hyperlink.is_some()
+            && run.inherited_hyperlink.2;
         if toc_entry || pageref_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
+        apply_run_defaults(&mut run.formatting, &defaults);
+        if hyperlink_sized && let Some(size) = field_chain_size {
+            run.formatting.font_size = Some(size);
+        }
     }
     if toc_entry {
-        clamp_toc_auxiliary_sizes(&mut raw_runs);
+        clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
     }
     let raw_runs = coalesce_runs(raw_runs);
     map.paragraph_blocks.push((paragraph_pm_start, source));
@@ -4919,8 +4934,11 @@ fn mark_direct_size(values: &BTreeMap<String, Any>, key: &str) -> Option<f64> {
 
 fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: (mark_direct_size(values, "fontSize").is_none())
-            .then(|| paragraph_default_font_size(values)),
+        font_size: Some(if mark_direct_size(values, "fontSize").is_some() {
+            10.0
+        } else {
+            paragraph_default_font_size(values)
+        }),
         ..RunFormatting::default()
     };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
@@ -4946,9 +4964,11 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = (mark_direct_size(values, "fontSizeCs").is_none())
-        .then(|| map_number(defaults, "fontSizeCs").map(font_size_pt))
-        .flatten();
+    result.font_size_cs = if mark_direct_size(values, "fontSizeCs").is_some() {
+        Some(10.0)
+    } else {
+        map_number(defaults, "fontSizeCs").map(font_size_pt)
+    };
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
@@ -5027,7 +5047,7 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
 /// (tabs, field results, whitespace only runs) at the entry text size. Word
 /// renders the leader and page number at the entry size even when a tab or
 /// field run carries a larger one, and sizes the line from the entry text.
-fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun]) {
+fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>) {
     let entry_size = raw_runs
         .iter()
         .filter_map(|run| match &run.kind {
@@ -5039,9 +5059,7 @@ fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun]) {
         .fold(None::<f64>, |size, next| {
             Some(size.map_or(next, |current| current.max(next)))
         });
-    let Some(entry_size) = entry_size else {
-        // No entry run carries a size: tabs and whitespace runs take the
-        // same default the entry text takes, never a size of their own.
+    let Some(entry_size) = entry_size.or(fallback_size) else {
         for run in raw_runs.iter_mut() {
             let auxiliary = match &run.kind {
                 RawRunKind::Tab => true,
