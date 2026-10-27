@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { renderPages, type SiteData } from './render';
+import { renderPages, robots, sitemap, type SiteData } from './render';
 import { newestFirst, type Suite } from './stats';
 import { validateSuite } from '../../../eval/formats/collect-results';
 
@@ -31,6 +31,8 @@ export async function buildSite(directory = resolve(import.meta.dir, '../dist'))
     await writeFile(target, html);
   }
   for (const suite of data.suites) await writeFile(resolve(directory, 'results', encodeURIComponent(suite.suite) + '.json'), JSON.stringify(suite, null, 2) + '\n');
+  await writeFile(resolve(directory, 'robots.txt'), robots());
+  await writeFile(resolve(directory, 'sitemap.xml'), sitemap(data));
   await writeFile(resolve(directory, 'icon.svg'), await readFile(resolve(import.meta.dir, 'icon.svg')));
   return pages;
 }

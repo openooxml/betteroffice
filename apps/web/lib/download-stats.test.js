@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { KV_KEYS, cachedDownloads, refreshDownloadStats } from "./download-stats.ts";
+import { KV_KEYS, cachedDownloads, npmRange, refreshDownloadStats } from "./download-stats.ts";
 import { PYPI_PACKAGES } from "./pypi-downloads.ts";
 
 const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
@@ -7,6 +7,9 @@ const json = (body, status = 200) => ({ ok: status < 400, status, json: async ()
 const NPM_LISTING = "https://registry.npmjs.org/-/org/betteroffice/package?format=cli";
 const CRATES_SEARCH = "https://crates.io/api/v1/crates?page=1&per_page=100&q=betteroffice";
 const today = "2026-09-07";
+const NPM_RANGE = "2023-10-15:2023-11-13";
+const npm = (name) => `https://api.npmjs.org/downloads/range/${NPM_RANGE}/%40betteroffice%2F${name}`;
+const days = (...counts) => json({ downloads: counts.map((downloads, i) => ({ day: `2023-11-${String(13 - i).padStart(2, "0")}`, downloads })) });
 
 function history(downloads) {
   return { version_downloads: [{ date: today, downloads }], meta: { extra_downloads: [] } };
@@ -16,8 +19,8 @@ function history(downloads) {
 function registries(overrides = {}) {
   const table = {
     [NPM_LISTING]: () => json({ "@betteroffice/docx": "write", "@betteroffice/xlsx": "write", "other": "read" }),
-    "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fdocx": () => json({ downloads: 100 }),
-    "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": () => json({ downloads: 20 }),
+    [npm("docx")]: () => days(60, 40),
+    [npm("xlsx")]: () => days(20),
     [CRATES_SEARCH]: () =>
       json({
         crates: [
@@ -48,6 +51,13 @@ function harness(table) {
   return { calls, sleeps, store, options };
 }
 
+describe("npm range", () => {
+  test("names the 30 UTC days ending yesterday", () => {
+    expect(npmRange(new Date(1_700_000_000_000))).toBe(NPM_RANGE);
+    expect(npmRange(new Date("2026-03-01T05:00:00Z"))).toBe("2026-01-30:2026-02-28");
+  });
+});
+
 describe("scheduled download stats refresh", () => {
   test("requests one package at a time, three seconds apart, and writes every registry", async () => {
     const { calls, sleeps, store, options } = harness(registries());
@@ -66,10 +76,10 @@ describe("scheduled download stats refresh", () => {
     let attempts = 0;
     const flaky = () => {
       attempts += 1;
-      return attempts < 3 ? json({}, 503) : json({ downloads: 20 });
+      return attempts < 3 ? json({}, 503) : days(20);
     };
     const { calls, sleeps, store, options } = harness(
-      registries({ "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": flaky }),
+      registries({ [npm("xlsx")]: flaky }),
     );
     const result = await refreshDownloadStats(store, options);
 
@@ -86,10 +96,10 @@ describe("scheduled download stats refresh", () => {
       attempts += 1;
       if (attempts === 1) return { ...json({}, 429), headers: new Headers({ "Retry-After": "7" }) };
       if (attempts === 2) return { ...json({}, 429), headers: new Headers({ "Retry-After": "3600" }) };
-      return json({ downloads: 20 });
+      return days(20);
     };
     const { sleeps, store, options } = harness(
-      registries({ "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": limited }),
+      registries({ [npm("xlsx")]: limited }),
     );
     const result = await refreshDownloadStats(store, options);
     expect(result.npm).toEqual({ downloads: 120 });
@@ -98,7 +108,7 @@ describe("scheduled download stats refresh", () => {
 
   test("does not write a registry whose package keeps failing, but still writes the others", async () => {
     const { store, options } = harness(
-      registries({ "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": () => json({}, 500) }),
+      registries({ [npm("xlsx")]: () => json({}, 500) }),
     );
     const result = await refreshDownloadStats(store, options);
 
@@ -108,7 +118,7 @@ describe("scheduled download stats refresh", () => {
 
   test("a malformed count fails the registry instead of skewing the sum", async () => {
     const { store, options } = harness(
-      registries({ "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": () => json({ downloads: "many" }) }),
+      registries({ [npm("xlsx")]: () => json({ downloads: "many" }) }),
     );
     const result = await refreshDownloadStats(store, options);
     expect(result.npm).toEqual({ error: expect.stringContaining("invalid") });
@@ -118,7 +128,7 @@ describe("scheduled download stats refresh", () => {
   test("a package the stats API has never seen counts as zero", async () => {
     const { store, options } = harness(
       registries({
-        "https://api.npmjs.org/downloads/point/last-month/%40betteroffice%2Fxlsx": () => json({}, 404),
+        [npm("xlsx")]: () => json({}, 404),
         [`https://pypistats.org/api/packages/${encodeURIComponent(PYPI_PACKAGES[0])}/recent`]: () => json({}, 404),
       }),
     );

@@ -575,6 +575,7 @@ fn emu_to_pixels(value: f64) -> f64 {
 
 fn float_geometry(metrics: HeaderFooterMetrics<'_>) -> crate::display_list::PageFloatGeom {
     crate::display_list::PageFloatGeom {
+        horizontal_frame: None,
         page_width: metrics.page_size.w,
         page_height: metrics.page_size.h,
         margin_left: metrics.margins.left,
