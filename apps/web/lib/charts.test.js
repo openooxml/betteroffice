@@ -72,7 +72,7 @@ describe("chart SVGs", () => {
     for (const [name, svg] of SVGS()) {
       const width = Number(svg.match(/viewBox="0 0 (\d+) /)[1]);
       const height = Number(svg.match(/viewBox="0 0 \d+ (\d+)"/)[1]);
-      const texts = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="(\d+)"([^>]*)>([^<]*)<\/text>/g)];
+      const texts = [...svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)" font-size="([\d.]+)"([^>]*)>([^<]*)<\/text>/g)];
       expect(texts.length).toBeGreaterThan(8);
       for (const [, x, y, size, attrs, content] of texts) {
         const wide = content.replace(/&\w+;/g, "x").length * Number(size) * 0.62;
@@ -157,10 +157,18 @@ describe("chart SVGs", () => {
 
   test("content is flush with the canvas edges: titles, legend and labels start at x = 0, nothing is end-anchored in the benchmarks chart", () => {
     for (const [name, svg] of SVGS()) {
-      expect(svg).toMatch(/<text x="0" y="1\d" font-size="1[56]" font-weight="600"/);
+      expect(svg).toMatch(/<text x="0" y="12" font-size="12(\.8)?" font-weight="600"/);
       const xs = [...svg.matchAll(/<text x="([\d.]+)"/g)].map((m) => Number(m[1]));
       expect(Math.min(...xs)).toBe(0);
-      if (name === "benchmarks") expect(svg).not.toContain("text-anchor");
+      if (name === "benchmarks") {
+        const labels = [...svg.matchAll(/<text x="(\d+)" y="[\d.]+" font-size="11" text-anchor="end"[^>]*>([^<]*)<\/text>/g)];
+        expect(labels.length).toBe(tableRows(FORMATS).length * 2);
+        expect(new Set(labels.map((m) => m[1]))).toEqual(new Set(["560"]));
+        const trackEnds = [...svg.matchAll(/<rect x="204" y="[\d.]+" width="(\d+)" height="15" fill="#(?:000000|ffffff)"/g)].map((m) => 204 + Number(m[1]));
+        expect(trackEnds.length).toBe(labels.length);
+        expect(Math.max(...trackEnds)).toBeLessThanOrEqual(560 - 11 * 0.62 * "1351 ms".length);
+        expect(svg).not.toMatch(/<text x="[\d.]+" y="[\d.]+" font-size="11" fill="#[0-9a-f]{6}">(\d|1351)/);
+      }
     }
   });
 

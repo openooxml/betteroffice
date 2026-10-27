@@ -95,7 +95,7 @@ export function evalsChartSvg(basic: AgentEvals | null, complex: AgentEvals | nu
   const perGroup = Math.max(...groups.map((group) => group.bars.length));
   const barWidth = Math.min(34, (groupWidth - 30) / perGroup - 6);
   const title = model ? `Agent edits with ${model}: pass rate by format` : "Agent edits: pass rate by format";
-  let body = `<text x="0" y="14" font-size="15" font-weight="600" fill="${c.fg}">${esc(title)}</text>`;
+  let body = `<text x="0" y="12" font-size="12" font-weight="600" fill="${c.fg}">${esc(title)}</text>`;
   const legend = [
     { label: "Generic complex", fill: c.other, basic: false },
     { label: "BetterOffice complex", fill: c.ours, basic: false },
@@ -197,12 +197,13 @@ export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): str
   const c = PALETTE[theme];
   const width = WIDTH;
   const barX = 204;
-  const plot = width - barX - 62;
+  const valueColumn = 60;
+  const plot = width - barX - valueColumn;
   const barHeight = 15;
   const pair = 2 * barHeight + 3;
   const pitch = pair + 11;
   let y = 52;
-  let body = `<text x="0" y="14" font-size="16" font-weight="600" fill="${c.fg}">Scored against Microsoft Office</text>`;
+  let body = `<text x="0" y="12" font-size="12.8" font-weight="600" fill="${c.fg}">Scored against Microsoft Office</text>`;
   body += `<rect x="0.75" y="26" width="11" height="11" fill="${c.ours}"/><text x="17" y="36" font-size="12" fill="${c.dim}">BetterOffice</text><rect x="110.75" y="26" width="11" height="11" fill="${c.other}"/><text x="127" y="36" font-size="12" fill="${c.dim}">LibreOffice</text>`;
   let section = "";
   for (const row of rows) {
@@ -216,12 +217,11 @@ export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): str
     if (lower) body += `<text x="0" y="${y + 27}" font-size="10" font-style="italic" fill="${c.dim}">lower is better</text>`;
     for (const [offset, bar, ours] of [[0, row.ours, true], [barHeight + 3, row.theirs, false]] as const) {
       body += `<rect x="${barX}" y="${y + offset}" width="${plot}" height="${barHeight}" fill="${c.track}" fill-opacity="${c.trackOpacity}"/>`;
-      if (bar.share === null) {
-        body += `<text x="${barX}" y="${y + offset + 12}" font-size="12" fill="${c.dim}">${esc(bar.text)}</text>`;
-        continue;
+      if (bar.share !== null) {
+        const w = Math.max(1, plot * Math.min(1, bar.share));
+        body += `<rect x="${barX}" y="${y + offset}" width="${w.toFixed(1)}" height="${barHeight}" fill="${ours ? c.ours : c.other}"/>`;
       }
-      const w = Math.max(1, plot * Math.min(1, bar.share));
-      body += `<rect x="${barX}" y="${y + offset}" width="${w.toFixed(1)}" height="${barHeight}" fill="${ours ? c.ours : c.other}"/><text x="${(barX + w + 6).toFixed(1)}" y="${y + offset + 12}" font-size="11" fill="${c.fg}">${esc(bar.text)}</text>`;
+      body += `<text x="${width}" y="${y + offset + 12}" font-size="11" text-anchor="end" fill="${bar.share === null ? c.dim : c.fg}">${esc(bar.text)}</text>`;
     }
     body += "</g>";
     y += pitch;
