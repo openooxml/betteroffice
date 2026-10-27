@@ -311,6 +311,8 @@ describe("collab relay", () => {
     await a.closed;
     expect(a.closeCode).toBe(4400);
     b.editAndSend("still-working ", 0);
+    const session = s.h.registry.list()[0]!;
+    await waitFor(() => session.dirty, "server applied b update");
     await s.h.clock.advance(30000);
     expect(s.h.putCount()).toBe(1);
     await expectNoTokens(s);
