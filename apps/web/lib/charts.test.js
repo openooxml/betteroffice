@@ -142,9 +142,14 @@ describe("chart SVGs", () => {
     expect(error.ours.share).toBe(0);
     expect(error.theirs.share).toBe(1);
     const bench = benchmarksChartSvg(FORMATS, "light");
-    expect(bench).toContain("Absolute page error (lower)");
-    expect(bench).toContain("Render time (lower)");
-    expect(bench).toContain("(lower) marks rows where lower is better");
+    for (const label of ["Absolute page error", "Render time", "Recalc time"]) {
+      const at = bench.indexOf(`>${label}<`);
+      expect(at).toBeGreaterThan(0);
+      expect(bench.slice(at, at + 200)).toMatch(/<text x="0" y="[\d.]+" font-size="10" font-style="italic" fill="#6b6b6b">lower is better<\/text>/);
+    }
+    expect(bench.match(/>lower is better<\/text>/g)).toHaveLength(tableRows(FORMATS).filter((row) => row.better === "lower").length);
+    expect(bench).not.toContain("(lower)");
+    expect(bench).not.toContain("marks rows");
     expect(rows.find((row) => row.label === "SSIM").ours.share).toBeCloseTo(0.8519, 4);
     expect(rows.find((row) => row.label === "Render time (avg)").theirs.share).toBe(1);
   });
@@ -180,6 +185,11 @@ describe("chart SVGs", () => {
   test("the theme changes the palette and anything unknown is light", () => {
     expect(evals("dark")).toContain("#34d399");
     expect(evals("dark")).not.toContain("#047857");
+    expect(evals("light")).toContain("#94a3b8");
+    expect(evals("dark")).toContain("#64748b");
+    const tokens = readFileSync(join(import.meta.dir, "..", "..", "..", "shared", "site-tokens.css"), "utf8");
+    expect(tokens).toContain("--bo-acc: #047857");
+    expect(tokens).toContain("--bo-acc: #34d399");
     expect(themeOf("dark")).toBe("dark");
     expect(themeOf("sepia")).toBe("light");
     expect(themeOf(null)).toBe("light");

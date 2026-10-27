@@ -4,9 +4,11 @@ import { type FidelityFormat, fidelityCharts, quantity } from "./fidelity";
 
 export type Theme = "light" | "dark";
 
+// ours is the landing page's accent (--bo-acc in shared/site-tokens.css), text and rules use its ink tokens;
+// the other engine gets a cooler neutral than the page's grey so it reads against both the green and the background
 const PALETTE = {
-  light: { fg: "#0b0b0b", dim: "#6b6b6b", line: "#e4e4e4", ours: "#047857", other: "#6b6b6b" },
-  dark: { fg: "#f2f2f0", dim: "#8c8c8c", line: "#262626", ours: "#34d399", other: "#8c8c8c" },
+  light: { fg: "#0b0b0b", dim: "#6b6b6b", line: "#e4e4e4", ours: "#047857", other: "#94a3b8" },
+  dark: { fg: "#f2f2f0", dim: "#8c8c8c", line: "#262626", ours: "#34d399", other: "#64748b" },
 } as const;
 
 // the landing page's Geist, embedded because an SVG loaded through <img> cannot fetch fonts
@@ -187,7 +189,7 @@ export function tableRows(formats: FidelityFormat[]): TableRow[] {
   );
 }
 
-const shown = (row: TableRow) => `${row.label.replace(/ \(avg\)$/, "")}${row.better === "lower" ? " (lower)" : ""}`;
+const shown = (row: TableRow) => row.label.replace(/ \(avg\)$/, "");
 
 export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): string | null {
   const rows = tableRows(formats);
@@ -209,7 +211,9 @@ export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): str
       body += `<text x="0" y="${y + 12}" font-size="13" font-weight="600" fill="${c.fg}">${esc(section.toUpperCase())}</text><line x1="${barX}" y1="${y + 8}" x2="${width}" y2="${y + 8}" stroke="${c.line}"/>`;
       y += 24;
     }
-    body += `<g data-row="${esc(row.format)}:${esc(row.label)}"><text x="0" y="${y + pair / 2 + 4}" font-size="12" fill="${c.fg}">${esc(shown(row))}</text>`;
+    const lower = row.better === "lower";
+    body += `<g data-row="${esc(row.format)}:${esc(row.label)}"><text x="0" y="${y + (lower ? 14 : pair / 2 + 4)}" font-size="12" fill="${c.fg}">${esc(shown(row))}</text>`;
+    if (lower) body += `<text x="0" y="${y + 27}" font-size="10" font-style="italic" fill="${c.dim}">lower is better</text>`;
     for (const [offset, bar, ours] of [[0, row.ours, true], [barHeight + 3, row.theirs, false]] as const) {
       if (bar.share === null) {
         body += `<text x="${barX}" y="${y + offset + 12}" font-size="12" fill="${c.dim}">${esc(bar.text)}</text>`;
@@ -221,9 +225,8 @@ export function benchmarksChartSvg(formats: FidelityFormat[], theme: Theme): str
     body += "</g>";
     y += pitch;
   }
-  body += `<text x="0" y="${y + 8}" font-size="11" fill="${c.dim}">Higher is better; (lower) marks rows where lower is better.</text>`;
-  body += `<text x="0" y="${y + 22}" font-size="11" fill="${c.dim}">Same scorer and Office references for both engines.</text>`;
-  return frame(width, y + 28, benchmarksHeadline(formats), body);
+  body += `<text x="0" y="${y + 8}" font-size="11" fill="${c.dim}">Same scorer and Office references for both engines.</text>`;
+  return frame(width, y + 16, benchmarksHeadline(formats), body);
 }
 
 export const publishedEvalTiers = (section: string) => ({
