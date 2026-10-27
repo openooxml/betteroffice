@@ -459,11 +459,7 @@ fn resolved_shape_text(
                 .paragraphs
                 .iter()
                 .map(|paragraph| {
-                    let live: String = paragraph
-                        .runs
-                        .iter()
-                        .map(|run| run.text.as_str())
-                        .collect();
+                    let live: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
                     let Some(body) = source_body(package, slide, shape, &story.id) else {
                         return live;
                     };
@@ -1118,10 +1114,11 @@ impl DeckSession {
                 slide.layout_part_path.as_deref(),
             );
             slide.layout = parents.layout.map(|layout| SlideLayoutSnapshot {
-                header_footer: layout
-                    .header_footer
-                    .clone()
-                    .or_else(|| parents.master.and_then(|master| master.header_footer.clone())),
+                header_footer: layout.header_footer.clone().or_else(|| {
+                    parents
+                        .master
+                        .and_then(|master| master.header_footer.clone())
+                }),
                 name: layout.name.clone(),
                 r#type: layout.layout_type.clone(),
             });
@@ -1304,7 +1301,11 @@ mod tests {
     fn command_reads_number_selected_slides_in_deck_order() {
         let paragraphs = format!("<a:p>{}</a:p>", field("slidenum", "9"));
         let shape = placeholder(2, "sldNum", &paragraphs, false);
-        let slides = [(shape.as_str(), false), (shape.as_str(), true), (shape.as_str(), false)];
+        let slides = [
+            (shape.as_str(), false),
+            (shape.as_str(), true),
+            (shape.as_str(), false),
+        ];
         let session = DeckSession::open(&deck(&slides, "", "", "", Some(5)), 920).unwrap();
         let ids = session.slide_ids().unwrap();
         let read = session
