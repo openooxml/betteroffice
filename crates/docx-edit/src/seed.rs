@@ -2085,6 +2085,13 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
                     .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
             }
         }
+        if field(formatting, "fontSize").is_none()
+            && field(run_style, "fontSize").is_some()
+            && let Some(mark) = marks.iter_mut().find(|mark| mark.name == "fontSize")
+        {
+            mark.attrs
+                .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
+        }
     }
     marks
 }

@@ -219,7 +219,7 @@ pub(super) fn place(
                     pm_end: None,
                 }),
                 formatting: RunFormatting::default(),
-                inherited_hyperlink: (false, false),
+                inherited_hyperlink: (false, false, false),
                 story_start: at,
                 story_end: at,
                 pm_start: reservation.start,
