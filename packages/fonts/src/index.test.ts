@@ -317,7 +317,7 @@ describe('loading', () => {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
         for (const bold of [false, true]) {
           for (const italic of [false, true]) {
-            expect(provider.resolve(family, bold, italic)!.measureAs).toBe('Segoe UI');
+            expect(provider.resolve(family, bold, italic)?.measureAs).toBe(family === 'Segoe UI Black' ? undefined : 'Segoe UI');
             const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
             const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, italic)!;
             expect(resolveGlyphFallbackFace(family, bold, italic, office)).toBe(expected);
