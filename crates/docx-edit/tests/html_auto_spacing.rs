@@ -191,6 +191,42 @@ fn same_numbering_suppresses_auto_across_levels_and_non_list_restores_it() {
     body_gap(&output, 2, 280.0);
 }
 
+const ANCHORED_SHAPE: &str = r#"<w:r xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="1" locked="0" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="6096000" cy="2286000"/><wp:wrapNone/><wp:docPr id="1" name="Watermark"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6096000" cy="2286000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+
+fn with_anchored_shape(paragraph: String) -> String {
+    paragraph.replace(
+        "<w:r><w:t>Sample</w:t></w:r>",
+        &format!("{ANCHORED_SHAPE}<w:r><w:t>Sample</w:t></w:r>"),
+    )
+}
+
+fn paragraph_tops(output: &Value) -> Vec<f64> {
+    output["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fragment| fragment["kind"] == "paragraph")
+        .map(|fragment| fragment["y"].as_f64().unwrap())
+        .collect()
+}
+
+#[test]
+fn first_body_paragraph_with_an_anchored_shape_drops_its_auto_before() {
+    let output = render(&with_anchored_shape(paragraph(AUTO, "")), false);
+    close(paragraph_tops(&output)[0], 96.0);
+}
+
+#[test]
+fn an_anchored_shape_between_list_items_does_not_restore_their_auto_spacing() {
+    let body = format!(
+        "{}{}",
+        paragraph(AUTO, &numbered(1, 0)),
+        with_anchored_shape(paragraph(AUTO, &numbered(1, 0))),
+    );
+    let tops = paragraph_tops(&render(&body, false));
+    close(tops[1] - tops[0], 16.0);
+}
+
 #[test]
 fn same_numbering_preserves_explicit_sides_and_distinct_ids_keep_auto() {
     for (after, before, expected) in [
