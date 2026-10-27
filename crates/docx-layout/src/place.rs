@@ -35,8 +35,8 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::keep_together::{
-    measure_keep_with_next_group_witnessing, paragraph_can_split, paragraph_is_unbreakable,
-    paragraph_min_leading_slice, paragraph_min_trailing_slice, paragraph_widow_control,
+    KeepRun, paragraph_can_split, paragraph_is_unbreakable, paragraph_min_leading_slice,
+    paragraph_min_trailing_slice, paragraph_widow_control,
 };
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
@@ -989,6 +989,7 @@ fn place<F: PartialEq>(
         paginator.mark_balanced_region();
     }
 
+    let mut keep_run: Option<KeepRun<'_>> = None;
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         crate::progress::tick();
         let section_mark = plan.section_marks[i];
@@ -1055,27 +1056,27 @@ fn place<F: PartialEq>(
                 }
                 _ => (0.0, 0.0),
             };
-            let group = whole_group.starting_at(i, measured);
-            let group_height = measure_keep_with_next_group_witnessing(
-                &group,
+            if keep_run
+                .as_ref()
+                .is_none_or(|run| run.head_index() != whole_group.head_index)
+            {
+                keep_run = Some(KeepRun::new(whole_group, measured)?);
+            }
+            let run = keep_run.as_mut().unwrap();
+            run.starting_at(i);
+            let heights = run.heights(
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
                 split_first_row,
                 every_cell_starts,
-            ) - lead_skip;
-            let fresh_page_height = measure_keep_with_next_group_witnessing(
-                &group,
-                measured,
-                |_| 0.0,
-                0.0,
-                page_content_height,
-                split_first_row,
-                every_cell_starts,
-            ) - fresh_lead_skip;
+                lead_skip,
+                fresh_lead_skip,
+            );
             if let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
                 (&mb.block, &mb.measure)
+                && let Some((group_height, fresh_page_height)) = heights
             {
                 let leading = paginator
                     .leading_spacing(get_spacing_before(block))
@@ -2419,6 +2420,185 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn counted_keep_layout(mut value: Input, reference: bool) -> (Vec<u8>, usize) {
+        use crate::keep_together::{KEEP_REFERENCE, KEEP_WORK};
+
+        KEEP_WORK.with(|work| work.set(0));
+        KEEP_REFERENCE.with(|flag| flag.set(reference));
+        let result = layout_document(&mut value);
+        KEEP_REFERENCE.with(|flag| flag.set(false));
+        let count = KEEP_WORK.with(|work| work.get());
+        (serde_json::to_vec(&result.unwrap()).unwrap(), count)
+    }
+
+    fn keep_run_input(count: usize, split_every_tenth: bool, height: f64) -> Input {
+        let mut blocks: Vec<_> = (0..count)
+            .map(|index| {
+                paragraph(
+                    index as u32,
+                    if split_every_tenth && index % 10 == 9 {
+                        2
+                    } else {
+                        1
+                    },
+                    height,
+                    json!({"keepNext": true, "widowControl": false}),
+                )
+            })
+            .collect();
+        blocks.push(paragraph(count as u32, 1, height, json!({})));
+        input(blocks)
+    }
+
+    #[test]
+    fn long_keep_runs_visit_members_linearly_with_page_bounded_witnesses() {
+        for split_every_tenth in [false, true] {
+            let mut counts = Vec::new();
+            let mut reference_counts = Vec::new();
+            for count in [100, 200] {
+                let value = keep_run_input(count, split_every_tenth, 10.0);
+                let (actual, work) = counted_keep_layout(value.clone(), false);
+                let (expected, reference_work) = counted_keep_layout(value, true);
+                assert_eq!(actual, expected);
+                let expected_work = if split_every_tenth {
+                    13 * count - 9
+                } else {
+                    14 * count - 11
+                };
+                assert_eq!(work, expected_work);
+                counts.push(work);
+                reference_counts.push(reference_work);
+            }
+            assert!(counts[1] * 10 <= counts[0] * 22, "{counts:?}");
+            assert!(reference_counts[1] * 10 >= reference_counts[0] * 37);
+        }
+    }
+
+    #[test]
+    fn zero_height_keep_runs_skip_zero_continuations() {
+        let (_, small) = counted_keep_layout(keep_run_input(100, false, 0.0), false);
+        let (_, large) = counted_keep_layout(keep_run_input(200, false, 0.0), false);
+        assert_eq!((small, large), (499, 999));
+        assert!(large * 10 <= small * 22);
+    }
+
+    #[test]
+    fn cached_keep_witnesses_preserve_reference_layout_bytes() {
+        for split_every_tenth in [false, true] {
+            for float_bands in [false, true] {
+                let mut value = keep_run_input(36, split_every_tenth, 7.3);
+                for (index, measured) in value.measured.iter_mut().enumerate() {
+                    let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+                        (&mut measured.block, &mut measured.measure)
+                    else {
+                        unreachable!();
+                    };
+                    let attrs = block.attrs.as_mut().unwrap();
+                    attrs.spacing = Some(crate::types::ParagraphSpacing {
+                        before: Some(if index % 7 == 0 { -20.1 } else { 1.3 }),
+                        after: Some(if index % 7 == 6 { -20.7 } else { 2.9 }),
+                        ..Default::default()
+                    });
+                    if index % 6 == 0 {
+                        measure.lines = vec![measure.lines[0].clone(); 4];
+                        measure.total_height = 4.0 * 7.3;
+                        attrs.keep_lines = Some(true);
+                    }
+                    if index % 5 == 0 {
+                        attrs.widow_control = Some(true);
+                    }
+                    if index % 4 == 0 {
+                        measure.lines[0].float_skip_before = Some(13.7);
+                    }
+                }
+                if float_bands {
+                    let mut serialized = serde_json::to_value(&value).unwrap();
+                    serialized["options"]["sectionPageFloatBands"] = json!([
+                        {"default": [{"top": 40, "bottom": 47}]}
+                    ]);
+                    value = serde_json::from_value(serialized).unwrap();
+                }
+                let (actual, _) = counted_keep_layout(value.clone(), false);
+                let (expected, _) = counted_keep_layout(value, true);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_keep_table_witnesses_preserve_page_dependent_measurements() {
+        use crate::keep_together::{analyze_keep_with_next, measure_keep_with_next_group_witnessing};
+
+        let mut value = keep_run_input(24, false, 3.7);
+        let cell = paragraph(100, 4, 7.3, json!({}));
+        value.measured[24] = serde_json::from_value(json!({
+            "block": {
+                "kind": "table", "id": 24, "columnWidths": [100],
+                "rows": [{"id": 200, "cells": [{"id": 300, "blocks": [cell["block"]]}]}]
+            },
+            "measure": {
+                "kind": "table", "totalWidth": 100, "totalHeight": 29.2,
+                "columnWidths": [100],
+                "rows": [{"height": 29.2, "cells": [{
+                    "width": 100, "height": 29.2, "blocks": [cell["measure"]]
+                }]}]
+            }
+        }))
+        .unwrap();
+        let scan = analyze_keep_with_next(&value.measured);
+        let whole_group = &scan.groups_by_head[&0];
+        let mut run = KeepRun::new(whole_group, &value.measured).unwrap();
+        for start in 0..24 {
+            run.starting_at(start);
+            let group = crate::keep_together::KeepWithNextGroup {
+                head_index: start,
+                tail_index: 23,
+                members: (start..24).collect(),
+                follower: Some(24),
+            };
+            for capacity in [20.0, 100.0, 500.0] {
+                for split_first_row in [false, true] {
+                    for every_cell_starts in [false, true] {
+                        let current = measure_keep_with_next_group_witnessing(
+                            &group,
+                            &value.measured,
+                            |before| before + 1.3,
+                            2.9,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                        ) - 0.7;
+                        let fresh = measure_keep_with_next_group_witnessing(
+                            &group,
+                            &value.measured,
+                            |_| 0.0,
+                            0.0,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                        ) - 1.1;
+                        let actual = run.heights(
+                            &value.measured,
+                            |before| before + 1.3,
+                            2.9,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                            0.7,
+                            1.1,
+                        );
+                        if let Some((actual_current, actual_fresh)) = actual {
+                            assert_eq!(actual_current.to_bits(), current.to_bits());
+                            assert_eq!(actual_fresh.to_bits(), fresh.to_bits());
+                        } else {
+                            assert!(fresh > capacity);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn widow_rounding_input(
