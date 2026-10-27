@@ -2691,6 +2691,34 @@ mod tests {
     }
 
     #[test]
+    fn merged_nowrap_cell_that_fits_its_columns_adds_no_floor_to_the_narrow_one() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0, "layoutMode": "autofit", "gridWidths": [200, 40, 100],
+            "rows": [
+                {"id": 0, "cells": [
+                    {"id": 0, "blocks": [], "colSpan": 2, "widthValue": 3530, "widthType": "pct",
+                     "minContentWidth": 40, "maxContentWidth": 220, "noWrap": true},
+                    {"id": 1, "blocks": [], "widthValue": 1470, "widthType": "pct",
+                     "minContentWidth": 10, "maxContentWidth": 30}
+                ]},
+                {"id": 1, "cells": [
+                    {"id": 2, "blocks": [], "widthValue": 2940, "widthType": "pct",
+                     "minContentWidth": 10, "maxContentWidth": 30},
+                    {"id": 3, "blocks": [], "widthValue": 590, "widthType": "pct",
+                     "minContentWidth": 10, "maxContentWidth": 30},
+                    {"id": 4, "blocks": [], "widthValue": 1470, "widthType": "pct",
+                     "minContentWidth": 10, "maxContentWidth": 30}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let widths = resolve_table_column_widths(&block, 340.0);
+        assert!(widths[0] + widths[1] >= 220.0 - 0.5, "{widths:?}");
+        assert!(widths[1] <= 40.5, "{widths:?}");
+        assert!(widths[2] >= 99.5, "{widths:?}");
+    }
+
+    #[test]
     fn full_width_autofit_nowrap_preserves_neighbor_columns() {
         let block: TableBlock = serde_json::from_value(json!({
             "id": 0, "layoutMode": "autofit", "gridWidths": [100, 200],
