@@ -64,8 +64,15 @@ docker run -d --name betteroffice-wopi \
   betteroffice-wopi
 ```
 
+To keep the variables in a file instead, pass them with the Docker
+`--env-file` flag; the app only reads the environment.
+
 Then point the reverse proxy for `https://office.example.com` at port 3000
 and check `https://office.example.com/healthz` returns `{"status":"ok"}`.
+The proxy terminates TLS for the app, so configure TLS there and have the
+proxy send an HSTS header (`Strict-Transport-Security`) on its responses;
+the app itself speaks plain HTTP on its port and builds every URL from
+`WOPI_PUBLIC_URL`, so it needs no forwarded-header handling.
 
 Notes:
 
@@ -74,10 +81,17 @@ Notes:
 - Persist `/data`. The proof key lives there by default (see Security). If
   `/data` is lost, the app generates a new proof key and hosts must pick up
   the new discovery values.
-- More than one instance: file sessions live in one process, so route by
-  the WOPISrc file id with sticky routing (hash the file id at the proxy)
-  so every request for one file reaches the instance that holds it. There
-  is no cross-instance sync in this version.
+- More than one instance: file sessions live in one process, and there is
+  no cross-instance sync in this version. Hashing the WOPISrc file id at
+  the proxy is not enough on its own: only the entry requests
+  (`/wopi/edit` and `/wopi/view`) carry the WOPISrc, while the session API
+  (`/api/session/*`) and the `/collab` WebSocket carry only the session
+  handle, with no file id to hash. A multi-instance setup therefore needs
+  affinity for those requests too, for example an affinity cookie: the
+  proxy sets a sticky cookie on the `/wopi/edit` and `/wopi/view`
+  responses and routes `/api/session/*` and `/collab` by that cookie, so
+  every request for one file reaches the instance that holds its session.
+  If your proxy cannot do that, run a single instance.
 
 ## Configuration reference
 
@@ -157,11 +171,18 @@ it from URLs. Do not add proxies that log request bodies between the host
 and the app.
 
 Journal: `WOPI_JOURNAL_DIR` is off by default because it keeps document
-data at rest on the app server. When set, the app appends accepted updates
-there and replays them after a restart before reclaiming its lock. Only
-enable it if you accept document data on that volume, protect the volume
-like the documents themselves, and delete journal data with the same
-retention rules as the files.
+data at rest on the app server. When set, the journal for a file stores
+the original source the session opened, every accepted and local update,
+and the item versions the app itself wrote as saves land. On reopen
+after a restart, the app takes its lock, and rebuilds the session from
+the journal only if the host version is still the original version or
+one the app wrote: it replays the journaled updates and then saves. If the host
+version has moved to something the journal does not know (someone else
+changed the file), the app discards the journal and opens the host's
+current version instead, so a stale journal never overwrites a newer
+file. Only enable it if you accept document data on that volume, protect
+the volume like the documents themselves, and delete journal data with
+the same retention rules as the files.
 
 ## OpenCloud
 
@@ -232,7 +253,12 @@ end to end with this app.
    container, this is the egress address of the container host or proxy,
    not the container-internal address, unless Nextcloud runs on the same
    private network and sees that address.
-5. Open a DOCX, XLSX or PPTX file and check viewing, editing, save and a
+5. If the app URL resolves to a local or private address from
+   Nextcloud's point of view (as in the smoke compose stack), allow local
+   remote servers or Nextcloud refuses the connection:
+   `occ config:system:set allow_local_remote_servers --value=true --type=boolean`.
+   Leave it off when the app is reachable at a public address.
+6. Open a DOCX, XLSX or PPTX file and check viewing, editing, save and a
    second user joining.
 
 Known limitations versus a Collabora server:

@@ -41,6 +41,7 @@ Then install the Nextcloud Office app and point it at this app:
 docker compose -f apps/wopi/deploy/nextcloud.compose.yml exec nextcloud php occ app:install richdocuments
 docker compose -f apps/wopi/deploy/nextcloud.compose.yml exec nextcloud php occ config:app:set richdocuments wopi_url --value='http://office.nextcloud.test:3000'
 docker compose -f apps/wopi/deploy/nextcloud.compose.yml exec nextcloud php occ config:app:set richdocuments public_wopi_url --value='http://office.nextcloud.test:3000'
+docker compose -f apps/wopi/deploy/nextcloud.compose.yml exec nextcloud php occ config:system:set allow_local_remote_servers --value=true --type=boolean
 ```
 
 In Settings, Administration, Nextcloud Office, add the egress address the
