@@ -116,6 +116,7 @@ export function buildResidentRegionLayoutRequest(
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
+      ...chainFontSizeEnv(document, renderEnv),
       tocStyleIds: [...new Set([
         ...(renderEnv.tocStyleIds ?? []),
         ...(document?.package.styles?.styles ?? [])
@@ -124,6 +125,39 @@ export function buildResidentRegionLayoutRequest(
           .map((style) => style.styleId),
       ])],
     },
+  };
+}
+
+function chainFontSizeEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'docDefaultFontSize'> {
+  const styles = document?.package.styles;
+  if (!styles) return {};
+  const docDefault = styles.docDefaults?.rPr?.fontSize;
+  const byId = new Map((styles.styles ?? []).map((style) => [style.styleId, style]));
+  const sizes: Record<string, number> = { ...(renderEnv.paragraphStyleFontSizes ?? {}) };
+  for (const style of styles.styles ?? []) {
+    if (style.type !== 'paragraph' || !style.styleId || style.styleId in sizes) continue;
+    let size: number | undefined;
+    const seen = new Set<string>();
+    let current: typeof style | undefined = style;
+    while (current && !seen.has(current.styleId)) {
+      seen.add(current.styleId);
+      if (current.rPr?.fontSize != null) {
+        size = current.rPr.fontSize;
+        break;
+      }
+      current = current.basedOn ? byId.get(current.basedOn) : undefined;
+    }
+    const resolved = size ?? docDefault;
+    if (resolved != null) sizes[style.styleId] = resolved / 2;
+  }
+  return {
+    ...(Object.keys(sizes).length > 0 ? { paragraphStyleFontSizes: sizes } : {}),
+    ...(renderEnv.docDefaultFontSize == null && docDefault != null
+      ? { docDefaultFontSize: docDefault / 2 }
+      : {}),
   };
 }
 

@@ -622,6 +622,10 @@ export interface YrsRenderEnv {
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
   docGridPitchPx?: number;
   defaultParagraphStyleId?: string;
+  /** Resolved paragraph style chain font size in pt, keyed by style id. */
+  paragraphStyleFontSizes?: Record<string, number>;
+  /** The docDefaults font size in pt. */
+  docDefaultFontSize?: number;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   /** The document default tab stop in twips. */

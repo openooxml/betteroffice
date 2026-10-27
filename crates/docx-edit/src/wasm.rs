@@ -822,6 +822,7 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
 /// "showHiddenText": bool, "showTableGridlines": bool,
 /// "defaultParagraphStyleId": string,
+/// "paragraphStyleFontSizes": {styleId: pt}, "docDefaultFontSize": number,
 /// "revisionPreview": {revisionId: "accepted"|"rejected"} }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
@@ -844,6 +845,14 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
         .and_then(Value::as_str)
         .filter(|style| !style.is_empty())
         .map(str::to_owned);
+    if let Some(Value::Object(sizes)) = value.get("paragraphStyleFontSizes") {
+        for (key, entry) in sizes {
+            if let Some(size) = entry.as_f64() {
+                env.paragraph_style_font_sizes.insert(key.clone(), size);
+            }
+        }
+    }
+    env.doc_default_font_size = value.get("docDefaultFontSize").and_then(Value::as_f64);
     env.show_hidden_text = value
         .get("showHiddenText")
         .and_then(Value::as_bool)
@@ -5237,6 +5246,7 @@ impl EditSession {
     /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
     /// "tocStyleIds":[styleId],"showHiddenText":bool,
     /// "defaultParagraphStyleId":string,
+    /// "paragraphStyleFontSizes":{styleId: pt},"docDefaultFontSize":number,
     /// "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
