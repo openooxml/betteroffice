@@ -1,9 +1,9 @@
 /** Builds deterministic embedded, bundled, script, and last-resort font chains. */
 
-/** A lazy face loader; flags say how a chain uses the face. */
+/** A lazy face loader with measurement and fallback options. */
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
-  /** Measure with the face's own advances, not a substitute view of the requested family. */
-  useOwnMetrics?: boolean;
+  /** Word measurement family; defaults to the requested family. */
+  measureAs?: string;
   /** Only stands in for a primary face that failed to load. */
   onlyIfPrimaryFails?: boolean;
 };
@@ -556,7 +556,7 @@ export class TextMeasureFontRegistry {
         try {
           const bytes = await loader();
           const base = await this.registerBuffer(bytes);
-          return loader.useOwnMetrics ? base : this.measuredAs(base, family);
+          return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.warnFailure(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +

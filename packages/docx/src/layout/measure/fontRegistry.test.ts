@@ -24,7 +24,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
   for (const bold of [false, true]) {
     for (const italic of [false, true]) {
       for (const failPrimary of [false, true]) {
-        test(`${family} ${bold} ${italic} uses ${failPrimary ? 'Liberation measurement views' : 'raw Selawik metrics'}`, async () => {
+        test(`${family} ${bold} ${italic} uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
           const provider = createFontProvider();
           const primary = provider.resolve(family, bold, italic)!;
           const registered: Uint8Array[] = [];
@@ -51,11 +51,10 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
             expect(registered[0]).toEqual(lastResort);
             expect(substitutes).toContainEqual([1, family]);
           } else {
-            expect(chain).toEqual([1, 102]);
+            expect(chain).toEqual([101, 102]);
             expect(registered[0]).toEqual(new Uint8Array(await primary()));
             expect(registered[1]).toEqual(lastResort);
-            expect(substitutes).not.toContainEqual([1, family]);
-            expect(substitutes).toContainEqual([2, family]);
+            expect(substitutes).toEqual([[1, 'Segoe UI'], [2, family]]);
           }
         });
       }
@@ -136,6 +135,44 @@ test('a rejected primary still measures with real last-resort bytes', async () =
     wasm.clearMeasureFonts();
   }
 });
+
+for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
+  test(`${family} uses Word line metrics and unscaled Selawik advances with the real engine`, async () => {
+    const wasm = await import('../wasm');
+    await wasm.preloadLayoutWasm();
+    const provider = createFontProvider();
+    const registry = new TextMeasureFontRegistry(
+      {
+        registerFont: wasm.registerMeasureFont,
+        registerSubstituteFont: wasm.registerSubstituteMeasureFont,
+      },
+      { bundled: provider }
+    );
+    try {
+      const chain = await registry.getFontIdChain(family, false, false);
+      const raw = wasm.registerMeasureFont(new Uint8Array(await provider.resolve(family, false, false)!()));
+      const measure = (ids: number[]) => JSON.parse(wasm.measureParagraphJson(JSON.stringify({
+        block: { kind: 'paragraph', runs: [{ kind: 'text', text: 'Real font metrics' }] },
+        maxWidth: 200,
+        fontChains: { [`${family.toLowerCase()}|0|0`]: ids },
+        defaults: { fontSize: 12, fontFamily: family },
+        authoritativeShaping: true,
+      })));
+      const measured = measure(chain);
+      const unscaled = measure([raw]);
+      expect(measured.kind).toBe('paragraph');
+      expect(measured.lines).toHaveLength(1);
+      expect(unscaled.lines).toHaveLength(1);
+      expect(measured.lines[0].ascent).toBeCloseTo(2210 / 2048 * 16, 5);
+      expect(measured.lines[0].descent).toBeCloseTo(514 / 2048 * 16, 5);
+      expect(measured.lines[0].lineHeight).toBeCloseTo((2210 + 514) / 2048 * 16, 5);
+      expect(unscaled.lines[0].width).toBeGreaterThan(0);
+      expect(measured.lines[0].width / unscaled.lines[0].width).toBeCloseTo(1.0, 5);
+    } finally {
+      wasm.clearMeasureFonts();
+    }
+  });
+}
 
 test('Selawik Word chains retain Liberation Sans coverage and CJK without missing glyphs', async () => {
   const provider = createFontProvider();

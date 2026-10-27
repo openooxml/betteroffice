@@ -296,8 +296,8 @@ describe('loading', () => {
       return new ArrayBuffer(face.byteLength);
     });
     const regular = provider.resolve('Segoe UI', false, false)!;
-    expect(regular.useOwnMetrics).toBe(true);
-    expect(provider.resolve('Calibri', false, false)!.useOwnMetrics).toBe(false);
+    expect(regular.measureAs).toBe('Segoe UI');
+    expect(provider.resolve('Calibri', false, false)!.measureAs).toBeUndefined();
     expect(provider.resolveLastResort('Arial', false, false, 'word').onlyIfPrimaryFails).toBe(true);
     expect(provider.resolveLastResort('Segoe UI', false, false, 'word').onlyIfPrimaryFails).toBeUndefined();
     expect(provider.resolveLastResort('Google Sans', false, false).onlyIfPrimaryFails).toBeUndefined();
@@ -317,6 +317,7 @@ describe('loading', () => {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
         for (const bold of [false, true]) {
           for (const italic of [false, true]) {
+            expect(provider.resolve(family, bold, italic)!.measureAs).toBe('Segoe UI');
             const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
             const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, italic)!;
             expect(resolveGlyphFallbackFace(family, bold, italic, office)).toBe(expected);

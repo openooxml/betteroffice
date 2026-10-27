@@ -10,7 +10,8 @@ import {
 } from './manifest';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
-  useOwnMetrics?: boolean;
+  /** Word measurement family; defaults to the requested family. */
+  measureAs?: string;
   onlyIfPrimaryFails?: boolean;
 };
 
@@ -54,7 +55,7 @@ export function fontProvider(
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
-      return face ? Object.assign(load(face), { useOwnMetrics: face.family === 'Selawik' }) : undefined;
+      return face ? Object.assign(load(face), { measureAs: face.family === 'Selawik' ? 'Segoe UI' : undefined }) : undefined;
     },
     resolveFamily(family, bold, italic) {
       const face = resolveBundledFamilyFace(family, bold, italic);
