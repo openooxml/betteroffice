@@ -1447,13 +1447,14 @@ where
                     if section.break_type == Some(SectionBreakType::Continuous)
             )
         });
-    let has_continuous_floats = has_continuous && input.measured.iter().any(|measured| {
-        matches!(
-            &measured.block,
-            LayoutBlock::Paragraph(paragraph)
-                if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
-        )
-    });
+    let has_continuous_floats = has_continuous
+        && input.measured.iter().any(|measured| {
+            matches!(
+                &measured.block,
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
+            )
+        });
     if shapes.is_empty() && !has_unequal && !has_continuous_floats {
         return Ok(false);
     }
@@ -1516,7 +1517,11 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
-                if !paragraph.runs.iter().any(|run| matches!(run, Run::Image(_))) {
+                if !paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, Run::Image(_)))
+                {
                     continue;
                 }
                 next_wrap_frames[index].horizontal_frame = layout
@@ -1542,17 +1547,17 @@ where
         {
             return Ok(touched);
         }
-        let repeated = visited
-            .iter()
-            .position(|(seen_offsets, seen_widths, seen_bands, seen_frames)| {
-                *seen_offsets == offsets
-                    && *seen_widths == next_widths
-                    && *seen_bands == bands
-                    && *seen_frames == next_wrap_frames
-            });
-        let accept = has_unequal
-            && !frames_changed
-            && (repeated.is_some() || phase + 1 == max_phases);
+        let repeated =
+            visited
+                .iter()
+                .position(|(seen_offsets, seen_widths, seen_bands, seen_frames)| {
+                    *seen_offsets == offsets
+                        && *seen_widths == next_widths
+                        && *seen_bands == bands
+                        && *seen_frames == next_wrap_frames
+                });
+        let accept =
+            has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
                 if !unequal {
@@ -23068,7 +23073,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             continuous_margin_section("", 1440, 1440, 0)
         };
         let section = if columns {
-            section.replace("</w:sectPr>", r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#)
+            section.replace(
+                "</w:sectPr>",
+                r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#,
+            )
         } else {
             section
         };
@@ -23258,7 +23266,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                         match (&measured.block, &measured.measure) {
                             (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
                                 if block.id == paragraph.block_id
-                                    && block.runs.iter().any(|run| matches!(run, Run::Image(_))) =>
+                                    && block
+                                        .runs
+                                        .iter()
+                                        .any(|run| matches!(run, Run::Image(_))) =>
                             {
                                 Some((page_index, paragraph, measure))
                             }
@@ -23290,9 +23301,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
 
     #[test]
     fn continuous_margin_float_at_page_boundary_converges_with_matching_paint_and_wrap() {
-        let section =
-            continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
-                .replace(r#"w:right="720""#, r#"w:right="1080""#);
+        let section = continuous_margin_section(r#"<w:type w:val="continuous"/>"#, 720, 1440, 0)
+            .replace(r#"w:right="720""#, r#"w:right="1080""#);
         let anchor = boundary_float_anchor("rightMargin", "right");
         let mut destinations = Vec::new();
         for height in [12000, 12300, 12600] {
@@ -23306,7 +23316,17 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             destinations.push(assert_boundary_float(
                 &engine, &request, 786.0, 48.0, 696.0, 0.0,
             ));
-            assert!(engine.pagination.borrow().layout.as_ref().unwrap().pages.len() <= 2);
+            assert!(
+                engine
+                    .pagination
+                    .borrow()
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .pages
+                    .len()
+                    <= 2
+            );
         }
         assert!(destinations.contains(&0));
         assert!(destinations.contains(&1));
@@ -23323,7 +23343,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 r#"<w:cols w:num="2" w:space="360"/></w:sectPr>"#,
             );
             let anchor = boundary_float_anchor("column", "left");
-            let spacing = r#"<w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/>"#;
+            let spacing =
+                r#"<w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/>"#;
             let body = format!(
                 r#"{}<w:p><w:pPr>{spacing}</w:pPr><w:r><w:t>First column</w:t></w:r></w:p><w:p><w:pPr>{spacing}</w:pPr>{anchor}<w:r><w:t>Second column</w:t></w:r></w:p>{}{section}"#,
                 ending(old, &continuous_margin_section("", 1440, 1440, 0)),

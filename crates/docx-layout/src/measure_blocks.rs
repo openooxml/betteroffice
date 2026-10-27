@@ -2604,43 +2604,42 @@ fn extract_image_zones(
                 .and_then(|value| value.pos_offset)
                 .map_or(0.0, emu_to_pixels)
         };
-        let (left_margin, right_margin) = if let (Some(frame), Some(page)) =
-            (horizontal_frame, page_geometry)
-        {
-            let geom = crate::display_list::PageFloatGeom {
-                page_width: page.page_width,
-                page_height: page.page_height,
-                margin_left: frame.margin_left,
-                margin_top: page.margin_top,
-                content_width: frame.content_width,
-                content_height: page.content_height,
-                horizontal_frame: Some(frame),
-            };
-            let (x, _) = crate::display_list::resolve_anchored_position(
-                image.position.as_ref(),
-                image.css_float.as_deref(),
-                image.width,
-                image.height,
-                0.0,
-                &geom,
-            );
-            let x = frame.margin_left + x - frame.column_x;
-            let (left, right) = if x + image.width / 2.0 < content_width / 2.0 {
-                (x + image.width + image.dist_right.unwrap_or(12.0), 0.0)
+        let (left_margin, right_margin) =
+            if let (Some(frame), Some(page)) = (horizontal_frame, page_geometry) {
+                let geom = crate::display_list::PageFloatGeom {
+                    page_width: page.page_width,
+                    page_height: page.page_height,
+                    margin_left: frame.margin_left,
+                    margin_top: page.margin_top,
+                    content_width: frame.content_width,
+                    content_height: page.content_height,
+                    horizontal_frame: Some(frame),
+                };
+                let (x, _) = crate::display_list::resolve_anchored_position(
+                    image.position.as_ref(),
+                    image.css_float.as_deref(),
+                    image.width,
+                    image.height,
+                    0.0,
+                    &geom,
+                );
+                let x = frame.margin_left + x - frame.column_x;
+                let (left, right) = if x + image.width / 2.0 < content_width / 2.0 {
+                    (x + image.width + image.dist_right.unwrap_or(12.0), 0.0)
+                } else {
+                    (0.0, content_width - x + image.dist_left.unwrap_or(12.0))
+                };
+                clamp_margins(left, right, content_width)
             } else {
-                (0.0, content_width - x + image.dist_left.unwrap_or(12.0))
+                anchored_margins(
+                    image.position.as_ref(),
+                    image.css_float.as_deref(),
+                    image.width,
+                    image.dist_left.unwrap_or(12.0),
+                    image.dist_right.unwrap_or(12.0),
+                    content_width,
+                )
             };
-            clamp_margins(left, right, content_width)
-        } else {
-            anchored_margins(
-                image.position.as_ref(),
-                image.css_float.as_deref(),
-                image.width,
-                image.dist_left.unwrap_or(12.0),
-                image.dist_right.unwrap_or(12.0),
-                content_width,
-            )
-        };
         if left_margin <= 0.0 && right_margin <= 0.0 {
             continue;
         }
