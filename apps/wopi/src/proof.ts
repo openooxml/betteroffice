@@ -47,16 +47,20 @@ export function generateKeyPair(): ProofKeyPair {
   return { privateKey, publicKey };
 }
 
+function publicFromPrivate(privateKey: KeyObject): KeyObject {
+  return createPublicKey({ key: privateKey.export({ format: "jwk" }), format: "jwk" });
+}
+
 function toPublicKey(key: ProofKeyInput): KeyObject {
   if (typeof key === "object" && "publicKey" in key) return key.publicKey;
   if (typeof key === "string") {
     try {
       return createPublicKey(key);
     } catch {
-      return createPublicKey(createPrivateKey(key));
+      return publicFromPrivate(createPrivateKey(key));
     }
   }
-  return key.type === "private" ? createPublicKey(key) : key;
+  return key.type === "private" ? publicFromPrivate(key) : key;
 }
 
 function bigEndianBytes(base64Url: string): Buffer {
@@ -97,7 +101,7 @@ export function proofKeyAttributes(key: ProofKeyInput): ProofKeyAttributes {
 
 export function keyPairFromPrivateKey(privateKey: KeyObject): ProofKeyPair {
   if (privateKey.type !== "private") throw new Error("Expected an RSA private key");
-  return { privateKey, publicKey: createPublicKey(privateKey) };
+  return { privateKey, publicKey: publicFromPrivate(privateKey) };
 }
 
 export function keyPairFromPrivatePem(pem: string): ProofKeyPair {
