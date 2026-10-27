@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[path = "../../pptx-parse/tests/support/header_footer.rs"]
 mod support;
 
