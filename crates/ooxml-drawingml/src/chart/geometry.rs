@@ -4790,10 +4790,10 @@ fn emit_pie<S: PlotSink + ?Sized>(
         .take(available)
         .collect();
     let automatic_labels = wedges.iter().any(|(index, _)| {
-        point_label_spec(series, *index).is_some_and(|labels| {
-            labels.shows_anything()
-                && matches!(labels.position, None | Some("bestFit") | Some("outEnd"))
-        })
+        matches!(
+            point_label_spec(series, *index).and_then(|labels| labels.position),
+            None | Some("bestFit") | Some("outEnd")
+        ) && point_label(family, series, *index, total).is_some_and(|text| !text.trim().is_empty())
     });
     let mut r = (width.min(height) * 0.45).max(10.0_f64.min(width.min(height) / 2.0).max(0.0));
     if automatic_labels {
@@ -8473,6 +8473,40 @@ mod tests {
                     .all(|line| line.chars().count() <= MAX_LABEL_CHARS)
             );
         }
+    }
+
+    #[test]
+    fn a_pie_shrinks_for_its_labels_only_when_they_draw() {
+        let data = source(&[3.0, 1.0]);
+        let radius = |plotted: PlotSeries<'_>| {
+            let mut chart = grouped("pie", group("pie", vec![plotted]));
+            chart.legend = Some(PlotLegend {
+                visible: Some(false),
+                ..Default::default()
+            });
+            plot_chart(&chart, rect())
+                .iter()
+                .find_map(|op| match op {
+                    PlotOp::Path { w, .. } => Some(w / 2.0),
+                    _ => None,
+                })
+                .expect("a wedge")
+        };
+        let plain = radius(series("Share", &data));
+        let mut literal = series("Share", &data);
+        literal.points = vec![PlotPoint {
+            index: Some(0),
+            label: Some("Slice A"),
+            ..PlotPoint::default()
+        }];
+        assert!((radius(literal) - plain * PIE_LABEL_RADIUS_SCALE).abs() < 0.01);
+        let mut nameless = series("Share", &data);
+        nameless.name = None;
+        nameless.labels = Some(PlotDataLabels {
+            show_series_name: true,
+            ..PlotDataLabels::default()
+        });
+        assert!((radius(nameless) - plain).abs() < 0.01);
     }
 
     #[test]
