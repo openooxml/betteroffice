@@ -4,6 +4,7 @@ import { createReferenceHost, type ReferenceHost } from "../host/reference-host"
 import { sourceBytes } from "../replica/clients";
 import { SessionRegistry } from "../../src/session/registry";
 import type { SessionLogger, SessionScheduler } from "../../src/session/scheduler";
+import type { Format } from "../../src/replica/replica";
 
 export const START = 1700000000000;
 export const SRC = "https://cloud.example.com/wopi/files/file1";
@@ -89,6 +90,7 @@ export function makeHarness(options: {
   maxEditorsPerFile?: number;
   instanceId?: string;
   quirks?: { timestampConflict?: boolean };
+  format?: Format;
   fileName?: string;
   lockFails?: boolean;
   failFirstRead?: boolean;
@@ -99,7 +101,8 @@ export function makeHarness(options: {
   const pair = generateKeyPair();
   const signer = createProofSigner(pair);
   const host = createReferenceHost({ now: clock.now, quirks: options.quirks });
-  host.setFile("file1", sourceBytes("xlsx"), { name: options.fileName ?? "book.xlsx" });
+  const format = options.format ?? "xlsx";
+  host.setFile("file1", sourceBytes(format), { name: options.fileName ?? `book.${format}` });
   const calls: RecordedCall[] = [];
   let reads = 0;
   const fetchFn: HostFetch = async (input, init) => {

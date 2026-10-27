@@ -37,6 +37,7 @@ export interface FileSessionEvents {
   saveFailed: { kind: string };
   conflict: { name: string; url: string; copyName: string; copyUrl: string };
   viewOnly: { reason: ViewOnlyReason };
+  replicaUpdate: { update: Uint8Array };
   closed: Record<string, never>;
   lostFlush: Record<string, never>;
   tokenExpiring: { userId: string; hostUserId: string; expiresAt: number | null };
@@ -157,6 +158,8 @@ export class FileSession {
   #journalActive = false;
   #journalVersion: string | null = null;
   #pendingJoins = 0;
+  #sourceBytes: Uint8Array | null = null;
+  #offLocalUpdate: (() => void) | null = null;
 
   constructor(deps: FileSessionDeps) {
     this.#deps = deps;
@@ -314,8 +317,9 @@ export class FileSession {
         this.#lastModifiedTime = info.LastModifiedTime ?? null;
         this.#itemVersion = info.Version ?? null;
         const bytes = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+        this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
-        this.#replica = await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) });
+        this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
         this.#journalVersion = info.Version ?? null;
         this.#state = "open";
       } catch (err) {
@@ -337,7 +341,12 @@ export class FileSession {
     }
     const lockJustAcquired = !lockHeldBefore && this.#lockHeld;
     if (this.#lockHeld && !this.#journalActive) {
-      this.#replayJournal(info.Version ?? this.#journalVersion ?? this.#itemVersion);
+      try {
+        await this.#activateJournal(info.Version ?? this.#journalVersion ?? this.#itemVersion);
+      } catch (err) {
+        if (first) this.#failOpening();
+        throw err;
+      }
     }
     const canWrite = wantsWrite && this.#viewOnlyReason === null;
     const now = this.#now();
@@ -376,17 +385,39 @@ export class FileSession {
     return result;
   }
 
-  #failOpening(): void {
-    this.#state = "opening";
-    this.#clearTimer("refresh");
-    this.#clearTimer("autosave");
-    this.#clearTimer("hold");
+  #attachReplica(replica: ServerReplica): void {
+    this.#replica = replica;
+    this.#offLocalUpdate = replica.onLocalUpdate((update) => {
+      try {
+        if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
+      } catch {
+        this.#log("warn", "journal append failed");
+      }
+      this.#emit("replicaUpdate", { update });
+    });
+  }
+
+  #destroyReplica(): void {
+    if (this.#offLocalUpdate) {
+      try {
+        this.#offLocalUpdate();
+      } catch {}
+      this.#offLocalUpdate = null;
+    }
     if (this.#replica) {
       try {
         this.#replica.destroy();
       } catch {}
       this.#replica = null;
     }
+  }
+
+  #failOpening(): void {
+    this.#state = "opening";
+    this.#clearTimer("refresh");
+    this.#clearTimer("autosave");
+    this.#clearTimer("hold");
+    this.#destroyReplica();
     this.#lockHeld = false;
     this.#viewOnlyReason = null;
     this.#leader = null;
@@ -394,33 +425,41 @@ export class FileSession {
     this.#deps.journal?.close();
   }
 
-  #replayJournal(currentVersion: string | null): void {
+  async #activateJournal(currentVersion: string | null): Promise<void> {
     const journal = this.#deps.journal;
-    if (!journal || !this.#replica) return;
-    this.#journalActive = true;
+    if (!journal || !this.#replica || !this.#format) return;
     this.#journalVersion = currentVersion;
     const existing = journal.read();
-    if (existing && (existing.updates.length > 0 || existing.baseItemVersion !== null)) {
-      if (currentVersion !== null && existing.baseItemVersion === currentVersion) {
-        const versionBefore = this.#replica.version;
-        for (const update of existing.updates) {
-          const result = this.#replica.applyUpdate(update);
-          if (!result.accepted) this.#log("warn", "journal replay update rejected");
+    const hasJournal = existing !== null && existing.source !== null && existing.itemVersion !== null;
+    if (hasJournal) {
+      const known = currentVersion !== null && (existing.itemVersion === currentVersion || existing.writtenVersions.includes(currentVersion));
+      if (known) {
+        if (this.#replica.version === 0 && !this.dirty) {
+          const source = existing.source!;
+          this.#destroyReplica();
+          const open = this.#deps.openReplica ?? openServerReplica;
+          this.#attachReplica(await open(this.#format, source, { clientId: randomInt(1, 2000000000) }));
+          this.#savedVersion = 0;
+          const versionBefore = this.#replica.version;
+          for (const update of existing.updates) {
+            const result = this.#replica.applyUpdate(update);
+            if (!result.accepted) this.#log("warn", "journal replay update rejected");
+          }
+          if (this.#replica.version !== versionBefore || existing.updates.length > 0) {
+            this.#firstDirtyAt = this.#now();
+            this.#lastUpdateAt = this.#now();
+          }
+          if (existing.updates.length > 0) this.#log("info", "journal replayed", { updates: existing.updates.length });
         }
-        if (this.#replica.version !== versionBefore) {
-          this.#firstDirtyAt = this.#now();
-          this.#lastUpdateAt = this.#now();
-        }
-        if (existing.updates.length > 0) this.#log("info", "journal replayed", { updates: existing.updates.length });
-        journal.begin(currentVersion);
+        this.#journalActive = true;
+        journal.begin(existing.source!, existing.itemVersion);
         return;
       }
       this.#log("warn", "journal discarded: host version changed");
       journal.delete();
-      journal.begin(currentVersion);
-      return;
     }
-    journal.begin(currentVersion);
+    this.#journalActive = true;
+    if (this.#sourceBytes) journal.begin(this.#sourceBytes, currentVersion);
   }
 
   async #attemptLock(accessToken: string): Promise<void> {
@@ -625,7 +664,7 @@ export class FileSession {
       if (this.#firstDirtyAt === null) this.#firstDirtyAt = this.#now();
       this.#lastUpdateAt = this.#now();
       try {
-        this.#deps.journal?.appendUpdate(update);
+        if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
       } catch {
         this.#log("warn", "journal append failed");
       }
@@ -641,15 +680,32 @@ export class FileSession {
     const target = Math.min(this.#lastUpdateAt + AUTOSAVE_DEBOUNCE_MS, first + AUTOSAVE_MAX_MS);
     const delay = Math.max(0, target - this.#now());
     this.#autosaveTimer = this.#scheduler.setTimeout(() => {
-      this.#enqueueTask(async () => {
-        if (this.#state !== "open" || !this.dirty) return;
-        const tokenUser = this.#leader ?? (await this.#refreshLeader()) ?? this.#pickToken([]);
-        if (tokenUser && this.dirty) {
-          await this.#saveInternal({ tokenUser, isAutosave: true, isExitSave: false, by: tokenUser.id });
-        }
-        if (this.dirty && this.#state === "open") this.#scheduleAutosave();
-      });
+      this.#enqueueTask(() => this.#runAutosave());
     }, delay);
+  }
+
+  #scheduleAutosaveRetry(): void {
+    this.#clearTimer("autosave");
+    if (!this.dirty || this.#state !== "open") return;
+    this.#autosaveTimer = this.#scheduler.setTimeout(() => {
+      this.#enqueueTask(() => this.#runAutosave());
+    }, AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  async #runAutosave(): Promise<void> {
+    if (this.#state !== "open" || !this.dirty) return;
+    const versionBefore = this.#replica?.version ?? 0;
+    const tokenUser = this.#leader ?? (await this.#refreshLeader()) ?? this.#pickToken([]);
+    if (!tokenUser) {
+      this.#scheduleAutosaveRetry();
+      return;
+    }
+    const result = await this.#saveInternal({ tokenUser, isAutosave: true, isExitSave: false, by: tokenUser.id });
+    if (this.dirty && this.#state === "open") {
+      if (result.saved && (this.#replica?.version ?? 0) !== versionBefore) this.#scheduleAutosave();
+      else if (result.saved) this.#scheduleAutosaveRetry();
+      else this.#scheduleAutosaveRetry();
+    }
   }
 
   /** Marks a user as alive and reconnects them when needed. */
@@ -729,14 +785,14 @@ export class FileSession {
     return this.#saveInternal({ tokenUser, isAutosave: false, isExitSave: false, by: tokenUser?.id ?? null });
   }
 
-  #advanceJournal(versionAtStart: number, savedVersionBefore: number): void {
+  #recordWritten(): void {
     const journal = this.#deps.journal;
     if (!journal || !this.#journalActive) return;
     try {
-      journal.startSegment(this.#itemVersion, Math.max(0, versionAtStart - savedVersionBefore));
+      journal.recordWrittenVersion(this.#itemVersion);
       journal.flush();
     } catch {
-      this.#log("warn", "journal segment failed");
+      this.#log("warn", "journal write failed");
     }
   }
 
@@ -746,10 +802,9 @@ export class FileSession {
     }
     if (!this.dirty) return { saved: false, itemVersion: this.#itemVersion, by: options.by ?? null };
     const versionAtStart = this.#replica.version;
-    const savedVersionBefore = this.#savedVersion;
     let bytes: Uint8Array;
     try {
-      bytes = await this.#replica.save();
+      bytes = (await this.#replica.save()).bytes;
     } catch {
       this.#emit("saveFailed", { kind: "invalidResponse" });
       this.#log("error", "save failed (invalidResponse)");
@@ -785,7 +840,7 @@ export class FileSession {
           if (info.LastModifiedTime) this.#lastModifiedTime = info.LastModifiedTime;
           if (info.Version) this.#itemVersion = info.Version;
         } catch {}
-        this.#advanceJournal(versionAtStart, savedVersionBefore);
+        this.#recordWritten();
         const by = options.by && options.by === current.id ? options.by : current.id;
         this.#emit("saved", { itemVersion: this.#itemVersion, by });
         return { saved: true, itemVersion: this.#itemVersion, by };
@@ -801,7 +856,7 @@ export class FileSession {
           return { saved: false, itemVersion: this.#itemVersion, by: current.id };
         }
         if (kind === "conflict" || kind === "lockMismatch") {
-          return this.#saveConflictCopy(bytes, versionAtStart, savedVersionBefore, current, options, tried);
+          return this.#saveConflictCopy(bytes, versionAtStart, current, options, tried);
         }
         this.#emit("saveFailed", { kind });
         this.#log("error", this.#scrub(`save failed (${kind})`));
@@ -813,7 +868,7 @@ export class FileSession {
     return { saved: false, itemVersion: this.#itemVersion, by: null };
   }
 
-  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number, savedVersionBefore: number, tokenUser: UserSession, options: SaveOptions, tried: Set<string>): Promise<SaveResult> {
+  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number, tokenUser: UserSession, options: SaveOptions, tried: Set<string>): Promise<SaveResult> {
     const target = conflictTargetName(this.#fileName, this.#now());
     let current: UserSession | null = tokenUser;
     while (current) {
@@ -828,7 +883,9 @@ export class FileSession {
         });
         this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
         if (!this.dirty) this.#firstDirtyAt = null;
-        this.#advanceJournal(versionAtStart, savedVersionBefore);
+        try {
+          this.#deps.journal?.flush();
+        } catch {}
         this.#emit("conflict", { name: result.name, url: result.url, copyName: result.name, copyUrl: result.url });
         this.#log("warn", "save conflict, wrote a conflict copy", { name: result.name });
         return { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name, conflictUrl: result.url };
@@ -955,12 +1012,7 @@ export class FileSession {
     } else {
       this.#deps.journal?.close();
     }
-    if (this.#replica) {
-      try {
-        this.#replica.destroy();
-      } catch {}
-      this.#replica = null;
-    }
+    this.#destroyReplica();
     for (const user of this.#history) user.accessToken = "";
     this.#users.clear();
     this.#history = [];
@@ -976,12 +1028,7 @@ export class FileSession {
     if (this.#state === "closed") return;
     this.#clearAllTimers();
     this.#deps.journal?.close();
-    if (this.#replica) {
-      try {
-        this.#replica.destroy();
-      } catch {}
-      this.#replica = null;
-    }
+    this.#destroyReplica();
     for (const user of this.#history) user.accessToken = "";
     this.#users.clear();
     this.#state = "closed";

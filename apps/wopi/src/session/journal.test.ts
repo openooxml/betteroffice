@@ -8,6 +8,7 @@ import { openFreshClient, openTestClient, sourceBytes } from "../../test/replica
 import { addToken, makeHarness, SRC, type Harness } from "../../test/session/harness";
 import { FileJournal } from "./journal";
 import { SessionRegistry } from "./registry";
+import type { Format } from "../replica/replica";
 
 function restartRegistry(h: Harness, journalDir: string): SessionRegistry {
   return new SessionRegistry({
@@ -24,76 +25,67 @@ beforeAll(async () => {
 });
 
 describe("FileJournal", () => {
-  test("records the base version and length prefixed updates, deletes on request", () => {
+  test("records the source header, updates and written versions, deletes on request", () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const journal = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1");
     const expectedName = `${createHash("sha256").update("testhost:https://cloud.example.com/wopi/files/file1").digest("hex")}.journal`;
     expect(journal.path.endsWith(expectedName)).toBe(true);
-    journal.begin("7");
+    const source = new TextEncoder().encode("source-bytes");
+    journal.begin(source, "7");
     journal.appendUpdate(new Uint8Array([1, 2, 3]));
+    journal.recordWrittenVersion("8");
     journal.appendUpdate(new Uint8Array([4, 5]));
     journal.flush();
     const read = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1").read();
-    expect(read?.baseItemVersion).toBe("7");
+    expect(read?.itemVersion).toBe("7");
+    expect(read?.source).toEqual(source);
+    expect(read?.sha256).toBe(createHash("sha256").update(source).digest("hex"));
+    expect(read?.writtenVersions).toEqual(["8"]);
     expect(read?.updates.map((u) => [...u])).toEqual([[1, 2, 3], [4, 5]]);
     journal.delete();
     expect(existsSync(journal.path)).toBe(false);
     expect(readdirSync(dir).filter((n) => n.includes("secret"))).toEqual([]);
   });
 
-  test("starting a new segment drops saved updates and keeps later ones", () => {
-    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
-    const journal = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1");
-    journal.begin("1");
-    journal.appendUpdate(new Uint8Array([1]));
-    journal.appendUpdate(new Uint8Array([2]));
-    journal.appendUpdate(new Uint8Array([3]));
-    journal.startSegment("2", 2);
-    const read = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1").read();
-    expect(read?.baseItemVersion).toBe("2");
-    expect(read?.updates.map((u) => [...u])).toEqual([[3]]);
-    journal.appendUpdate(new Uint8Array([4]));
-    const again = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1").read();
-    expect(again?.updates.map((u) => [...u])).toEqual([[3], [4]]);
-  });
-
-  test("edits after an autosave survive a crash through the new journal segment", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
-    const h = makeHarness({ journalDir: dir });
-    addToken(h, "tok-a", "user-a");
-    addToken(h, "tok-b", "user-b");
-    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
-    const session = [...h.registry.list()][0]!;
-    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 93001);
-    try {
-      client.edit("saved-edit ", 0);
-      session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
-      await h.clock.advance(30000);
-      expect(h.putCount()).toBe(1);
-      client.edit("post-save-edit ", 1);
-      session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
-      session.abandon();
-
-      const registry2 = restartRegistry(h, dir);
-      const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
-      const session2 = [...registry2.list()][0]!;
+  for (const format of ["docx", "xlsx", "pptx"] as Format[]) {
+    test(`edits, autosave, more edits and crash recovery saves every edit for ${format}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+      const h = makeHarness({ journalDir: dir, format });
+      addToken(h, "tok-a", "user-a");
+      addToken(h, "tok-b", "user-b");
+      const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+      const session = [...h.registry.list()][0]!;
+      const client = await openTestClient(a.joinPayload, sourceBytes(format), 93001);
       try {
-        expect(session2.dirty).toBe(true);
-        await session2.requestSave(b.user.id);
-        const fresh = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 93002);
+        client.edit("saved-edit ", 0);
+        session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
+        await h.clock.advance(30000);
+        expect(h.putCount()).toBe(1);
+        client.edit("post-save-edit ", 1);
+        session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
+        session.abandon();
+
+        const registry2 = restartRegistry(h, dir);
+        const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+        const session2 = [...registry2.list()][0]!;
         try {
-          expect(fresh.contains("saved-edit")).toBe(true);
-          expect(fresh.contains("post-save-edit")).toBe(true);
+          expect(session2.dirty).toBe(true);
+          await session2.requestSave(b.user.id);
+          const fresh = await openFreshClient(format, h.host.files.get("file1")!.bytes, 93002);
+          try {
+            expect(fresh.contains("saved-edit")).toBe(true);
+            expect(fresh.contains("post-save-edit")).toBe(true);
+          } finally {
+            fresh.destroy();
+          }
         } finally {
-          fresh.destroy();
+          await session2.leave(b.user.id).catch(() => {});
         }
       } finally {
-        await session2.leave(b.user.id).catch(() => {});
+        client.destroy();
       }
-    } finally {
-      client.destroy();
-    }
-  });
+    });
+  }
 
   test("a viewer first after a crash does not replay or delete the journal", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));

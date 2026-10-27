@@ -1,14 +1,18 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
-/** Journal contents read back from disk. */
+/** Journal contents read back from disk. The journal holds the full source at rest. */
 export interface JournalData {
-  baseItemVersion: string | null;
+  fileKey: string | null;
+  itemVersion: string | null;
+  sha256: string | null;
+  source: Uint8Array | null;
   updates: Uint8Array[];
+  writtenVersions: string[];
 }
 
-const MAGIC = Buffer.from("BOJ1\n", "utf8");
+const MAGIC = Buffer.from("BOJ2\n", "utf8");
 
 function record(prefix: string, payload: Buffer): Buffer {
   const body = Buffer.concat([Buffer.from(prefix, "utf8"), payload]);
@@ -17,9 +21,15 @@ function record(prefix: string, payload: Buffer): Buffer {
   return Buffer.concat([header, body]);
 }
 
-/** Append only journal for one file key. */
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Append only journal for one file key. It holds the full source at rest. */
 export class FileJournal {
   readonly path: string;
+  readonly dir: string;
+  readonly fileKey: string;
   #fd: number | null = null;
   #begun = false;
 
@@ -27,9 +37,8 @@ export class FileJournal {
     const name = `${createHash("sha256").update(fileKey).digest("hex")}.journal`;
     this.path = join(dir, name);
     this.dir = dir;
+    this.fileKey = fileKey;
   }
-
-  readonly dir: string;
 
   /** Path for a file key inside a journal directory. */
   static pathFor(dir: string, fileKey: string): string {
@@ -44,41 +53,29 @@ export class FileJournal {
     return this.#fd;
   }
 
-  /** Creates the journal with its base version when missing. */
-  begin(baseItemVersion: string | null): void {
+  /** Creates the journal with its source header when missing. */
+  begin(source: Uint8Array, itemVersion: string | null): void {
     if (this.#begun) return;
     this.#begun = true;
     if (existsSync(this.path) && readFileSync(this.path).length > 0) return;
     const fd = this.#ensureFd();
+    const header = JSON.stringify({ fileKey: this.fileKey, itemVersion, sha256: sha256Hex(source) });
     writeSync(fd, MAGIC);
-    writeSync(fd, record("B", Buffer.from(baseItemVersion ?? "", "utf8")));
+    writeSync(fd, record("H", Buffer.from(header, "utf8")));
+    writeSync(fd, record("S", Buffer.from(source)));
   }
 
-  /** Appends one accepted update. */
+  /** Appends one accepted or replica local update. */
   appendUpdate(update: Uint8Array): void {
     const fd = this.#ensureFd();
-    if (!this.#begun) this.begin(null);
     writeSync(fd, record("U", Buffer.from(update)));
   }
 
-  /** Appends a new base version record, keeping every update. */
-  setBaseVersion(baseItemVersion: string | null): void {
+  /** Records an itemVersion this session wrote with PutFile. */
+  recordWrittenVersion(itemVersion: string | null): void {
+    if (itemVersion === null) return;
     const fd = this.#ensureFd();
-    if (!this.#begun) this.begin(null);
-    writeSync(fd, record("B", Buffer.from(baseItemVersion ?? "", "utf8")));
-  }
-
-  /** Starts a fresh segment at a new base, keeping only updates after the first dropCount. */
-  startSegment(baseItemVersion: string | null, dropCount: number): void {
-    const existing = this.read();
-    const kept = existing ? existing.updates.slice(Math.max(0, dropCount)) : [];
-    this.close();
-    mkdirSync(this.dir, { recursive: true });
-    const parts: Buffer[] = [MAGIC, record("B", Buffer.from(baseItemVersion ?? "", "utf8"))];
-    for (const update of kept) parts.push(record("U", Buffer.from(update)));
-    writeFileSync(this.path, Buffer.concat(parts));
-    this.#begun = true;
-    this.#fd = openSync(this.path, "a");
+    writeSync(fd, record("V", Buffer.from(itemVersion, "utf8")));
   }
 
   /** Flushes buffered journal bytes to disk. */
@@ -86,15 +83,15 @@ export class FileJournal {
     if (this.#fd !== null) fsyncSync(this.#fd);
   }
 
-  /** Reads the base version and every complete update. */
+  /** Reads the header, source, updates and written versions. */
   read(): JournalData | null {
     if (!existsSync(this.path)) return null;
     const data = readFileSync(this.path);
-    if (data.length === 0) return { baseItemVersion: null, updates: [] };
-    if (!data.subarray(0, MAGIC.length).equals(MAGIC)) return { baseItemVersion: null, updates: [] };
+    const empty: JournalData = { fileKey: null, itemVersion: null, sha256: null, source: null, updates: [], writtenVersions: [] };
+    if (data.length === 0) return empty;
+    if (!data.subarray(0, MAGIC.length).equals(MAGIC)) return empty;
     let offset = MAGIC.length;
-    let baseItemVersion: string | null = null;
-    const updates: Uint8Array[] = [];
+    const out: JournalData = { fileKey: null, itemVersion: null, sha256: null, source: null, updates: [], writtenVersions: [] };
     while (offset + 4 <= data.length) {
       const length = data.readUInt32BE(offset);
       offset += 4;
@@ -102,10 +99,26 @@ export class FileJournal {
       const body = data.subarray(offset, offset + length);
       offset += length;
       const prefix = String.fromCharCode(body[0] ?? 0);
-      if (prefix === "B") baseItemVersion = body.subarray(1).toString("utf8") || null;
-      else if (prefix === "U") updates.push(new Uint8Array(body.subarray(1)));
+      if (prefix === "H") {
+        try {
+          const header = JSON.parse(body.subarray(1).toString("utf8")) as Record<string, unknown>;
+          out.fileKey = typeof header.fileKey === "string" ? header.fileKey : null;
+          out.itemVersion = typeof header.itemVersion === "string" ? header.itemVersion : null;
+          out.sha256 = typeof header.sha256 === "string" ? header.sha256 : null;
+        } catch {}
+      } else if (prefix === "S") {
+        out.source = new Uint8Array(body.subarray(1));
+      } else if (prefix === "U") {
+        out.updates.push(new Uint8Array(body.subarray(1)));
+      } else if (prefix === "V") {
+        const version = body.subarray(1).toString("utf8");
+        if (version) out.writtenVersions.push(version);
+      }
     }
-    return { baseItemVersion, updates };
+    if (out.source !== null && out.sha256 !== null && sha256Hex(out.source) !== out.sha256) {
+      out.source = null;
+    }
+    return out;
   }
 
   /** Deletes the journal file. */

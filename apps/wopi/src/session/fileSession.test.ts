@@ -14,8 +14,8 @@ function nextId(): number {
   return cid;
 }
 
-async function clientFor(session: FileSession, joinPayload: Parameters<typeof openTestClient>[0]): Promise<TestClient> {
-  return openTestClient(joinPayload, sourceBytes("xlsx"), nextId());
+async function clientFor(session: FileSession, joinPayload: Parameters<typeof openTestClient>[0], source?: Uint8Array): Promise<TestClient> {
+  return openTestClient(joinPayload, source ?? sourceBytes("xlsx"), nextId());
 }
 
 function edit(session: FileSession, userId: string, client: TestClient, marker: string, slot = 0): void {
@@ -691,8 +691,10 @@ describe("review fixes: expiry, fallback and departure races", () => {
     session.on("tokenExpiring", (e) => seen.push(e));
     try {
       expect(h.timerDelays.every((ms) => ms <= 2147483647)).toBe(true);
-      await h.clock.advance(3600000);
-      session.heartbeat(a.user.id);
+      for (let i = 0; i < 120; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+      }
       expect(seen.length).toBe(0);
     } finally {
       await session.leave(a.user.id).catch(() => {});
@@ -736,7 +738,7 @@ describe("review round 2: serialized transitions", () => {
       const live = [...h.registry.list()][0]!;
       expect(live.state).toBe("open");
       expect(h.host.files.get("file1")!.lock).toBe(live.lockId);
-      clientB = await clientFor(live, b.joinPayload);
+      clientB = await clientFor(live, b.joinPayload, h.host.files.get("file1")!.bytes);
       expect(clientB.contains("before-leave")).toBe(true);
       edit(live, b.user.id, clientB, "after-join ", 1);
       await live.requestSave(b.user.id);
@@ -837,5 +839,62 @@ describe("review round 2: serialized transitions", () => {
     expect(h.calls.filter((c) => c.pathname.endsWith("/contents") && c.override === null).length).toBe(2);
     const ok = results[1]?.status === "fulfilled" ? results[1].value : null;
     if (ok) await live.leave(ok.user.id).catch(() => {});
+  });
+});
+
+describe("replica api adaptation", () => {
+  test("a docx save that publishes paragraph ids emits replicaUpdate once and stays clean", async () => {
+    const h = makeHarness({ format: "docx" });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await openTestClient(a.joinPayload, sourceBytes("docx"), nextId());
+    const updates: Uint8Array[] = [];
+    session.on("replicaUpdate", (e) => updates.push(e.update));
+    try {
+      client.splitFirstParagraph();
+      const replica = session.replica!;
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
+      expect(session.dirty).toBe(true);
+      const saved = await session.requestSave(a.user.id);
+      expect(saved.saved).toBe(true);
+      expect(updates.length).toBe(1);
+      expect(updates[0]!.byteLength).toBeGreaterThan(0);
+      expect(session.dirty).toBe(false);
+      const again = await session.requestSave(a.user.id);
+      expect(again.saved).toBe(false);
+      expect(updates.length).toBe(1);
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a causalGap result passes through and does not mark dirty", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = [...h.registry.list()][0]!;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      client.edit("gap-first ", 0);
+      const afterFirst = client.encodeStateVector();
+      const replica = session.replica!;
+      const first = client.encodeStateAsUpdate(replica.encodeStateVector());
+      client.edit("gap-second ", 1);
+      const second = client.encodeStateAsUpdate(afterFirst);
+      expect(session.applyUpdate(a.user.id, second)).toEqual({ accepted: false, reason: "causalGap" });
+      expect(session.dirty).toBe(false);
+      expect(session.replica!.version).toBe(0);
+      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true });
+      expect(session.dirty).toBe(true);
+      await session.requestSave(a.user.id);
+      expect(session.dirty).toBe(false);
+      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true });
+      expect(session.dirty).toBe(false);
+    } finally {
+      client.destroy();
+      await session.leave(a.user.id).catch(() => {});
+    }
   });
 });
