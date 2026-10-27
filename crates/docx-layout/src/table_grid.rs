@@ -1165,10 +1165,14 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
             .or(table_block.table_layout.as_deref())
             == Some("autofit")
         && absolute.iter().any(|absolute| !absolute)
-        && table_block.rows.iter().flat_map(|row| &row.cells).all(|cell| {
-            cell.no_wrap == Some(true)
-                && !matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
-        })
+        && table_block
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .all(|cell| {
+                cell.no_wrap == Some(true)
+                    && !matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
+            })
     {
         if source.len() == widths.len()
             && source.iter().all(|width| width.is_finite() && *width > 0.0)

@@ -80,7 +80,10 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                     serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
                 let table: TableExtent =
                     serde_json::from_value(kernel["measured"][0]["measure"].clone()).unwrap();
-                assert!((table.total_width - 600.0).abs() < 0.01, "{path}, {borders:?}");
+                assert!(
+                    (table.total_width - 600.0).abs() < 0.01,
+                    "{path}, {borders:?}"
+                );
                 assert_eq!(table.rows.len(), 3, "{path}, {borders:?}");
                 engine.set_display_window(Some(0..0));
                 let extras = serde_json::json!({
