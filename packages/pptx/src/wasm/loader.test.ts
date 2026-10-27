@@ -74,6 +74,22 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
+test('worker handles without retained source still edit and save but cannot fork', () => {
+  const source = openPresentation(fixture, { clientId: 9301, retainSource: false });
+  try {
+    expect(source.snapshot().slides.length).toBeGreaterThan(0);
+    expect(() => source.fork()).toThrow('Presentation source is unavailable for fork');
+    expect(() => source.layouts()).toThrow('Presentation source is unavailable for layouts');
+    expect(source.save().byteLength).toBeGreaterThan(0);
+  } finally { source.dispose(); }
+  const retained = openPresentation(fixture, { clientId: 9302 });
+  try {
+    const forked = retained.fork();
+    try { expect(forked.snapshot()).toEqual(retained.snapshot()); } finally { forked.dispose(); }
+    expect(retained.layouts().length).toBeGreaterThan(0);
+  } finally { retained.dispose(); }
+});
+
 test('ordinary text deletion refuses paragraph joins without changing state or history', () => {
   const source = openPresentation(fixture, { clientId: 9210 });
   try {
