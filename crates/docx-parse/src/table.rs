@@ -9,7 +9,7 @@ use crate::formatting::{
     TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
 };
 use crate::inline::{InlineNode, RunContent};
-use crate::paragraph::{ParagraphContent, TrackedChangeInfo};
+use crate::paragraph::{ParagraphContent, RawAttribute, TrackedChangeInfo};
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
 
@@ -44,6 +44,8 @@ impl Table {
 pub struct TableRow {
     #[serde(rename = "type")]
     pub node_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_attributes: Option<Vec<RawAttribute>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting: Option<TableRowFormatting>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -784,6 +786,14 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn rows_without_preserved_attributes_remain_readable() {
+        let value = serde_json::json!({"type": "tableRow", "cells": []});
+        let row: TableRow = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(row.extra_attributes, None);
+        assert_eq!(serde_json::to_value(row).unwrap(), value);
     }
 
     #[test]

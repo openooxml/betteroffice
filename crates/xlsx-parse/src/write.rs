@@ -27,12 +27,13 @@ use crate::package::{
     remove_attribute, set_attribute,
 };
 use crate::patch::{
-    SheetPatch, SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles,
-    sheet_data_regeneration_loss,
+    SheetPatch, SourceStyles, StyleMatch, keeps_source_conditional_formats, keeps_source_xf,
+    retains_source_styles, sheet_data_regeneration_loss,
 };
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
+mod app_titles;
 mod source_coordinates;
 mod style_derivation;
 mod views;
@@ -150,11 +151,16 @@ fn argb(color: &str) -> String {
 
 fn dxf_bytes(format: &DifferentialFormat) -> Vec<u8> {
     let mut out = String::from("<dxf>");
-    if format.font_color.is_some() || format.bold.is_some() {
+    if format.font_color.is_some() || format.bold.is_some() || format.italic.is_some() {
         out.push_str("<font>");
         match format.bold {
             Some(true) => out.push_str("<b/>"),
             Some(false) => out.push_str("<b val=\"0\"/>"),
+            None => {}
+        }
+        match format.italic {
+            Some(true) => out.push_str("<i/>"),
+            Some(false) => out.push_str("<i val=\"0\"/>"),
             None => {}
         }
         if let Some(color) = &format.font_color {
@@ -601,6 +607,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     });
 
     let mut parts = PartStore::new(&package.parts);
+    if let Some(path) = app_titles::part_path(&package.root_relationships)
+        && let Some(bytes) = parts.get(&path)
+        && let Some(patched) = app_titles::patch(bytes, wb, &package.original_workbook, origins)
+    {
+        parts.set(path, patched)?;
+    }
     let retained_origins = sheets
         .iter()
         .filter_map(|sheet| sheet.origin)
@@ -832,9 +844,10 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
 
 /// What one sheet wants written into a chart part it anchors.
 struct ChartClaim<'a> {
+    chart: &'a SheetChart,
     refs: &'a [ChartRef],
     sheet: &'a str,
-    original_refs: &'a [ChartRef],
+    original_refs: std::borrow::Cow<'a, [ChartRef]>,
     original_sheet: &'a str,
 }
 
@@ -864,12 +877,13 @@ fn patch_chart_parts(
             .unwrap_or_default();
         for chart in &sheet.charts {
             let original = source_chart(source, chart, &sheet.name)?;
-            if original.refs.len() != chart.refs.len()
-                || original
-                    .refs
-                    .iter()
-                    .zip(&chart.refs)
-                    .any(|(original, edited)| original.kind != edited.kind)
+            if chart.raw_xml.is_none()
+                && (original.refs.len() != chart.refs.len()
+                    || original
+                        .refs
+                        .iter()
+                        .zip(&chart.refs)
+                        .any(|(original, edited)| original.kind != edited.kind))
             {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "chart {} no longer holds the references it was read from",
@@ -880,9 +894,15 @@ fn patch_chart_parts(
                 .entry(chart.part.as_str())
                 .or_default()
                 .push(ChartClaim {
+                    chart,
                     refs: chart.refs.as_slice(),
                     sheet: sheet.name.as_str(),
-                    original_refs: original.refs.as_slice(),
+                    original_refs: match &chart.raw_xml {
+                        Some(xml) => {
+                            std::borrow::Cow::Owned(crate::chart::chart_references(xml.as_bytes())?)
+                        }
+                        None => std::borrow::Cow::Borrowed(original.refs.as_slice()),
+                    },
                     original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
             claim_anchor(
@@ -895,7 +915,9 @@ fn patch_chart_parts(
     }
     let mut refreshes = Vec::new();
     for (path, claims) in chart_refs {
-        let moved = claims.iter().any(|claim| claim.refs != claim.original_refs);
+        let moved = claims.iter().any(|claim| {
+            claim.refs != claim.original_refs.as_ref() || claim.chart.raw_xml.is_some()
+        });
         let Some(source) = package.part_bytes(path) else {
             if moved {
                 return Err(missing_part(path));
@@ -979,13 +1001,21 @@ fn agreed_chart_bytes(
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let mut agreed: Option<(Vec<u8>, &str)> = None;
     for claim in claims {
+        let base = match &claim.chart.raw_xml {
+            Some(xml) => crate::tree::Part::decode(source)?.encode_text(xml),
+            None => source.to_vec(),
+        };
         let bytes = crate::chart::patch_chart_refs(
-            source,
+            &base,
             path,
             claim.refs,
             wb,
             claim.sheet,
-            (original, claim.original_sheet),
+            claim
+                .chart
+                .raw_xml
+                .is_none()
+                .then_some((original, claim.original_sheet)),
         )?;
         match &agreed {
             Some((first, owner)) if *first != bytes => {
@@ -1005,7 +1035,9 @@ fn refreshed_chart_bytes(
     original: &Workbook,
 ) -> Option<Vec<u8>> {
     let plan = crate::chart::ChartRefreshPlan::new(source);
-    let mut refresh = plan.save_refresh(wb, original);
+    let mut refresh = plan
+        .save_refresh(wb, original)
+        .edited(claims.iter().any(|claim| claim.chart.raw_xml.is_some()));
     let mut refreshed = None;
     let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
     for claim in claims {
@@ -1024,12 +1056,16 @@ fn refreshed_chart_bytes(
             ""
         };
         let references = seen.entry((owner, original_owner)).or_default();
-        if references.contains(&claim.original_refs) {
+        if references.contains(&claim.original_refs.as_ref()) {
             continue;
         }
-        references.push(claim.original_refs);
+        references.push(claim.original_refs.as_ref());
         let bytes = refresh
-            .refresh_changed(claim.sheet, claim.original_sheet, claim.original_refs)
+            .refresh_changed(
+                claim.sheet,
+                claim.original_sheet,
+                claim.original_refs.as_ref(),
+            )
             .unwrap_or_else(|| source.to_vec());
         match &refreshed {
             Some(first) if *first != bytes => return None,
@@ -1265,7 +1301,10 @@ fn sheet_body_matches(
     }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
-        && sheet.conditional_formats == original.conditional_formats
+        && keeps_source_conditional_formats(
+            &sheet.conditional_formats,
+            &original.conditional_formats,
+        )
         && sheet.auto_filter == original.auto_filter
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
@@ -3128,7 +3167,9 @@ fn worksheet_xml_with_template(
         replacements.push(("autoFilter", auto_filter_bytes(sheet)?));
     }
 
-    if original.is_none_or(|original| original.conditional_formats != sheet.conditional_formats) {
+    if original.is_none_or(|original| {
+        !keeps_source_conditional_formats(&sheet.conditional_formats, &original.conditional_formats)
+    }) {
         replacements.push((
             "conditionalFormatting",
             conditional_formatting_bytes(

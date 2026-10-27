@@ -1,5 +1,46 @@
 # @betteroffice/pptx
 
+## 0.5.1
+
+### Patch Changes
+
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+- 27590d9: Duplicating slides now preserves legacy and modern comment extensions, including reply threading information. Replies added to copied comments remain attached to the copied discussion.
+- d9c0a82: Adds opt-in `width: "copy"` to `insert_table_column` and `insertTableColumn` to preserve existing column widths and refit the table frame. Omitting `width` or choosing `"split"` keeps the current behavior.
+- 70e3441: Presentations open and show every slide when font downloads fail. Text falls back to available fonts and the editor logs one console warning.
+- 375cbc3: Adds effective paragraph lists and slide titles, visibility and layout details to plugin content reads. Available by default with optional fields for compatibility with older engines.
+- 4eaba8b: Table cell text without its own size or formatting now takes the slide master's other text style, and the presentation default text style only for levels the master leaves out, so table text matches PowerPoint's size and weight.
+- 59deeda: Slide text is drawn word by word at its layout positions, so lines keep PowerPoint's word placement instead of drifting when the browser's font metrics differ. Shaping, combining marks and right-to-left text stay intact.
+- 02818de: Shapes styled with a theme effect reference now draw the theme's outer shadow, as PowerPoint does. Sessions stored by earlier versions recover these shadows when their source is attached, without changing the stored format.
+
+## 0.5.0
+
+### Minor Changes
+
+- f18a42d: Adds opt-in `setSlideLayout` and the `pptx_edit` operation `set_slide_layout` to change a slide’s layout with explicit placeholder mappings. Layout inventories include placeholder IDs and names; unmapped shapes keep their data and geometry.
+- 5cf8c6d: `AsyncCollaborationReplica` gains optional `encodeStateAsUpdateChunks` and `applyUpdateChunks`. Synchronous access refused by the worker editor reports the code `sync-api-unavailable`, as in docx and xlsx.
+- 67c7645: `replyToComment` now supports legacy PowerPoint threads. Duplicated slides include an independent copy of their comments and replies.
+- c688743: The engine adds `duplicateSlide`, `setStoryParagraphs`, `fork` and `layouts`, edit batches add `setShapeAdjust` and `setSlideBackground` steps, and `inspectPresentation` can omit media bytes with `includeMedia: false`.
+- c688743: Adds experimental `openPresentationSession` in `@betteroffice/pptx/worker`, which keeps the presentation in a worker for async reads, version-checked edits, saving and per-slide `call.frame` display lists.
+- fefa072: Adds `insertTableRow`, `deleteTableRow`, `insertTableColumn` and `deleteTableColumn`, plus matching `pptx_edit` operations. Edits keep formatting, refresh refs and undo. They are refused in collaborative sessions, on merged tables and for cells with text fields. New cells take one line.
+- 5455c30: Adds the `@betteroffice/pptx/worker` entry point for the worker command session, and `@betteroffice/pptx/collaboration` for `CollaborationProvider` and the presence helpers, matching docx and xlsx. The root entry keeps the presentation handle API; the worker editor and session exports live in `@betteroffice/pptx/worker`.
+
+### Patch Changes
+
+- efa2982: Charts draw a quoted or escaped `%` in a number format (`0.0"%"`, `0.0\%`, `0.0[$%]`) as literal text instead of scaling the value by 100 and adding a second `%`.
+- c5f2b75: Saving or opening a very large document no longer ends the editing session after 60 seconds: the document worker reports progress while it works, so the watchdog only fires for a worker that has really stopped responding. Saves also skip a redundant package reparse.
+- 2bc343b: Worker editors now join collaboration rooms faster without visibly replaying each retained edit.
+- c688743: Text edits keep authored formatting, collaborative decks converge on concurrent shape, slide and text edits, non-PPTX or malformed packages fail to open, and large decks open, render and edit faster with bounded image memory.
+- c688743: Renders far more of a deck faithfully: every preset geometry, custom geometry, cropped and filled pictures, SmartArt fallbacks, text columns, autofit, kerning, shadows and legacy embedded object previews.
+- 22f572a: Fixes unnecessary inherited autofit overrides during text edits while saving changed fits for overflowing text. `setStoryParagraphs` now accepts line feeds within runs as soft line breaks.
+- 1002e7e: Shape and picture shadows in the presentation editor are drawn at their offset again, instead of shifted up and to the left or cut off.
+- 136b29c: The default editor shows the agent proposals button again, with the number of pending proposals, and opens the proposals panel from it. The button is hidden in read-only viewers and when proposals are not available.
+- 258cbb4: Runs collaboration inside the presentation worker by default for worker editors. Incoming update bursts merge together to keep the interface responsive and reduce repeated paints.
+- fa13da2: In the worker editor, Tab and Shift+Tab inside a table cell select the next or previous cell's text, wrapping across rows. Tab in the last cell keeps the selection there; adding a row from it is not supported yet.
+
 ## 0.2.0
 
 ### Minor Changes

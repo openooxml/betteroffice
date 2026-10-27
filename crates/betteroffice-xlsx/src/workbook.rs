@@ -1,6 +1,7 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod chart_cache_tests;
+pub mod charts;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
@@ -409,6 +410,9 @@ pub struct Workbook {
 struct ChartCache {
     plans: HashMap<String, Arc<ChartRefreshPlan>>,
     spaces: HashMap<(String, String), CachedChartSpace>,
+    /// edited charts, which resolve from their own XML, by the epoch they
+    /// were resolved at.
+    edited: HashMap<(String, String), (u64, Arc<ChartSpace>)>,
 }
 
 struct CachedChartSpace {
@@ -3598,6 +3602,13 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
+    if xlsx_model::workbook::defined_names_bytes(&model.defined_names)
+        > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES
+    {
+        return Err(Error::InvalidOperation(
+            "defined name table exceeds the size limit".to_owned(),
+        ));
+    }
     validate_model_sheets(model)
 }
 
@@ -4261,6 +4272,13 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
                 "two charts claim the same drawing anchor".to_string(),
             ));
         }
+        if let Some(xml) = &chart.raw_xml
+            && xml.len() > xlsx_parse::MAX_TREE_BYTES
+        {
+            return Err(Error::InvalidOperation(
+                "chart XML exceeds the supported size".into(),
+            ));
+        }
         validate_chart_anchor(chart.anchor)?;
         for reference in &chart.refs {
             if reference.formula.len() > MAX_CHART_FIELD_BYTES {
@@ -4823,6 +4841,37 @@ impl Workbook {
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
         let epoch = self.model_epoch;
         let key = (chart.part.clone(), owner.to_owned());
+        if chart.raw_xml.is_some() {
+            if let Some((cached, space)) = self
+                .chart_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .edited
+                .get(&key)
+                && *cached == epoch
+            {
+                return Ok(Arc::clone(space));
+            }
+            let bytes = self.chart_bytes(chart, &self.model, owner).map_err(|_| {
+                RenderError::ChartParseFailed {
+                    part: chart.part.clone(),
+                }
+            })?;
+            let space = xlsx_parse::edited_chart_space(
+                &bytes,
+                &self.model,
+                owner,
+                &self.model.styles.theme,
+            )
+            .map(Arc::new)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })?;
+            let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.edited.retain(|_, (cached, _)| *cached == epoch);
+            cache.edited.insert(key, (epoch, Arc::clone(&space)));
+            return Ok(space);
+        }
         let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
         let changed = if let Some(hit) = cache.spaces.get_mut(&key) {
             if hit.epoch == epoch {
@@ -5126,6 +5175,9 @@ struct CalculationInputs<'a> {
     date_system: xlsx_model::DateSystem,
     sheet_names: Vec<Cow<'a, str>>,
     sheets: Vec<(SheetId, Option<Cow<'a, Sheet>>)>,
+    /// currency text coercion follows the workbook's formats, so a batch
+    /// that changes these symbols moves results anywhere
+    currency_symbols: Vec<char>,
 }
 
 impl<'a> CalculationInputs<'a> {
@@ -5143,6 +5195,7 @@ impl<'a> CalculationInputs<'a> {
                 .iter()
                 .map(|&id| (id, model.sheet(id).map(Cow::Borrowed)))
                 .collect(),
+            currency_symbols: xlsx_calc::currency_symbols(model),
         }
     }
 
@@ -5162,6 +5215,7 @@ impl<'a> CalculationInputs<'a> {
                 .into_iter()
                 .map(|(id, sheet)| (id, sheet.map(|sheet| Cow::Owned(sheet.into_owned()))))
                 .collect(),
+            currency_symbols: self.currency_symbols,
         }
     }
 
@@ -5172,6 +5226,7 @@ impl<'a> CalculationInputs<'a> {
         keeps_defined_names(&self.defined_names, &after.defined_names, renamed)
             && self.date_system == after.date_system
             && self.tables[..] == after.tables[..]
+            && self.currency_symbols == xlsx_calc::currency_symbols(after)
             && self.sheet_names.len() == after.sheets.len()
             && (renamed || keeps_sheet_names(&self.sheet_names, &after.sheets))
             && self

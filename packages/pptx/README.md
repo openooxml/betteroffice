@@ -65,7 +65,9 @@ All entry points below are exported from `@betteroffice/pptx`.
 | `exportPptxStructured(bytes, options?)` | Export structured content asynchronously without fonts or a DOM. |
 | `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
 | `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
-| `openPresentationSession(bytes, options?)` | Open an experimental asynchronous worker session. |
+
+`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an experimental asynchronous
+worker session.
 
 `openPresentation` accepts `fonts`, `fallbackFonts`, `clientId`, and `initialUpdate`. Fallback fonts
 supply glyphs missing from a run's own face. When opening from a collaboration update, retain the
@@ -117,7 +119,7 @@ for options, anchors, diagnostics, and truncation.
 ## Comments and history
 
 `comments()` lists comments. `setCommentFlavor` selects `legacy` or `modern` only while that list is
-empty; `replyToComment` and `setCommentStatus` require modern comments. `addComment` takes the author's
+empty. `replyToComment` supports both flavors; `setCommentStatus` requires modern comments. `addComment` takes the author's
 name, text, and caller-supplied `created` timestamp. `setCommentPosition` moves a root comment using
 safe integer EMU coordinates; replies share their root's position.
 

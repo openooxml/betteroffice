@@ -144,7 +144,7 @@ export function useWorkerContextMenu(options: {
     { action: 'selectAll', label: t('contextMenu.selectAll') },
   ];
   if (hasSelection && !readOnly && options.beginAddComment && (selection?.focus.story === 'body' || selection?.focus.story.startsWith('body:'))) {
-    items.push({ action: 'addComment', label: 'Comment' });
+    items.push({ action: 'addComment', label: t('contextMenu.addComment') });
   }
   if (menu?.object && !readOnly && options.submit) {
     if (menu.object.kind === 'image') {
@@ -154,10 +154,10 @@ export function useWorkerContextMenu(options: {
           label: t(`imageWrap.menu.${option.i18nLabelKey}` as TranslationKey),
           disabled: !evaluateWrap(option.choice).enabled,
         })),
-        { action: 'resizeImage', label: 'Resize image' },
-        { action: 'moveImage', label: 'Move image', dividerAfter: true },
+        { action: 'resizeImage', label: t('contextMenu.resizeImage') },
+        { action: 'moveImage', label: t('contextMenu.moveImage'), dividerAfter: true },
       );
-    } else items.unshift({ action: 'resizeColumn', label: 'Column width', dividerAfter: true });
+    } else items.unshift({ action: 'resizeColumn', label: t('contextMenu.columnWidth'), dividerAfter: true });
   }
   if (menu?.snapshot.editState?.tableContext && !readOnly) {
     for (const [action, key] of [['addRowAbove', 'insertRowAbove'], ['addRowBelow', 'insertRowBelow'], ['deleteRow', 'deleteRow'],

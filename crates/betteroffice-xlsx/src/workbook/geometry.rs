@@ -227,7 +227,11 @@ impl Workbook {
                     &self.model.styles,
                     std::mem::take(&mut state.pending.rows),
                 );
-                geometry.update_columns(sheet_ref, std::mem::take(&mut state.pending.columns));
+                geometry.update_columns(
+                    sheet_ref,
+                    &self.model.styles,
+                    std::mem::take(&mut state.pending.columns),
+                );
                 state.generation = state.generation.wrapping_add(1);
             }
             return Ok((Arc::clone(&state.geometry), state.generation));

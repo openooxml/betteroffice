@@ -3,6 +3,12 @@
 //! that lets the shared DrawingML parser read a chart part, and in-place
 //! patching of both parts when a structural edit moves what they name.
 
+mod edit;
+pub(crate) use edit::quoted_sheet;
+pub use edit::{
+    ChartMetadata, ChartSeriesInfo, chart_bytes, chart_metadata, chart_references, edit_chart,
+};
+
 #[cfg(feature = "test-counters")]
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -168,6 +174,24 @@ pub fn preserved_chart_space(
     plan.chart_space(&refresh, part, theme)
 }
 
+/// Renders an edited part the way a save writes it back: every cache rebuilt
+/// from the cells it reads now, empty and sparse ones included, so a preview
+/// never shows values the saved file no longer holds.
+pub fn edited_chart_space(
+    part: &[u8],
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+    theme: &Theme,
+) -> Option<ChartSpace> {
+    let references = chart_references(part).ok()?;
+    let plan = ChartRefreshPlan::new(part);
+    let refreshed = plan
+        .save_refresh(workbook, workbook)
+        .edited(true)
+        .refresh_changed(owner, owner, &references);
+    chart_space(refreshed.as_deref().unwrap_or(part), theme)
+}
+
 /// The workbook-independent half of [`preserved_chart_space`]. Anything that
 /// puts the reference vocabulary itself in doubt (ChartEx, a pivot or external
 /// source, a filtered-series `sqref`) leaves it with no sites: authored values.
@@ -260,6 +284,7 @@ impl ChartRefreshPlan {
             rebuilt: HashMap::new(),
             changes: HashMap::new(),
             remaining: crate::MAX_PROJECTED_CACHE_POINTS,
+            edited: false,
         }
     }
 
@@ -344,9 +369,17 @@ pub(crate) struct ChartSaveRefresh<'a> {
     rebuilt: HashMap<(usize, String, Option<String>), Option<String>>,
     changes: HashMap<ChangeKey, (bool, Option<String>)>,
     remaining: usize,
+    /// an edited part's caches were written against the workbook at edit
+    /// time, so every one is rebuilt from the cells it reads now.
+    edited: bool,
 }
 
 impl ChartSaveRefresh<'_> {
+    pub(crate) fn edited(mut self, edited: bool) -> Self {
+        self.edited = edited;
+        self
+    }
+
     pub(crate) fn refresh_changed(
         &mut self,
         owner: &str,
@@ -388,7 +421,7 @@ impl ChartSaveRefresh<'_> {
                                 })
                         });
                         (
-                            site.formula != reference.formula || current != original,
+                            self.edited || site.formula != reference.formula || current != original,
                             format,
                         )
                     })
@@ -431,7 +464,7 @@ impl ChartSaveRefresh<'_> {
                     self.workbook,
                     CacheFidelity::Persisted,
                     format.as_deref(),
-                    true,
+                    !self.edited,
                 )
                 .ok()
             });
@@ -631,6 +664,7 @@ pub(crate) fn parse_sheet_charts(
                 return Err(ParseError::TooManyCharts);
             }
             charts.push(SheetChart {
+                raw_xml: None,
                 part,
                 drawing: drawing_path.clone(),
                 anchor_index: index,
@@ -986,6 +1020,9 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 /// beside them from `workbook`, leaving every other byte alone. A cache that
 /// cannot be rebuilt is kept verbatim when its moved reference's cells read
 /// what the old cells read in `original`, since it still stands for them.
+/// Without `original`, for a part written by a chart edit against a workbook
+/// no longer at hand, it is kept when the moved reference keeps its shape, as
+/// a sheet rename or a row or column shift does.
 /// Refuses when the part no longer holds the references the model was built
 /// from, or when a moved reference's cells changed and its cache cannot be
 /// rebuilt, rather than leaving a reference pointing at one range while its
@@ -996,7 +1033,7 @@ pub(crate) fn patch_chart_refs(
     refs: &[ChartRef],
     workbook: &xlsx_model::Workbook,
     owner: &str,
-    original: (&xlsx_model::Workbook, &str),
+    original: Option<(&xlsx_model::Workbook, &str)>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
@@ -1035,10 +1072,14 @@ pub(crate) fn patch_chart_refs(
         ) {
             Ok(markup) => markup,
             Err(_)
-                if same_inputs(
-                    (&site.formula, original.0, original.1),
-                    (&reference.formula, workbook, owner),
-                ) =>
+                if match original {
+                    Some((original, original_owner)) => same_inputs(
+                        (&site.formula, original, original_owner),
+                        (&reference.formula, workbook, owner),
+                    ),
+                    None => reference_shape(&site.formula)
+                        .is_some_and(|shape| reference_shape(&reference.formula) == Some(shape)),
+                } =>
             {
                 continue;
             }
@@ -1059,6 +1100,13 @@ pub(crate) fn patch_chart_refs(
     source.splice(&edits)
 }
 
+/// The rows and columns a single-area reference spans.
+fn reference_shape(formula: &str) -> Option<(u32, u32)> {
+    split_qualifier(formula.trim())
+        .and_then(|(_, area)| parse_area(area))
+        .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
+}
+
 /// Whether two references read the same values under the same number formats,
 /// each against its own workbook, so a cache authored for one stands for the
 /// other.
@@ -1067,12 +1115,7 @@ fn same_inputs(
     after: (&str, &xlsx_model::Workbook, &str),
 ) -> bool {
     let limit = MAX_CACHE_POINTS as usize;
-    let dimensions = |formula: &str| {
-        split_qualifier(formula.trim())
-            .and_then(|(_, area)| parse_area(area))
-            .map(|(start, end)| (end.row - start.row + 1, end.col - start.col + 1))
-    };
-    if dimensions(before.0) != dimensions(after.0) {
+    if reference_shape(before.0) != reference_shape(after.0) {
         return false;
     }
     matches!(
@@ -1362,11 +1405,14 @@ fn resolve_reference_with<'a, T>(
 
 /// Splits `Sheet!$A$1:$A$5` into its sheet name and its area. `None` when the
 /// reference carries anything else: a union, an external book, a defined name.
+/// A quoted sheet name may hold commas and parentheses; only what follows it
+/// is checked for them.
 fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
-    if source.contains(',') || source.contains('(') || source.contains('[') {
-        return None;
-    }
+    let expression = |text: &str| text.contains([',', '(', '[']);
     let Some(rest) = source.strip_prefix('\'') else {
+        if expression(source) {
+            return None;
+        }
         return match source.split_once('!') {
             Some((name, area)) if !name.is_empty() && !name.contains(':') => {
                 Some((Some(name.to_owned()), area))
@@ -1386,7 +1432,7 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
                 continue;
             }
             let area = rest.get(cursor + 1..)?.strip_prefix('!')?;
-            return (!name.contains(':')).then_some((Some(name), area));
+            return (!name.contains([':', '[']) && !expression(area)).then_some((Some(name), area));
         }
         let character = rest[cursor..].chars().next()?;
         name.push(character);

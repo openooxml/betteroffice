@@ -1,7 +1,8 @@
-import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx/editor';
+import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
+import type { PptxEditRefusal } from '@betteroffice/pptx';
 import type {
-  PptxEditRefusal, PptxWorkerEditorAccess, PptxWorkerEditorFailedError, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
-} from '@betteroffice/pptx';
+  PptxWorkerEditorAccess, PptxWorkerEditorFailedError, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
+} from '@betteroffice/pptx/worker';
 import type { PptxEditorApi } from '../PptxEditor';
 import type { PptxCommandStore } from '../commands/types';
 import { pptxCommandController } from '../commands/createPptxCommandStore';

@@ -11,7 +11,7 @@ counts, and no allocation sized from a value in the file.
 | `MAX_DEPTH` | 64 |
 | `MAX_CELLS` | 10,000,000 per worksheet |
 | `MAX_SHARED_STRINGS` | 10,000,000 |
-| `MAX_DEFINED_NAMES` | 65,536 |
+| `MAX_DEFINED_NAME_BYTES` | 32 MiB of name and formula text, plus 64 bytes per name |
 | `MAX_HYPERLINKS` | 65,536 per worksheet |
 | `MAX_STYLE_ENTRIES` | 65,536 |
 

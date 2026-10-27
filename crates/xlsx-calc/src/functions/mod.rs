@@ -4,10 +4,11 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{EvalContext, as_area, err, evaluate, num, parse_num, to_number};
+use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, union_areas};
 use crate::parser::Expr;
 
 pub mod criteria;
+pub(crate) mod criteria_index;
 pub mod datetime;
 pub mod financial;
 pub mod info;
@@ -60,6 +61,7 @@ pub enum Func {
     Degrees,
     Radians,
     Correl,
+    Rsq,
     CovarianceP,
     CovarianceS,
     Slope,
@@ -67,6 +69,15 @@ pub enum Func {
     Percentile,
     Quartile,
     Randbetween,
+    Rand,
+    Forecast,
+    Gcd,
+    Lcm,
+    Even,
+    Odd,
+    Fact,
+    Combin,
+    Fixed,
     Average,
     Count,
     CountA,
@@ -88,6 +99,7 @@ pub enum Func {
     Large,
     Small,
     Rank,
+    RankAvg,
     AverageA,
     MaxA,
     MinA,
@@ -176,6 +188,7 @@ pub enum Func {
     Column,
     Rows,
     Columns,
+    Areas,
     Transpose,
     IsBlank,
     IsNumber,
@@ -198,7 +211,12 @@ pub enum Func {
     Nper,
     Npv,
     NormDist,
+    /// the `(a,b)` reference union the parser builds under [`UNION_NAME`].
+    Union,
 }
+
+/// the call name a parsed `(a,b)` union carries; no formula can spell it.
+pub const UNION_NAME: &str = "(union)";
 
 /// drop the `_xlfn.` / `_xlfn._xlws.` prefix excel stores post-2007 functions
 /// under; the prefix belongs to the stored name, not to the function.
@@ -271,6 +289,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "DEGREES" => Func::Degrees,
         "RADIANS" => Func::Radians,
         "CORREL" => Func::Correl,
+        "RSQ" => Func::Rsq,
         "COVAR" | "COVARIANCE.P" => Func::CovarianceP,
         "COVARIANCE.S" => Func::CovarianceS,
         "SLOPE" => Func::Slope,
@@ -278,6 +297,15 @@ pub fn resolve(name: &str) -> Option<Func> {
         "PERCENTILE" | "PERCENTILE.INC" => Func::Percentile,
         "QUARTILE" | "QUARTILE.INC" => Func::Quartile,
         "RANDBETWEEN" => Func::Randbetween,
+        "RAND" => Func::Rand,
+        "FORECAST" | "FORECAST.LINEAR" => Func::Forecast,
+        "GCD" => Func::Gcd,
+        "LCM" => Func::Lcm,
+        "EVEN" => Func::Even,
+        "ODD" => Func::Odd,
+        "FACT" => Func::Fact,
+        "COMBIN" => Func::Combin,
+        "FIXED" => Func::Fixed,
         "AVERAGE" => Func::Average,
         "COUNT" => Func::Count,
         "COUNTA" => Func::CountA,
@@ -299,6 +327,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "LARGE" => Func::Large,
         "SMALL" => Func::Small,
         "RANK" | "RANK.EQ" => Func::Rank,
+        "RANK.AVG" => Func::RankAvg,
         "AVERAGEA" => Func::AverageA,
         "MAXA" => Func::MaxA,
         "MINA" => Func::MinA,
@@ -397,6 +426,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "COLUMN" => Func::Column,
         "ROWS" => Func::Rows,
         "COLUMNS" => Func::Columns,
+        "AREAS" => Func::Areas,
         "TRANSPOSE" => Func::Transpose,
         "ISBLANK" => Func::IsBlank,
         "ISNUMBER" => Func::IsNumber,
@@ -409,6 +439,7 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ISODD" => Func::IsOdd,
         "NA" => Func::Na,
         "N" => Func::N,
+        "(UNION)" => Func::Union,
         _ => return None,
     })
 }
@@ -456,6 +487,7 @@ impl Func {
             Func::Degrees => math::degrees(args, ctx),
             Func::Radians => math::radians(args, ctx),
             Func::Correl => stats::correl(args, ctx),
+            Func::Rsq => stats::rsq(args, ctx),
             Func::CovarianceP => stats::covariance_p(args, ctx),
             Func::CovarianceS => stats::covariance_s(args, ctx),
             Func::Slope => stats::slope(args, ctx),
@@ -463,6 +495,15 @@ impl Func {
             Func::Percentile => stats::percentile(args, ctx),
             Func::Quartile => stats::quartile(args, ctx),
             Func::Randbetween => math::randbetween(args, ctx),
+            Func::Rand => math::rand(args, ctx),
+            Func::Forecast => stats::forecast(args, ctx),
+            Func::Gcd => math::gcd(args, ctx),
+            Func::Lcm => math::lcm(args, ctx),
+            Func::Even => math::even(args, ctx),
+            Func::Odd => math::odd(args, ctx),
+            Func::Fact => math::fact(args, ctx),
+            Func::Combin => math::combin(args, ctx),
+            Func::Fixed => text::fixed(args, ctx),
             Func::Average => stats::average(args, ctx),
             Func::Count => stats::count(args, ctx),
             Func::CountA => stats::counta(args, ctx),
@@ -484,6 +525,7 @@ impl Func {
             Func::Large => stats::large(args, ctx),
             Func::Small => stats::small(args, ctx),
             Func::Rank => stats::rank(args, ctx),
+            Func::RankAvg => stats::rank_avg(args, ctx),
             Func::AverageA => stats::averagea(args, ctx),
             Func::MaxA => stats::maxa(args, ctx),
             Func::MinA => stats::mina(args, ctx),
@@ -582,6 +624,7 @@ impl Func {
             Func::Column => lookups::column(args, ctx),
             Func::Rows => lookups::rows(args, ctx),
             Func::Columns => lookups::columns(args, ctx),
+            Func::Areas => lookups::areas(args, ctx),
             Func::Transpose => lookups::transpose(args, ctx),
             Func::IsBlank => info::isblank(args, ctx),
             Func::IsNumber => info::isnumber(args, ctx),
@@ -594,6 +637,7 @@ impl Func {
             Func::IsOdd => info::isodd(args, ctx),
             Func::Na => info::na(args, ctx),
             Func::N => info::n(args, ctx),
+            Func::Union => err(ErrorValue::Value),
         }
     }
 }
@@ -606,21 +650,30 @@ pub(crate) fn argument_cells(
     arg: &Expr,
     ctx: &EvalContext<'_>,
 ) -> Result<(Vec<CellValue>, bool), ErrorValue> {
+    if let Some(areas) = union_areas(arg, ctx) {
+        return Ok((area_cells(&areas?, ctx)?, true));
+    }
     if let Some(area) = as_area(arg, ctx) {
-        let mut cells = Vec::new();
-        for cell in area.values_ref(ctx)? {
-            if !ctx.keep_text(&cell) {
-                return Err(ErrorValue::Num);
-            }
-            cells.push(cell.into_owned());
-        }
-        return Ok((cells, true));
+        return Ok((area_cells(&[area], ctx)?, true));
     }
     let cells = crate::array::evaluate_array(arg, ctx)
         .into_array()
         .into_values();
     let from_sheet = cells.len() > 1;
     Ok((cells, from_sheet))
+}
+
+fn area_cells(areas: &[Area], ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
+    let mut cells = Vec::new();
+    for area in areas {
+        for cell in area.values_ref(ctx)? {
+            if !ctx.keep_text(&cell) {
+                return Err(ErrorValue::Num);
+            }
+            cells.push(cell.into_owned());
+        }
+    }
+    Ok(cells)
 }
 
 /// like [`collect_numbers`], but a computed block contributes every numeric
@@ -641,7 +694,7 @@ pub(crate) fn collect_numbers_deep(
                 CellValue::Number { value } => nums.push(value),
                 CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
                 CellValue::Empty => {}
-                CellValue::Text { value } => match parse_num(&value) {
+                CellValue::Text { value } => match ctx.parse_number(&value) {
                     Some(n) => nums.push(n),
                     None => return Err(ErrorValue::Value),
                 },
@@ -669,7 +722,7 @@ pub(crate) fn collect_numbers_anytype(
                 CellValue::Error { value } => return Err(value),
                 CellValue::Empty => {}
                 CellValue::Text { .. } if from_sheet => nums.push(0.0),
-                CellValue::Text { value } => match parse_num(&value) {
+                CellValue::Text { value } => match ctx.parse_number(&value) {
                     Some(n) => nums.push(n),
                     None => return Err(ErrorValue::Value),
                 },
@@ -687,6 +740,14 @@ pub(crate) fn collect_numbers(
 ) -> Result<Vec<f64>, ErrorValue> {
     let mut nums = Vec::new();
     for arg in args {
+        if let Some(areas) = union_areas(arg, ctx) {
+            for area in areas? {
+                for value in area.values_ref(ctx)? {
+                    push_reference_number(&mut nums, &value)?;
+                }
+            }
+            continue;
+        }
         match as_area(arg, ctx) {
             Some(area) => {
                 for value in area.values_ref(ctx)? {
@@ -705,7 +766,7 @@ pub(crate) fn collect_numbers(
                     CellValue::Number { value } => nums.push(value),
                     CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
                     CellValue::Empty => {}
-                    CellValue::Text { value } => match parse_num(&value) {
+                    CellValue::Text { value } => match ctx.parse_number(&value) {
                         Some(n) => nums.push(n),
                         None => return Err(ErrorValue::Value),
                     },
@@ -746,7 +807,7 @@ pub(crate) fn nth_number(
 /// an argument as a number, reading text that spells a date as its serial the
 /// way excel does anywhere a number is wanted.
 pub(crate) fn coerce_number(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
-    match (to_number(value), value) {
+    match (ctx.number(value), value) {
         (Err(ErrorValue::Value), CellValue::Text { value }) => {
             datetime::parse_date_text(value, ctx)
                 .map(|serial| serial as f64)
@@ -779,7 +840,7 @@ pub(crate) fn nth_int_lifted(
         return Err(scalar);
     }
     let value = crate::array::evaluate_array(&args[i], ctx).into_scalar();
-    to_number(&value)
+    ctx.number(&value)
         .map(|value| value.trunc() as i64)
         .map_err(|_| scalar)
 }
@@ -795,7 +856,7 @@ pub(crate) fn finite(x: f64) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Func, resolve};
+    use super::{Func, UNION_NAME, resolve};
 
     #[test]
     fn every_builtin_name_and_alias_resolves_to_its_variant() {
@@ -828,6 +889,15 @@ mod tests {
             (Func::Pi, "PI"),
             (Func::Tanh, "TANH"),
             (Func::Randbetween, "RANDBETWEEN"),
+            (Func::Rand, "RAND"),
+            (Func::Forecast, "FORECAST"),
+            (Func::Gcd, "GCD"),
+            (Func::Lcm, "LCM"),
+            (Func::Even, "EVEN"),
+            (Func::Odd, "ODD"),
+            (Func::Fact, "FACT"),
+            (Func::Combin, "COMBIN"),
+            (Func::Fixed, "FIXED"),
             (Func::Average, "AVERAGE"),
             (Func::Count, "COUNT"),
             (Func::CountA, "COUNTA"),
@@ -849,6 +919,7 @@ mod tests {
             (Func::Large, "LARGE"),
             (Func::Small, "SMALL"),
             (Func::Rank, "RANK"),
+            (Func::RankAvg, "RANK.AVG"),
             (Func::AverageA, "AVERAGEA"),
             (Func::MaxA, "MAXA"),
             (Func::MinA, "MINA"),
@@ -915,6 +986,7 @@ mod tests {
             (Func::Pv, "PV"),
             (Func::Nper, "NPER"),
             (Func::Npv, "NPV"),
+            (Func::Rsq, "RSQ"),
             (Func::NormDist, "NORM.DIST"),
             (Func::If, "IF"),
             (Func::IfError, "IFERROR"),
@@ -938,6 +1010,7 @@ mod tests {
             (Func::Column, "COLUMN"),
             (Func::Rows, "ROWS"),
             (Func::Columns, "COLUMNS"),
+            (Func::Areas, "AREAS"),
             (Func::Transpose, "TRANSPOSE"),
             (Func::IsBlank, "ISBLANK"),
             (Func::IsNumber, "ISNUMBER"),
@@ -950,6 +1023,7 @@ mod tests {
             (Func::IsOdd, "ISODD"),
             (Func::Na, "NA"),
             (Func::N, "N"),
+            (Func::Union, UNION_NAME),
         ];
         for &(func, name) in canonical {
             assert_eq!(resolve(name), Some(func), "{name}");
@@ -962,6 +1036,7 @@ mod tests {
             ("VAR.S", Func::VarS),
             ("VAR.P", Func::VarP),
             ("RANK.EQ", Func::Rank),
+            ("FORECAST.LINEAR", Func::Forecast),
             ("CONCAT", Func::Concat),
             ("NORMDIST", Func::NormDist),
         ];

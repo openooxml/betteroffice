@@ -62,6 +62,22 @@ describe('CDN font provider', () => {
     expect(requested).toEqual([latin, japanese]);
   });
 
+  test('Selawik CDN assets load only when a Segoe UI loader is invoked', async () => {
+    const requested: string[] = [];
+    const baseUrl = 'https://selawik.example/fonts/';
+    intercept({
+      [`${baseUrl}Carlito-Regular.ttf`]: new URL('../assets/Carlito-Regular.ttf', import.meta.url).pathname,
+      [`${baseUrl}Selawik-Semilight.ttf`]: new URL('../assets/Selawik-Semilight.ttf', import.meta.url).pathname,
+    }, requested);
+    const provider = createFontProvider({ baseUrl });
+    const load = provider.resolve('Segoe UI Semilight', true, false)!;
+    expect(requested).toEqual([]);
+    await provider.resolveLastResort('Google Sans', false, false)();
+    expect(requested).toEqual([`${baseUrl}Carlito-Regular.ttf`]);
+    expect((await load()).byteLength).toBe(44260);
+    expect(requested).toEqual([`${baseUrl}Carlito-Regular.ttf`, `${baseUrl}Selawik-Semilight.ttf`]);
+  });
+
   test('custom origins remain isolated and failed downloads can retry', async () => {
     const provider = createFontProvider({
       baseUrl: 'https://retry.example/latin',

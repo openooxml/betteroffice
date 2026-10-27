@@ -1,5 +1,5 @@
 import { mock, type Mock } from 'bun:test';
-import type { DocxProposalInput, DocxProposalSnapshot, DocxWorkerEditSession, ResidentReviewSnapshot } from '@betteroffice/docx/yrs';
+import type { DocxProposalInput, DocxProposalSnapshot, DocxWorkerEditSession, DocxReviewSnapshot } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
@@ -9,7 +9,7 @@ import { createPeerlessShellController } from './shellController';
 import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 
 type ProposalTicket = ReturnType<DocxWorkerEditSession<PeerlessEchoIntent>['submit']>;
-type ReviewRead = { status: 'superseded' } | { status: 'ok'; version: string; value: ResidentReviewSnapshot | null };
+type ReviewRead = { status: 'superseded' } | { status: 'ok'; version: string; value: DocxReviewSnapshot | null };
 interface ProposalHost {
   controller: ReturnType<typeof createPeerlessShellController>;
   binding: PeerlessEditSessionBinding;
@@ -85,7 +85,7 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
     if (version !== snapshot.version) return { status: 'superseded' as const };
     const available = frame.documentVersion === snapshot.version && frame.coversThroughSeq >= seq && request.expectPreviewVersion === snapshot.previewVersion;
     if (!available) nullReads++;
-    const value: ResidentReviewSnapshot | null = available ? {
+    const value: DocxReviewSnapshot | null = available ? {
       version: snapshot.version, previewVersion: snapshot.previewVersion, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
       proposals: structuredClone(snapshot), proposalGeometry: { version: snapshot.version, previewVersion: snapshot.previewVersion,
         proposals: '', targets: Object.fromEntries(snapshot.proposals.map((proposal, index) => [proposal.id, {
@@ -95,7 +95,7 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
       comments: [], uiComments: [], commentIds: {}, revisions: snapshot.proposals.map((proposal, index) => ({
         revisionId: proposal.revisionIds[0]!, kind: 'insertion', author: 'Reviewer', date: '2026-10-01T00:00:00Z', preview: `Added ${index}`,
         range: { story: 'body', start: { paraId: `p${index}`, offset: 0 }, end: { paraId: `p${index}`, offset: 5 } },
-      })) as ResidentReviewSnapshot['revisions'], commentGeometry: {}, revisionGeometry: {},
+      })) as DocxReviewSnapshot['revisions'], commentGeometry: {}, revisionGeometry: {},
     } : null;
     return { status: 'ok' as const, version, value };
   });

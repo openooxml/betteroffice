@@ -8,13 +8,19 @@ export interface CollaborationReplica {
   onUpdate(
     listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   ): () => void;
+  /** Replicas that wrap a PresentationHandle must forward this to it. */
+  setCollaborative?(): void;
 }
 
 export interface AsyncCollaborationReplica {
   readonly clientId: number;
   encodeStateVector(): Promise<Uint8Array>;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Promise<Uint8Array>;
+  /** Optional. Encodes the update for `remoteStateVector` as chunks of at most `maxChunkBytes`. */
+  encodeStateAsUpdateChunks?(remoteStateVector: Uint8Array, maxChunkBytes: number): Promise<Uint8Array[]>;
   applyUpdate(update: Uint8Array): Promise<unknown>;
+  /** Optional. Resolves once the worker has merged the updates as a single change. */
+  applyUpdateChunks?(updates: readonly Uint8Array[]): Promise<unknown>;
   onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
 }
 

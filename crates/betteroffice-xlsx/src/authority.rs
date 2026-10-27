@@ -551,6 +551,7 @@ impl AnchorShape {
 /// the structure this describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChartIdentity {
+    raw_xml: Option<String>,
     part: String,
     drawing: String,
     anchor_index: usize,
@@ -565,6 +566,7 @@ impl ChartIdentity {
             drawing: chart.drawing.clone(),
             anchor_index: chart.anchor_index,
             refs: chart.refs.clone(),
+            raw_xml: chart.raw_xml.clone(),
             anchor: AnchorShape::of(&chart.anchor),
         }
     }
@@ -787,8 +789,18 @@ impl WorkbookAuthority {
     pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
         use crate::snapshot::wire::Writer;
         use snapshot::Codec;
-        let mut writer = Writer::new();
         let base = &self.base;
+        if base
+            .charts
+            .iter()
+            .flatten()
+            .any(|chart| chart.raw_xml.is_some())
+        {
+            return Err(crate::snapshot::SnapshotError::new(
+                "Recovery cannot carry edited chart XML in the authority base",
+            ));
+        }
+        let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
         base.date_system.write(&mut writer);
         base.defined_names.write(&mut writer);
@@ -1385,6 +1397,9 @@ impl WorkbookAuthority {
         if released && let Err(error) = candidate.keep_released_source_formats(self) {
             return SnapshotAdoption::Incompatible(error);
         }
+        if let Err(error) = candidate.keep_source_italic(self) {
+            return SnapshotAdoption::Incompatible(error);
+        }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
             Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
@@ -1396,6 +1411,48 @@ impl WorkbookAuthority {
             && !self
                 .state_fingerprint()
                 .is_some_and(|fingerprint| fingerprint_reading(&fingerprint).as_written())
+    }
+
+    /// Points each sheet's conditional formats back at the source's where a
+    /// release before italic wrote them without it, so the state reads as the
+    /// source does.
+    fn keep_source_italic(&self, source: &Self) -> Result<(), String> {
+        let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let source_txn = source.doc.transact();
+        let source_sheets = source_txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        for key in sheets.keys(&txn).map(str::to_string).collect::<Vec<_>>() {
+            let Some(sheet) = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+            else {
+                continue;
+            };
+            let Some(Out::Any(Any::String(restored))) = sheet.get(&txn, CONDITIONAL_FORMATS) else {
+                continue;
+            };
+            let Some(Out::Any(Any::String(own))) = source_sheets
+                .get(&source_txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .and_then(|sheet| sheet.get(&source_txn, CONDITIONAL_FORMATS))
+            else {
+                continue;
+            };
+            if restored == own {
+                continue;
+            }
+            let read = |json: &str| serde_json::from_str::<Vec<ConditionalFormatting>>(json).ok();
+            if let (Some(restored), Some(original)) = (read(&restored), read(&own))
+                && xlsx_parse::keeps_source_conditional_formats(&restored, &original)
+            {
+                sheet.try_update(&mut txn, CONDITIONAL_FORMATS, own.to_string());
+            }
+        }
+        Ok(())
     }
 
     /// Points each cell of a state a release before patterned fills wrote back
@@ -7227,6 +7284,7 @@ pub(crate) mod open_test_cases {
                 columns: vec!["First".into(), "Second".into()],
             });
             model.sheets[0].charts.push(SheetChart {
+                raw_xml: None,
                 part: "xl/charts/chart1.xml".into(),
                 drawing: "xl/drawings/drawing1.xml".into(),
                 anchor_index: 0,
@@ -8707,6 +8765,7 @@ mod tests {
     fn charted(name: &str, formula: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(xlsx_model::SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,
@@ -10444,6 +10503,7 @@ mod tests {
     fn sliding_chart(name: &str) -> Sheet {
         let mut sheet = Sheet::new(name);
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,

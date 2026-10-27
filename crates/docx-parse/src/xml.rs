@@ -1292,7 +1292,7 @@ pub(crate) fn parse_xml_strict(
                 let element = decode_element(&reader, start, part, budget)?;
                 let mut element = number(element, &stack);
                 retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
-                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
@@ -1303,7 +1303,7 @@ pub(crate) fn parse_xml_strict(
                 })?;
                 let start = starts.pop().unwrap();
                 retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
-                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -1394,13 +1394,14 @@ pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
         .map(|(_, namespace)| *namespace)
 }
 
-fn retain_drawing_namespace_aliases(
+fn retain_replayed_namespace_aliases(
     element: &mut XmlElement,
     ancestors: &[XmlElement],
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
-    if !matches!(element.local_name(), "pict" | "object") {
+    let row = element.name == "w:tr" && !element.attributes.is_empty();
+    if !row && !matches!(element.local_name(), "pict" | "object") {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1415,6 +1416,16 @@ fn retain_drawing_namespace_aliases(
                 }
             }
         }
+    }
+    if row
+        && let Some(root) = ancestors.first()
+        && matches!(root.name.as_str(), "w:document" | "w:hdr" | "w:ftr")
+    {
+        bindings.retain(|name, value| {
+            let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+            crate::serializer::parts::is_story_root_prefix(prefix)
+                || root.attributes.get(*name).map(String::as_str) != Some(*value)
+        });
     }
     if bindings.is_empty() {
         return Ok(());
@@ -1448,7 +1459,9 @@ fn retain_drawing_namespace_aliases(
                 used_prefixes.insert(prefix.to_owned());
             }
         }
-        pending.extend(node.child_elements());
+        if !row {
+            pending.extend(node.child_elements());
+        }
     }
     let mut attribute_bytes: usize = element
         .attributes
@@ -1465,7 +1478,11 @@ fn retain_drawing_namespace_aliases(
             || attribute_bytes > budget.limits.max_attribute_bytes
         {
             return Err(ParseError::ResourceLimit {
-                kind: "drawingNamespaceAliases",
+                kind: if row {
+                    "rowNamespaceAliases"
+                } else {
+                    "drawingNamespaceAliases"
+                },
                 part: part.to_owned(),
             });
         }
@@ -1763,6 +1780,57 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_attributes_retain_local_namespace_bindings() {
+        let document = parse(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:root" xmlns:bofx="urn:root"><w:body><w:tbl xmlns:x="urn:table"><w:tr x:keep="1" bofx:keep="2"/></w:tbl></w:body></w:document>"#,
+        )
+        .unwrap();
+        let row = document
+            .root()
+            .unwrap()
+            .child("w", "body")
+            .unwrap()
+            .child("w", "tbl")
+            .unwrap()
+            .child("w", "tr")
+            .unwrap();
+        assert_eq!(
+            row.attributes.get("xmlns:x").map(String::as_str),
+            Some("urn:table")
+        );
+        assert!(!row.attributes.contains_key("xmlns:bofx"));
+        assert!(!row.attributes.contains_key("xmlns:w"));
+    }
+
+    #[test]
+    fn note_and_comment_rows_retain_root_namespace_bindings() {
+        for root in ["footnotes", "endnotes", "comments"] {
+            let document = parse(&format!(
+                r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:root"><w:tr x:keep="1"/></w:{root}>"#,
+            ))
+            .unwrap();
+            let row = document.root().unwrap().child("w", "tr").unwrap();
+            assert_eq!(
+                row.attributes.get("xmlns:x").map(String::as_str),
+                Some("urn:root")
+            );
+        }
+    }
+
+    #[test]
+    fn row_attributes_retain_rebound_root_prefixes() {
+        let document = parse(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="urn:custom"><w:tr w14:keep="1"/></w:document>"#,
+        )
+        .unwrap();
+        let row = document.root().unwrap().child("w", "tr").unwrap();
+        assert_eq!(
+            row.attributes.get("xmlns:w14").map(String::as_str),
+            Some("urn:custom")
+        );
+    }
 
     #[test]
     fn parses_on_off_values() {

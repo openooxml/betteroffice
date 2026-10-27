@@ -640,6 +640,7 @@
   },
   "errors": {
     "loadingDocument": "טוען מסמך...",
+    "stillOpening": null,
     "noDocumentLoaded": "לא נטען מסמך",
     "failedToLoad": "טעינת המסמך נכשלה",
     "unableToParse": "לא ניתן לעבד את המסמך",

@@ -3,10 +3,16 @@ import { toolbarFixture } from './toolbarCommands.testing';
 
 test('worker toolbar preserves unsupported command reasons', () => {
   const { controller } = toolbarFixture();
-  for (const id of ['insertTOC',
-    'reportIssue'] as const) {
+  for (const id of ['insertTOC'] as const) {
     expect(controller.commands.store.getState(id)).toMatchObject({ enabled: false, disabledReason: { code: 'unsupported-command' } });
   }
+});
+
+test('worker report issue follows the host help menu', () => {
+  const { controller } = toolbarFixture();
+  expect(controller.commands.store.getState('reportIssue')).toMatchObject({ enabled: true });
+  controller.update({ read: (async () => null) as never, focus() {}, zoom: 1, showHelpMenu: false });
+  expect(controller.commands.store.getState('reportIssue')).toMatchObject({ enabled: false, disabledReason: { code: 'host-disabled' } });
 });
 
 test('worker comments sidebar toggles through its host binding and refuses a fixed controlled sidebar', async () => {

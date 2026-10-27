@@ -54,7 +54,7 @@ test.afterEach(async ({ page }) => {
 
 test('asyncApi mounts a peer-less editor without a main-thread engine', async ({ page }) => {
   await open(page);
-  await expect(page.getByTestId('pptx-peerless-editor')).toBeVisible();
+  await expect(page.getByTestId('pptx-worker-editor')).toBeVisible();
   await expect(page.getByTestId('pptx-slide-canvas')).toBeVisible();
   expect(await page.evaluate(() => window.__pptxPeerlessEditor.hydrated())).toBe(true);
   expect(await page.evaluate(() => window.__pptxPeerlessEditor.mainThreadEngines())).toBe(0);
@@ -88,6 +88,39 @@ test('peer-less slide buttons and keyboard navigation adopt the active frame', a
   await stage.press('PageUp');
   await expect(slides.nth(0)).toHaveAttribute('aria-current', 'page');
   await expect.poll(() => page.evaluate(() => window.__pptxPeerlessEditor.paintedTexts())).toContain('initial');
+});
+
+test('peer-less Present shows the slides and the read-only viewer keeps it', async ({ page }) => {
+  await open(page);
+  await editor(page).getByTestId('pptx-present').click();
+  const dialog = page.getByRole('dialog', { name: 'Slide presentation' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('1 / 2')).toBeVisible();
+  await expect.poll(() => dialog.locator('canvas').evaluate((canvas: HTMLCanvasElement) => canvas.width)).toBeGreaterThan(0);
+  await page.keyboard.press('ArrowRight');
+  await expect(dialog.getByText('2 / 2')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await page.evaluate(() => window.__pptxPeerlessEditor.setReadOnly(true));
+  await expect(editor(page).getByTestId('pptx-editor-toolbar')).toHaveCount(0);
+  await editor(page).getByTestId('pptx-present').click();
+  await expect(dialog.getByText('1 / 2')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+});
+
+test('peer-less slide is centred in the stage and typing at a clicked point lands in the text', async ({ page }) => {
+  await open(page);
+  const stage = await editor(page).getByRole('application').boundingBox();
+  const slide = await editor(page).getByTestId('pptx-slide-canvas').boundingBox();
+  expect(Math.abs((stage!.x + stage!.width / 2) - (slide!.x + slide!.width / 2))).toBeLessThan(2);
+  expect(Math.abs((stage!.y + stage!.height / 2) - (slide!.y + slide!.height / 2))).toBeLessThan(2);
+  expect(slide!.x - stage!.x).toBeGreaterThan(8);
+  const point = await page.evaluate(() => window.__pptxPeerlessEditor.point(0));
+  await page.mouse.click(point.x, point.y);
+  await input(page).pressSequentially('Z');
+  await pinnedEvaluate(page, () => window.__pptxPeerlessEditor.flush());
+  await expect.poll(() => text(page)).toBe('Zinitial');
 });
 
 test('peer-less pointer typing commits before leaving and returning to the slide', async ({ page }) => {
@@ -237,7 +270,7 @@ test('peer-less save and reopen preserve edits and accept further typing', async
 
 test('two peer-less editors merge concurrent typing and undo only the local edit', async ({ page }) => {
   await open(page, 'asyncApi=1&collaboration=1');
-  await expect(page.getByTestId('pptx-peerless-editor')).toHaveCount(2);
+  await expect(page.getByTestId('pptx-worker-editor')).toHaveCount(2);
   await select(page, 7, 7, 0);
   await input(page, 0).pressSequentially('L');
   await select(page, 7, 7, 1);

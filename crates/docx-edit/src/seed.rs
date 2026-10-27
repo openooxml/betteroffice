@@ -466,6 +466,47 @@ impl SourceMetadata {
             .collect()
     }
 
+    pub(crate) fn recover_table_line_grid(
+        &mut self,
+        package: &ooxml_opc::RetainedPackage,
+    ) -> Result<(), String> {
+        if self
+            .read
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.get("compatibilityFlags"))
+            .is_some_and(|flags| flags.get("adjustLineHeightInTable").is_some())
+        {
+            return Ok(());
+        }
+        let Some(position) = package
+            .parts()
+            .position(|(name, _)| name.eq_ignore_ascii_case("word/settings.xml"))
+        else {
+            return Ok(());
+        };
+        let xml = package.read(position)?;
+        let limits = docx_parse::ParseLimits::default();
+        let settings = docx_parse::parse_settings(
+            Some(&xml),
+            "word/settings.xml",
+            &mut docx_parse::ParseBudget::new(&limits),
+        )
+        .map_err(|error| error.to_string())?;
+        let stored = self.read.settings.get_or_insert_with(|| json!({}));
+        if let Some(stored) = stored.as_object_mut()
+            && let Some(flags) = stored
+                .entry("compatibilityFlags")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        {
+            flags
+                .entry("adjustLineHeightInTable")
+                .or_insert_with(|| json!(settings.compatibility_flags.adjust_line_height_in_table));
+        }
+        Ok(())
+    }
+
     pub(crate) fn read(&self) -> &ReadSource {
         &self.read
     }
@@ -487,6 +528,17 @@ impl SourceMetadata {
     /// The paragraph style that applies when a paragraph names none or an undefined one.
     pub(crate) fn default_paragraph_style(&self) -> Option<&str> {
         self.styles.default_paragraph.as_deref()
+    }
+
+    /// Numbering inherited from the paragraph style.
+    pub(crate) fn style_numbering(&self, style_id: Option<&str>) -> Option<Any> {
+        let style = style_id
+            .and_then(|id| self.styles.style(id))
+            .or_else(|| self.styles.default_style("paragraph"));
+        field(field(style, "pPr"), "numPr")
+            .or_else(|| field(field(self.styles.doc_defaults.as_ref(), "pPr"), "numPr"))
+            .cloned()
+            .and_then(|value| any_from_value(value).ok())
     }
 
     /// The outline level `style_id` defines, its `basedOn` chain included.
@@ -1428,6 +1480,16 @@ impl StyleResolver {
         self.styles.get(style_id)
     }
 
+    /// The paragraph style a break at the end of a `style_id` paragraph starts (`w:next`): `None`
+    /// when it names the same style or no known paragraph style. `None` means the default style.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn next_paragraph_style(&self, style_id: Option<&str>) -> Option<String> {
+        let current = style_id.or(self.default_paragraph.as_deref())?;
+        let next = string(field(self.style(current), "next"))?;
+        (next != current && string(field(self.style(next), "type")) == Some("paragraph"))
+            .then(|| next.to_owned())
+    }
+
     fn default_style(&self, style_type: &str) -> Option<&Value> {
         let id = match style_type {
             "paragraph" => self.default_paragraph.as_deref(),
@@ -2228,7 +2290,8 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "noChangeAspect": nullish(field(Some(image), "noChangeAspect")),
-        "allowOverlap": nullish(field(Some(image), "allowOverlap"))
+        "allowOverlap": nullish(field(Some(image), "allowOverlap")),
+        "horizontalRule": nullish(field(Some(image), "horizontalRule"))
     }))
 }
 
@@ -2456,14 +2519,15 @@ fn hyperlink_mark(hyperlink: &Value) -> Mark {
                 .map(|value| format!("#{value}"))
         })
         .unwrap_or_default();
-    mark(
-        "hyperlink",
-        ordered_object([
-            ("href", Value::String(href)),
-            ("tooltip", nullish(field(Some(hyperlink), "tooltip"))),
-            ("rId", nullish(field(Some(hyperlink), "rId"))),
-        ]),
-    )
+    let mut attrs = ordered_object([
+        ("href", Value::String(href)),
+        ("tooltip", nullish(field(Some(hyperlink), "tooltip"))),
+        ("rId", nullish(field(Some(hyperlink), "rId"))),
+    ]);
+    if let Some(Value::Bool(history)) = field(Some(hyperlink), "history") {
+        attrs.push(("history".to_owned(), Value::Bool(*history)));
+    }
+    mark("hyperlink", attrs)
 }
 
 fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
@@ -2650,6 +2714,14 @@ fn run_content_to_units(
                 payload.insert(
                     "previews".to_owned(),
                     json!(previews.iter().map(image_payload).collect::<Vec<_>>()),
+                );
+            }
+            if let Some(text_box) =
+                field(Some(content), "textBox").filter(|value| value.is_object())
+            {
+                payload.insert(
+                    "textBoxJson".to_owned(),
+                    Value::String(source_json(text_box, source)),
                 );
             }
             vec![embed_unit(
@@ -4672,6 +4744,9 @@ fn project_row<'a>(
             field(Some(row), "propertyChanges").unwrap().clone(),
         );
     }
+    if let Some(attributes) = field(Some(row), "extraAttributes") {
+        attrs.insert("_extraAttributes".to_owned(), attributes.clone());
+    }
     let widths: Vec<Option<f64>> = array(field(Some(table), "columnWidths"))
         .iter()
         .map(Value::as_f64)
@@ -6045,6 +6120,82 @@ fn lower_docx(
 
 /// [`lower_docx`], without the retained source JSON that only seeded payloads carry when
 /// `payloads` is `false`.
+fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                resolve_seed_font_names(value, theme);
+            }
+        }
+        Value::Object(values) => {
+            if let Some(fonts) = values.get_mut("fontFamily").and_then(Value::as_object_mut) {
+                for (explicit, reference) in [
+                    ("ascii", "asciiTheme"),
+                    ("hAnsi", "hAnsiTheme"),
+                    ("eastAsia", "eastAsiaTheme"),
+                    ("cs", "csTheme"),
+                ] {
+                    if fonts
+                        .get(explicit)
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                        && let Some(reference) = fonts.get(reference).and_then(Value::as_str)
+                    {
+                        let name = docx_parse::resolve_theme_font_ref(Some(theme), reference);
+                        fonts.insert(explicit.to_owned(), Value::String(name));
+                    }
+                }
+            }
+            for value in values.values_mut() {
+                resolve_seed_font_names(value, theme);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
+    match value {
+        OrderedValue::Array(values) => {
+            for value in values {
+                resolve_seed_ordered_fonts(value, theme);
+            }
+        }
+        OrderedValue::Object(values) => {
+            for (key, value) in values {
+                if key == "fontFamily" && matches!(value, OrderedValue::Object(_)) {
+                    let mut wrapper = json!({ "fontFamily": value.value() });
+                    resolve_seed_font_names(&mut wrapper, theme);
+                    *value = serde_json::from_value(wrapper["fontFamily"].take())
+                        .expect("font family remains valid JSON");
+                    if let OrderedValue::Object(fonts) = value {
+                        let order = [
+                            "ascii",
+                            "hAnsi",
+                            "eastAsia",
+                            "cs",
+                            "asciiTheme",
+                            "hAnsiTheme",
+                            "eastAsiaTheme",
+                            "csTheme",
+                            "hint",
+                        ];
+                        fonts.sort_by_key(|(key, _)| {
+                            order
+                                .iter()
+                                .position(|name| *name == key.as_str())
+                                .unwrap_or(order.len())
+                        });
+                    }
+                } else {
+                    resolve_seed_ordered_fonts(value, theme);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn lower_docx_with(
     mut envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
@@ -6056,7 +6207,8 @@ fn lower_docx_with(
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let mut parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    resolve_seed_font_names(&mut parsed, &envelope.document.package.theme);
     let opaque_total = opaque_xml_bytes(&parsed);
     if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
         return Err(opaque_seed_budget_exceeded(opaque_total));
@@ -6065,8 +6217,9 @@ fn lower_docx_with(
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let ordered: OrderedValue =
+        let mut ordered: OrderedValue =
             serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+        resolve_seed_ordered_fonts(&mut ordered, &envelope.document.package.theme);
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
         values
@@ -7786,6 +7939,37 @@ mod tests {
         assert!(numeric_field_instruction(" 123 "));
         for instruction in ["", "= 0", "QUOTE 0", "PAGE", "CustomField", "123abc"] {
             assert!(!numeric_field_instruction(instruction));
+        }
+    }
+
+    #[test]
+    fn next_paragraph_style_follows_w_next_to_another_paragraph_style() {
+        let styles = StyleResolver::new(Some(&json!({"styles":[
+            {"type":"paragraph","styleId":"Normal","default":true,"next":"Normal"},
+            {"type":"paragraph","styleId":"Heading1","next":"Normal"},
+            {"type":"paragraph","styleId":"Heading2"},
+            {"type":"paragraph","styleId":"Quote","next":"Emphasis"},
+            {"type":"character","styleId":"Emphasis"},
+            {"type":"paragraph","styleId":"Body","next":"Missing"},
+            {"type":"paragraph","styleId":"Default","next":"Heading2"}
+        ]})));
+        assert_eq!(
+            styles.next_paragraph_style(Some("Heading1")).as_deref(),
+            Some("Normal")
+        );
+        assert_eq!(
+            styles.next_paragraph_style(Some("Default")).as_deref(),
+            Some("Heading2")
+        );
+        for id in [
+            Some("Normal"),
+            Some("Heading2"),
+            Some("Quote"),
+            Some("Body"),
+            Some("Unknown"),
+            None,
+        ] {
+            assert_eq!(styles.next_paragraph_style(id), None, "{id:?}");
         }
     }
 

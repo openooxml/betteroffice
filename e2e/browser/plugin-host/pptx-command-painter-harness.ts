@@ -3,7 +3,7 @@ import { createCommandFramePainter } from '../../../packages/pptx-react/src/work
 import type { PeerlessViewSnapshot } from '../../../packages/pptx-react/src/worker/peerlessViewStore';
 
 export interface CommandPainterProbe {
-  pixels(primitive: SlidePrimitive, region: { x: number; y: number; width: number; height: number }):
+  pixels(primitive: SlidePrimitive, region: { x: number; y: number; width: number; height: number }, scale?: number):
     Promise<{ actual: number[]; reference: number[] }>;
 }
 
@@ -18,12 +18,12 @@ await font.load();
 await document.fonts.ready;
 
 window.__pptxCommandPainter = {
-  async pixels(primitive, region) {
+  async pixels(primitive, region, scale = 1) {
     const list: SlideDisplayList = { contractVersion: 1, width: 960, height: 540,
       background: { kind: 'solid', color: '#ffffff' }, primitives: [primitive] };
     const canvas = document.createElement('canvas');
     const reference = document.createElement('canvas');
-    const painter = createCommandFramePainter(canvas);
+    const painter = createCommandFramePainter(canvas, { scale });
     try {
       const frame = { displayList: list, frame: {
         slideId: 'slide', slideIndex: 0, slideRevision: 0, coversThroughSeq: 0,
@@ -39,14 +39,16 @@ window.__pptxCommandPainter = {
         thumbnails: new Map(), dirtyThumbnailIds: new Set<string>() };
       painter.paintFrame(frame, view);
       if (!await painter.whenPainted()) throw new Error('Painter did not finish');
-      sizeCanvasForSlide(reference, list, devicePixelRatio, 1);
+      sizeCanvasForSlide(reference, list, devicePixelRatio, scale);
       const ctx = reference.getContext('2d');
       if (!ctx) throw new Error('Reference canvas is unavailable');
-      await paintSlide(ctx, list, devicePixelRatio, 1);
+      await paintSlide(ctx, list, devicePixelRatio, scale);
       const read = (surface: HTMLCanvasElement) => {
         const ctx = surface.getContext('2d');
         if (!ctx) throw new Error('Canvas is unavailable');
-        return Array.from(ctx.getImageData(region.x, region.y, region.width, region.height).data);
+        const factor = devicePixelRatio * scale;
+        return Array.from(ctx.getImageData(Math.round(region.x * factor), Math.round(region.y * factor),
+          Math.round(region.width * factor), Math.round(region.height * factor)).data);
       };
       return { actual: read(canvas), reference: read(reference) };
     } finally { painter.dispose(); }

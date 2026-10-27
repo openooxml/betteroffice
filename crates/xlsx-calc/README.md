@@ -9,12 +9,12 @@ semantics. No GPL/AGPL or proprietary spreadsheet source was consulted.
 
 ## Architecture
 
-- `lexer.rs` / `parser.rs` — source → position-tagged tokens → `Expr`.
-- `eval.rs` — the evaluator and coercion machinery (`to_number`, `to_text`,
+- `lexer.rs` / `parser.rs`: source → position-tagged tokens → `Expr`.
+- `eval.rs`: the evaluator and coercion machinery (`to_number`, `to_text`,
   `to_bool`, `cmp_values`), range/`Area` access, and error propagation. It owns
   no functions; `Expr::FuncCall` carries a `Func` interned at parse time and
   dispatches via `Func::call`.
-- `functions/` — the builtin library. `mod.rs` holds the name → `Func` registry
+- `functions/`: the builtin library. `mod.rs` holds the name → `Func` registry
   (`resolve`), the `Func` → implementation dispatch (`Func::call`), and shared
   argument collectors; one module per category
   (`math`, `stats`, `text`, `datetime`, `logical`, `lookups`, `info`) plus
@@ -34,7 +34,7 @@ evaluation limits still apply to large scans and aggregates.
 Function names resolve **case-insensitively** (`sum`, `SUM`, `Sum` are one
 function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 `MODE`/`MODE.SNGL`, `STDEV`/`STDEV.S`, `STDEVP`/`STDEV.P`, `VAR`/`VAR.S`,
-`VARP`/`VAR.P`, `RANK`/`RANK.EQ`.
+`VARP`/`VAR.P`, `RANK`/`RANK.EQ`, `FORECAST`/`FORECAST.LINEAR`.
 
 ## Supported functions
 
@@ -48,7 +48,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `SUMPRODUCT(array1, [array2], …)` | Element-wise product summed; non-numeric cells = 0; arrays must match length. |
 | `MMULT(array1, array2)` | `cols(array1)` must equal `rows(array2)`. The scalar evaluator gives `#VALUE!` for any non-numeric operand cell; array evaluation reads blanks, logicals and numeric text as numbers. Returns the whole product as an array (see Dynamic arrays). |
 | `PRODUCT` | No numbers → 0. |
-| `ABS`, `SIGN` | — |
+| `ABS`, `SIGN` | none |
 | `ROUND` | Half away from zero. |
 | `ROUNDUP` / `ROUNDDOWN` | Directional (away from / toward zero). |
 | `MROUND(n, m)` | Nearest multiple, half away from zero; opposite signs → `#NUM!`; `m=0` → 0. |
@@ -58,9 +58,13 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `MOD(n, d)` | Sign follows divisor; `d=0` → `#DIV/0!`. |
 | `POWER`, `SQRT`, `EXP` | Non-finite result → `#NUM!`; `SQRT` of a negative → `#NUM!`. |
 | `LN`, `LOG10`, `LOG(n, [base])` | Non-positive input → `#NUM!`; `LN`/`LOG10` use the dedicated libm routine. |
-| `PI` | — |
+| `PI` | none |
 | `TANH` | Hyperbolic tangent. |
 | `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
+| `RAND()` | Volatile. Uniform over `[0, 1)` from the same seeded stream as `RANDBETWEEN`. |
+| `GCD`, `LCM` | Arguments truncate and blanks read as 0; a negative argument, or a value or `LCM` result at or past 2^53 → `#NUM!`. |
+| `EVEN`, `ODD` | Round away from zero to the nearest even or odd integer, negatives included: `EVEN(-1)` = -2, `ODD(-2)` = -3, `ODD(0)` = 1. |
+| `FACT`, `COMBIN` | Arguments truncate; a negative argument (or `COMBIN` number < chosen) → `#NUM!`. |
 
 ### Statistics
 
@@ -71,12 +75,14 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `COUNTIF`, `COUNTIFS` | Criteria via the shared parser. |
 | `AVERAGEIF(range, criteria, [avg_range])`, `AVERAGEIFS` | No matches → `#DIV/0!`. |
 | `MIN` / `MAX` | No numbers → 0. |
-| `MEDIAN` | — |
+| `MEDIAN` | none |
 | `MODE` (`MODE.SNGL`) | Earliest-appearing value wins ties; no repeats → `#N/A`. |
 | `STDEV`/`STDEV.S`, `STDEVP`/`STDEV.P` | Sample needs ≥2 values, population ≥1, else `#DIV/0!`. |
 | `VAR`/`VAR.S`, `VARP`/`VAR.P` | As above. |
 | `LARGE(array, k)` / `SMALL(array, k)` | `k` out of range → `#NUM!`. |
 | `RANK`/`RANK.EQ(n, ref, [order])` | Order 0/omitted = descending; ties share the best rank; absent → `#N/A`. |
+| `RANK.AVG(n, ref, [order])` | As `RANK`, but ties share the average of their ranks. |
+| `FORECAST`/`FORECAST.LINEAR(x, known_y, known_x)` | Least-squares line at `x`; `known_x` without variance → `#DIV/0!`. |
 
 ### Text
 
@@ -92,6 +98,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `CHAR(n)` / `CODE(text)` | `CHAR` for code points 1..=255; `CODE` returns the first char's code point (Unicode). |
 | `VALUE`, `NUMBERVALUE(text, [dec], [grp])` | `VALUE` handles a trailing `%`. |
 | `TEXT(value, format)` | Formats through the number-format interpreter, dates in the workbook's date system. |
+| `FIXED(n, [decimals], [no_commas])` | Rounds half away from zero (left of the point for negative `decimals`); `decimals` > 127 → `#VALUE!`. |
 | `TEXTJOIN(delim, ignore_empty, …)` | `ignore_empty` also skips empty strings; ranges flatten row-major. |
 | `CONCAT` / `CONCATENATE` | Ranges flatten row-major. |
 
@@ -171,7 +178,7 @@ with `~` escaping a literal `*`, `?`, or `~`.
 
 - **Text positions** count Unicode scalar values.
 - **`RANDBETWEEN`** draws from
-  `EvalContext::rand_seed` — pin it before the first draw and the sequence
+  `EvalContext::rand_seed`: pin it before the first draw and the sequence
   replays exactly. Left `None`, each context takes a fresh stream from a
   process-local counter, so sibling cells differ and every recalc re-draws,
   while a process that evaluates in the same order replays the same draws.
@@ -193,8 +200,8 @@ with `~` escaping a literal `*`, `?`, or `~`.
 - **`OFFSET`'s anchor** gives coordinates, never a value, so it is no more a
   dependency than the reference under `ROW`. A cell may offset from its own
   position without being a cycle.
-- **`OFFSET`'s dependencies** are exact — the resolved rectangle is a graph edge
-  — whenever its offsets and sizes are literal numbers over a literal anchor.
+- **`OFFSET`'s dependencies** are exact (the resolved rectangle is a graph edge)
+  whenever its offsets and sizes are literal numbers over a literal anchor.
   When any of them is computed, the target is unknowable before evaluation, so
   the calling cell is marked volatile and re-evaluates on every recalc.
   Volatility guarantees the cell is never skipped.

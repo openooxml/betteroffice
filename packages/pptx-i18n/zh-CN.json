@@ -106,11 +106,32 @@
     "appLabel": null,
     "opening": null,
     "noSlides": null,
-    "openPrompt": null
+    "openPrompt": null,
+    "textInput": null,
+    "selectionAnnouncement": null,
+    "openError": null,
+    "openErrorDescription": null,
+    "stoppedError": null,
+    "stoppedErrorDescription": null,
+    "loadError": null,
+    "loadErrorDescription": null,
+    "reloadPage": null,
+    "showDetails": null
   },
   "objects": {
     "defaultTextBoxName": null,
-    "defaultPictureName": null
+    "defaultPictureName": null,
+    "insertPicture": null,
+    "resize": {
+      "nw": null,
+      "n": null,
+      "ne": null,
+      "e": null,
+      "se": null,
+      "s": null,
+      "sw": null,
+      "w": null
+    }
   },
   "presentation": {
     "label": "幻灯片放映",
@@ -208,5 +229,8 @@
     "panelTabs": "插件面板",
     "collapsePanel": "折叠{title}",
     "expandPanel": "展开{title}"
+  },
+  "presence": {
+    "label": null
   }
 }

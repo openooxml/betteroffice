@@ -8,6 +8,7 @@ test('dirty projection stories select every story when empty and normalize neste
     dirty.add(story);
   }
   expect(dirty.projectionOptions()?.storyIds).toEqual(new Set(['body', 'hf:rId7', 'fn:1', 'en:2']));
+  expect(dirty.capture().stories).toEqual(['body', 'cell:table:0:0', 'hf:rId7:cell:0:0', 'fn:1:cell:0:0', 'en:2']);
   dirty.clear();
   expect(dirty.projectionOptions()).toBeUndefined();
 });

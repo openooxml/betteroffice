@@ -157,6 +157,8 @@ pub struct ShapeSnapshot {
     pub pending_media: Option<PendingMedia>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blip_effects: Vec<BlipEffect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_structure: Option<pptx_parse::TableStructure>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
@@ -198,7 +200,20 @@ pub enum ShapeKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SlideLayoutSnapshot {
+    pub name: Option<String>,
+    pub r#type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SlideSnapshot {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub hidden: Option<bool>,
+    #[serde(default)]
+    pub layout: Option<SlideLayoutSnapshot>,
     pub id: String,
     pub source_part_path: Option<String>,
     pub layout_part_path: Option<String>,
@@ -428,6 +443,12 @@ pub enum EditError {
     InvalidFill(String),
     #[error("invalid shape adjustment: {0}")]
     InvalidAdjustment(String),
+    #[error("invalid table: {0}")]
+    InvalidTable(String),
+    #[error(
+        "structural table operations are unavailable in collaborative mode; edit cell text instead, or change the table structure outside the shared session"
+    )]
+    CollaborativeStructureOperation,
     #[error("invalid text: {0}")]
     InvalidText(String),
     #[error("update observer failed: {0}")]

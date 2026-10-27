@@ -18,7 +18,7 @@ use crate::{Error, Result, Workbook};
 use xlsx_model::ErrorValue;
 
 pub use markdown::render_xlsx_markdown;
-pub(crate) use walk::ExportSource;
+pub(crate) use walk::{ExportSource, sheet_visibility};
 
 pub const DEFAULT_EXPORT_MAX_CELLS: u32 = 100_000;
 pub const MAX_EXPORT_CELLS: u32 = 1_000_000;

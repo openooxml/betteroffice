@@ -1,7 +1,8 @@
 import { useLayoutEffect, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import type { Translations } from '@betteroffice/pptx-i18n';
-import type { PresentationCommandAck, Proposal } from '@betteroffice/pptx';
+import type { Proposal } from '@betteroffice/pptx';
+import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
 import type { PeerlessReviewState } from '../worker/PeerlessReview';
 import { invokePeerless } from '../worker/peerlessObjectCommands';
 import { useTranslation } from '../i18n';

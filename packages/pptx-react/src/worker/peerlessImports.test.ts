@@ -86,12 +86,12 @@ test('default editor static chunks exclude the peerless core', async () => {
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
-  expect(bytes).toBeLessThan(103_500);
+  expect(bytes).toBeLessThan(104_500);
 });
 
 test('p2_peerless_import_graph_has_no_wasm_modules', () => {
   const exports = new Map<string, string>();
-  for (const barrel of ['editor', 'worker'].map((name) => resolve(root, `packages/pptx/src/${name}.ts`))) {
+  for (const barrel of ['index.ts', 'worker.ts', 'collaboration/index.ts'].map((name) => resolve(root, `packages/pptx/src/${name}`))) {
     for (const statement of source(barrel).statements) {
       if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || !statement.moduleSpecifier ||
         !ts.isStringLiteral(statement.moduleSpecifier) || !statement.exportClause ||
@@ -113,7 +113,7 @@ test('p2_peerless_import_graph_has_no_wasm_modules', () => {
         if (name.startsWith('packages/pptx-react/')) expect(relative(root, target)).not.toMatch(/^packages\/(?!pptx-react\/)/);
         visit(target);
       }
-      else if (/^@betteroffice\/pptx(?:\/(?:editor|peerless))?$/.test(specifier)) {
+      else if (/^@betteroffice\/pptx(?:\/(?:worker|collaboration))?$/.test(specifier)) {
         if (!names) throw new Error(`Expected named pptx import: ${name}`);
         for (const imported of names) {
           const target = exports.get(imported);

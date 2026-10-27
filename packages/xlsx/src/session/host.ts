@@ -10,7 +10,7 @@ import type { XlsxEditRefusal } from '../edits';
 import type { XlsxExportOptions, XlsxExportResult, XlsxStructuredContent } from '../exports';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
+  engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
   openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
@@ -674,7 +674,15 @@ export function createWorkbookSessionHost(
       edit: (command) => commandHost?.policy(command) ?? { lane: 'input', reorderable: false },
       checkpoint: () => commandHost?.checkpointPolicy() ?? { lane: 'input', reorderable: false },
     },
-    context: null, onDispose: dispose,
+    context: null, onDispose: dispose, trapFailure: engineOutOfMemory,
   });
   return host;
+}
+
+/** The engine traps when an allocation fails; past the wasm32 memory limit that means the workbook is too large. */
+function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
+  const failed = engineAllocationFailure();
+  return failed ? new SessionFailure('out-of-memory', 'The workbook is too large: the spreadsheet engine ran out of memory',
+    `An allocation of ${failed.bytes} bytes failed with ${Math.round(failed.memoryBytes / 2 ** 20)} MiB of engine memory; ` +
+    `${trap.message}${trap.diagnostics ? `: ${trap.diagnostics}` : ''}`) : undefined;
 }

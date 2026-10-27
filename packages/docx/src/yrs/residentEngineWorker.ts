@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
-import { readResidentToolbarMetadata } from './residentToolbarMetadata';
+import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
 import { readResidentReviewSnapshot, readReviewTarget } from './residentReview';
 import { createResidentCollaboration, readResidentCollaborationState, readResidentPresence } from './residentCollaboration';
@@ -19,11 +19,11 @@ import { projectCommandEchoContext } from './residentCommandViewProjection';
 import { EchoGlyphSources, type EchoGlyphEngine } from './residentEchoGlyphSource';
 import { echoBackgroundPage, stageCommandPresentation } from './residentCommandPresentation';
 import { registerCommandFonts } from './residentCommandFonts';
-import { residentSourceMetadata, validateResidentSource, type ResidentSourceOpenRequest, type ResidentSourcePreviewOptions } from './residentSource';
+import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
-import { ResidentSessionFonts, type ResidentFontEnvironment } from './residentFontEnvironment';
+import { ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
@@ -34,12 +34,14 @@ import type {
   DocxFrameReservations,
   DocxNavigationIntent,
   DocxSelectionPointIntent,
-  ResidentCommandHooksFactory,
-  ResidentCommandHost,
-  ResidentCommandInitRequest,
-  ResidentCommandViewportRequest,
+  DocxCommandHooksFactory,
+  DocxCommandHost,
+  DocxCommandInitRequest,
+  DocxCommandViewportRequest,
+  DocxHostImage,
+  DocxSvgMedia,
   PreparedDocxCommand,
-  ResidentDocxCommandEngine,
+  DocxWorkerCommandEngine,
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
@@ -116,9 +118,9 @@ import {
 } from '../layout/render/rustDisplayList';
 import {
   RESIDENT_HOST_MODULE_WAIT_MS,
-  type ResidentEngineWorkerHostModule,
-  type ResidentEngineWorkerRequest,
-  type ResidentEngineWorkerResponse,
+  type DocxEngineWorkerHostModule,
+  type DocxEngineWorkerRequest,
+  type DocxEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -131,11 +133,36 @@ let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
 let collaboration: ReturnType<typeof createResidentCollaboration> | null = null;
-let commandHost: ResidentCommandHost | null = null;
+let commandHost: DocxCommandHost | null = null;
 const deferredSelectionFrames = new WeakSet<DocxCommandAck>();
 let releaseCommandHost: (() => void) | null = null;
 let commandQueries: ((frame: RetainedFrame, version: string) => ReturnType<typeof createDisplayListQueries>) | null = null;
-let commandInit: ResidentCommandInitRequest | null = null;
+let commandInit: DocxCommandInitRequest | null = null;
+/** Pictures the host decoded because this worker cannot (SVG), by media token and by data URL. */
+const hostImages = new Map<string, ImageBitmap>();
+/** The opened document's SVG pictures: data URL by media token. */
+let svgMediaUrls = new Map<string, string>();
+
+function adoptHostImages(images: readonly DocxHostImage[] | undefined): void {
+  const displaced = new Set<ImageBitmap>();
+  // A document opened without media tokens names its pictures by data URL.
+  for (const { source, image } of images ?? []) {
+    for (const key of [source, svgMediaUrls.get(source)]) {
+      if (key === undefined) continue;
+      const previous = hostImages.get(key);
+      if (previous && previous !== image) displaced.add(previous);
+      hostImages.set(key, image);
+    }
+  }
+  const kept = new Set(hostImages.values());
+  for (const image of displaced) if (!kept.has(image)) image.close();
+}
+
+function closeHostImages(): void {
+  for (const image of new Set(hostImages.values())) image.close();
+  hostImages.clear();
+  svgMediaUrls = new Map();
+}
 /** The bound command session's layout owner, through which every command layout runs. */
 interface CommandLayout {
   /** Pages of the certified prefix the whole layout has not replaced yet, or null. */
@@ -149,9 +176,11 @@ interface CommandLayout {
 }
 let commandLayout: CommandLayout | null = null;
 let sessionFonts: ResidentSessionFonts | null = null;
-let commandHooksFactory: ResidentCommandHooksFactory | null = null;
+let commandHooksFactory: DocxCommandHooksFactory | null = null;
 let commandFrameChanges: {
   pages: Set<number>; updates: Uint8Array[];
+  /** Host-decoded pictures arrived: every displayed page rasterizes again. */
+  repaintPictures?: boolean;
   causes?: Set<'selection' | 'other'>;
   selectionFrames?: Uint8Array[];
   publishedGeometry?: {
@@ -162,14 +191,14 @@ let commandFrameChanges: {
   selectionContext?: boolean;
   /** The document changed outside a command and its layout has not followed yet. */
   layoutStale?: boolean;
-  viewport?: ResidentCommandViewportRequest;
+  viewport?: DocxCommandViewportRequest;
   window?: [number, number];
   reviewFrame?: { frameEpoch: number; previewVersion: number };
   echoRaster?: { pageId: string; pixelRatio: number };
   layoutPreviewVersion?: number;
 } | null = null;
 
-export function setResidentCommandHooksFactory(factory: ResidentCommandHooksFactory): void {
+export function setResidentCommandHooksFactory(factory: DocxCommandHooksFactory): void {
   commandHooksFactory = factory;
 }
 
@@ -185,9 +214,9 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
   });
 }
 
-function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommandHost {
-  if (!session) throw new Error('Resident engine worker is not initialized');
-  if (!commandHooksFactory) throw new Error('Resident command hooks are not installed');
+function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
+  if (!session) throw new Error('Document worker is not initialized');
+  if (!commandHooksFactory) throw new Error('Worker command hooks are not installed');
   releaseCommandHost?.();
   releaseCommandHost = null;
   const engine = session;
@@ -574,7 +603,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           retainedLayoutVersion !== engine.proposalEngine.version() || hooks.editState().storedMarks ||
           !echoGlyphState || echoGlyphState.engine !== engine || echoGlyphState.cache !== glyphCache) return undefined;
         const projected = projectCommandEchoContext({
-          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(),
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(),
           layout: { frame: retainedFrame, layoutRevision },
           glyphs: echoGlyphState.sources.provider(offscreenDpr * offscreenZoom, true),
         });
@@ -631,7 +660,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           }
           if (command.kind === 'setFontEnvironment' && checked.status === 'ready') {
             try {
-              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as ResidentFontEnvironment));
+              preparedFonts.set(checked.prepared, await fonts.prepare(command.payload as DocxFontEnvironment));
             } catch (error) {
               if (error instanceof WebAssembly.RuntimeError) throw error;
               return { status: 'refused' as const, reason: 'invalid-font-environment', selection: hooks.selection(), editState: hooks.editState() };
@@ -648,12 +677,12 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
       async apply(command, context) {
         if (command.command.kind === 'setFontEnvironment') {
           const prepared = preparedFonts.get(command);
-          if (!prepared) throw new Error('Resident font environment was not prepared');
+          if (!prepared) throw new Error('Worker font environment was not prepared');
           const snapshot = fonts.commit(prepared, (faces, chains) => {
             engine.clearFonts();
             glyphCache = null;
             const registered = registerCommandFonts(engine, faces);
-            if (registered.ids.some(id => id === null)) throw new Error('Resident font registration failed');
+            if (registered.ids.some(id => id === null)) throw new Error('Worker font registration failed');
             const input = JSON.parse(init.layoutInput);
             input.measurement = { ...input.measurement, fontChains: chains };
             init.layoutInput = registered.remap(JSON.stringify(input));
@@ -718,6 +747,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         changes.viewport = undefined;
         const pages = [...changes.pages];
         changes.pages.clear();
+        const repaintPictures = changes.repaintPictures === true;
+        changes.repaintPictures = false;
         if (viewport) {
           changes.window = [viewport.start, viewport.end];
           commandDisplayWindow = changes.window;
@@ -925,7 +956,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         if (echoRaster && echoRaster.pixelRatio !== pixelRatio) pendingOffscreenPageIds.add(echoRaster.pageId);
         const echoGlyphs = commandEchoGlyphs(glyphCache, engine, full);
         const projectedEcho = hooks.editState().storedMarks ? undefined : projectCommandEchoContext({
-          engine: engine as ResidentDocxCommandEngine, selection: hooks.selection(), layout,
+          engine: engine as DocxWorkerCommandEngine, selection: hooks.selection(), layout,
           glyphs: echoGlyphs.provider(pixelRatio),
         });
         if (selectionContext && projectedEcho?.glyphs) requestedPages.add(projectedEcho.page.pageIndex);
@@ -938,6 +969,8 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
         const rasterOptions = {
           glyphCache,
           async resolveImage(source: string) {
+            const hosted = hostImages.get(source);
+            if (hosted) return hosted;
             if (failedImages.has(source)) return null;
             let image = images.get(source);
             if (!image) {
@@ -980,7 +1013,7 @@ function bindResidentCommands(init: ResidentCommandInitRequest): ResidentCommand
           const retained = layout.frame.pages[index];
           if (!retained || retained.page.unbuilt) return [];
           const pageId = retained.pageId.toString();
-          if (!full && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
+          if (!full && !repaintPictures && !requestedPages.has(index) && !pendingOffscreenPageIds.has(pageId)) return [];
           return [{ pageId, pageIndex: retained.pageIndex }];
         });
         const presentation = await stageCommandPresentation({
@@ -1102,7 +1135,7 @@ function commandEchoGlyphs(cache: GlyphCache, engine: EchoGlyphEngine, full: boo
 }
 
 /** Whether `init` opens on a certified prefix that completes in the background. */
-function viewportFirst(init: ResidentCommandInitRequest): boolean {
+function viewportFirst(init: DocxCommandInitRequest): boolean {
   return init.layoutWithRegions && init.provisionalPages !== undefined;
 }
 
@@ -1110,7 +1143,7 @@ function viewportFirst(init: ResidentCommandInitRequest): boolean {
  * Finishes a certified prefix's layout after the frames already in flight; false when there is none.
  * Only for requests `runRequest` does not run inside the frame work, which complete directly.
  */
-function completeCommandPrefix(host: ResidentCommandHost): Promise<boolean> {
+function completeCommandPrefix(host: DocxCommandHost): Promise<boolean> {
   if (commandLayout?.certifiedPages() == null) return Promise.resolve(false);
   return host.withFrameWork(async () => commandLayout?.complete() ?? false);
 }
@@ -1123,7 +1156,7 @@ function abandonedRegionLayout(error: unknown): boolean {
     message === 'the document or its fonts changed since the region layout began';
 }
 
-function replacementCommandInit(): ResidentCommandInitRequest | null {
+function replacementCommandInit(): DocxCommandInitRequest | null {
   if (!commandInit) return null;
   return {
     ...commandInit, epoch: commandInit.epoch + 1,
@@ -1131,8 +1164,8 @@ function replacementCommandInit(): ResidentCommandInitRequest | null {
   };
 }
 
-function requireCommandHost(): ResidentCommandHost {
-  if (!commandHost) throw new Error('Resident commands are not initialized');
+function requireCommandHost(): DocxCommandHost {
+  if (!commandHost) throw new Error('Worker commands are not initialized');
   return commandHost;
 }
 
@@ -1148,14 +1181,14 @@ function replyCommand<K extends 'commandInitial' | 'commandAck' | 'checkpoint', 
 /** Answers `id` with the next command frame, carrying `answer` (and its `transfer`) along. */
 function postCommandFrame(
   id: number,
-  answer: Omit<ResidentEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
+  answer: Omit<DocxEngineWorkerResponse & { ok: true }, 'id' | 'ok'> = {},
   transfer: Transferable[] = []
 ): void {
   const host = requireCommandHost();
   const init = commandInit!;
   void host.frame().then((result) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     const frame = isTransferResult(result) ? result.value : result;
@@ -1166,7 +1199,7 @@ function postCommandFrame(
     }, [...transfer, ...(isTransferResult(result) ? result.transfer : [])]);
   }).catch((error: unknown) => {
     if (commandHost !== host) {
-      replyFailure(id, new SessionFailure('disposed', 'Resident command document was replaced'));
+      replyFailure(id, new SessionFailure('disposed', 'Worker command document was replaced'));
       return;
     }
     reply({ id, ok: false, terminal: true, error: error instanceof Error ? error.message : String(error),
@@ -1210,6 +1243,8 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
 let openedViaSource = false;
 let openedParsed = false;
+/** Toolbar metadata of the parsed document a source open seeded, read once. */
+let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
 class SaveUnavailableError extends Error {}
@@ -1224,7 +1259,7 @@ let previewing = false;
 /** Whether the opened source is a cut that stops before the end of its body. */
 let cutPartial = false;
 /** The request that opened the current cut, re-opened when the whole source that replaces it fails. */
-let openedCut: ResidentSourceOpenRequest | null = null;
+let openedCut: DocxSourceOpenRequest | null = null;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
 let previewFinalPages: number | null = null;
 let provisionalFinalPages: number | null = null;
@@ -1292,7 +1327,7 @@ interface SlicedCompletion {
   /** Times a change in between abandoned the pass. */
   restarts: number;
   /** The command session whose certified prefix this completes; its frames publish the result. */
-  commandOwner?: ResidentCommandHost;
+  commandOwner?: DocxCommandHost;
 }
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_RESTARTS = 3;
@@ -1301,7 +1336,7 @@ const COMPLETION_IDLE_MS = 300;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 interface BackgroundPageBuild {
-  request: Extract<ResidentEngineWorkerRequest, { type: 'buildPages' }>;
+  request: Extract<DocxEngineWorkerRequest, { type: 'buildPages' }>;
   owner: ResidentEngineSession;
   frameEpoch: number;
   frames: Uint8Array[];
@@ -1328,12 +1363,12 @@ function reportProgress(): void {
   const now = performance.now();
   if (now - progressReported < PROGRESS_INTERVAL_MS) return;
   progressReported = now;
-  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies ResidentEngineWorkerResponse);
+  scope.postMessage({ id: 0, ok: true, progress: [...runningIds].at(-1)! } satisfies DocxEngineWorkerResponse);
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
 scope.onmessage = (
-  event: MessageEvent<ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule>
+  event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
 ) => {
   const message = event.data;
   if (message.type === 'editModule') {
@@ -1351,7 +1386,7 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
+function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
   const run = () => runRequest(request);
   switch (request.type) {
     case 'edit': {
@@ -1436,21 +1471,21 @@ function isUserInputCommand(kind: string): boolean {
     kind === 'setTableBorders' || kind === 'setTableProperties';
 }
 
-function isLegacyMutation(request: ResidentEngineWorkerRequest): boolean {
+function isLegacyMutation(request: DocxEngineWorkerRequest): boolean {
   return request.type === 'applyInput' || request.type === 'applyDelete' ||
     request.type === 'applyUpdate' || request.type === 'syncUpdate' || request.type === 'sync' ||
     (request.type === 'bootstrap' && request.opened === true) ||
     (request.type === 'proposal' && request.operation.kind !== 'snapshot');
 }
 
-async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
+async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
   runningIds.add(request.id);
   progressReported = performance.now();
   try {
     if (trap || projectionFailure) throw trap ?? projectionFailure;
     handlingId = request.id;
     if ((commandHost || openedViaSource) && isLegacyMutation(request)) {
-      throw new Error('Legacy mutations are unavailable in a resident command session');
+      throw new Error('Legacy mutations are unavailable in a worker command session');
     }
     if (commandHost && request.type !== 'edit' && request.type !== 'checkpoint' &&
       request.type !== 'commandInit' && request.type !== 'requestFullFrame' &&
@@ -1465,7 +1500,7 @@ async function runRequest(request: ResidentEngineWorkerRequest): Promise<void> {
 }
 
 /** Answers a request that will not run; after a trap, as the trap's failure. */
-function replyDropped(response: ResidentEngineWorkerResponse & { ok: true }): void {
+function replyDropped(response: DocxEngineWorkerResponse & { ok: true }): void {
   if (trap) replyFailure(response.id, trap);
   else reply(response);
 }
@@ -1514,14 +1549,14 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
     ok: false,
     error:
       failed > 0
-        ? `Resident engine worker ran out of memory allocating ${failed} bytes: ${error.message}`
-        : `Resident engine worker trapped: ${error.message}`,
+        ? `Document worker ran out of memory allocating ${failed} bytes: ${error.message}`
+        : `Document worker trapped: ${error.message}`,
     terminal: true,
     ...(failed > 0 ? { outOfMemory: true } : {}),
   });
 }
 
-async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+async function handle(request: DocxEngineWorkerRequest): Promise<void> {
   if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
@@ -1568,12 +1603,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'commandInit') {
     if (!session || !openedDocument || previewing) {
-      throw new Error('Resident commands require a whole opened document');
+      throw new Error('Worker commands require a whole opened document');
     }
-    if (commandHost) throw new Error('Resident commands are already initialized');
+    if (commandHost) throw new Error('Worker commands are already initialized');
     session.initializeComments(request.request.recoveryState?.comments);
     if (!commandHooksFactory) setResidentCommandHooksFactory(createResidentDocxCommandHooks);
-    const init = { ...request.request };
+    const { hostImages: decoded, ...init } = request.request;
+    adoptHostImages(decoded);
     if (init.provisionalPages !== undefined &&
       (!Number.isSafeInteger(init.provisionalPages) || init.provisionalPages < 1)) {
       throw new TypeError('Invalid provisional pages');
@@ -1616,7 +1652,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'commandUpdate') {
     requireCommandHost();
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     if (collaboration) throw new Error('Collaboration merges use the ordered applyRemoteUpdate command');
     noteDocumentChange();
     fontRequirements = null;
@@ -1645,7 +1681,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'openSource') {
     validateResidentSource(request.source);
     const source = request.source;
-    if (session && (!previewing || commandHost || source.cut)) throw new Error('Resident engine worker already holds a document');
+    if (session && (!previewing || commandHost || source.cut)) throw new Error('Document worker already holds a document');
     const replaced = previewing ? openedCut : null;
     if (session) destroySession(true);
     const started = performance.now();
@@ -1670,12 +1706,15 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
       const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
+      const svgMedia = opening.svgMedia?.();
+      svgMediaUrls = new Map(svgMedia?.map(({ source, url }) => [source, url]));
+      const listed = svgMedia?.length ? { svgMedia } : {};
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity, ...listed });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity, ...listed }, [stateVector]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -1690,7 +1729,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // One document per worker, so every queued request addresses the one it was sent for;
     // only a preview gives way, to the whole document.
     if (session && (!previewing || request.previewBlocks !== undefined)) {
-      throw new Error('Resident engine worker already holds a document');
+      throw new Error('Document worker already holds a document');
     }
     // The preview's memory goes before the whole package seeds; its pages stay painted.
     if (session) destroySession(true);
@@ -1734,7 +1773,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     const replacement = !request.opened ? replacementCommandInit() : null;
     const source = replacement ? openedSource : null;
     if (!request.opened) {
+      // Reopening the same source keeps its media tokens, so its decoded pictures stay valid.
+      const pictures = source ? { images: new Map(hostImages), urls: svgMediaUrls } : null;
+      if (pictures) hostImages.clear();
       destroySession(request.keepSurfaces === true);
+      if (pictures) {
+        for (const [key, image] of pictures.images) hostImages.set(key, image);
+        svgMediaUrls = pictures.urls;
+      }
       openedVersion = null;
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
@@ -1743,12 +1789,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       session = await createResidentEngineSession(request.heapLimitBytes);
       if (source) session.openDocx(new Uint8Array(source.bytes), undefined, undefined, false);
     } else if (!session || !openedDocument) {
-      throw new Error('Resident engine worker has no opened document');
+      throw new Error('Document worker has no opened document');
     } else if (
       request.heapLimitBytes !== undefined &&
       request.heapLimitBytes !== openedDocument.heapLimitBytes
     ) {
-      throw new Error('Resident engine worker opened its document under another heap limit');
+      throw new Error('Document worker opened its document under another heap limit');
     }
     unsubscribe?.();
     unsubscribe = null;
@@ -1823,7 +1869,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'fontRequirements') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const requirementsJson = layoutFontRequirements(session, request.layoutInput);
     requestedRequirements = { owner: session, layoutInput: request.layoutInput };
     fontRequirements = {
@@ -1835,7 +1881,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'encodeState') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     const state = exactBuffer(session.encodeState());
     let peerMetadata: ArrayBuffer | undefined;
     let peerMetadataReason: string | undefined;
@@ -1866,9 +1912,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'save') {
-    if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
+    if (previewing) throw new SaveUnavailableError('Document worker is still opening');
     if (!session || (!openedSource && !openedParsed)) {
-      throw new SaveUnavailableError('Resident engine worker has no opened document to save');
+      throw new SaveUnavailableError('Document worker has no opened document to save');
     }
     const held = pendingUpdates;
     pendingUpdates = [];
@@ -1906,7 +1952,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'revisionCount') {
-    if (!session) throw new Error('Resident engine worker is not initialized');
+    if (!session) throw new Error('Document worker is not initialized');
     // Host proposals' revisions are not the document's own.
     const proposed = new Set(proposals?.snapshot().proposals.flatMap((p) => p.revisionIds));
     reply({ id: request.id, ok: true, revisionCount: session.revisionCount(proposed) });
@@ -1918,10 +1964,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true });
     return;
   }
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   if (request.type === 'proposal') {
     if (!(commandHost ? layoutReady : unsubscribe)) {
-      throw new Error('Resident engine worker has not laid out its document');
+      throw new Error('Document worker has not laid out its document');
     }
     pendingUpdates = [];
     let committed = false;
@@ -2183,7 +2229,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       }
       case 'toolbarMetadata':
-        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson) : { styles: [], fontFamilies: [] };
+        value = openedSource ? readResidentToolbarMetadata(openedSource.hostJson)
+          : openedParsedToolbar ? openedParsedToolbar() : { styles: [], fontFamilies: [] };
         break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
@@ -2400,6 +2447,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       ? provisionalFinalPages
       : Math.min(previewFinalPages, provisionalFinalPages ?? previewFinalPages);
     const pages = limit === null ? request.pages : request.pages.filter((index) => index < limit);
+    if (request.hostImages) {
+      const owner = request.hostImagesFor;
+      if (!commandHost || !commandInit || !owner || owner.session !== commandInit.session ||
+        owner.incarnation !== commandInit.incarnation || owner.epoch !== commandInit.epoch) {
+        // Pictures decoded for a command session this worker no longer holds.
+        for (const { image } of request.hostImages) image.close();
+        reply({ id: request.id, ok: true });
+        return;
+      }
+      adoptHostImages(request.hostImages);
+      commandFrameChanges!.repaintPictures = true;
+    }
     if (commandHost) {
       for (const page of pages) commandFrameChanges!.pages.add(page);
       postCommandFrame(request.id);
@@ -2647,7 +2706,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 function validateFontsBaseRevision(snapshot: YrsResidentWorkerSnapshot): void {
   if (snapshot.fontsBaseRevision !== undefined && snapshot.fontsBaseRevision !== fontsRevision) {
-    throw new Error('Resident engine worker font base revision mismatch');
+    throw new Error('Document worker font base revision mismatch');
   }
 }
 
@@ -2700,10 +2759,10 @@ function hydrate(
   loadState = true,
   replyMode?: 'meta',
   knownHeadersFootersEpoch?: number,
-  commandFonts?: ResidentCommandInitRequest,
+  commandFonts?: DocxCommandInitRequest,
   layout = true
 ): { layoutJson: string | null; layoutMeta?: LayoutMetaV1; provisional: boolean } {
-  if (!session) throw new Error('Resident engine worker is not initialized');
+  if (!session) throw new Error('Document worker is not initialized');
   validateFontsBaseRevision(snapshot);
   layoutReady = false;
   supersedeSlicedCompletion();
@@ -3248,6 +3307,7 @@ function destroySession(keepSurfaces = false): void {
   releaseCommandHost?.();
   releaseCommandHost = null;
   session?.destroy();
+  closeHostImages();
   lastProposalMirrorVersion = null;
   session = null;
   commandHost = null;
@@ -3262,6 +3322,7 @@ function destroySession(keepSurfaces = false): void {
   openedSource = null;
   openedViaSource = false;
   openedParsed = false;
+  openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
   openedVersion = undefined;
@@ -3359,10 +3420,10 @@ async function finalizeResidentFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   for (const pageId of pendingOffscreenPageIds) {
     const page = retainedPageByKey(retainedFrame, pageId);
@@ -3384,10 +3445,15 @@ async function finalizeResidentFrame(
   return { bytes, delta, caret };
 }
 
+function parsedToolbar(document: import('../types/document').Document): () => DocxToolbarMetadata {
+  let metadata: DocxToolbarMetadata | undefined;
+  return () => (metadata ??= readParsedToolbarMetadata(document));
+}
+
 /** Parses `source` into `opening` and makes it the worker's document; null when the worker declines a cut. */
 function adoptResidentSource(
   opening: ResidentEngineSession,
-  source: ResidentSourceOpenRequest
+  source: DocxSourceOpenRequest
 ): { document: import('../types/document').Document; hostJson?: string } | null {
   let hostJson: string | undefined;
   let document: import('../types/document').Document;
@@ -3417,13 +3483,14 @@ function adoptResidentSource(
   cutPartial = partial;
   openedCut = source.cut ? source : null;
   openedParsed = source.document !== undefined;
+  openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
   return { document, hostJson };
 }
 
 /** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
-async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<boolean> {
+async function reopenSourceCut(source: DocxSourceOpenRequest): Promise<boolean> {
   const opening = await createResidentEngineSession(source.heapLimitBytes);
   try {
     if (adoptResidentSource(opening, source)) return true;
@@ -3439,14 +3506,14 @@ async function reopenSourceCut(source: ResidentSourceOpenRequest): Promise<boole
 async function replySourcePreview(
   id: number,
   opening: ResidentEngineSession,
-  preview: ResidentSourcePreviewOptions,
+  preview: DocxSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
-  const init: ResidentCommandInitRequest = {
+  const init: DocxCommandInitRequest = {
     session: '', incarnation: 0, epoch: 0, readOnly: true,
     fonts: preview.fonts ?? [], fontRegistrationSlots: preview.fontRegistrationSlots,
     layoutInput: preview.layoutInput ?? defaultLayoutInput(),
@@ -3483,7 +3550,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
@@ -3510,10 +3577,10 @@ async function replyFrame(
   }
   const caret = session?.residentCaretSnapshot();
   if (!caret || !retainedFrame || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
-    throw new Error('Resident caret snapshot does not match the produced frame');
+    throw new Error('Worker caret snapshot does not match the produced frame');
   }
   if (requireCaret && !caret.caretRect) {
-    throw new Error('Resident input frame omitted collapsed caret geometry');
+    throw new Error('Worker input frame omitted collapsed caret geometry');
   }
   const selection = session?.selection() ?? null;
   caretPaintRect = paintCaret ? (caret.caretRect ?? null) : null;
@@ -3619,7 +3686,7 @@ async function replayOffscreen(
       pageId: string;
     }>
   > = [];
-  const images = openedViaSource && session ? residentMediaImages(session) : undefined;
+  const images = openedViaSource && session ? residentMediaImages(session, hostImages) : undefined;
   for (let index = 0; index < retainedFrame.pages.length; index += 1) {
     const retainedPage = retainedFrame.pages[index];
     const pageIdString = retainedPage.pageId.toString();
@@ -3711,7 +3778,7 @@ function schedulePipeOutput(): void {
   }, 0);
 }
 
-function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
+function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;

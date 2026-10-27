@@ -13,7 +13,7 @@ both the typed layout and a display list.
 
 `layout_to_json` and `layout_to_canonical_json` are the pure entry points, unit
 tested natively; `layout_document_json` is the `wasm_bindgen` wrapper. Layout
-never touches the DOM — pages are replayed onto canvas by the host.
+never touches the DOM: pages are replayed onto canvas by the host.
 
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 

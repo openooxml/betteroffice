@@ -4,7 +4,6 @@
 
 import { isRawXml } from '../types/content/rawXml';
 import { hasTrackedControlContent } from '../utils/trackedControlContent';
-import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
@@ -36,6 +35,7 @@ import type {
   TrackedChangeInfo,
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
+import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
@@ -411,9 +411,14 @@ function runMarks(
   return marks;
 }
 
+/** EMU to px, unrounded and in the native seed's operation order, so both seeds hash alike. */
+function emuPixels(emu: number): number {
+  return (emu / 914400) * 96;
+}
+
 function imagePayload(image: Image): Attrs {
-  const width = image.size?.width ? emuToPixels(image.size.width) : undefined;
-  const height = image.size?.height ? emuToPixels(image.size.height) : undefined;
+  const width = image.size?.width ? emuPixels(image.size.width) : undefined;
+  const height = image.size?.height ? emuPixels(image.size.height) : undefined;
   const wrapType = image.wrap.type;
   const wrapText = image.wrap.wrapText;
   const hAlign = image.position?.horizontal?.alignment;
@@ -472,10 +477,10 @@ function imagePayload(image: Image): Attrs {
     displayMode,
     cssFloat: cssFloat ?? null,
     transform: transforms.length > 0 ? transforms.join(' ') : null,
-    distTop: image.wrap.distT != null ? emuToPixels(image.wrap.distT) : null,
-    distBottom: image.wrap.distB != null ? emuToPixels(image.wrap.distB) : null,
-    distLeft: image.wrap.distL != null ? emuToPixels(image.wrap.distL) : null,
-    distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
+    distTop: image.wrap.distT != null ? emuPixels(image.wrap.distT) : null,
+    distBottom: image.wrap.distB != null ? emuPixels(image.wrap.distB) : null,
+    distLeft: image.wrap.distL != null ? emuPixels(image.wrap.distL) : null,
+    distRight: image.wrap.distR != null ? emuPixels(image.wrap.distR) : null,
     position: image.position
       ? {
           relativeHeight: image.position.relativeHeight,
@@ -508,14 +513,20 @@ function imagePayload(image: Image): Attrs {
     cropLeft: image.crop?.left ?? null,
     shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
-    effectExtentTop: image.padding?.top != null ? emuToPixels(image.padding.top) : null,
-    effectExtentBottom: image.padding?.bottom != null ? emuToPixels(image.padding.bottom) : null,
-    effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
-    effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
+    effectExtentTop: image.padding?.top != null ? emuPixels(image.padding.top) : null,
+    effectExtentBottom: image.padding?.bottom != null ? emuPixels(image.padding.bottom) : null,
+    effectExtentLeft: image.padding?.left != null ? emuPixels(image.padding.left) : null,
+    effectExtentRight: image.padding?.right != null ? emuPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     noChangeAspect: image.noChangeAspect ?? null,
     allowOverlap: image.allowOverlap ?? null,
+    horizontalRule: image.horizontalRule ?? null,
   }) as Attrs;
+}
+
+/** Leaves out the source paragraph ordinals the native seed never writes into display JSON. */
+function withoutSourceOrdinal(key: string, value: unknown): unknown {
+  return key === 'sourceOrdinal' ? undefined : value;
 }
 
 function shapePayload(shape: Shape): Attrs {
@@ -527,8 +538,8 @@ function chartPayload(chart: Chart): Attrs {
     chartJson: JSON.stringify(chart),
     chartType: chart.chartType ?? null,
     title: chart.title ?? null,
-    width: chart.size?.width ? emuToPixels(chart.size.width) : 320,
-    height: chart.size?.height ? emuToPixels(chart.size.height) : 220,
+    width: chart.size?.width ? emuPixels(chart.size.width) : 320,
+    height: chart.size?.height ? emuPixels(chart.size.height) : 220,
     rId: chart.rId ?? null,
     path: chart.path ?? null,
   }) as Attrs;
@@ -689,6 +700,7 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
       href: hyperlink.href || (hyperlink.anchor ? `#${hyperlink.anchor}` : ''),
       tooltip: hyperlink.tooltip ?? null,
       rId: hyperlink.rId ?? null,
+      ...(typeof hyperlink.history === 'boolean' ? { history: hyperlink.history } : {}),
     },
   };
 }
@@ -840,6 +852,7 @@ function runContentToUnits(
         xml: content.xml,
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
         ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
+        ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox, withoutSourceOrdinal) } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
@@ -1579,6 +1592,7 @@ function projectRow(
     }
   }
   if (row.propertyChanges?.length) attrs.trPrChange = row.propertyChanges;
+  if (row.extraAttributes) attrs._extraAttributes = row.extraAttributes;
 
   const columnWidths = table.columnWidths;
   const totalWidth = columnWidths?.reduce((sum, width) => sum + width, 0) ?? 0;
@@ -2110,6 +2124,35 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
   session.applySeedRawOps(plan.storyId, ops);
 }
 
+function seedFontNames(document: Document): () => void {
+  const restore: Array<() => void> = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+    if (value instanceof Map) {
+      for (const child of value.values()) visit(child);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.fontFamily && typeof record.fontFamily === 'object') {
+      const original = record.fontFamily;
+      const fonts = { ...original } as Record<string, unknown>;
+      for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
+        const referenceName = fonts[reference];
+        if (!fonts[explicit] && typeof referenceName === 'string') {
+          const name = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
+          if (name !== null) fonts[explicit] = name;
+        }
+      }
+      const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
+      record.fontFamily = Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key]]));
+      restore.push(() => { record.fontFamily = original; });
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(document.package);
+  return () => { restore.reverse().forEach(reset => reset()); };
+}
+
 /**
  * Seeds every yrs-owned editable story directly from a parsed Document.
  *
@@ -2120,6 +2163,16 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(
+  session: YrsSession,
+  document: Document,
+  options: YrsOpeningOptions = {}
+): void {
+  const restore = seedFontNames(document);
+  try { seedDocument(session, document, options); }
+  finally { restore(); }
+}
+
+function seedDocument(
   session: YrsSession,
   document: Document,
   options: YrsOpeningOptions = {}

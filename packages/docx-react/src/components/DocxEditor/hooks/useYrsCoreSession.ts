@@ -10,7 +10,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import {
   EditorDirtyStories,
-  ResidentWorkerSaveUnavailableError,
+  DocxWorkerSaveUnavailableError,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   serialWorkerSaves,
@@ -672,7 +672,7 @@ export function useYrsCoreSession(
               save: (comments, peer) => {
                 const task = () => saveInOrder(async (stories) => {
                   if (stale()) throw new Error('The document changed while saving');
-                  if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
+                  if (!worker.canSave()) throw new DocxWorkerSaveUnavailableError('No document worker');
                   const currentHost = documentRef.current ?? host?.document;
                   return worker.save({
                     comments,
@@ -798,7 +798,7 @@ export function useYrsCoreSession(
                 () => {
                   clearPrefetchedState();
                   if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
-                    throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+                    throw new Error('The document worker holds proposals the main thread cannot rebuild');
                   }
                   worker.fallback();
                   if (hasEditorWorkerProposalRounds(next) && registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {

@@ -1,10 +1,11 @@
 import { PRESENTATION_COMMAND_MUTATIONS } from '@betteroffice/pptx/worker';
 import type { PptxFontFace } from '@betteroffice/pptx';
-import type { PptxAsyncCollaborationOptions, PptxEditorApi, PptxEditorCollaborationOptions } from './PptxEditor';
+import type { PptxAsyncCollaborationOptions, PptxContentCollaborationOptions, PptxEditorApi } from './PptxEditor';
 import { PptxCommandAdmissionError } from './commands/createPptxCommandStore';
 import type { PptxAsyncEditorApi, PptxAsyncEditorAccess } from './worker/createPeerlessEditorApi';
 
-export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): PptxEditorCollaborationOptions | undefined {
+/** Without a clientId, each opened handle generates its own. */
+export function asyncCollaboration(options?: PptxAsyncCollaborationOptions): PptxContentCollaborationOptions | undefined {
   if (!options) return;
   const { onReplica, ...rest } = options;
   return { ...rest, onReplica: (replica) => onReplica?.(replica ? {
@@ -54,12 +55,15 @@ export function createInThreadAsyncEditorApi(api: PptxEditorApi, readOnly: () =>
     failure: undefined,
     whenHydrated: api.flushPendingInput,
     handleAsync: () => read(() => access),
+    save: () => read(api.save),
     saveAsync: () => read(api.save),
     recoverySave: () => read(() => ({ bytes: api.save(), recovery: true as const, throughSeq: 0, version: handle.version() })),
     flushPendingInput: api.flushPendingInput,
     version: api.version,
     readContent: api.readContent,
     findText: api.findText,
+    exportStructured: access.exportStructured,
+    exportMarkdown: access.exportMarkdown,
     validateEdits: api.validateEdits,
     applyEdits: api.applyEdits,
     getPositionAtPoint: (x, y) => read(() => api.getPositionAtPoint(x, y)),

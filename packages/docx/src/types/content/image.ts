@@ -202,6 +202,8 @@ export interface Image {
   decorative?: boolean;
   /** Whether the picture's aspect ratio is locked. */
   noChangeAspect?: boolean;
+  /** VML `o:hr`: Word lays the picture's line at the picture's own height. */
+  horizontalRule?: boolean;
   /**
    * `wp:anchor layoutInCell` — when true (default), an anchored image inside
    * a table cell is constrained to the cell. When false, the image escapes

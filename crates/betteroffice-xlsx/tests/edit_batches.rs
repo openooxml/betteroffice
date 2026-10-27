@@ -487,6 +487,31 @@ fn guards_read_the_pre_batch_state() {
 }
 
 #[test]
+fn a_batch_that_adds_currency_evidence_recalculates_currency_text() {
+    let mut sheet = Sheet::new("Data");
+    put(&mut sheet, "A1", CellValue::Empty, Some("\"£12\"+0"), None);
+    put(&mut sheet, "B1", CellValue::Empty, Some("A1+1"), None);
+    put(&mut sheet, "D1", number(1.0), None, None);
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        value(&workbook, 0, "A1"),
+        CellValue::Error {
+            value: xlsx_model::ErrorValue::Value
+        }
+    );
+    applied(
+        &mut workbook,
+        json!([{ "op": "setNumberFormat", "target": target("sheet:0", "D1"), "format": { "type": "custom", "pattern": "£0.00" } }]),
+    );
+    assert_eq!(value(&workbook, 0, "A1"), number(12.0));
+    assert_eq!(value(&workbook, 0, "B1"), number(13.0));
+}
+
+#[test]
 fn formulas_bypass_text_format_coercion_and_inputs_parse_before_formatting() {
     let mut workbook = standalone();
     applied(

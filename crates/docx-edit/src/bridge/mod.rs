@@ -1505,6 +1505,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         hyperlink: formatting.hyperlink.clone(),
                         inline_shape: Some(Box::new(block)),
                         inline_chart: None,
+                        horizontal_rule: None,
                         is_insertion: formatting.is_insertion,
                         is_deletion: formatting.is_deletion,
                         change_author: formatting.change_author.clone(),
@@ -1543,6 +1544,21 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
+                if let Some(block) = opaque_text_box(
+                    &values,
+                    paragraph_pm_start + 1 + u64::from(paragraph_pm_units),
+                    env,
+                    story_id,
+                ) {
+                    paragraph_drawings.push(DrawingMarker {
+                        pm_offset: paragraph_pm_units,
+                        story_index,
+                        anchored: shapes::anchored_shape(&block),
+                        block: LayoutBlock::Shape(block),
+                        hidden: mark_bool(attributes, "hidden") == Some(true),
+                        revision_hidden: env.revision_hidden(attributes),
+                    });
+                }
                 for preview in opaque_image_previews(&values) {
                     let formatting = lower_run_formatting(attributes, env);
                     paragraph_runs.push(RawRun {
@@ -1724,6 +1740,30 @@ pub fn yrsDocToLayoutBlocks(
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
     yrs_doc_to_layout_blocks(doc, story_id, env)
+}
+
+/// The display-only shape a legacy VML text box carries next to its verbatim markup.
+fn opaque_text_box(
+    values: &HashMap<String, Any>,
+    pm_start: u64,
+    env: &RenderEnv,
+    story_id: &str,
+) -> Option<ShapeBlock> {
+    // Pictures shown as runs already hold the drawing's source position.
+    if !opaque_image_previews(values).is_empty() {
+        return None;
+    }
+    let Some(Any::String(source)) = values.get("textBoxJson") else {
+        return None;
+    };
+    let value = serde_json::from_str::<Value>(&env.media.tokenized_json(source)).ok()?;
+    if value.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let projected =
+        group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
+    let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+    shapes::lower_shape_json(&rendered, pm_start, env)
 }
 
 fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, Any>> {
@@ -2074,12 +2114,15 @@ fn lower_table<T: ReadTxn>(
                 local,
             )?;
 
-            if env.compatibility_flags.allow_space_of_same_style_in_table {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block
-                        && let Some(attrs) = &mut paragraph.attrs
-                    {
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block
+                    && let Some(attrs) = &mut paragraph.attrs
+                {
+                    if env.compatibility_flags.allow_space_of_same_style_in_table {
                         attrs.contextual_spacing = Some(false);
+                    }
+                    if !env.compatibility_flags.adjust_line_height_in_table {
+                        attrs.snap_to_grid = Some(false);
                     }
                 }
             }
@@ -2114,19 +2157,9 @@ fn lower_table<T: ReadTxn>(
                     }
                 });
             let background = map_string(tc_pr, "backgroundColor").map(|value| format!("#{value}"));
-            if background.as_deref().is_some_and(dark_cell_background) {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block {
-                        for run in &mut paragraph.runs {
-                            let formatting = match run {
-                                Run::Text(value) => &mut value.fmt,
-                                Run::Tab(value) => &mut value.fmt,
-                                Run::Field(value) => &mut value.fmt,
-                                _ => continue,
-                            };
-                            formatting.color.get_or_insert_with(|| "#FFFFFF".to_owned());
-                        }
-                    }
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block {
+                    resolve_paragraph_auto_text_color(paragraph, background.as_deref(), None);
                 }
             }
             cells.push(TableCell {
@@ -2245,7 +2278,55 @@ fn lower_table<T: ReadTxn>(
     ))
 }
 
-fn dark_cell_background(color: &str) -> bool {
+fn resolve_paragraph_auto_text_color(
+    paragraph: &mut ParagraphBlock,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let paragraph_background = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.shading.as_deref());
+    for run in &mut paragraph.runs {
+        let formatting = match run {
+            Run::Text(run) => &mut run.fmt,
+            Run::Tab(run) => &mut run.fmt,
+            Run::Field(run) => &mut run.fmt,
+            _ => continue,
+        };
+        resolve_auto_text_color(
+            formatting,
+            paragraph_background,
+            cell_background,
+            shape_background,
+        );
+    }
+}
+
+fn resolve_auto_text_color(
+    formatting: &mut RunFormatting,
+    paragraph_background: Option<&str>,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let background = formatting
+        .highlight
+        .as_deref()
+        .or(paragraph_background)
+        .or(cell_background)
+        .or(shape_background);
+    if let Some(background) = background {
+        formatting.color.get_or_insert_with(|| {
+            if automatic_text_needs_white(background) {
+                "#FFFFFF".to_owned()
+            } else {
+                "#000000".to_owned()
+            }
+        });
+    }
+}
+
+fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
         .filter(|value| value.len() == 6)
@@ -2253,10 +2334,21 @@ fn dark_cell_background(color: &str) -> bool {
     else {
         return false;
     };
-    let red = (value >> 16) & 255;
-    let green = (value >> 8) & 255;
-    let blue = value & 255;
-    299 * red + 587 * green + 114 * blue < 128_000
+    let linearize = |channel: u32| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let red = linearize((value >> 16) & 255);
+    let green = linearize((value >> 8) & 255);
+    let blue = linearize(value & 255);
+    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    // Choose the higher WCAG contrast: Word uses white on 007AA8, black on EE0000 and 009A96.
+    // Relative luminances between 0.167 and 0.182 are unobserved.
+    luminance < 0.1791
 }
 
 fn any_json(value: &Any) -> Option<Value> {
@@ -2447,6 +2539,7 @@ fn lower_image_values(
         hyperlink: None,
         inline_shape: None,
         inline_chart: None,
+        horizontal_rule: map_bool(values, "horizontalRule").filter(|rule| *rule),
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -3604,6 +3697,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
 
     let mut segment_start = 0_u32;
+    let mut first_part = true;
     for drawing in drawings {
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
         let remaining = raw_runs.split_off(split_at);
@@ -3613,18 +3707,22 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 run.pm_start -= segment_start;
                 run.pm_end -= segment_start;
             }
-            blocks.push(LayoutBlock::Paragraph(flush_paragraph(
-                segment,
-                pilcrow,
-                pilcrow_attributes,
-                txn,
-                story_id,
-                env,
-                paragraph_pm_start + u64::from(segment_start),
-                drawing.pm_offset - segment_start,
-                list_state,
-                (map, source),
-                Vec::new(),
+            blocks.push(LayoutBlock::Paragraph(split_part(
+                flush_paragraph(
+                    segment,
+                    pilcrow,
+                    pilcrow_attributes,
+                    txn,
+                    story_id,
+                    env,
+                    paragraph_pm_start + u64::from(segment_start),
+                    drawing.pm_offset - segment_start,
+                    list_state,
+                    (map, source),
+                    Vec::new(),
+                ),
+                segment_start,
+                &mut first_part,
             )));
         }
         blocks.push(drawing.block);
@@ -3636,18 +3734,22 @@ fn flush_paragraph_parts<T: ReadTxn>(
             run.pm_start -= segment_start;
             run.pm_end -= segment_start;
         }
-        blocks.push(LayoutBlock::Paragraph(flush_paragraph(
-            raw_runs,
-            pilcrow,
-            pilcrow_attributes,
-            txn,
-            story_id,
-            env,
-            paragraph_pm_start + u64::from(segment_start),
-            paragraph_pm_units - segment_start,
-            list_state,
-            (map, source),
-            Vec::new(),
+        blocks.push(LayoutBlock::Paragraph(split_part(
+            flush_paragraph(
+                raw_runs,
+                pilcrow,
+                pilcrow_attributes,
+                txn,
+                story_id,
+                env,
+                paragraph_pm_start + u64::from(segment_start),
+                paragraph_pm_units - segment_start,
+                list_state,
+                (map, source),
+                Vec::new(),
+            ),
+            segment_start,
+            &mut first_part,
         )));
     }
     if let Some(revealed) = revealable
@@ -3679,6 +3781,21 @@ fn flush_paragraph_parts<T: ReadTxn>(
         }
     }
     blocks
+}
+
+/// Each part of a paragraph split around a drawing paints from its own block,
+/// so the parts after the first take their start offset into their id.
+fn split_part(
+    mut paragraph: ParagraphBlock,
+    segment_start: u32,
+    first_part: &mut bool,
+) -> ParagraphBlock {
+    if !std::mem::replace(first_part, false)
+        && let BlockId::Str(id) = &mut paragraph.id
+    {
+        id.push_str(&format!(":part{segment_start}"));
+    }
+    paragraph
 }
 
 #[cfg(test)]
@@ -3761,7 +3878,7 @@ fn flush_paragraph<T: ReadTxn>(
         .collect();
     stamp_logical_order(&mut runs);
 
-    ParagraphBlock {
+    let mut paragraph = ParagraphBlock {
         sdt_groups: None,
         id: BlockId::Str(para_id.clone()),
         para_id: (!para_id.is_empty() && !para_id_is_generated).then_some(para_id),
@@ -3769,7 +3886,9 @@ fn flush_paragraph<T: ReadTxn>(
         attrs: Some(attrs),
         pm_start: Some(paragraph_pm_start as f64),
         pm_end: Some((paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64),
-    }
+    };
+    resolve_paragraph_auto_text_color(&mut paragraph, None, None);
+    paragraph
 }
 
 fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any> {
@@ -5622,7 +5741,7 @@ mod tests {
                     "kind": "text", "text": text, "fontSize": 10.0, "logicalOrder": 0,
                     "pmStart": start + 1.0, "pmEnd": start + 2.0
                 }],
-                "attrs": {"defaultFontSize": 10.0},
+                "attrs": {"defaultFontSize": 10.0, "snapToGrid": false},
                 "pmStart": start, "pmEnd": start + 3.0
             })
         };

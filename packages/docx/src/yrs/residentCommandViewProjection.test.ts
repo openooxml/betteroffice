@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DisplayPage, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { RetainedFrame } from '../layout/render/frameDelta';
-import type { ResidentDocxCommandEngine } from './residentCommandProtocol';
+import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { projectCommandEchoContext, type EchoGlyphProvider } from './residentCommandViewProjection';
 import { indexEchoGlyphSet, placeEchoGlyphs } from './residentEchoGlyphs';
 
@@ -24,7 +24,7 @@ function input(text = 'é🙂a') {
     geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3,
       caretRect: { pageId: '1', pageIndex: 0, x: 20, y: 2, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 3 };
   return { engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 }, run };
 }
@@ -100,7 +100,7 @@ test('projection echoes the caret line of a wrapped paragraph', () => {
     proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text: 'ab cd', atoms: [] }] }) },
     geometryReader: { locateParagraph: () => ({ start: 0, end: 5 }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3, caretRect: { pageId: '1', pageIndex: 0, x: 10, y: 22, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 4 };
   const context = projectCommandEchoContext({ engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 } });
   expect(context?.text).toBe('cd');
@@ -152,7 +152,7 @@ test('projection echoes a cluster-positioned line as one style run within the co
     proposalEngine: { readParagraphs: () => ({ ok: true, paragraphs: [{ paraId: 'p', text, atoms: [] }] }) },
     geometryReader: { locateParagraph: () => ({ start: 0, end: text.length }) },
     residentCaretSnapshot: () => ({ frameEpoch: 3, caretRect: { pageId: '1', pageIndex: 0, x: 400, y: 2, height: 12 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: 80 };
   const context = projectCommandEchoContext({ engine, selection: { anchor: at, focus: at }, layout: { frame, layoutRevision: 2 } });
   expect(context?.text).toBe(text);
@@ -201,7 +201,7 @@ function glyphLine(options: GlyphLineOptions = {}) {
     residentCaretSnapshot: () => ({ frameEpoch: 3,
       caretRect: { pageId: '1', pageIndex: 0, x: caretGlyph.x + (lines[caretLine]!.length === 1 ? 10 : 0),
         y: 108 + caretLine * 20, height: 16 } }),
-  } as unknown as ResidentDocxCommandEngine;
+  } as unknown as DocxWorkerCommandEngine;
   const at = { story: 'body', paraId: 'p', offset: lineStart + 1 };
   const alphabet = 'abcdeAV ';
   const glyphSet = (kern: boolean) => {
@@ -401,3 +401,66 @@ test('echo admits ordinary letters when contextual lookups require combining mar
     expect(set.glyphIds[DOCX_ECHO_ALPHABET.indexOf('j')]).toBeGreaterThan(0);
   } finally { engine.destroy(); }
 }, 20000);
+
+function withEcho(source: ReturnType<typeof glyphLine>, facts: (run: GlyphRunPrimitive, index: number) => object) {
+  source.layout.frame.pages[0]!.page.primitives.forEach((run, index) => {
+    if (run.kind === 'glyphRun') Object.assign(run.echo!, facts(run, index));
+  });
+  return source;
+}
+
+test('echo places a centered one-line paragraph at the engine centering origin', () => {
+  // 'abc' is 30px wide, so the engine centers it at 96 + (624 - 30) / 2
+  const source = withEcho(glyphLine({ lines: ['abc'], x: 393 }), () => ({ centerWidth: 624 }));
+  const context = projectCommandEchoContext(source);
+  expect(context?.glyphs).toMatchObject({ x: 96, right: 720, center: 624 });
+  expect(context?.glyphs?.device.x).toBe(95);
+  expect(projectCommandEchoContext(withEcho(glyphLine({ lines: ['abc'], x: 392 }), () => ({ centerWidth: 624 }))))
+    .toBeUndefined();
+});
+
+test('echo declines centered lines it cannot recenter alone', () => {
+  expect(projectCommandEchoContext(withEcho(glyphLine({ lines: ['ab ', 'cd'] }), () => ({ centerWidth: 624 }))))
+    .toBeUndefined();
+  expect(projectCommandEchoContext(withEcho(glyphLine({ lines: ['ab '], x: 381 }), () => ({ centerWidth: 624 }))))
+    .toBeUndefined();
+  const mixed = withEcho(glyphLine({ lines: ['abc'], x: 393 }), (_, index) => index ? { centerWidth: 624 } : {});
+  expect(projectCommandEchoContext(mixed)).toBeUndefined();
+});
+
+test('echo declines a justified line that stretches', () => {
+  const stretched = withEcho(glyphLine({ lines: ['ab ', 'cd'], caretLine: 0 }), (_, index) => index < 3 ? { stretch: 30 } : {});
+  expect(projectCommandEchoContext(stretched)).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ lines: ['ab ', 'cd'], caretLine: 0 }))?.glyphs).toBeDefined();
+});
+
+test('the closing line of a justified paragraph measures the previous line before its stretch', () => {
+  const closing = withEcho(glyphLine({ lines: ['ab ', 'cd'] }), (_, index) => index < 3 ? { stretch: 20 } : {});
+  // 604 px unstretched, plus a quarter of its one space the line breaker may squeeze, plus the trailing space
+  expect(projectCommandEchoContext(closing)?.glyphs?.previousSlack).toBe(616.5);
+});
+
+test('a justified closing line counts the space the line breaker may squeeze out of the line above', () => {
+  // 10 px glyphs, 100 px wide: "a a a a " is 80 px with 40 px of spaces; "bbb" fits once squeezed
+  // (80 + 30 - 10 = 100), so deleting one "b" of "bbbb" must not be echoed on the second line
+  const source = withEcho(glyphLine({ lines: ['a a a a ', 'bbbb'], right: 196 }), (_, index) => index < 8 ? { stretch: 80 } : {});
+  const slack = projectCommandEchoContext(source)?.glyphs?.previousSlack;
+  expect(slack).toBeDefined();
+  expect(30).toBeLessThanOrEqual(slack! + 1);
+});
+
+test('echo accepts a line that ends a rounding hair past the content box', () => {
+  const rounded = glyphLine();
+  rounded.layout.frame.pages[0]!.page.contentBounds!.width = 623.9997;
+  expect(projectCommandEchoContext(rounded)?.glyphs?.right).toBe(720);
+  const hanging = glyphLine();
+  hanging.layout.frame.pages[0]!.page.contentBounds!.width = 623.47;
+  expect(projectCommandEchoContext(hanging), 'a line hanging half a pixel past the content box declines').toBeUndefined();
+});
+
+test('echo ignores the empty position marker of a blank line just below, not text there', () => {
+  const marker = (text: string) => ({ kind: 'text' as const, text, x: 96, baselineY: 150, width: text ? 10 : 0,
+    font: '400 13.333px Calibri, sans-serif', color: '#000000', docStart: 9, docEnd: 9 });
+  expect(projectCommandEchoContext(glyphLine({ later: [marker('')] }))?.glyphs).toBeDefined();
+  expect(projectCommandEchoContext(glyphLine({ later: [marker('x')] }))).toBeUndefined();
+});

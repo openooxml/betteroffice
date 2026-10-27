@@ -159,10 +159,10 @@ interface Evaluation<K extends PptxCommandId> {
 
 export const MIN_FONT_POINTS = 1;
 export const MAX_FONT_POINTS = 400;
-export const MIN_ZOOM = 0.25;
-export const MAX_ZOOM = 4;
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 5;
 export const MAX_STROKE_POINTS = 1584;
-export const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+export const ZOOM_LEVELS = [0.5, 0.75, 0.9, 1, 1.25, 1.5, 2] as const;
 export const STROKE_WIDTHS = [1, 2, 3, 4, 8] as const;
 export const DEFAULT_FONT_FAMILIES = [
   'Arial',

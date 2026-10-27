@@ -1,6 +1,11 @@
-export function residentMediaImages(engine: { mediaDataUrl(token: string): string | null }) {
+export function residentMediaImages(
+  engine: { mediaDataUrl(token: string): string | null },
+  hosted?: ReadonlyMap<string, ImageBitmap>,
+) {
   const images = new Map<string, Promise<ImageBitmap | null>>();
   const resolve = (source: string): Promise<ImageBitmap | null> => {
+    const decoded = hosted?.get(source);
+    if (decoded) return Promise.resolve(decoded);
     let image = images.get(source);
     if (!image) {
       image = (async () => {

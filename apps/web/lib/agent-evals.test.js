@@ -101,6 +101,6 @@ test("publication config selects the basic table even after a complex table", ()
   expect(parseAgentEvals(readme, ["complex"]).rows[0].ours).toBe("7/33");
   expect(parseAgentEvals(block(`Complex tier: 33 tasks.\n\n${complex}`))).toBeNull();
   expect(parseAgentEvals(readme, [])).toBeNull();
-  expect(agentEvalsSection(README)).not.toMatch(/complex/i);
+  expect(parseAgentEvals(README, ["complex"]).rows.map((row) => row.format)).toEqual(["docx", "xlsx", "pptx"]);
   expect(agentEvalRuns(parseAgentEvals(README))).toBe(288);
 });

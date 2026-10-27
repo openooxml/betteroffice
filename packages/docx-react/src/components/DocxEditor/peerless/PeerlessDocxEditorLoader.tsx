@@ -1,15 +1,18 @@
 import { Component, forwardRef, useEffect, useMemo, useState, type ForwardedRef, type ReactNode } from 'react';
 import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
-import { DefaultLoadingIndicator, ParseError } from '../../DocxEditorHelpers';
+import { DefaultLoadingIndicator, EditorLoadError, ParseError } from '../../DocxEditorHelpers';
 import { LocaleProvider } from '../../../i18n';
+import { warnOnce } from '../internals/engineChoice';
 import type { PeerlessDocxEditor } from './PeerlessDocxEditor';
 
 export const docxPeerlessEditorLoader = { load: () => import('./PeerlessDocxEditor') };
+// Browsers cache a failed module fetch for the page's lifetime, so only a reload fetches the chunk again.
+const reloadPage = () => globalThis.location?.reload();
 
 export class DocxWorkerEditorChunkLoadError extends Error {
   readonly code = 'chunk-load-failed';
   constructor(readonly cause: unknown) {
-    super('Failed to load the worker editor. Remount the editor to retry.');
+    super('Failed to load the editor code. Reload the page to retry.');
     this.name = 'DocxWorkerEditorChunkLoadError';
   }
 }
@@ -32,7 +35,11 @@ class PeerlessEditorBoundary extends Component<BoundaryProps, { error: Error | n
   }
 
   render() {
-    return this.state.error ? <ParseError message={this.state.error.message} /> : this.props.children;
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    return error instanceof DocxWorkerEditorChunkLoadError
+      ? <EditorLoadError message={error.message} onReload={reloadPage} />
+      : <ParseError message={error.message} />;
   }
 }
 
@@ -80,7 +87,12 @@ function PeerlessDocxEditorChunk({ editorProps, editorRef }: { editorProps: Docx
   return <>{editorProps.loadingIndicator ?? <DefaultLoadingIndicator />}</>;
 }
 
+const PREWARM_IGNORED = '[DocxEditor] experimentalPrewarm has no effect on the worker editor; the worker loads the engine when a document opens.';
+const developmentBuild = () => (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV !== 'production';
+
 export const LazyPeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function LazyPeerlessDocxEditor(props, ref) {
+  const prewarm = props.experimentalPrewarm === true;
+  useEffect(() => { if (prewarm && developmentBuild()) warnOnce(PREWARM_IGNORED); }, [prewarm]);
   return <LocaleProvider i18n={props.i18n}>
     <PeerlessEditorBoundary onError={props.onError}>
       <PeerlessDocxEditorChunk editorProps={props} editorRef={ref} />

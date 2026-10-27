@@ -533,6 +533,45 @@ fn paragraph_patch_splits_run_and_inserts_bold_in_schema_order() {
 }
 
 #[test]
+fn paragraph_patch_drops_only_emptied_text_runs() {
+    for (tail, kept) in [
+        ("<w:t>]</w:t>", ""),
+        ("<w:t>]suffix</w:t>", "<w:t>suffix</w:t>"),
+        ("<w:t>]</w:t><w:tab/>", "<w:t></w:t><w:tab/>"),
+        (
+            "<w:t>]</w:t><w:lastRenderedPageBreak/>",
+            "<w:t></w:t><w:lastRenderedPageBreak/>",
+        ),
+    ] {
+        let empty = "<w:r><w:rPr/><w:t/></w:r>";
+        let source = format!(
+            "<w:p>{empty}<w:r><w:rPr/><w:t>[</w:t></w:r><w:r><w:rPr/><w:t>abc</w:t></w:r><w:r>{tail}</w:r></w:p>"
+        );
+        let suffix = if tail.contains("suffix") {
+            "suffix"
+        } else {
+            ""
+        };
+        let special = if tail.contains("tab") { "\t" } else { "" };
+        let mut plan = patch(
+            vec![text(&format!("[abc]{suffix}{special}"), json!({}))],
+            vec![text(&format!("abc{suffix}{special}"), json!({}))],
+        );
+        replace(&mut plan, 0, 1, "", json!({}));
+        replace(&mut plan, 4, 5, "", json!({}));
+        let tail = if kept.is_empty() {
+            String::new()
+        } else {
+            format!("<w:r>{kept}</w:r>")
+        };
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            format!("<w:p>{empty}<w:r><w:rPr/><w:t>abc</w:t></w:r>{tail}</w:p>")
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_replacement_uses_first_run_donor() {
     let source = "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>one</w:t></w:r><w:r><w:t>two</w:t></w:r></w:p>";
     let mut plan = patch(
@@ -542,7 +581,7 @@ fn paragraph_patch_replacement_uses_first_run_donor() {
     replace(&mut plan, 0, 6, "new", json!({"bold": true}));
     assert_eq!(
         write(source, &plan).unwrap(),
-        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r><w:r><w:t></w:t></w:r></w:p>"
+        "<w:p><w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t>new</w:t></w:r></w:p>"
     );
 }
 
@@ -1266,23 +1305,42 @@ fn paragraph_patch_formats_every_run_of_a_paragraph_in_place() {
     );
 }
 
+fn linear_work_growth(small: u64, large: u64) -> bool {
+    assert!(small > 0, "work counter must measure the writer");
+    large * 4 <= small * 8 * 5
+}
+
 #[test]
-fn paragraph_patch_formats_many_short_runs_in_linear_time() {
-    let fastest = |runs: usize| {
+fn paragraph_patch_formats_many_short_runs_with_linear_work() {
+    let measured = |runs: usize| {
         let (source, expected, plan) = bold_every_run(runs);
-        (0..2)
-            .map(|_| {
-                let started = std::time::Instant::now();
-                assert_eq!(write(&source, &plan).unwrap(), expected);
-                started.elapsed()
-            })
-            .min()
-            .unwrap()
+        super::work::reset();
+        let output = write(&source, &plan).unwrap();
+        let work = super::work::get();
+        assert_eq!(output, expected);
+        work
     };
-    let (small, large) = (fastest(400), fastest(3200));
-    let ratio = large.as_secs_f64() / small.as_secs_f64();
-    eprintln!("formatted 400 runs in {small:?}, 3200 runs in {large:?} (x{ratio:.1})");
-    assert!(ratio < 16.0, "8x the runs took x{ratio:.1}");
+    let (small, large) = (measured(400), measured(3200));
+    assert!(
+        linear_work_growth(small, large),
+        "8x the runs exceeded 10x the work: {small} -> {large}"
+    );
+}
+
+#[test]
+fn paragraph_patch_linear_work_check_rejects_quadratic_scans() {
+    let measured = |runs: usize| {
+        super::work::reset();
+        for _ in 0..runs {
+            for _ in 0..runs {
+                super::work::add(1);
+            }
+        }
+        super::work::get()
+    };
+    let (small, large) = (measured(40), measured(320));
+    assert_eq!((small, large), (1600, 102400));
+    assert!(!linear_work_growth(small, large));
 }
 
 fn model_run(text: &str) -> String {

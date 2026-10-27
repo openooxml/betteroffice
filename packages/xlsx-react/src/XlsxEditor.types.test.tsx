@@ -17,8 +17,7 @@ test('default and in-thread props preserve the async contextual API', () => {
       assertType<Equal<ReturnType<typeof api.exportStructured>, Promise<ReturnType<import('@betteroffice/xlsx').WorkbookHandle['exportStructured']>>>>();
       // @ts-expect-error
       api.handle;
-      // @ts-expect-error
-      api.save();
+      assertType<Equal<ReturnType<typeof api.save>, Promise<Uint8Array>>>();
     }} />,
     <XlsxEditor experimentalWorkerOpen={false} onReady={(api) => {
       assertType<Equal<typeof api, XlsxAsyncEditorApi>>();
@@ -97,4 +96,21 @@ test('rejects sync callbacks without a literal legacy opt-in', () => {
     { onReady: sync } satisfies XlsxEditorProps,
   ];
   expect(check).toBeFunction();
+});
+
+test('accepts async host props and document change types', () => {
+  const props = { file: new ArrayBuffer(0), initialZoom: 1.5, loadingIndicator: <span>Opening</span>,
+    style: { height: 400 }, downloadOnSave: false,
+    onDocumentChange: (change: import('./index').XlsxDocumentChange) => { assertType<Equal<typeof change.version, string>>(); },
+  } satisfies XlsxAsyncEditorProps;
+  expect(props.downloadOnSave).toBe(false);
+});
+
+test('keeps new host options off deprecated legacy props', () => {
+  const legacy = {
+    legacySyncApi: true,
+    // @ts-expect-error
+    initialZoom: 2,
+  } satisfies import('./XlsxEditor').XlsxLegacyEditorProps;
+  expect(legacy.legacySyncApi).toBe(true);
 });

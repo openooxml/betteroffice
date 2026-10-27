@@ -56,6 +56,10 @@ pub use workbook::{
     UpdateSubscription, Workbook,
 };
 
+pub use workbook::charts::{ChartInfo, ChartMutation};
+pub use xlsx_model::{ChartEdit, ChartSeriesName};
+pub use xlsx_parse::{ChartMetadata, ChartSeriesInfo};
+
 pub use xlsx_calc::set_progress_hook;
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{

@@ -537,6 +537,7 @@ impl SnapshotGraphBuilder {
                         self.retired.pop_front();
                         return Ok((false, 1, bytes));
                     }
+                    self.graph.computed_with_currency_of(model);
                     self.phase = 8;
                 }
                 _ => return Ok((true, 0, 0)),

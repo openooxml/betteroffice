@@ -1471,6 +1471,11 @@ impl crate::column_balancing::ColumnBalancePaginator for Paginator {
             .iter()
             .any(|band| band.top < bottom && band.bottom > top)
     }
+
+    fn deferred_spacing(&mut self) -> f64 {
+        let idx = self.get_current();
+        self.states[idx].deferred_spacing
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { dateSchema } from './tool-input';
 
 const ref = z.string().min(1).max(128);
 const text = z.string().max(16000);
@@ -19,17 +20,18 @@ export const docxEditSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('format_text'), match: ref.describe('Match ID from office_grep.'), bold: mark, italic: mark, underline: mark }).strict(),
   z.object({
     op: z.literal('add_comment'), match: ref.describe('Match ID from office_grep.'), author: z.string().min(1).max(200),
-    text: text.min(1).describe('Plain text; each line becomes a comment paragraph.'), date: z.string().datetime().optional().describe('ISO date; defaults to now.'),
+    text: text.min(1).describe('Plain text; each line becomes a comment paragraph.'), date: dateSchema.optional().describe('ISO timestamp or YYYY-MM-DD (midnight UTC); defaults to now.'),
   }).strict(),
   z.object({
     op: z.literal('reply_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'."), author: z.string().min(1).max(200),
-    text: text.min(1), date: z.string().datetime().optional(),
+    text: text.min(1), date: dateSchema.optional(),
   }).strict(),
   z.object({ op: z.literal('resolve_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'."), done: z.boolean().optional().describe('Defaults to true; false reopens the thread.') }).strict(),
   z.object({ op: z.literal('insert_paragraphs'), after: ref, paragraphs: z.array(z.object({ text, style: style.optional() }).strict()).min(1).max(100), runFormat: z.enum(['style', 'anchor']).optional().describe('Text formatting: style (default), or anchor first plain run; incompatible with list.'), list: z.enum(['continue']).optional().describe('continue: after a list item, the new paragraphs join its list at its level with its style and paragraph formatting.') }).strict(),
   z.object({ op: z.literal('delete_paragraph'), paragraph: ref }).strict(),
   z.object({ op: z.literal('insert_table_row'), row: ref.describe('Ref of any paragraph in the anchor row.'), position: z.enum(['before', 'after']), cells: z.array(text).min(1).max(64).describe('One text per table column.') }).strict(),
   z.object({ op: z.literal('delete_table_row'), row: ref.describe('Ref of any paragraph in the row.') }).strict(),
+  z.object({ op: z.literal('merge_cells'), from: ref.describe('Ref of any paragraph in one corner cell.'), to: ref.describe('Ref of any paragraph in the opposite corner cell of the same table.') }).strict(),
 ]).superRefine((edit, context) => {
   if (edit.op === 'insert_section_break' && Number(edit.before !== undefined) + Number(edit.after !== undefined) !== 1) context.addIssue({ code: 'custom', message: 'Supply exactly one before or after paragraph ref.' });
   if (edit.op === 'set_section' && edit.orientation === undefined && edit.pageWidth === undefined && edit.pageHeight === undefined && !Object.keys(edit.margins ?? {}).length) context.addIssue({ code: 'custom', message: 'Supply at least one section property.' });
@@ -52,4 +54,6 @@ export interface DocxEditOutcome {
   done?: boolean;
   refs?: Array<string | null>;
   deletedTable?: boolean;
+  rowSpan?: number;
+  colSpan?: number;
 }

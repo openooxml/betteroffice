@@ -7,6 +7,9 @@ struct CommandHost<'a> {
     request: String,
     extras: String,
     retained: HashMap<u64, crate::frame_delta::TestFramePage>,
+    /// The client id and package `engine` was seeded from, which cold
+    /// sessions seed from too.
+    seed: Option<(u64, Vec<u8>)>,
 }
 
 impl<'a> CommandHost<'a> {
@@ -31,7 +34,15 @@ impl<'a> CommandHost<'a> {
             request,
             extras,
             retained,
+            seed: None,
         }
+    }
+
+    /// Checks against cold sessions seeded from `bytes` under `client_id`, the
+    /// package and id `engine` was seeded from.
+    fn seeded(mut self, client_id: u64, bytes: Vec<u8>) -> Self {
+        self.seed = Some((client_id, bytes));
+        self
     }
 
     fn insert(&mut self, offset: u32, text: &str) {
@@ -104,11 +115,18 @@ impl<'a> CommandHost<'a> {
             .engine
             .build_display_list_frame(&self.extras, epoch)
             .unwrap();
-        assert_returned_frame_matches_cold(self.engine, &self.request, &frame, &mut self.retained);
-        let cold = EngineSession::new(9712);
-        cold.doc()
-            .apply_update_v1(&self.engine.doc().encode_state_as_update_v1())
-            .unwrap();
+        let seed = self
+            .seed
+            .as_ref()
+            .map(|(client_id, bytes)| (*client_id, bytes.as_slice()));
+        assert_returned_frame_matches_seeded_cold(
+            self.engine,
+            &self.request,
+            &frame,
+            &mut self.retained,
+            seed,
+        );
+        let cold = cold_session(self.engine, 9712, seed);
         cold.layout_regions_for_trigger(&self.request, None, RelayoutTrigger::Open)
             .unwrap();
         assert_eq!(
@@ -356,6 +374,19 @@ const ANCHORED_SHAPE: &str = r#"<w:r><w:drawing><wp:anchor simplePos="0" relativ
 /// and the `objects` named: "table", "image" (inline), "shape" (inline) or
 /// "anchored" (a floating shape).
 fn objects_engine(client_id: u64, objects: &[&str]) -> EngineSession {
+    seeded_engine(client_id, &objects_package(objects))
+}
+
+/// A session seeded from `bytes`, as a host opens it.
+fn seeded_engine(client_id: u64, bytes: &[u8]) -> EngineSession {
+    let engine = EngineSession::new(client_id);
+    crate::seed_from_docx(engine.doc(), bytes).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    engine
+}
+
+/// The package of [`objects_engine`].
+fn objects_package(objects: &[&str]) -> Vec<u8> {
     use super::lowering_fixture::{Package, image, para, run};
     let cell = |content: String| {
         format!(r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{content}</w:tc>"#)
@@ -406,13 +437,9 @@ fn objects_engine(client_id: u64, objects: &[&str]) -> EngineSession {
         }
         body += &para(&id(6), &run("A closing paragraph."));
     }
-    let bytes = Package::new(&body)
+    Package::new(&body)
         .rel("rIdImage", "image", "media/image1.png")
-        .bytes();
-    let engine = EngineSession::new(client_id);
-    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
-    engine.set_relayout_trigger(RelayoutTrigger::Open);
-    engine
+        .bytes()
 }
 
 #[test]
@@ -701,4 +728,547 @@ fn retained_pages_of_rich_runs_lay_out_as_a_full_recompute_does() {
         assert!(work.paginated_pages <= 2, "{label}: {work:?} of {pages}");
         host.assert_matches_cold(label);
     }
+}
+
+/// [`small_page_request`] as the worker sends it for a document whose only
+/// section is its final one: the final section listed twice.
+/// How many pages the retained layout holds.
+fn page_count(engine: &EngineSession) -> usize {
+    engine
+        .pagination
+        .borrow()
+        .layout
+        .as_ref()
+        .map_or(0, |layout| layout.pages.len())
+}
+
+/// Runs `edit` and checks it against a cold full pass. Returns whether the
+/// edit stayed off the full region pass, asserting that it did when the page
+/// count held: a page count change falls back by design, as the page number
+/// fields of headers and footers may change width.
+fn stays_resident<'a>(
+    host: &mut CommandHost<'a>,
+    label: &str,
+    edit: &mut dyn FnMut(&mut CommandHost<'a>),
+) -> bool {
+    let pages = page_count(host.engine);
+    REGION_FULL_PASSES.with(|count| count.set(0));
+    edit(host);
+    let full = REGION_FULL_PASSES.with(Cell::get);
+    if page_count(host.engine) == pages {
+        assert_eq!(full, 0, "{label}: the edit ran the full region pass");
+    }
+    host.assert_matches_cold(label);
+    full == 0
+}
+
+fn repeated_final_section_request(font: u32) -> String {
+    let mut request: serde_json::Value = serde_json::from_str(&small_page_request(font)).unwrap();
+    let section = request["regions"]["sections"][0].clone();
+    request["regions"]["sections"] = json!([section.clone(), section]);
+    request.to_string()
+}
+
+#[test]
+fn keystrokes_with_a_repeated_final_section_stay_resident() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for (label, engine, seed, paragraph) in [
+        ("paragraphs", paragraphs_engine(9724, 40), None, 5),
+        (
+            "tables",
+            objects_engine(9725, &["table"]),
+            Some((9725, objects_package(&["table"]))),
+            8,
+        ),
+    ] {
+        let mut host = CommandHost::open_with(&engine, repeated_final_section_request(font));
+        if let Some((client_id, bytes)) = seed {
+            host = host.seeded(client_id, bytes);
+        }
+        let end = paragraph_end(&engine, paragraph);
+        for key in 0..4 {
+            let label = format!("{label}: key {key}");
+            REGION_FULL_PASSES.with(|count| count.set(0));
+            let work = keystroke_work(&engine, || {
+                assert!(
+                    host.command("body", end + key, end + key, Some("x")),
+                    "{label}"
+                );
+            });
+            assert_eq!(REGION_FULL_PASSES.with(Cell::get), 0, "{label}: {work:?}");
+            assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+            assert_eq!(work.full_paginations, 0, "{label}: {work:?}");
+            host.assert_matches_cold(&label);
+        }
+        let work = keystroke_work(&engine, || {
+            assert!(
+                host.command("body", end + 3, end + 4, None),
+                "{label}: backspace"
+            );
+        });
+        assert_eq!(work.full_lowerings, 0, "{label}: backspace {work:?}");
+        assert_eq!(work.full_paginations, 0, "{label}: backspace {work:?}");
+        host.assert_matches_cold(&format!("{label}: backspace"));
+    }
+}
+
+/// Filler paragraphs over several small pages around a table and a bookmarked
+/// paragraph. The local patch declines edits in either, so typing there
+/// re-lowers the whole body.
+fn relowering_package() -> Vec<u8> {
+    use super::lowering_fixture::{Package, para, run};
+    let filler = |from: u32, count: u32| -> String {
+        (from..from + count)
+            .map(|index| {
+                para(
+                    &format!("{:08X}", 0x800 + index),
+                    &run(&format!(
+                        "Filler paragraph {index} with enough words to wrap over two lines."
+                    )),
+                )
+            })
+            .collect()
+    };
+    let cell = |id: &str, text: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            para(id, &run(text))
+        )
+    };
+    let body = format!(
+        r#"{}<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl>{}{}{}"#,
+        filler(0, 8),
+        cell("00000901", "Left cell"),
+        cell("00000902", "A right cell long enough to wrap"),
+        filler(8, 8),
+        para(
+            "00000903",
+            &format!(
+                r#"<w:bookmarkStart w:id="0" w:name="mark"/>{}<w:bookmarkEnd w:id="0"/>"#,
+                run("A bookmarked paragraph")
+            )
+        ),
+        filler(16, 8),
+    );
+    Package::new(&body).bytes()
+}
+
+#[test]
+fn typed_edits_that_re_lower_the_body_keep_the_full_pass() {
+    use yrs::{ReadTxn, Transact};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let bytes = relowering_package();
+    let engine = seeded_engine(9726, &bytes);
+    let mut host =
+        CommandHost::open_with(&engine, repeated_final_section_request(font)).seeded(9726, bytes);
+    let cell = {
+        let txn = engine.doc().yrs_doc().transact();
+        let stories = txn.get_map(crate::STORIES).unwrap();
+        let mut cells: Vec<String> = crate::live_stories(&stories, &txn)
+            .map(|(id, _)| id.to_string())
+            .filter(|id| id.starts_with("body:t"))
+            .collect();
+        cells.sort();
+        cells.remove(0)
+    };
+    let bookmarked = paragraph_start(&engine, "00000903") + 3;
+    for (label, story, at) in [
+        ("table cell", cell.as_str(), 4),
+        ("bookmarked paragraph", "body", bookmarked),
+    ] {
+        for key in 0..3 {
+            let label = format!("{label}: key {key}");
+            REGION_FULL_PASSES.with(|count| count.set(0));
+            let work = keystroke_work(&engine, || {
+                assert!(
+                    host.command(story, at + key, at + key, Some("x")),
+                    "{label}"
+                );
+            });
+            assert!(work.full_lowerings > 0, "{label}: {work:?}");
+            assert_eq!(
+                REGION_FULL_PASSES.with(Cell::get),
+                1,
+                "{label}: the keystroke left the full pass, {work:?}"
+            );
+            host.assert_matches_cold(&label);
+        }
+    }
+}
+
+#[test]
+fn paragraph_breaks_stay_on_the_region_fast_path() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for (label, engine, request, seed, paragraph) in [
+        (
+            "paragraphs",
+            paragraphs_engine(9727, 40),
+            small_page_request(font),
+            None,
+            5,
+        ),
+        (
+            "paragraphs, repeated final section",
+            paragraphs_engine(9728, 40),
+            repeated_final_section_request(font),
+            None,
+            5,
+        ),
+        (
+            "after a table",
+            objects_engine(9729, &["table"]),
+            repeated_final_section_request(font),
+            Some((9729, objects_package(&["table"]))),
+            8,
+        ),
+    ] {
+        let mut host = CommandHost::open_with(&engine, request);
+        if let Some((client_id, bytes)) = seed {
+            host = host.seeded(client_id, bytes);
+        }
+        let mut resident_splits = 0;
+        let end = paragraph_end(&engine, paragraph);
+        for (name, at) in [("middle", end - 6), ("end", end), ("start", end - 6 - 20)] {
+            let at = at.max(paragraph_end(&engine, paragraph - 1) + 1);
+            let split = stays_resident(
+                &mut host,
+                &format!("{label}: enter at the {name}"),
+                &mut |host| {
+                    engine
+                        .split_resident_paragraph(crate::Position::new("body", at))
+                        .unwrap();
+                    host.relayout(Some("body"));
+                },
+            );
+            resident_splits += usize::from(split);
+            let typed = format!("{label}: typing after enter at the {name}");
+            let work = keystroke_work(&engine, || {
+                assert!(host.command("body", at + 1, at + 1, Some("y")), "{typed}");
+            });
+            assert_eq!(work.full_lowerings, 0, "{typed}: {work:?}");
+            host.assert_matches_cold(&typed);
+        }
+        assert!(resident_splits > 0, "{label}: no split stayed resident");
+    }
+}
+
+/// Filler over several small pages around a numbered list and a table,
+/// optionally with a section break after the list.
+fn structured_engine(client_id: u64, section_break: bool) -> (EngineSession, Vec<u8>) {
+    use super::lowering_fixture::{NS, Package, para, run};
+    let filler = |from: u32, count: u32| -> String {
+        (from..from + count)
+            .map(|index| {
+                para(
+                    &format!("{:08X}", 0xA00 + index),
+                    &run(&format!(
+                        "Filler paragraph {index} with enough words to wrap over two lines."
+                    )),
+                )
+            })
+            .collect()
+    };
+    let item = |index: u32| {
+        format!(
+            r#"<w:p w14:paraId="{:08X}"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>{}</w:p>"#,
+            0xB00 + index,
+            run(&format!("List item {index} with a few words"))
+        )
+    };
+    let break_after_list = if section_break {
+        r#"<w:p w14:paraId="00000C01"><w:pPr><w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:pPr></w:p>"#
+    } else {
+        ""
+    };
+    let body = format!(
+        r#"{}{}{}{}{}<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc><w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>{}"#,
+        filler(0, 6),
+        item(0),
+        item(1),
+        item(2),
+        break_after_list,
+        para("00000D01", &run("Left cell text")),
+        para("00000D02", &run("A right cell long enough to wrap")),
+        filler(6, 10),
+    );
+    let numbering = format!(
+        r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let bytes = Package::new(&body).numbering(&numbering).bytes();
+    let engine = EngineSession::new(client_id);
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+    engine.set_relayout_trigger(RelayoutTrigger::Open);
+    (engine, bytes)
+}
+
+#[test]
+fn paragraph_breaks_in_lists_cells_and_before_section_breaks_lay_out_as_a_full_recompute_does() {
+    use yrs::{ReadTxn, Transact};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for section_break in [false, true] {
+        let (engine, bytes) = structured_engine(9730 + u64::from(section_break), section_break);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        let client_id = 9730 + u64::from(section_break);
+        let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+        let cell = {
+            let txn = engine.doc().yrs_doc().transact();
+            let stories = txn.get_map(crate::STORIES).unwrap();
+            let mut cells: Vec<String> = crate::live_stories(&stories, &txn)
+                .map(|(id, _)| id.to_string())
+                .filter(|id| id.starts_with("body:t"))
+                .collect();
+            cells.sort();
+            cells.remove(0)
+        };
+        let span = |id: &str| {
+            engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .para_span(id)
+                .unwrap()
+        };
+        let mut splits = vec![
+            ("a list item", "body"),
+            ("the end of the last list item", "body"),
+            ("a table cell", cell.as_str()),
+        ];
+        if section_break {
+            splits.push(("the section mark paragraph", "body"));
+        }
+        for (label, story) in splits {
+            let at = match label {
+                "a list item" => span("00000B01").0 + 4,
+                "the end of the last list item" => span("00000B02").1,
+                "a table cell" => 4,
+                _ => span("00000C01").0,
+            };
+            let label = format!("{label}, section break {section_break}");
+            let mut split = |host: &mut CommandHost<'_>| {
+                engine
+                    .split_resident_paragraph(crate::Position::new(story, at))
+                    .unwrap();
+                host.relayout(Some(story));
+            };
+            if section_break || story != "body" {
+                split(&mut host);
+                host.assert_matches_cold(&label);
+            } else {
+                stays_resident(&mut host, &label, &mut split);
+            }
+            host.command(story, at + 1, at + 1, Some("z"));
+            host.assert_matches_cold(&format!("{label}: typing after it"));
+        }
+    }
+}
+
+#[test]
+fn undone_repeated_and_remote_paragraph_breaks_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let engine = paragraphs_engine(9733, 40);
+    let mut host = CommandHost::open_with(&engine, repeated_final_section_request(font));
+    let mut undo = engine.doc().undo_manager();
+    let split = |at: u32| {
+        engine
+            .split_resident_paragraph(crate::Position::new("body", at))
+            .unwrap();
+    };
+
+    undo.add_undo_barrier();
+    let at = paragraph_end(&engine, 6) - 8;
+    split(at);
+    host.relayout(Some("body"));
+    host.assert_matches_cold("enter");
+    assert!(undo.undo());
+    host.relayout(None);
+    host.assert_matches_cold("undo of enter");
+    assert!(undo.redo());
+    host.relayout(None);
+    host.assert_matches_cold("redo of enter");
+
+    undo.add_undo_barrier();
+    let at = paragraph_end(&engine, 9) - 5;
+    split(at);
+    host.relayout(Some("body"));
+    host.command("body", at + 1, at + 1, Some("q"));
+    host.command("body", at + 2, at + 2, Some("r"));
+    host.assert_matches_cold("enter and typing");
+    assert!(undo.undo());
+    host.relayout(None);
+    host.assert_matches_cold("undo of enter and typing");
+    assert!(undo.redo());
+    host.relayout(None);
+    host.assert_matches_cold("redo of enter and typing");
+
+    for key in 0..5 {
+        let at = paragraph_end(&engine, 12) - 3;
+        stays_resident(&mut host, &format!("enter {key} of five"), &mut |host| {
+            split(at);
+            host.relayout(Some("body"));
+        });
+    }
+    let at = paragraph_end(&engine, 20) - 3;
+    for _ in 0..5 {
+        split(at);
+    }
+    host.relayout(Some("body"));
+    host.assert_matches_cold("five splits laid out once");
+
+    let remote = EngineSession::new(9734);
+    remote
+        .doc()
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    let at = paragraph_end(&remote, 25) - 4;
+    remote
+        .doc()
+        .split_paragraph(
+            &crate::EditCtx::local("", ""),
+            crate::Position::new("body", at),
+            None,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .apply_update_v1(&remote.doc().encode_state_as_update_v1())
+        .unwrap();
+    host.relayout(None);
+    host.assert_matches_cold("a remote paragraph break");
+    let at = paragraph_end(&remote, 30) - 4;
+    remote
+        .doc()
+        .split_paragraph(
+            &crate::EditCtx::local("", ""),
+            crate::Position::new("body", at),
+            None,
+        )
+        .unwrap();
+    let at = paragraph_end(&engine, 3) - 2;
+    split(at);
+    engine
+        .doc()
+        .apply_update_v1(&remote.doc().encode_state_as_update_v1())
+        .unwrap();
+    host.relayout(Some("body"));
+    host.assert_matches_cold("a local paragraph break beside a remote update");
+}
+
+/// Filler paragraphs keyed from `base`, each long enough to wrap.
+fn filler_paragraphs(base: u32, count: u32) -> String {
+    use super::lowering_fixture::{para, run};
+    (0..count)
+        .map(|index| {
+            para(
+                &format!("{:08X}", base + index),
+                &run(&format!(
+                    "Filler paragraph {index} with enough words to wrap over two lines."
+                )),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn enter_before_a_body_section_break_lays_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::{Package, para, run};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let body = format!(
+        r#"{}{}{}"#,
+        para(
+            "00001101",
+            &format!(
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr>{}"#,
+                run("Section 1")
+            )
+        ),
+        para("00001102", &run("Section 2")),
+        filler_paragraphs(0x1200, 12),
+    );
+    let bytes = Package::new(&body).bytes();
+    let engine = seeded_engine(9742, &bytes);
+    let mut host = CommandHost::open_with(&engine, small_page_request(font)).seeded(9742, bytes);
+    let end = engine
+        .doc()
+        .paragraph_index("body")
+        .unwrap()
+        .para_span("00001101")
+        .unwrap()
+        .1;
+    engine
+        .split_resident_paragraph(crate::Position::new("body", end))
+        .unwrap();
+    host.relayout(Some("body"));
+    host.assert_matches_cold("enter at the end of the paragraph holding a section break");
+    host.command("body", end + 1, end + 1, Some("x"));
+    host.assert_matches_cold("typing into the paragraph holding the section break");
+}
+
+#[test]
+fn edits_beside_unequal_columns_lay_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::Package;
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let body = format!(
+        r#"{}<w:sectPr><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/><w:cols w:num="2" w:equalWidth="0"><w:col w:w="3600" w:space="300"/><w:col w:w="1860"/></w:cols></w:sectPr>"#,
+        filler_paragraphs(0x1300, 30),
+    );
+    let bytes = Package::new(&body).bytes();
+    let engine = seeded_engine(9743, &bytes);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9743, bytes);
+    for paragraph in [4, 9] {
+        let end = paragraph_end(&engine, paragraph);
+        host.command("body", end - 3, end - 3, Some("x"));
+        host.assert_matches_cold(&format!("typing in paragraph {paragraph}"));
+        engine
+            .split_resident_paragraph(crate::Position::new("body", end - 8))
+            .unwrap();
+        host.relayout(Some("body"));
+        host.assert_matches_cold(&format!("enter in paragraph {paragraph}"));
+    }
+}
+
+#[test]
+fn edits_beside_a_shape_placed_by_page_side_lay_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::{Package, para, run};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    // Offset from the outside margin into the body, so it has no zone until
+    // the page side places it.
+    let shape = INSIDE_SHAPE.replace(
+        r#"<wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH>"#,
+        r#"<wp:positionH relativeFrom="outsideMargin"><wp:posOffset>-3175000</wp:posOffset></wp:positionH>"#,
+    );
+    assert_ne!(shape, INSIDE_SHAPE);
+    let body = format!(
+        r#"{}{}<w:sectPr><w:pgSz w:w="5760" w:h="5760"/><w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="200" w:footer="200" w:gutter="0"/></w:sectPr>"#,
+        para("00001401", &format!("{}{shape}", run("Anchor "))),
+        filler_paragraphs(0x1410, 12),
+    );
+    let bytes = Package::new(&body).bytes();
+    let engine = seeded_engine(9744, &bytes);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9744, bytes);
+    let end = paragraph_end(&engine, 1);
+    engine
+        .split_resident_paragraph(crate::Position::new("body", end - 20))
+        .unwrap();
+    host.relayout(Some("body"));
+    host.assert_matches_cold("enter beside the shape");
+    host.command("body", end - 25, end - 25, Some("x"));
+    host.assert_matches_cold("typing beside the shape");
 }

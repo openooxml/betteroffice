@@ -1,11 +1,11 @@
 import { extractTrackedChangesFromYrs, type YrsSidebarProjection } from '@betteroffice/docx/layout/render';
-import type { DocxProposalState, ResidentReviewSnapshot, YrsLoc } from '@betteroffice/docx/yrs';
+import type { DocxProposalState, DocxReviewSnapshot, YrsLoc } from '@betteroffice/docx/yrs';
 import type { ReviewSidebarItem } from '../../sidebar/trackedChanges';
 import type { DocxPluginGeometry } from '../../../plugins/types';
 import { TrackedChangeCard } from '../../sidebar/TrackedChangeCard';
 import type { createPeerlessShellController } from './shellController';
 
-export function workerProposalSidebarItems(controller: ReturnType<typeof createPeerlessShellController>, review: ResidentReviewSnapshot | null,
+export function workerProposalSidebarItems(controller: ReturnType<typeof createPeerlessShellController>, review: DocxReviewSnapshot | null,
   geometry: DocxPluginGeometry | null, enabled: boolean, report?: (error: Error) => void): ReviewSidebarItem[] {
   if (!enabled || !review) return [];
   return review.proposals.proposals.flatMap(proposal => {

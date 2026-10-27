@@ -1,14 +1,15 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseDocx } from '../docx/parser';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { preloadEditWasm } from './wasm/index';
 import { createYrsSession } from './index';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
+import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './residentSourceWorkerClient';
 import { ResidentEngineWorkerClient as DefaultWorkerClient } from './residentEngineWorkerClient';
-import type { DocxCommandPayloads, ResidentCommandInitRequest } from './residentCommandProtocol';
+import type { DocxCommandPayloads, DocxCommandInitRequest } from './residentCommandProtocol';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 
 const TIMEOUT = 20_000;
@@ -40,7 +41,7 @@ function source(paragraphs = 120, pageTotal = false): Uint8Array {
   ])));
 }
 
-function init(): ResidentCommandInitRequest {
+function init(): DocxCommandInitRequest {
   return {
     session: 'source-worker', incarnation: 1, epoch: 1, readOnly: false,
     fonts: [new Uint8Array(readFileSync(resolve(process.cwd(), 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')))],
@@ -147,6 +148,33 @@ test('prewarm loads the worker without creating a document session', async () =>
   } finally {
     client.destroy();
   }
+}, TIMEOUT);
+
+test('a parsed document lists the same toolbar styles and fonts as its source bytes', async () => {
+  const w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const office = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${office}.styles+xml"/><Override PartName="/word/fontTable.xml" ContentType="${office}.fontTable+xml"/><Override PartName="/word/header1.xml" ContentType="${office}.header+xml"/></Types>`)],
+    ['_rels/.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${r}/officeDocument" Target="word/document.xml"/></Relationships>`)],
+    ['word/_rels/document.xml.rels', toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="${r}/styles" Target="styles.xml"/><Relationship Id="rIdFonts" Type="${r}/fontTable" Target="fontTable.xml"/><Relationship Id="rIdHeader" Type="${r}/header" Target="header1.xml"/></Relationships>`)],
+    ['word/styles.xml', toBytes(`<w:styles ${w}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:uiPriority w:val="0"/></w:style><w:style w:type="paragraph" w:customStyle="1" w:styleId="MyCustom"><w:name w:val="My Custom"/><w:basedOn w:val="Normal"/><w:uiPriority w:val="1"/><w:qFormat/><w:rPr><w:rFonts w:ascii="Style Face" w:hAnsi="Style Face"/><w:b/></w:rPr></w:style></w:styles>`)],
+    ['word/fontTable.xml', toBytes(`<w:fonts ${w}><w:font w:name="Table Face"><w:altName w:val="Table Alias"/></w:font></w:fonts>`)],
+    ['word/header1.xml', toBytes(`<w:hdr ${w}><w:p><w:r><w:rPr><w:rFonts w:ascii="Header Face"/></w:rPr><w:t>Header</w:t></w:r></w:p></w:hdr>`)],
+    ['word/document.xml', toBytes(`<w:document ${w} xmlns:r="${r}"><w:body><w:p><w:pPr><w:pStyle w:val="MyCustom"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Run Face" w:eastAsia="East Face"/></w:rPr><w:t>Seed</w:t></w:r><w:r><w:sym w:font="Symbol Face" w:char="F0FC"/></w:r></w:p><w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:pPr></w:p><w:p><w:r><w:t>Second section</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`)],
+  ])));
+  const metadata = async (open: { bytes: Uint8Array } | { document: Awaited<ReturnType<typeof parseDocx>> }) => {
+    const client = new ResidentEngineWorkerClient(startWorker());
+    try {
+      await client.openSource(open);
+      return (await client.documentRead({ kind: 'toolbarMetadata' })).value;
+    } finally { client.destroy(); }
+  };
+  const fromBytes = await metadata({ bytes });
+  expect(fromBytes.styles.map(style => style.styleId)).toContain('MyCustom');
+  expect(fromBytes.fontFamilies).toEqual(expect.arrayContaining(['Table Face', 'Table Alias', 'Style Face', 'Run Face', 'East Face', 'Header Face', 'Symbol Face']));
+  expect(await metadata({ document: await parseDocx(bytes.slice().buffer, { preloadFonts: false }) })).toEqual(fromBytes);
+  expect(await metadata({ document: await parsed(bytes) })).toEqual(fromBytes);
 }, TIMEOUT);
 
 for (const section of ['first', '0']) {
