@@ -92,6 +92,61 @@ describe("FileJournal", () => {
     });
   }
 
+  test("an apply time repair is journaled after its client update and replays cleanly", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness({ journalDir: dir, format: "docx" });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+    const session = [...h.registry.list()][0]!;
+    const source = sourceBytes("docx");
+    const peer = await openTestClient(a.joinPayload, source, 95001);
+    const author = await openTestClient(a.joinPayload, source, 95011);
+    const emitted: Uint8Array[] = [];
+    session.on("replicaUpdate", (e) => emitted.push(e.update));
+    try {
+      peer.splitFirstParagraph();
+      session.applyUpdate(a.user.id, peer.encodeStateAsUpdate(session.replica!.encodeStateVector()));
+      await session.requestSave(a.user.id);
+      for (const update of emitted) peer.applyUpdate(update);
+      const savedId = peer.secondParagraphOoxmlId();
+      expect(savedId).toBeTruthy();
+      peer.deleteSplitSecondHalf();
+      session.applyUpdate(a.user.id, peer.encodeStateAsUpdate(session.replica!.encodeStateVector()));
+
+      author.insertPilcrowClaiming(savedId!);
+      const authorUpdate = author.encodeStateAsUpdate(session.replica!.encodeStateVector());
+      emitted.length = 0;
+      const result = session.applyUpdate(a.user.id, authorUpdate);
+      expect(result.accepted).toBe(true);
+      if (!result.accepted) throw new Error("author update rejected");
+      expect(result.followUps.length).toBeGreaterThan(0);
+      expect(emitted.length).toBe(0);
+
+      const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC)).read();
+      const authorIndex = journal!.updates.findIndex((u) => Buffer.from(u).equals(Buffer.from(authorUpdate)));
+      expect(authorIndex).toBeGreaterThanOrEqual(0);
+      for (const followUp of result.followUps) {
+        const followIndex = journal!.updates.findIndex((u) => Buffer.from(u).equals(Buffer.from(followUp)));
+        expect(followIndex).toBeGreaterThan(authorIndex);
+      }
+
+      session.abandon();
+      const registry2 = restartRegistry(h, dir);
+      const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      const session2 = [...registry2.list()][0]!;
+      try {
+        expect(session2.replayStats?.rejected).toBe(0);
+        expect(session2.dirty).toBe(true);
+      } finally {
+        await session2.leave(b.user.id).catch(() => {});
+      }
+    } finally {
+      peer.destroy();
+      author.destroy();
+    }
+  });
+
   test("a viewer first after a crash does not replay or delete the journal", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const h = makeHarness({ journalDir: dir });

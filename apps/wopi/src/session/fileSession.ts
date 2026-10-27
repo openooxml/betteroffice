@@ -163,6 +163,7 @@ export class FileSession {
   #openedClientId: number | null = null;
   #openedInitialState: Uint8Array | null = null;
   #replayStats: { accepted: number; rejected: number } | null = null;
+  #collectingFollowUps: Uint8Array[] | null = null;
 
   constructor(deps: FileSessionDeps) {
     this.#deps = deps;
@@ -402,6 +403,10 @@ export class FileSession {
   #attachReplica(replica: ServerReplica): void {
     this.#replica = replica;
     this.#offLocalUpdate = replica.onLocalUpdate((update) => {
+      if (this.#collectingFollowUps !== null) {
+        this.#collectingFollowUps.push(update);
+        return;
+      }
       try {
         if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
       } catch {
@@ -674,8 +679,8 @@ export class FileSession {
     this.#syncLeader();
   }
 
-  /** Applies one update from a connected writer. */
-  applyUpdate(userId: string, update: Uint8Array): { accepted: true } | { accepted: false; reason: string } {
+  /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
+  applyUpdate(userId: string, update: Uint8Array): { accepted: true; followUps: Uint8Array[] } | { accepted: false; reason: string } {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (this.#state !== "open" || !this.#replica) return { accepted: false, reason: "session is not open" };
@@ -683,20 +688,30 @@ export class FileSession {
     if (!user.canWrite || this.#viewOnlyReason !== null) return { accepted: false, reason: "user is read only" };
     if (!user.isTokenValidAt(this.#now())) return { accepted: false, reason: "token expired" };
     const before = this.#replica.version;
-    const result = this.#replica.applyUpdate(update);
+    const followUps: Uint8Array[] = [];
+    this.#collectingFollowUps = followUps;
+    let result: ReturnType<ServerReplica["applyUpdate"]>;
+    try {
+      result = this.#replica.applyUpdate(update);
+    } finally {
+      this.#collectingFollowUps = null;
+    }
     if (!result.accepted) return result;
     user.lastSeen = this.#now();
-    if (this.#replica.version !== before) {
+    if (this.#replica.version !== before || followUps.length > 0) {
       if (this.#firstDirtyAt === null) this.#firstDirtyAt = this.#now();
       this.#lastUpdateAt = this.#now();
       try {
-        if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
+        if (this.#journalActive) {
+          this.#deps.journal?.appendUpdate(update);
+          for (const followUp of followUps) this.#deps.journal?.appendUpdate(followUp);
+        }
       } catch {
         this.#log("warn", "journal append failed");
       }
       this.#scheduleAutosave();
     }
-    return result;
+    return { accepted: true, followUps };
   }
 
   #scheduleAutosave(): void {

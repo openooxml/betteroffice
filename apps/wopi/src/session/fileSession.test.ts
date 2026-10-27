@@ -855,7 +855,7 @@ describe("replica api adaptation", () => {
       client.edit("autosave-docx ", 0);
       const replica = session.replica!;
       const result = session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector()));
-      expect(result).toEqual({ accepted: true });
+      expect(result).toEqual({ accepted: true, followUps: [] });
       expect(session.replica!.version).toBe(1);
       expect(session.dirty).toBe(true);
       await h.clock.advance(30000);
@@ -919,11 +919,11 @@ describe("replica api adaptation", () => {
       expect(session.applyUpdate(a.user.id, second)).toEqual({ accepted: false, reason: "causalGap" });
       expect(session.dirty).toBe(false);
       expect(session.replica!.version).toBe(0);
-      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true });
+      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true, followUps: [] });
       expect(session.dirty).toBe(true);
       await session.requestSave(a.user.id);
       expect(session.dirty).toBe(false);
-      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true });
+      expect(session.applyUpdate(a.user.id, first)).toEqual({ accepted: true, followUps: [] });
       expect(session.dirty).toBe(false);
     } finally {
       client.destroy();
