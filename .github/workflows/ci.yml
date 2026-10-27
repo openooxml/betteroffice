@@ -274,6 +274,12 @@ jobs:
           cargo fmt --check --all --manifest-path fuzz/Cargo.toml
           cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
+      - name: Lint the standalone native viewer
+        if: steps.ws.outputs.present == 'true'
+        run: |
+          cargo fmt --check --manifest-path apps/native-viewer/Cargo.toml
+          cargo clippy --locked --manifest-path apps/native-viewer/Cargo.toml --all-targets -- -D warnings
+
       - name: Test
         if: steps.ws.outputs.present == 'true'
         run: cargo test
