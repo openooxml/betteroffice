@@ -1536,6 +1536,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         revision_hidden: env.revision_hidden(attributes),
                         formatting: formatting.clone(),
                         inline_text_box: text_box,
+                        from_opaque: false,
                     });
                 }
                 story_index += 1;
@@ -1561,6 +1562,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         revision_hidden: env.revision_hidden(attributes),
                         formatting: lower_run_formatting(attributes, env),
                         inline_text_box: false,
+                        from_opaque: true,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1586,8 +1588,10 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(chart, txn, "_kind").as_deref() == Some("chart") =>
             {
                 let pm_offset = paragraph_pm_units;
+                let values = shared_values(chart, txn);
+                let anchored = chart_drawing_anchored(&values);
                 let Some(block) = lower_chart_block(
-                    &shared_values(chart, txn),
+                    &values,
                     Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                     env,
                 ) else {
@@ -1602,9 +1606,10 @@ fn walk_story_chunks<T: ReadTxn>(
                     block: LayoutBlock::Chart(block),
                     hidden: mark_bool(attributes, "hidden") == Some(true),
                     revision_hidden: env.revision_hidden(attributes),
-                    anchored: false,
+                    anchored,
                     formatting: lower_run_formatting(attributes, env),
                     inline_text_box: false,
+                    from_opaque: false,
                 });
                 story_index += 1;
                 paragraph_pm_units += 1;
@@ -2768,6 +2773,22 @@ fn lower_shape_block<T: ReadTxn>(
     ))
 }
 
+/// Whether a chart drawing is anchored (floating): its chart object
+/// carries a position or a wrap, which an inline (`wp:inline`) chart
+/// never has. Anchored charts keep the block path, like anchored shapes.
+fn chart_drawing_anchored(values: &std::collections::HashMap<String, Any>) -> bool {
+    map_string(values, "chartJson")
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .is_some_and(|chart| {
+            chart.get("position").is_some_and(Value::is_object)
+                || chart
+                    .get("wrap")
+                    .and_then(|wrap| wrap.get("type"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|wrap_type| wrap_type != "inline")
+        })
+}
+
 fn lower_chart_block(
     values: &std::collections::HashMap<String, Any>,
     pm_start: Option<u64>,
@@ -3391,6 +3412,10 @@ struct DrawingMarker {
     /// typed shape, not a plain text shape and not an opaque (VML) text
     /// box, which keeps its block path.
     inline_text_box: bool,
+    /// The marker came from an opaque drawing: for an `AlternateContent`
+    /// drawing this is the fallback representation of the same drawing
+    /// a neighbouring typed shape or chart embed also lowers.
+    from_opaque: bool,
 }
 
 impl DrawingMarker {
@@ -3794,13 +3819,44 @@ fn inline_shared_drawings(
             return;
         }
     }
+    let mut converted: Vec<(u32, f64, f64)> = Vec::new();
     let mut kept = Vec::new();
     for drawing in drawings.drain(..) {
         if convertible(&drawing) {
+            let (width, height) = match &drawing.block {
+                LayoutBlock::Chart(chart) => (chart.width, chart.height),
+                LayoutBlock::Shape(shape) => (shape.width, shape.height),
+                _ => (0.0, 0.0),
+            };
+            converted.push((drawing.pm_offset, width, height));
             raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
         } else {
             kept.push(drawing);
         }
+    }
+    if !converted.is_empty() {
+        let twin = |pm_offset: u32, width: f64, height: f64| {
+            converted.iter().any(|(pm, w, h)| {
+                pm_offset + 1 == *pm && (width - w).abs() < 1.5 && (height - h).abs() < 1.5
+            })
+        };
+        kept.retain(|drawing| {
+            !(drawing.from_opaque
+                && drawing.anchored
+                && match &drawing.block {
+                    LayoutBlock::Shape(shape) => twin(drawing.pm_offset, shape.width, shape.height),
+                    _ => false,
+                })
+        });
+        raw_runs.retain(|run| {
+            let RawRunKind::Image(image) = &run.kind else {
+                return true;
+            };
+            !(image.inline_shape.is_none()
+                && image.inline_chart.is_none()
+                && !image.src.is_empty()
+                && twin(run.pm_start, image.width, image.height))
+        });
     }
     *drawings = kept;
     raw_runs.sort_by_key(|run| run.pm_start);

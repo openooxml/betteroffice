@@ -16,7 +16,9 @@ const NAMESPACES: &str = concat!(
     r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
     r#"xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" "#,
     r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#,
-    r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#
+    r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" "#,
+    r#"xmlns:v="urn:schemas-microsoft-com:vml" "#,
+    r#"xmlns:o="urn:schemas-microsoft-com:office:office""#
 );
 
 /// 5648400 x 3049200 EMU: 593 x 320 px at 96 dpi, the corpus pair's extent.
@@ -39,6 +41,13 @@ const CHART: &str = concat!(
     r#"</c:plotArea></c:chart></c:chartSpace>"#
 );
 
+/// The same chart in a floating (`wp:anchor`, wrapNone) drawing.
+fn anchored_chart_drawing() -> String {
+    format!(
+        r#"<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent {EXTENT}/><wp:effectExtent l="0" t="0" r="9525" b="18415"/><wp:wrapNone/><wp:docPr id="22" name="Chart 22"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    )
+}
+
 fn chart_drawing() -> String {
     format!(
         r#"<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent {EXTENT}/><wp:effectExtent l="0" t="0" r="9525" b="18415"/><wp:docPr id="22" name="Chart 22"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
@@ -57,8 +66,20 @@ fn text_box_drawing() -> String {
 /// An inline text box with extent attribute string `extent` (for example
 /// `cx="5943600" cy="3810000"`) holding `content` as its txbxContent.
 fn text_box_drawing_with(extent: &str, content: &str) -> String {
+    text_box_drawing_fb(extent, content, "<w:t>Fallback</w:t>")
+}
+
+/// The same text box with `fallback` as its AlternateContent fallback.
+fn text_box_drawing_fb(extent: &str, content: &str, fallback: &str) -> String {
     format!(
-        r#"<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent {extent}/><wp:effectExtent l="0" t="0" r="28575" b="18415"/><wp:docPr id="4" name="Text Box 4"/><wp:cNvGraphicFramePr><a:graphicFrameLocks/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"><a:spLocks noChangeArrowheads="1"/></wps:cNvSpPr><wps:spPr bwMode="auto"><a:xfrm><a:off x="0" y="0"/><a:ext cx="5648400" cy="3049200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback><w:t>Fallback</w:t></mc:Fallback></mc:AlternateContent>"#
+        r#"<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent {extent}/><wp:effectExtent l="0" t="0" r="28575" b="18415"/><wp:docPr id="4" name="Text Box 4"/><wp:cNvGraphicFramePr><a:graphicFrameLocks/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"><a:spLocks noChangeArrowheads="1"/></wps:cNvSpPr><wps:spPr bwMode="auto"><a:xfrm><a:off x="0" y="0"/><a:ext cx="5648400" cy="3049200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+    )
+}
+
+/// A VML fallback text box of `width` by `height` points holding `text`.
+fn vml_fallback(width: &str, height: &str, text: &str) -> String {
+    format!(
+        r#"<w:pict><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype><v:shape id="Text Box 10" type="#_x0000_t202" style="width:{width}pt;height:{height}pt;visibility:visible;mso-wrap-style:square;mso-position-horizontal:absolute;mso-position-horizontal-relative:char;mso-position-vertical:absolute;mso-position-vertical-relative:line;v-text-anchor:top"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="36"/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#
     )
 }
 
@@ -469,6 +490,102 @@ fn inline_chart_atoms_have_source_spans() {
     // map to the story positions after the first and second atoms.
     assert_eq!(map.span_at(2).map(|span| span.raw_start), Some(1));
     assert_eq!(map.span_at(3).map(|span| span.raw_start), Some(2));
+}
+
+fn chart_block_fragments(layout: &Value) -> Vec<&Value> {
+    layout["layout"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|page| page["fragments"].as_array().unwrap().iter())
+        .filter(|fragment| fragment["kind"] == "chart")
+        .collect()
+}
+
+#[test]
+fn anchored_charts_in_one_paragraph_keep_the_block_layout() {
+    let body = paragraph(
+        "20000004",
+        &format!(
+            "{}{}",
+            run(&anchored_chart_drawing()),
+            run(&anchored_chart_drawing())
+        ),
+    );
+    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78211);
+    assert_eq!(page_count(&layout), 1);
+    assert_eq!(
+        chart_block_fragments(&layout).len(),
+        2,
+        "two chart blocks, not inline carriers: {layout}"
+    );
+    if let Some(fragment) = paragraph_fragment(&layout, "20000004") {
+        assert!(
+            num(fragment, "height") < 60.0,
+            "no paragraph fragment holds the floating charts: {layout}"
+        );
+    }
+}
+
+#[test]
+fn an_anchored_chart_next_to_text_keeps_the_block_layout() {
+    let body = paragraph(
+        "20000005",
+        &format!(
+            "{}{}",
+            text_run("Before the chart"),
+            run(&anchored_chart_drawing())
+        ),
+    );
+    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78212);
+    assert_eq!(page_count(&layout), 1);
+    assert_eq!(
+        chart_block_fragments(&layout).len(),
+        1,
+        "one chart block, not an inline carrier: {layout}"
+    );
+    let text = paragraph_fragment(&layout, "20000005")
+        .expect("the text stays its own paragraph fragment");
+    assert!(
+        num(text, "height") < 60.0,
+        "text fragment holds only its line, got height {}: {layout}",
+        num(text, "height")
+    );
+}
+
+/// A narrow label box beside a wide box (144 and 466 px in 624 px of
+/// content): the label text wraps inside its own box and never reaches
+/// into the wide box. The label's AlternateContent fallback is a VML
+/// text box of the same size, the corpus form.
+#[test]
+fn narrow_label_box_text_wraps_inside_its_box() {
+    let label = text_box_drawing_fb(
+        r#"cx="1371600" cy="1760855""#,
+        r#"<w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="36"/></w:rPr><w:t>Guiding Principles</w:t></w:r></w:p>"#,
+        &vml_fallback("108", "138.65", "Guiding Principles"),
+    );
+    let wide = text_box_drawing_with(
+        r#"cx="4438650" cy="1760855""#,
+        "<w:p><w:r><w:t>Information and data are managed as assets</w:t></w:r></w:p>",
+    );
+    let body = paragraph(
+        "20000006",
+        &format!("{}{}", run(&label), run(&wide)),
+    );
+    let (_, display) = render(&document(&body, 12240, 16845, 1440), 78213);
+    let (guiding_x, guiding_baseline) = text_origin(&display, "Guiding");
+    let (principles_x, principles_baseline) = text_origin(&display, "Principles");
+    near(guiding_x, 105.6, 3.0, "label first line at the box inset");
+    near(
+        principles_x,
+        guiding_x,
+        3.0,
+        "label second line back at the box inset",
+    );
+    assert!(
+        principles_baseline > guiding_baseline + 10.0,
+        "label wraps to a second line: baselines {guiding_baseline} and {principles_baseline}"
+    );
 }
 
 #[test]
