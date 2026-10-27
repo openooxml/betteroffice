@@ -1,5 +1,6 @@
 use docx_edit::*;
 use serde_json::json;
+use yrs::{Map, MapPrelim, ReadTxn, Text, TextRef, Transact};
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
 const DATE: &str = "2026-01-01T00:00:00Z";
@@ -71,6 +72,14 @@ fn stories(doc: &EditingDoc, view: EditTextView) -> Vec<StoryText> {
 }
 
 fn oracle(bytes: &[u8], edit: impl Fn(&EditingDoc)) -> EditingDoc {
+    oracle_stories(bytes, edit, false)
+}
+
+fn parent_story_oracle(bytes: &[u8], edit: impl Fn(&EditingDoc)) -> EditingDoc {
+    oracle_stories(bytes, edit, true)
+}
+
+fn oracle_stories(bytes: &[u8], edit: impl Fn(&EditingDoc), parent_only: bool) -> EditingDoc {
     let doc = open(bytes);
     edit(&doc);
     for view in [EditTextView::Accepted, EditTextView::Original] {
@@ -78,6 +87,9 @@ fn oracle(bytes: &[u8], edit: impl Fn(&EditingDoc)) -> EditingDoc {
         edit(&resolved);
         let ctx = EditCtx::local("Author", DATE);
         for story in resolved.list_stories().stories {
+            if parent_only && story.story != "body" {
+                continue;
+            }
             let end = resolved.story_len(&story.story).unwrap();
             if end == 0 {
                 continue;
@@ -90,9 +102,24 @@ fn oracle(bytes: &[u8], edit: impl Fn(&EditingDoc)) -> EditingDoc {
             .unwrap();
         }
         assert_eq!(read(&doc, view), read(&resolved, view));
+        let selected_stories = |doc: &EditingDoc| {
+            if parent_only {
+                doc.read_stories(&ReadStoriesRequest {
+                    stories: Some(StorySelection::Listed(vec!["body".into()])),
+                    by_root: false,
+                    view,
+                    expect_version: None,
+                })
+                .unwrap()
+                .stories
+            } else {
+                stories(doc, view)
+            }
+        };
         assert_eq!(
-            serde_json::to_value(stories(&doc, view)).unwrap(),
-            serde_json::to_value(stories(&resolved, view)).unwrap()
+            serde_json::to_value(selected_stories(&doc)).unwrap(),
+            serde_json::to_value(selected_stories(&resolved)).unwrap(),
+            "parent_only={parent_only}: table resolution can remove cell stories"
         );
     }
     doc
@@ -512,6 +539,193 @@ fn run_revisions_without_mark_revisions_keep_literal_read_records() {
                 {"story":"body", "paraId":"00000001", "text":text, "styleId":"Normal", "outlineLevel":null, "list":null, "atoms":[]},
                 {"story":"body", "paraId":"00000002", "text":"tail", "styleId":"Normal", "outlineLevel":null, "list":null, "atoms":[]}
             ])
+        );
+    }
+}
+
+fn row_revision_table(kind: &str, partial: bool) -> String {
+    let row = |id, revision: bool| {
+        let properties = if revision {
+            format!(r#"<w:trPr><w:{kind}/></w:trPr>"#)
+        } else {
+            String::new()
+        };
+        format!(
+            "<w:tr>{properties}<w:tc>{}</w:tc></w:tr>",
+            p(id, "", &run("cell"))
+        )
+    };
+    format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{}{}</w:tbl>"#,
+        row(90, true),
+        row(91, !partial)
+    )
+}
+
+fn find_seed(doc: &EditingDoc, view: EditTextView) -> FindTextResponse {
+    doc.find_text(&FindTextRequest {
+        text: "Seed".into(),
+        within: SearchScope::Story {
+            story: "body".into(),
+        },
+        view,
+        limit: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn row_revision_tables_follow_resolution_in_parent_story_only() {
+    for (kind, joined_view, split_view) in [
+        ("ins", EditTextView::Original, EditTextView::Accepted),
+        ("del", EditTextView::Accepted, EditTextView::Original),
+    ] {
+        for partial in [false, true] {
+            let bytes = package(&format!(
+                "{}{}{}",
+                p(1, &mark(kind), &run("Se")),
+                row_revision_table(kind, partial),
+                p(2, "", &run("ed"))
+            ));
+            let doc = parent_story_oracle(&bytes, |_| {});
+            literal(&doc, split_view, &[("00000001", "Se"), ("00000002", "ed")]);
+            if partial {
+                literal(&doc, joined_view, &[("00000001", "Se"), ("00000002", "ed")]);
+                assert!(find_seed(&doc, joined_view).matches.is_empty());
+            } else {
+                literal(&doc, joined_view, &[("00000002", "Seed")]);
+                let paragraphs = read(&doc, joined_view);
+                assert!(paragraphs[0].atoms.is_empty());
+                let found = find_seed(&doc, joined_view);
+                assert_eq!(found.matches.len(), 1);
+                assert_eq!(found.matches[0].range.start.para_id, "00000002");
+                assert_eq!(found.matches[0].range.start.offset, 0);
+                assert_eq!(found.matches[0].range.end.offset, 4);
+            }
+        }
+    }
+}
+
+#[test]
+fn suggested_table_follows_resolution_in_parent_story_only() {
+    let bytes = package(&p(1, "", &run("Seed")));
+    let doc = parent_story_oracle(&bytes, |doc| {
+        doc.insert_table(
+            &EditCtx::local("Author", DATE).suggesting(),
+            Position::new("body", 2),
+            1,
+            1,
+        )
+        .unwrap();
+    });
+    let raw = doc.paragraphs("body").unwrap();
+    assert_eq!(raw.len(), 2);
+    literal(
+        &doc,
+        EditTextView::Original,
+        &[(raw[1].para_id.as_str(), "Seed")],
+    );
+    literal(
+        &doc,
+        EditTextView::Accepted,
+        &[
+            (raw[0].para_id.as_str(), "Se"),
+            (raw[1].para_id.as_str(), "ed"),
+        ],
+    );
+    assert!(read(&doc, EditTextView::Original)[0].atoms.is_empty());
+    assert_eq!(find_seed(&doc, EditTextView::Original).matches.len(), 1);
+}
+
+fn duplicate_key(doc: &EditingDoc, key: &str) {
+    let mut txn = doc.yrs_doc().transact_mut();
+    let body: TextRef = txn
+        .get_map("stories")
+        .and_then(|stories| stories.get(&txn, "body"))
+        .unwrap()
+        .cast()
+        .unwrap();
+    let pilcrow = body.insert_embed(&mut txn, 0, MapPrelim::default());
+    pilcrow.insert(&mut txn, "_kind", "pilcrow");
+    pilcrow.insert(&mut txn, "paraId", key);
+}
+
+#[test]
+fn joined_duplicate_ids_remain_ambiguous_for_subset_reads_and_search() {
+    for (kind, view) in [
+        ("del", EditTextView::Accepted),
+        ("ins", EditTextView::Original),
+    ] {
+        let doc = open(&package(&format!(
+            "{}{}{}",
+            p(0xDD, &mark(kind), &run("first ")),
+            p(2, "", &run("second")),
+            p(3, "", &run("third"))
+        )));
+        duplicate_key(&doc, "000000DD");
+        literal(
+            &doc,
+            view,
+            &[
+                ("000000DD", ""),
+                ("00000002", "first second"),
+                ("00000003", "third"),
+            ],
+        );
+        let target = ParagraphTarget {
+            story: "body".into(),
+            para_id: "000000DD".into(),
+        };
+        let subset = doc
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: Some(target.story.clone()),
+                para_ids: Some(vec![target.para_id.clone()]),
+                view,
+            })
+            .unwrap_err();
+        let search = doc
+            .find_text(&FindTextRequest {
+                text: "first".into(),
+                within: SearchScope::Paragraph(target.clone()),
+                view,
+                limit: None,
+            })
+            .unwrap_err();
+        for refusal in [subset, search] {
+            assert_eq!(refusal.failure.code, EditFailureCode::AmbiguousTarget);
+            assert_eq!(
+                refusal.failure.message,
+                "paragraph id \"000000DD\" occurs more than once in story \"body\""
+            );
+            assert_eq!(
+                refusal.failure.target,
+                Some(Box::new(EditTarget::Paragraph(target.clone())))
+            );
+        }
+    }
+}
+
+#[test]
+fn paragraph_search_missing_story_preserves_its_target() {
+    let doc = open(&package(&p(1, "", &run("Seed"))));
+    for view in [EditTextView::Accepted, EditTextView::Original] {
+        let target = ParagraphTarget {
+            story: "missing".into(),
+            para_id: "00000001".into(),
+        };
+        let refusal = doc
+            .find_text(&FindTextRequest {
+                text: "needle".into(),
+                within: SearchScope::Paragraph(target.clone()),
+                view,
+                limit: None,
+            })
+            .unwrap_err();
+        assert_eq!(refusal.failure.code, EditFailureCode::MissingTarget);
+        assert_eq!(refusal.failure.message, "story \"missing\" was not found");
+        assert_eq!(
+            refusal.failure.target,
+            Some(Box::new(EditTarget::Paragraph(target)))
         );
     }
 }

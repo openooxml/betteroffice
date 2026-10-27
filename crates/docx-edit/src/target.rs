@@ -591,19 +591,36 @@ impl ParagraphBuilder {
     }
 }
 
-pub(crate) fn joined_pilcrows<T: ReadTxn>(
+#[derive(Default)]
+pub(crate) struct StoryReadProjection {
+    pub joined_pilcrows: HashSet<u32>,
+    pub removed_tables: HashSet<u32>,
+}
+
+pub(crate) fn story_read_projection<T: ReadTxn>(
     txn: &T,
     chunks: &[crate::ops::Chunk],
     view: EditTextView,
-) -> HashSet<u32> {
+) -> StoryReadProjection {
     let (attribute, property) = match view {
         EditTextView::Accepted => (DEL, PPR_DEL),
         EditTextView::Original => (INS, PPR_INS),
     };
+    let removed_tables: HashSet<u32> = chunks
+        .iter()
+        .filter(|chunk| {
+            matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+                if map_string(map, txn, KIND_KEY).as_deref() == Some("table")
+                    && crate::ops::table::table_removed_in_view(
+                        map, txn, view == EditTextView::Accepted))
+        })
+        .map(|chunk| chunk.start)
+        .collect();
     let removes: Vec<bool> = chunks
         .iter()
         .map(|chunk| {
-            chunk.attr_active(attribute)
+            removed_tables.contains(&chunk.start)
+                || chunk.attr_active(attribute)
                 || matches!(&chunk.kind, ChunkKind::Pilcrow(map)
             if matches!(map.get(txn, property), Some(Out::Any(value)) if value != Any::Null))
         })
@@ -638,7 +655,10 @@ pub(crate) fn joined_pilcrows<T: ReadTxn>(
             next_block = chunk.block_revisions(txn).is_some();
         }
     }
-    joined
+    StoryReadProjection {
+        joined_pilcrows: joined,
+        removed_tables,
+    }
 }
 
 impl StoryView {
@@ -674,12 +694,12 @@ impl StoryView {
         chunks: &[crate::ops::Chunk],
         project: bool,
     ) -> Option<(Self, bool)> {
-        let joined = if project {
-            joined_pilcrows(txn, chunks, view)
+        let projection = if project {
+            story_read_projection(txn, chunks, view)
         } else {
-            HashSet::new()
+            StoryReadProjection::default()
         };
-        let project = project && !joined.is_empty();
+        let project = project && !projection.joined_pilcrows.is_empty();
         let source = doc.source_metadata();
         let mut paragraphs = Vec::new();
         let mut current = ParagraphBuilder::new(0);
@@ -689,11 +709,17 @@ impl StoryView {
                 complete = false;
                 break;
             }
+            if projection.removed_tables.contains(&chunk.start) {
+                if current.node_start == chunk.start {
+                    current.node_start = chunk.end();
+                }
+                continue;
+            }
             let ins = chunk.attr_active(INS);
             let del = chunk.attr_active(DEL);
             match &chunk.kind {
                 ChunkKind::Pilcrow(map) => {
-                    if joined.contains(&chunk.start) {
+                    if projection.joined_pilcrows.contains(&chunk.start) {
                         if current.node_start == chunk.start {
                             current.node_start = chunk.end();
                         }
@@ -1193,23 +1219,21 @@ impl<'a, T: ReadTxn> Views<'a, T> {
     }
 
     fn read_paragraph(&mut self, story: &StoryView, para_id: &str) -> Result<usize, EditFailure> {
+        let target = ParagraphTarget {
+            story: story.story.clone(),
+            para_id: para_id.to_owned(),
+        };
+        self.paragraph(&target, story.view)?;
         match story.lookup(para_id) {
             Lookup::One(index) => Ok(index),
-            _ => {
-                let target = ParagraphTarget {
-                    story: story.story.clone(),
-                    para_id: para_id.to_owned(),
-                };
-                self.paragraph(&target, story.view)?;
-                Err(failure(
-                    EditFailureCode::MissingTarget,
-                    format!(
-                        "paragraph {para_id:?} joins the following paragraph in the {:?} view",
-                        story.view
-                    ),
-                    Some(EditTarget::Paragraph(target)),
-                ))
-            }
+            _ => Err(failure(
+                EditFailureCode::MissingTarget,
+                format!(
+                    "paragraph {para_id:?} joins the following paragraph in the {:?} view",
+                    story.view
+                ),
+                Some(EditTarget::Paragraph(target)),
+            )),
         }
     }
 
@@ -1497,7 +1521,10 @@ impl EditingDoc {
             }
             let story_id = match &request.within {
                 SearchScope::Story { story } => story,
-                SearchScope::Paragraph(target) => &target.story,
+                SearchScope::Paragraph(target) => {
+                    views.paragraph(target, request.view)?;
+                    &target.story
+                }
             };
             let story = views.read_story(story_id, request.view).ok_or_else(|| {
                 failure(

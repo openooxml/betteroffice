@@ -352,11 +352,14 @@ fn facts_story<T: ReadTxn>(
         return;
     };
     let chunks = crate::ops::snapshot(&text, txn);
-    let joined = crate::target::joined_pilcrows(txn, &chunks, view);
+    let projection = crate::target::story_read_projection(txn, &chunks, view);
     let mut position = 0;
     for diff in text.diff(txn, YChange::identity) {
         let start = position;
         position += crate::out_len(&diff.insert);
+        if projection.removed_tables.contains(&start) {
+            continue;
+        }
         let Out::YMap(map) = diff.insert else {
             continue;
         };
@@ -367,7 +370,7 @@ fn facts_story<T: ReadTxn>(
                 revision: false,
             };
             let original = view == EditTextView::Original;
-            if joined.contains(&start) {
+            if projection.joined_pilcrows.contains(&start) {
                 continue;
             }
             let style = if original {

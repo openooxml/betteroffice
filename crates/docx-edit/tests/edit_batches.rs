@@ -1391,7 +1391,14 @@ fn read_stories_reports_each_story_and_refuses_a_stale_version() {
     let all = summary(read(None, None).unwrap().stories);
     let ids: Vec<&String> = all.iter().map(|(story, _)| story).collect();
     assert!(ids.is_sorted());
-    assert!(all.contains(&("body".to_owned(), Err(EditFailureCode::Unsupported))));
+    assert!(all.contains(&(
+        "body".to_owned(),
+        Ok(vec![
+            "before".to_owned(),
+            "split here".to_owned(),
+            "after".to_owned()
+        ])
+    )));
     assert!(all.contains(&("body:t0:r0c0".to_owned(), Ok(vec!["cell".to_owned()]))));
 
     let chosen = read(

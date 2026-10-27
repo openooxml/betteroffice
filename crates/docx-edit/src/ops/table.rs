@@ -1517,6 +1517,16 @@ fn remove_row_at(
     Ok(())
 }
 
+pub(crate) fn table_removed_in_view<T: ReadTxn>(table: &MapRef, txn: &T, accept: bool) -> bool {
+    let Ok(data) = read_table(table, txn) else {
+        return false;
+    };
+    let key = if accept { TR_DEL } else { TR_INS };
+    data.rows
+        .iter()
+        .all(|row| matching_row_revision(row.tr_pr.get(key), None).is_some())
+}
+
 pub(crate) fn table_revisions<T: ReadTxn>(table: &MapRef, txn: &T) -> [Option<Any>; 2] {
     let Ok(data) = read_table(table, txn) else {
         return [None, None];
