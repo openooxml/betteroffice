@@ -222,7 +222,7 @@ fn parse_package(
             shape_elements,
         )?;
         masters.push(SlideMaster {
-            header_footer: None,
+            header_footer: header_footer(&root),
             part_path: part_path.clone(),
             name: data.name,
             theme_part_path: relationship_by_type(master_relationships, relationship_types::THEME),
@@ -264,7 +264,7 @@ fn parse_package(
             shape_elements,
         )?;
         layouts.push(SlideLayout {
-            header_footer: None,
+            header_footer: header_footer(&root),
             part_path: part_path.clone(),
             name: root
                 .attribute("matchingName")
@@ -1181,6 +1181,16 @@ fn relationship_target(relationships: &[Relationship], id: &str) -> Option<Strin
 fn positive_integer_attribute(element: Option<&XmlElement>, name: &str) -> Option<i64> {
     let value = element?.attribute(name)?.parse::<i64>().ok()?;
     (value > 0 && value <= 1_000_000_000_000_000).then_some(value)
+}
+
+fn header_footer(element: &XmlElement) -> Option<HeaderFooterSettings> {
+    let settings = element.child("hf")?;
+    Some(HeaderFooterSettings {
+        slide_number: bool_attribute(settings, "sldNum", true),
+        footer: bool_attribute(settings, "ftr", true),
+        date: bool_attribute(settings, "dt", true),
+        header: bool_attribute(settings, "hdr", true),
+    })
 }
 
 fn bool_attribute(element: &XmlElement, name: &str, default: bool) -> bool {
