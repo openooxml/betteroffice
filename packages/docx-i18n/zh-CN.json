@@ -19,7 +19,14 @@
     "change": "更改",
     "px": "px",
     "closeDialog": "关闭对话框",
-    "clear": "清除"
+    "clear": "清除",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "格式工具栏",
@@ -86,6 +93,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": null,
     "alignLeft": "左对齐",
     "alignLeftShortcut": "Ctrl+L",
     "center": "居中",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "{type} 颜色选择器",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "突出显示颜色",
     "customColor": "自定义颜色",
     "noColor": "无颜色",
@@ -252,7 +262,9 @@
       "columnWidthLabel": "列宽",
       "fixedWidth": "固定列宽",
       "tableStyleLabel": "表格样式",
-      "validationHint": "行数: {minRows}-{maxRows}, 列数: {minCols}-{maxCols}"
+      "validationHint": "行数: {minRows}-{maxRows}, 列数: {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "拆分单元格",
@@ -342,6 +354,7 @@
       "alignment": "对齐方式",
       "offset": "偏移",
       "offsetPx": "偏移(px)",
+      "distanceFromText": null,
       "align": "对齐",
       "relativeTo": "相对于",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "未找到与 \"{query}\" 匹配的快捷方式",
       "pressEscToClose": "按 {key} 关闭",
-      "or": "或"
+      "or": "或",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "应用",
@@ -651,13 +671,26 @@
     "tryAgain": "请重试",
     "showDetails": "显示详情",
     "hideDetails": "隐藏详情",
-    "unsavedChanges": "您有未保存的更改，是否确定离开？"
+    "unsavedChanges": "您有未保存的更改，是否确定离开？",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "在上方插入行",
     "insertRowBelow": "在下方插入行",
     "insertColumnLeft": "在左侧插入列",
     "insertColumnRight": "在右侧插入列",
+    "insertColumnToTheRight": null,
     "deleteRow": "删除行",
     "deleteColumn": "删除列",
     "deleteTable": "删除表格",
@@ -818,6 +851,16 @@
     "editableAriaLabel": "可编辑图片"
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null,
+      "clear": null,
+      "num": null
+    },
     "horizontal": "水平标尺",
     "vertical": "垂直标尺",
     "firstLineIndent": "首行缩进",

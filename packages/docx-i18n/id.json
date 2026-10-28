@@ -19,7 +19,14 @@
     "change": "Ubah",
     "clear": "Hapus",
     "px": "px",
-    "closeDialog": "Tutup dialog"
+    "closeDialog": "Tutup dialog",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "Bilah alat pemformatan",
@@ -86,6 +93,7 @@
     "moreItems": "{count} item lainnya"
   },
   "alignment": {
+    "left": null,
     "alignLeft": "Rata Kiri",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Tengah",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "Pilih warna {type}",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "Warna Sorotan",
     "customColor": "Warna Kustom",
     "noColor": "Tidak ada warna",
@@ -252,7 +262,9 @@
       "fixedWidth": "Lebar tetap",
       "autofit": "Sesuai isi",
       "tableStyleLabel": "Gaya tabel",
-      "validationHint": "Baris: {minRows} - {maxRows} | Kolom: {minCols} - {maxCols}"
+      "validationHint": "Baris: {minRows} - {maxRows} | Kolom: {minCols} - {maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "watermark": {
       "title": "Tanda Air",
@@ -363,6 +375,7 @@
       "alignment": "Perataan",
       "offset": "Offset",
       "offsetPx": "Offset (px)",
+      "distanceFromText": null,
       "align": "Ratakan",
       "relativeTo": "Relatif terhadap",
       "alignOptions": {
@@ -566,7 +579,14 @@
       },
       "noResults": "Tidak ada pintasan yang cocok dengan \"{query}\"",
       "pressEscToClose": "Tekan {key} untuk menutup",
-      "or": "atau"
+      "or": "atau",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     }
   },
   "comments": {
@@ -669,13 +689,26 @@
     "tryAgain": "Coba Lagi",
     "showDetails": "Tampilkan detail",
     "hideDetails": "Sembunyikan detail",
-    "unsavedChanges": "Anda memiliki perubahan yang belum disimpan. Yakin ingin meninggalkan halaman ini?"
+    "unsavedChanges": "Anda memiliki perubahan yang belum disimpan. Yakin ingin meninggalkan halaman ini?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "Sisipkan Baris di Atas",
     "insertRowBelow": "Sisipkan Baris di Bawah",
     "insertColumnLeft": "Sisipkan Kolom di Kiri",
     "insertColumnRight": "Sisipkan Kolom di Kanan",
+    "insertColumnToTheRight": null,
     "deleteRow": "Hapus Baris",
     "deleteColumn": "Hapus Kolom",
     "deleteTable": "Hapus Tabel",
@@ -842,6 +875,16 @@
     "replaceImage": "Ganti Gambar..."
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null,
+      "clear": null,
+      "num": null
+    },
     "horizontal": "Penggaris Horizontal",
     "vertical": "Penggaris Vertikal",
     "firstLineIndent": "Inden Baris Pertama",

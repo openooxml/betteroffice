@@ -641,7 +641,7 @@ export function ColorPicker({
           className="docx-color-picker-dropdown"
           style={{ ...dropdownStyle, ...S_DROPDOWN }}
           role="dialog"
-          aria-label={`${defaultTitle} picker`}
+          aria-label={t('colorPicker.pickerLabel', { title: defaultTitle })}
           onMouseDown={(e) => {
             // Allow input elements to receive focus, prevent focus steal for everything else
             if ((e.target as HTMLElement).tagName !== 'INPUT') {
@@ -729,7 +729,7 @@ export function ColorPicker({
                 }}
                 placeholder="FF0000"
                 maxLength={6}
-                aria-label="Custom hex color"
+                aria-label={t('colorPicker.customHexColor')}
               />
               <button
                 type="button"

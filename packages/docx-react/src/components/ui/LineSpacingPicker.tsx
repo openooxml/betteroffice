@@ -19,7 +19,12 @@ import { cn } from '../../lib/utils';
 import { IconLineSpacing } from './Icons';
 import { useTranslation } from '../../i18n';
 import { useDisabledDescription } from './disabledDescription';
-import type { TranslationKey } from '@betteroffice/docx-i18n';
+import { createT, en } from '@betteroffice/docx-i18n';
+import type { TFunction, TranslationKey } from '@betteroffice/docx-i18n';
+
+function formatMultiplier(multiplier: number, lang: string): string {
+  return new Intl.NumberFormat(lang, { maximumFractionDigits: 2 }).format(multiplier);
+}
 
 // ============================================================================
 // TYPES
@@ -71,7 +76,7 @@ export function LineSpacingPicker({
   description,
   className,
 }: LineSpacingPickerProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const reason = useDisabledDescription(disabled, description);
   const [open, setOpen] = React.useState(false);
   // Find current option by twips value
@@ -91,7 +96,7 @@ export function LineSpacingPicker({
   );
 
   const getOptionLabel = (option: LineSpacingOption) =>
-    option.labelKey ? t(option.labelKey) : option.label;
+    option.labelKey ? t(option.labelKey) : formatMultiplier(option.value, lang);
 
   return (
     <Select
@@ -146,11 +151,15 @@ export function twipsToLineSpacingMultiplier(twips: number): number {
   return twips / 240;
 }
 
-export function getLineSpacingLabel(twips: number): string {
+export function getLineSpacingLabel(
+  twips: number,
+  t: TFunction = createT(en),
+  lang = 'en'
+): string {
   const option = DEFAULT_OPTIONS.find((opt) => opt.twipsValue === twips);
-  if (option) return option.label;
+  if (option) return option.labelKey ? t(option.labelKey) : formatMultiplier(option.value, lang);
   const multiplier = twipsToLineSpacingMultiplier(twips);
-  return multiplier.toFixed(2).replace(/\.?0+$/, '');
+  return formatMultiplier(multiplier, lang);
 }
 
 export function isStandardLineSpacing(twips: number): boolean {
@@ -172,9 +181,9 @@ export function nearestStandardLineSpacing(twips: number): LineSpacingOption {
   return nearest;
 }
 
-export function createLineSpacingOption(multiplier: number): LineSpacingOption {
+export function createLineSpacingOption(multiplier: number, lang = 'en'): LineSpacingOption {
   const twipsValue = lineSpacingMultiplierToTwips(multiplier);
-  const label = multiplier.toFixed(2).replace(/\.?0+$/, '');
+  const label = formatMultiplier(multiplier, lang);
   return { label, value: multiplier, twipsValue };
 }
 

@@ -165,6 +165,7 @@
     "stale": "Diese Objekte wurden geändert, nachdem der Vorschlag erstellt wurde. Sehen Sie sich vor dem Übernehmen die aktuellen Änderungen an.",
     "stalePreview": "Diese Vorschau verwendet die aktualisierte Folie. Beim Übernehmen werden die geänderten Ziele überschrieben.",
     "geometry": "Position und Größe (x, y, Breite, Höhe)",
+    "geometryValues": null,
     "appearance": "Darstellung oder Textformatierung geändert",
     "changedAgain": "Das Ziel hat sich erneut geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
     "canvasTitle": "Änderungen auf dieser Folie",
@@ -231,6 +232,8 @@
     "expandPanel": "{title} ausklappen"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }

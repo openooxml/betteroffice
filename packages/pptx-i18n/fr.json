@@ -165,6 +165,7 @@
     "stale": "Ces objets ont été modifiés après la création de la proposition. Vérifiez les modifications actuelles avant de les appliquer.",
     "stalePreview": "Cet aperçu utilise la diapositive mise à jour. L'application remplacera les cibles modifiées.",
     "geometry": "Position et taille (x, y, largeur, hauteur)",
+    "geometryValues": null,
     "appearance": "Apparence ou mise en forme du texte modifiée",
     "changedAgain": "La cible a encore changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
     "canvasTitle": "Modifications sur cette diapositive",
@@ -231,6 +232,8 @@
     "expandPanel": "Développer {title}"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }

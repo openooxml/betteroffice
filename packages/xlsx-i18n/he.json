@@ -51,6 +51,7 @@
       "proposalStale": null,
       "renderFailed": null,
       "commandFailed": null,
+      "commandRefused": null,
       "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
       "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
       "pluginUnavailable": "התוסף אינו פעיל עוד.",
@@ -61,7 +62,11 @@
     "appLabel": null,
     "demoCellText": null,
     "openError": null,
-    "sheetTabsLabel": null
+    "sheetTabsLabel": null,
+    "clearExceedsLimit": null
+  },
+  "presence": {
+    "moreCollaborators": null
   },
   "proposals": {
     "panelLabel": null,

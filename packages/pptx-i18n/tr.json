@@ -165,6 +165,7 @@
     "stale": "Öneri oluşturulduktan sonra bu nesneler değişti. Uygulamadan önce geçerli değişiklikleri önizle.",
     "stalePreview": "Bu önizleme güncellenmiş slaydı kullanıyor. Uygulama, değişen hedeflerin üzerine yazacak.",
     "geometry": "Konum ve boyut (x, y, genişlik, yükseklik)",
+    "geometryValues": null,
     "appearance": "Görünüm veya metin biçimlendirmesi değişti",
     "changedAgain": "Hedef yine değişti. Uygulamadan önce yenilenen önizlemeyi incele.",
     "canvasTitle": "Bu slayttaki değişiklikler",
@@ -231,6 +232,8 @@
     "expandPanel": "{title} genişlet"
   },
   "presence": {
-    "label": null
+    "label": null,
+    "moreCollaborators": null,
+    "moreSelections": null
   }
 }

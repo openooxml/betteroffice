@@ -19,7 +19,14 @@
     "change": "Alterar",
     "px": "px",
     "closeDialog": "Fechar diálogo",
-    "clear": "Limpar"
+    "clear": "Limpar",
+    "units": {
+      "inch": null,
+      "cm": null,
+      "pt": null,
+      "px": null,
+      "inchMark": null
+    }
   },
   "toolbar": {
     "ariaLabel": "Barra de formatação",
@@ -86,6 +93,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": null,
     "alignLeft": "Alinhar à esquerda",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Centralizar",
@@ -143,6 +151,8 @@
   },
   "colorPicker": {
     "ariaLabel": "Seletor de cores {type}",
+    "pickerLabel": null,
+    "customHexColor": null,
     "highlightColors": "Cores de destaque",
     "customColor": "Cor personalizada",
     "noColor": "Sem cor",
@@ -252,7 +262,9 @@
       "columnWidthLabel": "Largura da coluna",
       "fixedWidth": "Fixa",
       "tableStyleLabel": "Estilo da tabela",
-      "validationHint": "Linhas: {minRows}-{maxRows}, Colunas: {minCols}-{maxCols}"
+      "validationHint": "Linhas: {minRows}-{maxRows}, Colunas: {minCols}-{maxCols}",
+      "selectSize": null,
+      "cellSize": null
     },
     "splitCell": {
       "title": "Dividir célula",
@@ -342,6 +354,7 @@
       "alignment": "Alinhamento",
       "offset": "Deslocamento",
       "offsetPx": "Deslocamento (px)",
+      "distanceFromText": null,
       "align": "Alinhar",
       "relativeTo": "Relativo a",
       "alignOptions": {
@@ -545,7 +558,14 @@
       },
       "noResults": "Nenhum atalho encontrado para \"{query}\"",
       "pressEscToClose": "Pressione {key} para fechar",
-      "or": "ou"
+      "or": "ou",
+      "keys": {
+        "escape": null,
+        "pageUp": null,
+        "pageDown": null,
+        "ctrl": null,
+        "del": null
+      }
     },
     "watermark": {
       "applyButton": "Aplicar",
@@ -651,13 +671,26 @@
     "tryAgain": "Tentar novamente",
     "showDetails": "Mostrar detalhes",
     "hideDetails": "Ocultar detalhes",
-    "unsavedChanges": "Você tem alterações não salvas. Tem certeza que deseja sair?"
+    "unsavedChanges": "Você tem alterações não salvas. Tem certeza que deseja sair?",
+    "canvasRendererFailed": null,
+    "userFriendly": {
+      "network": null,
+      "parse": null,
+      "permission": null,
+      "notFound": null,
+      "timeout": null,
+      "unexpected": null
+    }
+  },
+  "contentControls": {
+    "noOptions": null
   },
   "table": {
     "insertRowAbove": "Inserir linha acima",
     "insertRowBelow": "Inserir linha abaixo",
     "insertColumnLeft": "Inserir coluna à esquerda",
     "insertColumnRight": "Inserir coluna à direita",
+    "insertColumnToTheRight": null,
     "deleteRow": "Excluir linha",
     "deleteColumn": "Excluir coluna",
     "deleteTable": "Excluir tabela",
@@ -818,6 +851,16 @@
     "editableAriaLabel": "Imagem editável"
   },
   "ruler": {
+    "tabStop": null,
+    "tabAlignments": {
+      "left": null,
+      "center": null,
+      "right": null,
+      "decimal": null,
+      "bar": null,
+      "clear": null,
+      "num": null
+    },
     "horizontal": "Régua horizontal",
     "vertical": "Régua vertical",
     "firstLineIndent": "Recuo da primeira linha",

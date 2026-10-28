@@ -165,6 +165,7 @@
     "stale": "These objects changed after the proposal was created. Preview the current changes before applying.",
     "stalePreview": "This preview uses the updated slide. Applying will override the changed targets.",
     "geometry": "Position and size (x, y, width, height)",
+    "geometryValues": "{before} → {after} pt",
     "appearance": "Appearance or text formatting changed",
     "changedAgain": "The target changed again. Review the refreshed preview before applying.",
     "canvasTitle": "Changes on this slide",
@@ -231,6 +232,8 @@
     "expandPanel": "Expand {title}"
   },
   "presence": {
-    "label": "Collaborators"
+    "label": "Collaborators",
+    "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}",
+    "moreSelections": "+{count, plural, one {# selection} other {# selections}}"
   }
 }

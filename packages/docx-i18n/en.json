@@ -19,7 +19,14 @@
     "change": "Change",
     "clear": "Clear",
     "px": "px",
-    "closeDialog": "Close dialog"
+    "closeDialog": "Close dialog",
+    "units": {
+      "inch": "in",
+      "cm": "cm",
+      "pt": "pt",
+      "px": "px",
+      "inchMark": "\""
+    }
   },
   "toolbar": {
     "ariaLabel": "Formatting toolbar",
@@ -89,6 +96,7 @@
     "moreItems": "{count, plural, one {# more item} other {# more items}}"
   },
   "alignment": {
+    "left": "Left",
     "alignLeft": "Align Left",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Center",
@@ -146,6 +154,8 @@
   },
   "colorPicker": {
     "ariaLabel": "{type} color picker",
+    "pickerLabel": "{title} picker",
+    "customHexColor": "Custom hex color",
     "highlightColors": "Highlight Colors",
     "customColor": "Custom Color",
     "noColor": "No Color",
@@ -255,7 +265,9 @@
       "fixedWidth": "Fixed",
       "autofit": "Auto-fit to contents",
       "tableStyleLabel": "Table style",
-      "validationHint": "Rows: {minRows}-{maxRows}, Columns: {minCols}-{maxCols}"
+      "validationHint": "Rows: {minRows}-{maxRows}, Columns: {minCols}-{maxCols}",
+      "selectSize": "Select size",
+      "cellSize": "{cols} columns, {rows} rows"
     },
     "watermark": {
       "title": "Watermark",
@@ -366,6 +378,7 @@
       "alignment": "Alignment",
       "offset": "Offset",
       "offsetPx": "Offset (px)",
+      "distanceFromText": "Distance from text ({unit})",
       "align": "Align",
       "relativeTo": "Relative to",
       "alignOptions": {
@@ -569,7 +582,14 @@
       },
       "noResults": "No shortcuts found matching \"{query}\"",
       "pressEscToClose": "Press {key} to close",
-      "or": "or"
+      "or": "or",
+      "keys": {
+        "escape": "Esc",
+        "pageUp": "Page Up",
+        "pageDown": "Page Down",
+        "ctrl": "Ctrl",
+        "del": "Del"
+      }
     },
     "objectGeometry": {
       "left": "Left (px)",
@@ -686,13 +706,26 @@
     "tryAgain": "Try Again",
     "showDetails": "Show details",
     "hideDetails": "Hide details",
-    "unsavedChanges": "You have unsaved changes. Are you sure you want to leave?"
+    "unsavedChanges": "You have unsaved changes. Are you sure you want to leave?",
+    "canvasRendererFailed": "Canvas renderer failed.",
+    "userFriendly": {
+      "network": "Network error. Please check your internet connection and try again.",
+      "parse": "The document could not be parsed. It may be corrupted or in an unsupported format.",
+      "permission": "Access denied. You may not have permission to access this file.",
+      "notFound": "The requested file was not found.",
+      "timeout": "The operation timed out. Please try again.",
+      "unexpected": "An unexpected error occurred. Please try again."
+    }
+  },
+  "contentControls": {
+    "noOptions": "No options"
   },
   "table": {
     "insertRowAbove": "Insert row above",
     "insertRowBelow": "Insert row below",
     "insertColumnLeft": "Insert column left",
     "insertColumnRight": "Insert column right",
+    "insertColumnToTheRight": "Insert column to the right",
     "deleteRow": "Delete row",
     "deleteColumn": "Delete column",
     "deleteTable": "Delete table",
@@ -873,6 +906,16 @@
     "replaceImage": "Replace image…"
   },
   "ruler": {
+    "tabStop": "{alignment} tab at {position}",
+    "tabAlignments": {
+      "left": "Left",
+      "center": "Center",
+      "right": "Right",
+      "decimal": "Decimal",
+      "bar": "Bar",
+      "clear": "Clear",
+      "num": "List"
+    },
     "horizontal": "Horizontal ruler",
     "vertical": "Vertical ruler",
     "firstLineIndent": "First line indent",
