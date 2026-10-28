@@ -3,7 +3,7 @@
 //! breaks its own page (pageBreakBefore or a leading page break run);
 //! below 15 it keeps it unless suppressSpBfAfterPgBrk spends the run's.
 
-use docx_edit::{EngineSession, seed_from_docx};
+use docx_edit::{EngineSession, bridge::RenderEnv, seed_from_docx};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -82,6 +82,12 @@ fn render(bytes: &[u8]) -> Value {
             .unwrap(),
     )
     .unwrap()
+}
+
+fn lower(engine: &EngineSession, story: &str, mode: u8) -> Value {
+    let mut env = RenderEnv::default();
+    env.compatibility_flags.compatibility_mode = mode;
+    serde_json::from_str(&engine.lower_story_json(story, &env).unwrap()).unwrap()
 }
 
 fn target(output: &Value) -> (u64, f64) {
@@ -171,4 +177,108 @@ fn compat15_keeps_space_before_after_a_section_break() {
     let (page, y) = target(&output);
     assert_eq!(page, 2);
     assert!((y - TOP - BEFORE).abs() < 0.01, "{y}");
+}
+
+#[test]
+fn compat15_keeps_space_before_in_text_boxes_and_shapes() {
+    let paragraph = r#"<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="480"/></w:pPr><w:r><w:t>TARGET</w:t></w:r></w:p>"#;
+    for shape_properties in [r#"<wps:cNvSpPr txBox="1"/>"#, "<wps:cNvSpPr/>"] {
+        let body = format!(
+            r#"<w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:inline><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>{shape_properties}<wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>{paragraph}"#
+        );
+        let engine = EngineSession::new(76402);
+        seed_from_docx(
+            engine.doc(),
+            &document(&body, LETTER, Some(&compat(15, ""))),
+        )
+        .unwrap();
+        for mode in [14, 15] {
+            let blocks = lower(&engine, "body", mode);
+            let blocks = blocks.as_array().unwrap();
+            let shape = blocks
+                .iter()
+                .find(|block| block["kind"] == "shape")
+                .unwrap();
+            let boxed = &shape["innerText"][0];
+            assert_eq!(boxed["runs"][0]["text"], "TARGET");
+            assert_eq!(boxed["attrs"]["spacing"]["before"], json!(BEFORE));
+            let body = blocks
+                .iter()
+                .find(|block| block["attrs"]["pageBreakBefore"] == true)
+                .unwrap();
+            assert_eq!(body["runs"][0]["text"], "TARGET");
+            assert_eq!(
+                body["attrs"]["spacing"]["before"],
+                json!(if mode == 15 { 0.0 } else { BEFORE })
+            );
+        }
+    }
+}
+
+#[test]
+fn compat15_spends_space_before_in_body_table_cells_and_controls() {
+    let paragraph = r#"<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before="480"/></w:pPr><w:r><w:t>TARGET</w:t></w:r></w:p>"#;
+    let body = format!(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{paragraph}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr/><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"#
+    );
+    let engine = EngineSession::new(76403);
+    seed_from_docx(
+        engine.doc(),
+        &document(&body, LETTER, Some(&compat(15, ""))),
+    )
+    .unwrap();
+    for story in ["body:t0:r0c0", "body:sdt0"] {
+        for mode in [14, 15] {
+            let blocks = lower(&engine, story, mode);
+            assert_eq!(blocks[0]["runs"][0]["text"], "TARGET");
+            assert_eq!(blocks[0]["attrs"]["pageBreakBefore"], true);
+            assert_eq!(
+                blocks[0]["attrs"]["spacing"]["before"],
+                json!(if mode == 15 { 0.0 } else { BEFORE }),
+                "{story}, mode {mode}"
+            );
+        }
+    }
+}
+
+#[test]
+fn compat15_keeps_space_before_in_headers_footers_and_notes() {
+    let engine = EngineSession::new(76404);
+    for story in [
+        "hf:rHeader",
+        "hf:rFooter",
+        "fn:1",
+        "en:1",
+        "hf:rHeader:t0:r0c0",
+        "hf:rFooter:sdt0",
+        "fn:1:t0:r0c0",
+        "en:1:sdt0",
+    ] {
+        let paragraph = engine
+            .doc()
+            .create_story(story, "TARGET", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .set_paragraph_attr(&paragraph, "spaceBefore", yrs::Any::Number(480.0))
+            .unwrap();
+        for property in ["pageBreakBefore", "pageBreakBeforeRun"] {
+            engine
+                .doc()
+                .set_paragraph_attr(&paragraph, property, yrs::Any::Bool(true))
+                .unwrap();
+            for mode in [14, 15] {
+                let blocks = lower(&engine, story, mode);
+                assert_eq!(
+                    blocks[0]["attrs"]["spacing"]["before"],
+                    json!(BEFORE),
+                    "{story}, {property}, mode {mode}"
+                );
+            }
+            engine
+                .doc()
+                .set_paragraph_attr(&paragraph, property, yrs::Any::Bool(false))
+                .unwrap();
+        }
+    }
 }
