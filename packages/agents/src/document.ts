@@ -149,6 +149,7 @@ export class DocxAgentDocument {
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
+  private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
 
   constructor(
@@ -630,8 +631,9 @@ export class DocxAgentDocument {
             resolved = new Map(this.resolvedComments);
             for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
             const earlier = this.resolvedComments;
+            const baseline = await this.commentBaselineBytes(version);
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })));
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -808,6 +810,13 @@ export class DocxAgentDocument {
     if (!source) return;
     if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
     return this.commentPartCheck.check;
+  }
+
+  private commentBaselineBytes(version: number): Promise<Uint8Array> {
+    if (this.commentPackageBaseline?.version !== version) {
+      this.commentPackageBaseline = { version, bytes: this.export() };
+    }
+    return this.commentPackageBaseline.bytes;
   }
 
   private styles(): ParagraphStyle[] {
