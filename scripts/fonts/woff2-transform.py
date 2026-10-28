@@ -67,7 +67,7 @@ def transform_directory(directory):
                 (standard, path.with_suffix(".woff2").name),
             )
         ]
-        path.with_suffix(".source.sha256").write_text("\n".join(lines) + "\n", encoding="ascii")
+        path.with_suffix(".source.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main():

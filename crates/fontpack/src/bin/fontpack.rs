@@ -185,7 +185,11 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
                 (standard.as_slice(), format!("{stem}.woff2")),
             ]
             .map(|(data, name)| format!("{:x}  {name}", Sha256::digest(data)));
-            if !recorded.lines().map(str::trim_end).eq(expected.iter().map(String::as_str)) {
+            if !recorded
+                .lines()
+                .map(str::trim_end)
+                .eq(expected.iter().map(String::as_str))
+            {
                 return Err(invalid(format!(
                     "source SHA-256 mismatch for {file}; {regenerate}"
                 ))
