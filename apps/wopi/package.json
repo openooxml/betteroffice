@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "test": "bun test src",
+    "test": "bun test src test",
     "typecheck": "tsc --noEmit",
     "start": "bun src/server.ts"
   },
