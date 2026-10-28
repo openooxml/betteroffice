@@ -157,7 +157,7 @@ fn render(bytes: &[u8], client_id: u64) -> (Value, Value) {
                 "bodyStory": "body",
                 "renderEnv": {},
                 "regions": {"sections": [{"properties": package.document.final_section_properties}]},
-                "measurement": {"fontChains": {"calibri|0|0": [font]}, "defaults": {"fontFamily": "Calibri", "fontSize": 11}}
+                "measurement": {"fontChains": {"calibri|0|0": [font], "calibri|1|0": [font]}, "defaults": {"fontFamily": "Calibri", "fontSize": 11}}
             })
             .to_string(),
         )
@@ -607,6 +607,36 @@ fn narrow_label_box_text_wraps_inside_its_box() {
         3.0,
         "label second line back at the box inset",
     );
+    assert!(
+        principles_baseline > guiding_baseline + 10.0,
+        "label wraps to a second line: baselines {guiding_baseline} and {principles_baseline}"
+    );
+}
+
+#[test]
+fn a_converted_label_box_paints_one_representation() {
+    let label = text_box_drawing_fb(
+        r#"cx="1371600" cy="1760855""#,
+        r#"<w:p><w:r><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="36"/></w:rPr><w:t>Guiding Principles</w:t></w:r></w:p>"#,
+        &vml_fallback("108", "138.65", "Guiding Principles"),
+    );
+    let wide = text_box_drawing_with(
+        r#"cx="4438650" cy="1760855""#,
+        "<w:p><w:r><w:t>Information and data are managed as assets</w:t></w:r></w:p>",
+    );
+    let body = paragraph("20000007", &format!("{}{}", run(&label), run(&wide)));
+    let (_, display) = render(&document(&body, 12240, 16845, 1440), 78218);
+    let painted: String = primitives(&display)
+        .iter()
+        .filter_map(|primitive| primitive["text"].as_str())
+        .collect();
+    assert_eq!(
+        painted.matches("Guiding").count(),
+        1,
+        "one label representation paints: {display}"
+    );
+    let (_, guiding_baseline) = text_origin(&display, "Guiding");
+    let (_, principles_baseline) = text_origin(&display, "Principles");
     assert!(
         principles_baseline > guiding_baseline + 10.0,
         "label wraps to a second line: baselines {guiding_baseline} and {principles_baseline}"
