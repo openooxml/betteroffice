@@ -72,7 +72,8 @@ function carriesFallbackScript(value: unknown, depth = 0): boolean {
  * Showing or hiding hidden text is judged by the worker, which knows the setting before and after.
  */
 export function commandMayNeedNewFonts(kind: string, payload: unknown): boolean {
-  return FONT_RESHAPING_COMMANDS.has(kind) || (kind !== 'setFontEnvironment' && carriesFallbackScript(payload));
+  if (kind === 'setFontEnvironment' || kind === 'setRenderEnvironment') return false;
+  return FONT_RESHAPING_COMMANDS.has(kind) || carriesFallbackScript(payload);
 }
 
 export class ResidentSessionFonts {

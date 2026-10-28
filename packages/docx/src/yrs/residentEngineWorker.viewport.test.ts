@@ -7,7 +7,7 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import type { DocxCommandEnvelope, DocxCommandFrame, DocxCommandIntent, DocxFrameReservations,
   DocxCommandHooks, DocxCommandInitRequest } from './residentCommandProtocol';
 import { registerCommandFonts } from './residentCommandFonts';
-import { commandMayNeedNewFonts, ResidentSessionFonts } from './residentFontEnvironment';
+import { ResidentSessionFonts } from './residentFontEnvironment';
 import { readPartGeometry } from './residentParts';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
@@ -130,7 +130,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     relayout() { state.layoutDirty = true; relaidBuild = true; },
     preparedFonts: new WeakMap(), registerCommandFonts, GlyphCache,
     reply() {}, intactBackBuffers: new Map(), forgetRequirementsCache() {},
-    retainedLayoutVersion: null, fontRequirements: null, fontRequirementsHinted: false, commandMayNeedNewFonts,
+    retainedLayoutVersion: null, fontRequirements: null,
     loadRustDisplayListQueryEngine: async () => null, loadedRustDisplayListQueryEngine: () => null,
     layoutPreviewVersion: 0, readResidentFrameGeometry: async () => undefined,
     hooks: {
