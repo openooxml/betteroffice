@@ -561,7 +561,11 @@ class OfficeEquivalentTests(unittest.TestCase):
                  '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>'
                  + text_run('Body text.') + '</w:p>')
         hyphen = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:noBreakHyphen/></w:r>' + text_run('plain rest.') + '</w:p>'
+        deleted = ('<w:p><w:del w:id="9" w:author="A"><w:r><w:rPr><w:i/></w:rPr><w:tab/></w:r></w:del>'
+                   + text_run('Plain text.') + '</w:p>')
         for name, template, inserted, accepted in (
+                ('plain like the first text after a deleted italic tab', deleted, plain, True),
+                ('italic like a deleted opening tab', deleted, italic, False),
                 ('italic like an opening non-breaking hyphen', hyphen, italic, True),
                 ('plain after an italic opening non-breaking hyphen', hyphen, plain, False),
                 ('plain like the body text after a text box', boxed, plain, True),

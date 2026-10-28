@@ -1260,7 +1260,7 @@ def opening_run_props(paragraph, prefix):
             if child.tag in runs:
                 if any(part.text if part.tag == q(prefix, 't') else part.tag in characters for part in child):
                     return child
-            elif child.tag != q(prefix, 'p') and (found := visible(child)) is not None:
+            elif child.tag not in (q(prefix, 'p'), w('del'), w('moveFrom')) and (found := visible(child)) is not None:
                 return found
         return None
     run = visible(paragraph)
