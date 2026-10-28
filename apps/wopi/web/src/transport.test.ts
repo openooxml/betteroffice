@@ -93,7 +93,7 @@ test.each([false, true])("Close waits for an offline deletion to resync after re
       flushPendingInput: async () => {}, hasPendingUpdates: () => provider.pendingBytes > 0,
     }, {
       async save(barrier) {
-        expect(barrier).toEqual(transport.captureSaveBarrier());
+        expect(barrier).toEqual(transport.captureSaveBarrier()!);
         hostText = server.getText("body").toString();
         calls.push("save");
       },
