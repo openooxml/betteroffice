@@ -169,6 +169,55 @@ async function expectNoTokens(s: Setup, extra: string[] = []): Promise<void> {
 }
 
 describe("collab relay", () => {
+  for (const changed of ["version", "timestamp"] as const) {
+    test(`source ${changed} replacement closes existing viewers with 4409 and new sockets stay open`, async () => {
+      const s = setup("xlsx");
+      const viewerHandles = [
+        await joinPage(s, "SECRETTOKEN-relay-view-444", "view"),
+        await joinPage(s, TOKENS[1]!, "view"),
+      ];
+      const viewers: FrameClient[] = [];
+      for (let i = 0; i < viewerHandles.length; i += 1) {
+        const handle = viewerHandles[i]!;
+        const viewer = await FrameClient.connect(s, handle, await hydrate(s, handle, 908001 + i * 100));
+        viewers.push(viewer);
+        cleanups.push(() => viewer.client.destroy());
+      }
+      const session = s.h.registry.list()[0]!;
+      cleanups.push(() => session.abandon());
+      const oldReplica = session.replica;
+      const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 908201);
+      cleanups.push(() => external.destroy());
+      external.edit("replacement-baseline ", 0);
+      const file = s.h.host.files.get("file1")!;
+      file.bytes = await external.save();
+      if (changed === "version") file.itemVersion = "2";
+      else file.lastModifiedTime = "2026-10-28T12:00:00.000Z";
+
+      const writerHandle = await joinPage(s, TOKENS[0]!);
+      expect(session.replica).not.toBe(oldReplica);
+      for (const viewer of viewers) {
+        await waitFor(() => viewer.closeCode !== null, "source rejoin close");
+        expect(viewer.closeCode).toBe(4409);
+        expect(viewer.closeReason).toBe("rejoin from source");
+        expect(viewer.client.contains("replacement-baseline")).toBe(false);
+      }
+
+      const writer = await FrameClient.connect(s, writerHandle, await hydrate(s, writerHandle, 908301));
+      const rejoined = await FrameClient.connect(s, viewerHandles[0]!, await hydrate(s, viewerHandles[0]!, 908401));
+      cleanups.push(() => { writer.client.destroy(); rejoined.client.destroy(); });
+      expect(writer.client.contains("replacement-baseline")).toBe(true);
+      expect(rejoined.client.contains("replacement-baseline")).toBe(true);
+      writer.editAndSend("replacement-live ", 1);
+      await waitFor(() => rejoined.client.contains("replacement-live"), "live edit after source rejoin");
+      expect(writer.closeCode).toBeNull();
+      expect(rejoined.closeCode).toBeNull();
+      expect(writer.ws.readyState).toBe(WebSocket.OPEN);
+      expect(rejoined.ws.readyState).toBe(WebSocket.OPEN);
+      await expectNoTokens(s, viewers.map((viewer) => viewer.closeReason));
+    });
+  }
+
   for (const failure of [0, -1, "throw"] as const) {
     for (const delivery of ["broadcast", "sync"] as const) {
       test(`${delivery} delivery ${failure} closes and detaches the dropped socket`, async () => {

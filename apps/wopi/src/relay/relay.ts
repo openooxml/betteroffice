@@ -110,6 +110,7 @@ export class CollabRelay {
       this.#subscribed.add(resolved.session);
       resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
       resolved.session.on("userInvalidated", ({ userId }) => this.closeUser(userId, 4401, "unauthorized"));
+      resolved.session.on("rejoinRequired", () => this.#closeRoom(resolved.session, 4409, "rejoin from source"));
       resolved.session.on("replicaUpdate", ({ update }) => {
         this.#broadcastAll(resolved.session, encodeUpdateFrame(update));
       });
@@ -163,6 +164,10 @@ export class CollabRelay {
   /** Closes every socket in one file session room. */
   closeSession(session: FileSession, code = 1000, reason = "session closed"): void {
     this.#subscribed.delete(session);
+    this.#closeRoom(session, code, reason);
+  }
+
+  #closeRoom(session: FileSession, code: number, reason: string): void {
     const room = this.#rooms.get(session.fileKey);
     if (!room) return;
     for (const state of [...room]) {

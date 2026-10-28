@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPair } from "./proof";
 import { createHandler, startServer } from "./server";
 import { initEngines } from "./replica/engines";
-import { openTestClient, sourceBytes } from "../test/replica/clients";
+import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
 import { SessionRegistry } from "./session/registry";
@@ -401,6 +401,69 @@ describe("session API", () => {
     await tracked(s, close);
     expect((await fetch(`${s.base}/api/session/source`, { headers: auth(config) })).status).toBe(401);
     expectNoToken(s);
+  });
+
+  test("source replacement sends rejoinRequired to every existing SSE stream before closing", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "viewer-a", { canWrite: false });
+    addToken(h, TOKEN_B, "viewer-b", { canWrite: false });
+    addToken(h, "SECRETTOKEN-routes-writer-rejoin", "writer");
+    const viewers = await Promise.all([TOKEN, TOKEN_B].map((accessToken) => h.registry.join({
+      wopiSrc: SRC, accessToken, accessTokenTtl: 0, mode: "view",
+    })));
+    const session = viewers[0]!.session;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const requestEvents = (handle: string) => handler(new Request("https://office.example.com/api/session/events", {
+      headers: { Authorization: `Bearer ${handle}` },
+    }));
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 990251);
+    let writerClient: Awaited<ReturnType<typeof openTestClient>> | null = null;
+    try {
+      for (const viewer of viewers) {
+        const response = await requestEvents(viewer.user.id);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/event-stream");
+        const reader = response.body!.getReader();
+        readers.push(reader);
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+      }
+      external.edit("sse-replacement-baseline ", 0);
+      const file = h.host.files.get("file1")!;
+      file.bytes = await external.save();
+      file.itemVersion = "2";
+      const writer = await h.registry.join({
+        wopiSrc: SRC, accessToken: "SECRETTOKEN-routes-writer-rejoin", accessTokenTtl: 0, mode: "edit",
+      });
+      for (const reader of readers) {
+        let text = "";
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          text += new TextDecoder().decode(chunk.value);
+        }
+        expect(text).toBe('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n');
+        for (const token of [TOKEN, TOKEN_B, "SECRETTOKEN-routes-writer-rejoin"]) expect(text).not.toContain(token);
+      }
+
+      const fresh = await requestEvents(viewers[0]!.user.id);
+      const freshReader = fresh.body!.getReader();
+      readers.push(freshReader);
+      expect((await freshReader.read()).done).toBe(false);
+      writerClient = await openTestClient(writer.joinPayload, session.sourceBytes!, 990351);
+      expect(writerClient.contains("sse-replacement-baseline")).toBe(true);
+      writerClient.edit("sse-replacement-live ", 1);
+      expect(session.applyUpdate(writer.user.id, writerClient.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+      expect((await session.requestSave(writer.user.id)).saved).toBe(true);
+      const saved = await freshReader.read();
+      expect(saved.done).toBe(false);
+      expect(new TextDecoder().decode(saved.value)).toContain("event: saved\n");
+    } finally {
+      for (const reader of readers) await reader.cancel().catch(() => {});
+      external.destroy();
+      writerClient?.destroy();
+      session.abandon();
+    }
   });
 
   test("SSE delivers saved and conflict without tokens", async () => {

@@ -401,6 +401,10 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         session.on("saveFailed", (p) => send("saveFailed", { kind: p.kind })),
         session.on("conflict", (p) => send("conflict", { name: p.name, copyName: p.copyName })),
         session.on("viewOnly", (p) => send("viewOnly", { reason: p.reason })),
+        session.on("rejoinRequired", (p) => {
+          send("rejoinRequired", { reason: p.reason });
+          end();
+        }),
         session.on("tokenExpiring", (p) => {
           if (p.userId === userId) send("tokenExpiring", { expiresAt: p.expiresAt });
         }),
