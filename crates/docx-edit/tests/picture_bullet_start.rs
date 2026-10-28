@@ -315,13 +315,44 @@ fn untouched_save_preserves_picture_bullet_numbering_bytes() {
         .unwrap()
         .document
         .package;
-    let request: S13SaveRequest = serde_json::from_value(json!({
-        "determinism": {"seed": "0".repeat(64), "now": "2026-10-28T00:00:00.000Z"},
-        "document": package.document,
-        "numbering": package.numbering,
-        "options": {"updateModifiedDate": false}
-    }))
-    .unwrap();
+    let body = package.document;
+    let sections = body.sections.map(|sections| {
+        sections
+            .into_iter()
+            .map(|section| docx_parse::document::Section {
+                id: section.id,
+                properties: section.properties,
+                content: body.content[section.content_start..section.content_end].to_vec(),
+            })
+            .collect()
+    });
+    let request = S13SaveRequest {
+        determinism: docx_parse::serializer::SerializerDeterminism {
+            seed: "0".repeat(64),
+            now: "2026-10-28T00:00:00.000Z".to_owned(),
+        },
+        document: docx_parse::document::DocumentBody {
+            content: body.content,
+            sections,
+            final_section_properties: body.final_section_properties,
+            custom_root_bindings: body.custom_root_bindings,
+            comments: body.comments,
+        },
+        header_entries: package.header_entries.unwrap_or_default(),
+        footer_entries: package.footer_entries.unwrap_or_default(),
+        footnotes: package.footnotes.unwrap_or_default(),
+        endnotes: package.endnotes.unwrap_or_default(),
+        footnote_separators: package.footnote_separators.unwrap_or_default(),
+        endnote_separators: package.endnote_separators.unwrap_or_default(),
+        relationship_entries: package.relationship_entries,
+        numbering: Some(package.numbering),
+        options: docx_parse::serializer::S13SaveOptions {
+            update_modified_date: false,
+            modified_by: None,
+        },
+        selective: None,
+        paragraph_ids: None,
+    };
     let saved = write_docx_s13(request, &bytes).unwrap();
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let numbering = &parts
