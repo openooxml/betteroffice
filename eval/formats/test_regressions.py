@@ -545,6 +545,31 @@ class OfficeEquivalentTests(unittest.TestCase):
                 f'{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>', parent + reply, threaded), False),
         })
 
+    def test_inserted_paragraph_takes_the_opening_run_formatting(self):
+        task = {'format': 'docx', 'suite': 'v3', 'expected': {'insert_paragraphs': {'heading': 'Foreword', 'texts': ['New note.']}}}
+        heading = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Foreword</w:t></w:r></w:p>'
+        body = ('<w:p>' + text_run('Opening ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>Emphasis</w:t></w:r>'
+                + text_run(' tail.') + '</w:p>')
+        def package(inserted=''):
+            return word_package(heading + inserted + body, '', '')
+        for name, inserted, accepted in (
+                ('plain like the opening run', '<w:p><w:r><w:t>New note.</w:t></w:r></w:p>', True),
+                ('italic like a later run', '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>New note.</w:t></w:r></w:p>', False)):
+            with self.subTest(output=name):
+                if accepted:
+                    runner.checker.check_real(task, package(), package(inserted))
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, package(), package(inserted))
+
+    def test_replaced_drawing_text_takes_the_opening_run_formatting(self):
+        body = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t>Plain</a:t></a:r>'
+                             '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(body, 'New text')
+        runs = body.findall('a:p/a:r', runner.checker.NS)
+        self.assertEqual([run.find('a:t', runner.checker.NS).text for run in runs], ['New text'])
+        self.assertIsNone(runs[0].find('a:rPr', runner.checker.NS))
+
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
             tag = 'delText' if kind == 'del' else 't'

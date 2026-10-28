@@ -1273,7 +1273,8 @@ def real_expected_package(package, spec, fmt):
             if props is not None:
                 paragraph.append(copy.deepcopy(props))
             run = ET.SubElement(paragraph, w('r'))
-            props = template.find('w:r/w:rPr', NS)
+            opening = template.find('w:r', NS)
+            props = opening.find('w:rPr', NS) if opening is not None else None
             if props is not None:
                 run.append(copy.deepcopy(props))
             ET.SubElement(run, w('t')).text = text
@@ -2529,7 +2530,8 @@ def drawing_text(body, text):
     paragraphs = body.findall('a:p', NS)
     require(paragraphs, 'text body has no paragraph template')
     template = copy.deepcopy(paragraphs[0])
-    props = template.find('a:r/a:rPr', NS)
+    opening = template.find('a:r', NS)
+    props = opening.find('a:rPr', NS) if opening is not None else None
     template[:] = [n for n in template if n.tag in (q('a', 'pPr'), q('a', 'endParaRPr'))]
     for paragraph in paragraphs:
         body.remove(paragraph)
