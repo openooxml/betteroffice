@@ -9,6 +9,8 @@ import { peerlessSessionOpener } from './usePeerlessPresentation';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 const { act, waitFor } = await import('@testing-library/react');
 
+const last = <T,>(items: readonly T[]): T | undefined => items[items.length - 1];
+
 test('recovery retains typing after an edited automatic checkpoint', async () => {
   const error = mock(() => {});
   const value = await open({ onError: error });
@@ -258,13 +260,13 @@ for (const rebase of [false, true]) test(`source recovery preserves insert, dele
     const input = { inputTime: 0, undoGroup: 'recovery-test' };
     await act(async () => {
       const ack = await value.client.dispatch({ kind: 'insertText', payload: { ...input, at: at(0), text: 'typed' } });
-      expect(ack.outcomes.at(-1)?.committed).toBe(true);
+      expect(last(ack.outcomes)?.committed).toBe(true);
       await value.api.recoverySave();
     });
     expect(recovery?.baseline?.kind).toBe('source');
     await act(async () => {
-      const ack = await value.client.dispatch({ kind: 'deleteBackward', payload: { ...input, at: at(5) } });
-      expect(ack.outcomes.at(-1)?.committed).toBe(true);
+      const ack = await value.client.dispatch({ kind: 'deleteBackward', payload: { ...input, unit: 'codePoint', at: at(5) } });
+      expect(last(ack.outcomes)?.committed).toBe(true);
     });
     const bound = spyOn(recovery!, 'needsRebase').mockReturnValueOnce(rebase);
     try { await act(async () => { await value.api.recoverySave(); }); }
@@ -277,12 +279,12 @@ for (const rebase of [false, true]) test(`source recovery preserves insert, dele
       if (object?.kind !== 'object' || !object.rect) throw new Error('Expected a movable object');
       const ack = await value.client.dispatch({ kind: 'moveShape', payload: { ...input,
         frame: value.client.state.frame!, target: object, x: object.rect.x + 10000, y: object.rect.y + 20000 } });
-      expect(ack.outcomes.at(-1)?.committed).toBe(true);
+      expect(last(ack.outcomes)?.committed).toBe(true);
       await value.api.recoverySave();
     });
     await act(async () => {
-      const ack = await value.client.dispatch({ kind: 'invoke', payload: { ...input, method: 'insertSlide', args: [2, null] } });
-      expect(ack.outcomes.at(-1)?.committed).toBe(true);
+      const ack = await value.client.dispatch({ kind: 'invoke', payload: { ...input, method: 'insertSlide', args: [2] } });
+      expect(last(ack.outcomes)?.committed).toBe(true);
     });
     const reference = await value.client.save();
     const throughSeq = value.client.state.throughSeq;
@@ -325,10 +327,10 @@ async function remoteThenLocal(value: Awaited<ReturnType<typeof open>>, target: 
       inputTime: 0, undoGroup: 'remote' } });
     expect(ack.updates?.some((update) => update.origin === 'remote')).toBe(true);
     await value.api.recoverySave();
-    const local = await value.client.dispatch({ kind: 'deleteBackward', payload: { inputTime: 1, undoGroup: 'local',
+    const local = await value.client.dispatch({ kind: 'deleteBackward', payload: { inputTime: 1, undoGroup: 'local', unit: 'codePoint',
       at: { source: 'confirmed', selection: { slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
         anchor: 6, focus: 6, affinity: 'downstream' } } } });
-    expect(local.outcomes.at(-1)?.committed).toBe(true);
+    expect(last(local.outcomes)?.committed).toBe(true);
   });
   const reference = await value.client.save();
   const throughSeq = value.client.state.throughSeq;
