@@ -238,6 +238,62 @@ describe("streaming", () => {
     expect(sourceCancelled).toBe(true);
   });
 
+  test("download cap failures abort without waiting for source cancellation", async () => {
+    for (const announced of [false, true]) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64));
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(stream, { headers: announced ? { "Content-Length": "128" } : {} });
+      }, 100, { timeoutMs: 5000, bodyIdleTimeoutMs: 5000 });
+      const err = await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }));
+      expect(err.kind).toBe("tooLarge");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
+  test("upload cap failures abort without waiting for source cancellation", async () => {
+    for (const op of ["putFile", "putRelativeFile"] as const) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64));
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        const reader = (init?.body as ReadableStream<Uint8Array>).getReader();
+        try {
+          for (;;) {
+            if ((await reader.read()).done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return new Response(null);
+      }, 100, { timeoutMs: 5000, bodyIdleTimeoutMs: 5000 });
+      const err = await kindOf(client[op]({ wopiSrc: SRC, accessToken: TOKEN, body: source, suggestedTarget: "copy.docx" }));
+      expect(err.kind).toBe("tooLarge");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
   test("a 64 MiB generated body streams through getFile and readFile by checksum", async () => {
     const total = 64 * 1024 * 1024;
     const chunkSize = 64 * 1024;
@@ -292,15 +348,34 @@ describe("timeouts and body reads", () => {
     expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
   });
 
-  test("a stalled CheckFileInfo body uses the header timeout as its total budget", async () => {
-    const stream = new ReadableStream<Uint8Array>({
-      pull() {
-        return new Promise<void>(() => {});
-      },
-    });
-    const client = makeClient(async () => new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } }), 1024, { timeoutMs: 20, bodyIdleTimeoutMs: 60000 });
-    expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
-  });
+  test("metadata body timeouts cancel the reader, abort and release the body lock", async () => {
+    for (const op of ["CheckFileInfo", "PutRelativeFile", "RenameFile", "error"] as const) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(stream, { status: op === "error" ? 500 : 200 });
+      }, 1024, { timeoutMs: 20, bodyIdleTimeoutMs: 60000 });
+      const input = { wopiSrc: SRC, accessToken: TOKEN };
+      const pending = op === "CheckFileInfo" ? client.checkFileInfo(input)
+        : op === "PutRelativeFile" ? client.putRelativeFile({ ...input, body: new Uint8Array([1]), suggestedTarget: "copy.docx" })
+        : op === "RenameFile" ? client.renameFile({ ...input, requestedName: "renamed" })
+        : client.getLock(input);
+      expect((await kindOf(pending)).kind).toBe("timeout");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      expect(stream.locked).toBe(false);
+    }
+  }, 1000);
 
   test("a steady stream longer than the header timeout still completes", async () => {
     let sent = 0;
@@ -666,6 +741,7 @@ describe("putRelativeFile and renameFile validation", () => {
       },
       cancel() {
         cancelled = true;
+        return new Promise<void>(() => {});
       },
     });
     const client = makeClient(async () => {
@@ -675,7 +751,7 @@ describe("putRelativeFile and renameFile validation", () => {
     expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 11 }))).kind).toBe("tooLarge");
     expect(cancelled).toBe(true);
     expect(calls).toBe(0);
-  });
+  }, 1000);
 });
 
 describe("redaction through the client", () => {

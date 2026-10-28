@@ -141,6 +141,17 @@ function parseContentLength(header: string | null): number | null {
   return Number.isSafeInteger(value) ? value : null;
 }
 
+function cancelStream(stream: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array> | null | undefined): void {
+  try {
+    stream?.cancel().catch(() => {});
+  } catch {}
+}
+
+interface HostResponse {
+  response: Response;
+  controller: AbortController;
+}
+
 interface RequestSpec {
   op: string;
   contents: boolean;
@@ -192,7 +203,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     return new WopiHostError("network", `${op} network error: ${scrub(err instanceof Error ? err.message : String(err), accessToken)}`);
   }
 
-  async function withTotalTimeout<T>(op: string, accessToken: string, run: () => Promise<T>, cancel?: () => Promise<void> | undefined): Promise<T> {
+  async function withTotalTimeout<T>(op: string, accessToken: string, run: () => Promise<T>, cancel?: () => void): Promise<T> {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -206,8 +217,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     } catch (err) {
       if (timedOut) {
         try {
-          const pending = cancel?.();
-          if (pending) pending.catch(() => {});
+          cancel?.();
         } catch {}
         throw new WopiHostError("timeout", `${op} timed out after ${timeoutMs} ms`);
       }
@@ -217,45 +227,49 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }
   }
 
-  async function readResponseText(response: Response, op: string, accessToken: string, maxBytes = 1024 * 1024, throwOnOverCap = true): Promise<string> {
+  async function readResponseText(result: HostResponse, op: string, accessToken: string, maxBytes = 1024 * 1024, throwOnOverCap = true): Promise<string> {
+    const { response, controller } = result;
+    if (!response.body) return "";
+    const reader = response.body.getReader();
     return withTotalTimeout(op, accessToken, async () => {
-      if (!response.body) return "";
-      const reader = response.body.getReader();
       const kept: Uint8Array[] = [];
       let keptBytes = 0;
       let total = 0;
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        total += chunk.value.byteLength;
-        if (total > maxBytes) {
-          if (throwOnOverCap) {
-            try {
-              await reader.cancel();
-            } catch {}
-            throw new WopiHostError("invalidResponse", `${op} response exceeds ${maxBytes} bytes`);
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          total += chunk.value.byteLength;
+          if (total > maxBytes) {
+            controller.abort();
+            cancelStream(reader);
+            if (throwOnOverCap) {
+              throw new WopiHostError("invalidResponse", `${op} response exceeds ${maxBytes} bytes`);
+            }
+            const room = maxBytes - keptBytes;
+            if (room > 0) {
+              kept.push(chunk.value.subarray(0, room));
+              keptBytes += Math.min(room, chunk.value.byteLength);
+            }
+            break;
           }
-          const room = maxBytes - keptBytes;
-          if (room > 0) {
-            kept.push(chunk.value.subarray(0, room));
-            keptBytes += Math.min(room, chunk.value.byteLength);
-          }
-          try {
-            await reader.cancel();
-          } catch {}
-          break;
+          kept.push(chunk.value);
+          keptBytes += chunk.value.byteLength;
         }
-        kept.push(chunk.value);
-        keptBytes += chunk.value.byteLength;
+        const out = new Uint8Array(keptBytes);
+        let offset = 0;
+        for (const part of kept) {
+          out.set(part, offset);
+          offset += part.byteLength;
+        }
+        return new TextDecoder().decode(out);
+      } finally {
+        reader.releaseLock();
       }
-      const out = new Uint8Array(keptBytes);
-      let offset = 0;
-      for (const part of kept) {
-        out.set(part, offset);
-        offset += part.byteLength;
-      }
-      return new TextDecoder().decode(out);
-    }, () => response.body?.cancel());
+    }, () => {
+      cancelStream(reader);
+      controller.abort();
+    });
   }
 
   async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string): Promise<ChunkResult> {
@@ -283,9 +297,10 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }
   }
 
-  async function responseError(response: Response, op: string, accessToken: string): Promise<WopiHostError> {
+  async function responseError(result: HostResponse, op: string, accessToken: string): Promise<WopiHostError> {
+    const { response } = result;
     const status = response.status;
-    const fullText = scrub(await readResponseText(response, op, accessToken, 64 * 1024, false), accessToken);
+    const fullText = scrub(await readResponseText(result, op, accessToken, 64 * 1024, false), accessToken);
     const bodyText = fullText.slice(0, 200);
     const detail = bodyText.length > 0 ? `: ${bodyText}` : "";
     if (status >= 300 && status < 400) {
@@ -313,7 +328,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     return new WopiHostError("invalidResponse", `${op} failed with status ${status}${detail}`, { status });
   }
 
-  function wrapDownload(source: ReadableStream<Uint8Array>, op: string, accessToken: string): ReadableStream<Uint8Array> {
+  function wrapDownload(source: ReadableStream<Uint8Array>, op: string, accessToken: string, abort: () => void): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
     return new ReadableStream<Uint8Array>({
@@ -331,10 +346,9 @@ export function createHostClient(options: HostClientOptions): HostClient {
         }
         count += chunk.value.byteLength;
         if (count > maxFileBytes) {
-          try {
-            await reader.cancel();
-          } catch {}
           controller.error(tooLarge(op));
+          abort();
+          cancelStream(reader);
           return;
         }
         controller.enqueue(chunk.value);
@@ -366,7 +380,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     error?: WopiHostError;
     onDone?: () => void;
     pulled?: boolean;
-    onIdleTimeout?: () => void;
+    abort?: () => void;
     clearIdleTimer?: () => void;
   }
 
@@ -398,17 +412,16 @@ export function createHostClient(options: HostClientOptions): HostClient {
         count += chunk.value.byteLength;
         if (count > maxFileBytes) {
           state.exceeded = true;
-          try {
-            await reader.cancel();
-          } catch {}
           controller.error(tooLarge(op));
+          state.abort?.();
+          cancelStream(reader);
           return;
         }
         controller.enqueue(chunk.value);
         idleTimer = setTimeout(() => {
           idleTimer = undefined;
           state.error = new WopiHostError("timeout", `${op} timed out after ${bodyIdleTimeoutMs} ms without data`);
-          state.onIdleTimeout?.();
+          state.abort?.();
         }, bodyIdleTimeoutMs);
       },
       async cancel(reason) {
@@ -418,7 +431,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }, { highWaterMark: 0 });
   }
 
-  async function execute(input: WopiRequest, spec: RequestSpec): Promise<Response> {
+  async function execute(input: WopiRequest, spec: RequestSpec): Promise<HostResponse> {
     const url = buildUrl(input.wopiSrc, spec.contents, input.accessToken);
     let lastError: WopiHostError | undefined;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -432,7 +445,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       if (spec.override) headers.set("X-WOPI-Override", spec.override);
       if (spec.op === "GetFile") headers.set("X-WOPI-MaxExpectedSize", String(maxFileBytes));
       const controller = new AbortController();
-      const uploadState: UploadState = { exceeded: false, onIdleTimeout: () => controller.abort() };
+      const uploadState: UploadState = { exceeded: false, abort: () => controller.abort() };
       let body: BodyInit | undefined;
       let streamed = false;
       if (spec.body instanceof Uint8Array && spec.body.byteLength > 1024 * 1024) {
@@ -490,9 +503,8 @@ export function createHostClient(options: HostClientOptions): HostClient {
       if (connectTimer) clearTimeout(connectTimer);
       uploadState.clearIdleTimer?.();
       if (exceeded()) {
-        try {
-          await response.body?.cancel();
-        } catch {}
+        controller.abort();
+        cancelStream(response.body);
         throw tooLarge(spec.op);
       }
       if (uploadState.error) throw uploadState.error;
@@ -503,9 +515,9 @@ export function createHostClient(options: HostClientOptions): HostClient {
         continue;
       }
       if (response.status < 200 || response.status >= 300) {
-        throw await responseError(response, spec.op, input.accessToken);
+        throw await responseError({ response, controller }, spec.op, input.accessToken);
       }
-      return response;
+      return { response, controller };
     }
     throw lastError ?? new WopiHostError("network", `${spec.op} network error`);
   }
@@ -537,16 +549,15 @@ export function createHostClient(options: HostClientOptions): HostClient {
   }
 
   async function getFile(input: WopiRequest): Promise<GetFileResult> {
-    const response = await execute(input, { op: "GetFile", contents: true, method: "GET", idempotent: true });
+    const { response, controller } = await execute(input, { op: "GetFile", contents: true, method: "GET", idempotent: true });
     const announced = parseContentLength(response.headers.get("Content-Length"));
     if (announced !== null && announced > maxFileBytes) {
-      try {
-        await response.body?.cancel();
-      } catch {}
+      controller.abort();
+      cancelStream(response.body);
       throw tooLarge("GetFile");
     }
     const source = response.body ?? new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
-    const stream = wrapDownload(source, "GetFile", input.accessToken);
+    const stream = wrapDownload(source, "GetFile", input.accessToken, () => controller.abort());
     return { stream, size: announced, itemVersion: response.headers.get("X-WOPI-ItemVersion") };
   }
 
@@ -590,13 +601,11 @@ export function createHostClient(options: HostClientOptions): HostClient {
     return buffer;
   }
 
-  async function sendPut(input: WopiRequest, args: PutFileArgs, contents: boolean, override: string, extra: HeadersInit | undefined, op: string): Promise<Response> {
+  async function sendPut(input: WopiRequest, args: PutFileArgs, contents: boolean, override: string, extra: HeadersInit | undefined, op: string): Promise<HostResponse> {
     const declaredSize = args.body instanceof Uint8Array ? args.body.byteLength : args.size;
     if (declaredSize !== undefined && declaredSize > maxFileBytes) {
       if (isStream(args.body)) {
-        try {
-          await args.body.cancel();
-        } catch {}
+        cancelStream(args.body);
       }
       throw tooLarge(op);
     }
@@ -615,14 +624,14 @@ export function createHostClient(options: HostClientOptions): HostClient {
   }
 
   async function putFile(args: PutFileArgs): Promise<PutFileResult> {
-    const response = await sendPut(args, args, true, "PUT", args.extraHeaders, "PutFile");
+    const { response } = await sendPut(args, args, true, "PUT", args.extraHeaders, "PutFile");
     try {
       await response.body?.cancel();
     } catch {}
     return { itemVersion: response.headers.get("X-WOPI-ItemVersion") };
   }
 
-  async function discard(response: Response): Promise<void> {
+  async function discard({ response }: HostResponse): Promise<void> {
     try {
       await response.body?.cancel();
     } catch {}
@@ -652,14 +661,15 @@ export function createHostClient(options: HostClientOptions): HostClient {
   }
 
   async function getLock(input: WopiRequest): Promise<GetLockResult> {
-    const response = await execute(input, { op: "GetLock", contents: false, method: "POST", override: "GET_LOCK", idempotent: true });
+    const result = await execute(input, { op: "GetLock", contents: false, method: "POST", override: "GET_LOCK", idempotent: true });
+    const { response } = result;
     const raw = response.headers.get("X-WOPI-Lock");
     const currentLock = raw === null || raw === "" ? null : raw;
-    await discard(response);
+    await discard(result);
     return { lock: currentLock };
   }
 
-  async function readJsonObject(response: Response, op: string, accessToken: string): Promise<Record<string, unknown>> {
+  async function readJsonObject(response: HostResponse, op: string, accessToken: string): Promise<Record<string, unknown>> {
     const text = await readResponseText(response, op, accessToken);
     let parsed: unknown;
     try {
@@ -692,10 +702,11 @@ export function createHostClient(options: HostClientOptions): HostClient {
     if (args.suggestedTarget) headers.set("X-WOPI-SuggestedTarget", encodeUtf7(args.suggestedTarget));
     if (args.relativeTarget) headers.set("X-WOPI-RelativeTarget", encodeUtf7(args.relativeTarget));
     if (args.overwrite !== undefined) headers.set("X-WOPI-OverwriteRelativeTarget", args.overwrite ? "true" : "false");
-    const response = await sendPut(args, args, false, "PUT_RELATIVE", headers, "PutRelativeFile");
+    const result = await sendPut(args, args, false, "PUT_RELATIVE", headers, "PutRelativeFile");
+    const { response } = result;
     const validHeader = response.headers.get("X-WOPI-ValidRelativeTarget");
     const validRelativeTarget = validHeader ? decodeUtf7(validHeader) : undefined;
-    const parsed = await readJsonObject(response, "PutRelativeFile", args.accessToken);
+    const parsed = await readJsonObject(result, "PutRelativeFile", args.accessToken);
     const name = requiredString(parsed, "Name", "PutRelativeFile");
     const url = requiredString(parsed, "Url", "PutRelativeFile");
     return { name, url, validRelativeTarget, itemVersion: response.headers.get("X-WOPI-ItemVersion") };

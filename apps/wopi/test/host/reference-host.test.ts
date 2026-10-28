@@ -60,6 +60,24 @@ async function kindOf(promise: Promise<unknown>): Promise<WopiHostError> {
   throw new Error("expected the operation to fail");
 }
 
+function pausedBody() {
+  let finish = () => {};
+  let onRead = () => {};
+  const started = new Promise<void>((resolve) => { onRead = resolve; });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      finish = () => {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        controller.close();
+      };
+    },
+    pull() {
+      onRead();
+    },
+  }, { highWaterMark: 0 });
+  return { body, started, finish: () => finish() };
+}
+
 describe("reference host and host client", () => {
   test("checkFileInfo returns the stored file and proof headers are sent", async () => {
     const { client, recorded } = setup();
@@ -196,6 +214,95 @@ describe("reference host quirks", () => {
   });
 });
 
+describe("reference host write races", () => {
+  test("putFile revalidates the live lock after lock handoff or expiry", async () => {
+    for (const handoff of [false, true]) {
+      const { host, client, advance } = setup();
+      await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "lock-a" });
+      const upload = pausedBody();
+      const pending = kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: upload.body, lock: "lock-a" }));
+      await upload.started;
+      if (handoff) {
+        await client.unlock({ wopiSrc: SRC, accessToken: TOKEN, lock: "lock-a" });
+        await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "lock-b" });
+        await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), lock: "lock-b" });
+      } else {
+        advance(31 * 60 * 1000);
+        await client.getLock({ wopiSrc: SRC, accessToken: TOKEN });
+      }
+      const before = { ...host.files.get("file1") };
+      upload.finish();
+      const err = await pending;
+      expect(err.kind).toBe("lockMismatch");
+      expect(err.currentLock).toBe(handoff ? "lock-b" : null);
+      expect(host.files.get("file1")).toEqual(before);
+    }
+  });
+
+  test("an unlocked empty file can be initialized only once during concurrent uploads", async () => {
+    const { host, client } = setup();
+    host.setFile("file1", new Uint8Array(0), { name: "empty.docx" });
+    const upload = pausedBody();
+    const pending = kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: upload.body }));
+    await upload.started;
+    await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]) });
+    const before = { ...host.files.get("file1") };
+    upload.finish();
+    expect((await pending).kind).toBe("lockMismatch");
+    expect(host.files.get("file1")).toEqual(before);
+  });
+
+  test("putRelativeFile rechecks existing and newly created target locks before overwrite", async () => {
+    for (const existsAtStart of [false, true]) {
+      const { host, client } = setup();
+      if (existsAtStart) host.setFile("target", "before", { name: "target.docx" });
+      const upload = pausedBody();
+      const pending = kindOf(client.putRelativeFile({
+        wopiSrc: SRC,
+        accessToken: TOKEN,
+        body: upload.body,
+        relativeTarget: "target.docx",
+        overwrite: true,
+      }));
+      await upload.started;
+      if (!existsAtStart) host.setFile("target", "before", { name: "target.docx" });
+      const targetSrc = "https://cloud.example.com/wopi/files/target";
+      await client.lock({ wopiSrc: targetSrc, accessToken: TOKEN, lock: "target-lock" });
+      await client.putFile({ wopiSrc: targetSrc, accessToken: TOKEN, body: new Uint8Array([9]), lock: "target-lock" });
+      const before = [...host.files.values()].map((file) => ({ ...file }));
+      upload.finish();
+      const err = await pending;
+      expect(err.kind).toBe("lockMismatch");
+      expect(err.currentLock).toBe("target-lock");
+      expect([...host.files.values()]).toEqual(before);
+    }
+  });
+
+  test("write operations revalidate timestamps after reading the body", async () => {
+    for (const relative of [false, true]) {
+      const { host, client, advance } = setup({ timestampConflict: true });
+      const target = relative ? host.setFile("target", "before", { name: "target.docx" }) : host.files.get("file1")!;
+      if (!relative) await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "holder" });
+      const upload = pausedBody();
+      const input = { wopiSrc: SRC, accessToken: TOKEN, body: upload.body, extraHeaders: { "X-COOL-WOPI-Timestamp": target.lastModifiedTime } };
+      const pending = kindOf(relative
+        ? client.putRelativeFile({ ...input, relativeTarget: target.name, overwrite: true })
+        : client.putFile({ ...input, lock: "holder" }));
+      await upload.started;
+      advance(1);
+      if (relative) {
+        await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: target.name, overwrite: true });
+      } else {
+        await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), lock: "holder" });
+      }
+      const before = [...host.files.values()].map((file) => ({ ...file }));
+      upload.finish();
+      expect((await pending).kind).toBe("conflict");
+      expect([...host.files.values()]).toEqual(before);
+    }
+  });
+});
+
 describe("reference host strictness", () => {
   test("a proof signed 21 minutes off the host clock is rejected", async () => {
     const { host, signer } = setup();
@@ -218,7 +325,7 @@ describe("reference host strictness", () => {
     });
     host.tokens.set(TOKEN, { userId: "user1", canWrite: true });
     host.setFile("file1", new TextEncoder().encode("hi"), { name: "hi.docx" });
-    const rotatingSigner = createProofSigner(untrusted, old);
+    const rotatingSigner = createProofSigner(untrusted, current);
     const client = createHostClient({
       signer: rotatingSigner,
       maxFileBytes: 1024,
@@ -227,6 +334,40 @@ describe("reference host strictness", () => {
     });
     const info = await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN });
     expect(info.BaseFileName).toBe("hi.docx");
+  });
+
+  test("proof verification accepts only the three permitted header and key combinations", async () => {
+    const current = generateKeyPair();
+    const old = generateKeyPair();
+    const untrusted = createProofSigner(generateKeyPair());
+    const currentSigner = createProofSigner(current);
+    const oldSigner = createProofSigner(old);
+    const now = 1700000000000;
+    const url = `${SRC}?access_token=${TOKEN}`;
+    const ticks = dotnetTicks(new Date(now));
+    const signatures = [currentSigner, oldSigner, untrusted].map((key) => key.signProof({ accessToken: TOKEN, url, ticks }).proof);
+    for (const verifyProof of [
+      { current: proofKeyAttributes(current.publicKey), old: proofKeyAttributes(old.publicKey) },
+      { currentKey: current.publicKey, oldKey: old.publicKey },
+      [current.publicKey, old.publicKey],
+      createProofSigner(current, old),
+    ]) {
+      const host = createReferenceHost({ verifyProof, now: () => now });
+      host.setFile("file1", "hi", { name: "hi.docx" });
+      for (let proofIndex = 0; proofIndex < signatures.length; proofIndex += 1) {
+        for (let oldIndex = 0; oldIndex < signatures.length; oldIndex += 1) {
+          const response = await host.fetch(new Request(url, {
+            headers: {
+              "X-WOPI-Proof": signatures[proofIndex]!,
+              "X-WOPI-ProofOld": signatures[oldIndex]!,
+              "X-WOPI-TimeStamp": String(ticks),
+            },
+          }));
+          const permitted = proofIndex === 0 || proofIndex === 1 || oldIndex === 0;
+          expect(response.status).toBe(permitted ? 200 : 401);
+        }
+      }
+    }
   });
 
   test("a viewer token can read but every mutating and lock op is unauthorized", async () => {
@@ -275,19 +416,70 @@ describe("reference host strictness", () => {
     expect(bothTargets.status).toBe(400);
   });
 
-  test("putRelativeFile overwrite respects the target lock and keeps one file entry", async () => {
+  test("putRelativeFile rejects locked targets even with a matching lock and overwrites after unlock", async () => {
     const { host, client } = setup();
-    host.setFile("doc1", new TextEncoder().encode("v1"), { name: "doc.docx" });
+    const target = host.setFile("doc1", new TextEncoder().encode("v1"), { name: "doc.docx" });
     const docSrc = "https://cloud.example.com/wopi/files/doc1";
     await client.lock({ wopiSrc: docSrc, accessToken: TOKEN, lock: "holder" });
-    const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite: true }));
-    expect(err.kind).toBe("lockMismatch");
-    expect(err.currentLock).toBe("holder");
-    const ok = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite: true, lock: "holder" });
+    const before = { ...target };
+    for (const overwrite of [false, true]) {
+      for (const lock of [undefined, "other", "holder"]) {
+        const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite, lock }));
+        expect(err.kind).toBe("lockMismatch");
+        expect(err.currentLock).toBe("holder");
+        expect(target).toEqual(before);
+      }
+    }
+    await client.unlock({ wopiSrc: docSrc, accessToken: TOKEN, lock: "holder" });
+    const ok = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "doc.docx", overwrite: true });
     expect(ok.name).toBe("doc.docx");
     const named = [...host.files.values()].filter((entry) => entry.name === "doc.docx");
     expect(named.length).toBe(1);
     expect(named[0]?.id).toBe("doc1");
+    expect(target.bytes).toEqual(new Uint8Array([9]));
+    expect(target.version).toBe(before.version + 1);
+    expect(ok.itemVersion).toBe(target.itemVersion);
+  });
+
+  test("suggested targets never overwrite a collision even when overwrite is true", async () => {
+    for (const locked of [false, true]) {
+      const { host, client } = setup();
+      const target = host.setFile("doc1", "original", { name: "doc.docx" });
+      if (locked) await client.lock({ wopiSrc: "https://cloud.example.com/wopi/files/doc1", accessToken: TOKEN, lock: "holder" });
+      const before = { ...target };
+      const copy = await client.putRelativeFile({
+        wopiSrc: SRC,
+        accessToken: TOKEN,
+        body: new Uint8Array([9]),
+        suggestedTarget: "doc.docx",
+        overwrite: true,
+        lock: "holder",
+      });
+      expect(copy.name).toBe("doc (1).docx");
+      expect(copy.validRelativeTarget).toBe(copy.name);
+      expect(target).toEqual(before);
+      const copies = [...host.files.values()].filter((file) => file.name === copy.name);
+      expect(copies.length).toBe(1);
+      expect(copies[0]?.id).not.toBe(target.id);
+      expect(copies[0]?.bytes).toEqual(new Uint8Array([9]));
+    }
+  });
+
+  test("a suggested overwrite handles a target created while the upload is paused", async () => {
+    const { host, client } = setup();
+    const upload = pausedBody();
+    const pending = client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: upload.body, suggestedTarget: "race.docx", overwrite: true });
+    await upload.started;
+    const first = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "race.docx" });
+    await client.lock({ wopiSrc: first.url, accessToken: TOKEN, lock: "holder" });
+    const before = [...host.files.values()].find((file) => file.name === first.name);
+    const snapshot = { ...before };
+    upload.finish();
+    const second = await pending;
+    expect(second.name).toBe("race (1).docx");
+    expect(second.url).not.toBe(first.url);
+    expect(before).toEqual(snapshot);
+    expect(new Set([...host.files.values()].map((file) => file.name)).size).toBe(host.files.size);
   });
 });
 
@@ -359,6 +551,40 @@ describe("reference host file identity and body length", () => {
     const response = await host.fetch(request);
     expect([400, 413]).toContain(response.status);
     expect(host.files.get("file1")?.bytes.length).toBe(0);
+  });
+
+  test("premature EOF rejects every write without changing bytes or versions", async () => {
+    for (const mode of ["put", "create", "overwrite"] as const) {
+      for (const emptyBody of [false, true]) {
+        const { host, client, signer, nowMs } = setup();
+        const target = host.setFile("target", "target bytes", { name: "target.docx" });
+        await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "holder" });
+        const before = [...host.files.values()].map((file) => ({ ...file }));
+        const body = emptyBody ? null : new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            controller.close();
+          },
+        });
+        const headers: Record<string, string> = { "Content-Length": "10" };
+        if (mode === "put") {
+          headers["X-WOPI-Override"] = "PUT";
+          headers["X-WOPI-Lock"] = "holder";
+        } else {
+          headers["X-WOPI-Override"] = "PUT_RELATIVE";
+          headers["X-WOPI-RelativeTarget"] = mode === "create" ? "new.docx" : target.name;
+          headers["X-WOPI-OverwriteRelativeTarget"] = "true";
+        }
+        const response = await host.fetch(rawRequest(signer, mode === "put" ? `${SRC}/contents` : SRC, TOKEN, nowMs(), {
+          method: "POST",
+          headers,
+          body,
+          duplex: "half",
+        } as RequestInit));
+        expect([400, 413]).toContain(response.status);
+        expect([...host.files.values()]).toEqual(before);
+      }
+    }
   });
 });
 

@@ -72,35 +72,29 @@ function isAttributes(value: unknown): value is ProofKeyAttributes {
   return typeof value === "object" && value !== null && "modulus" in value && "exponent" in value;
 }
 
-function collectKeys(input: unknown, out: KeyObject[]): void {
-  if (input === undefined || input === null) return;
+function verificationKey(input: unknown): KeyObject | undefined {
+  if (input === undefined || input === null) return undefined;
+  try {
+    return publicKeyFromAttributes(isAttributes(input) ? input : proofKeyAttributes(input as ProofKeyInput));
+  } catch {
+    return undefined;
+  }
+}
+
+function verificationKeys(input: VerifyProofInput | undefined): { current?: KeyObject; old?: KeyObject } {
+  if (input === undefined || input === null) return {};
   if (Array.isArray(input)) {
-    for (const entry of input) collectKeys(entry, out);
-    return;
+    return { current: verificationKey(input[0]), old: verificationKey(input[1]) };
   }
   if (typeof input === "object" && "signProof" in input && "proofKeyAttributes" in input) {
     const signer = input as ProofSigner;
-    out.push(publicKeyFromAttributes(signer.proofKeyAttributes()));
-    out.push(publicKeyFromAttributes(signer.oldProofKeyAttributes()));
-    return;
-  }
-  if (isAttributes(input)) {
-    out.push(publicKeyFromAttributes(input));
-    return;
+    return { current: verificationKey(signer.proofKeyAttributes()), old: verificationKey(signer.oldProofKeyAttributes()) };
   }
   if (typeof input === "object" && ("current" in input || "old" in input || "currentKey" in input || "oldKey" in input)) {
     const record = input as Record<string, unknown>;
-    collectKeys(record.current ?? record.currentKey, out);
-    collectKeys(record.old ?? record.oldKey, out);
-    return;
+    return { current: verificationKey(record.current ?? record.currentKey), old: verificationKey(record.old ?? record.oldKey) };
   }
-  if (typeof input === "object" && "publicKey" in input) {
-    collectKeys((input as ProofKeyPair).publicKey, out);
-    return;
-  }
-  try {
-    out.push(publicKeyFromAttributes(proofKeyAttributes(input as ProofKeyInput)));
-  } catch {}
+  return { current: verificationKey(input) };
 }
 
 function fileIdFromPath(pathname: string): string {
@@ -143,8 +137,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   const quirks = options.quirks ?? {};
   const files = new Map<string, ReferenceFile>();
   const tokens = new Map<string, ReferenceToken | string>();
-  const keys: KeyObject[] = [];
-  collectKeys(options.verifyProof, keys);
+  const keys = verificationKeys(options.verifyProof);
   let nextFileNumber = 1;
 
   function uniqueFileId(): string {
@@ -171,7 +164,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   }
 
   function verifyRequestProof(request: Request, token: string): boolean {
-    if (keys.length === 0) return true;
+    if (options.verifyProof === undefined) return true;
     const timestampHeader = request.headers.get("X-WOPI-TimeStamp");
     if (!timestampHeader) return false;
     let ticks: bigint;
@@ -183,15 +176,17 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     const timestampMs = Number((ticks - DOTNET_EPOCH_TICKS) / 10000n);
     if (Math.abs(now() - timestampMs) > PROOF_WINDOW_MS) return false;
     const bytes = buildProofBytes(token, request.url, ticks);
-    for (const headerName of ["X-WOPI-Proof", "X-WOPI-ProofOld"]) {
+    for (const [headerName, key] of [
+      ["X-WOPI-Proof", keys.current],
+      ["X-WOPI-Proof", keys.old],
+      ["X-WOPI-ProofOld", keys.current],
+    ] as const) {
       const proof = request.headers.get(headerName);
-      if (!proof) continue;
+      if (!proof || !key) continue;
       const signature = Buffer.from(proof, "base64");
-      for (const key of keys) {
-        try {
-          if (verify("RSA-SHA256", bytes, key, signature)) return true;
-        } catch {}
-      }
+      try {
+        if (verify("RSA-SHA256", bytes, key, signature)) return true;
+      } catch {}
     }
     return false;
   }
@@ -202,6 +197,31 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       file.lockExpiresAt = null;
     }
     return file.lock;
+  }
+
+  function timestampConflict(request: Request, file: ReferenceFile): Response | null {
+    const stamp = request.headers.get("X-COOL-WOPI-Timestamp");
+    return quirks.timestampConflict && stamp !== null && stamp !== file.lastModifiedTime
+      ? json({ COOLStatusCode: 1010 }, 409) : null;
+  }
+
+  function validatePutFile(request: Request, file: ReferenceFile): Response | null {
+    const conflict = timestampConflict(request, file);
+    if (conflict) return conflict;
+    const currentLock = liveLock(file);
+    if (currentLock !== null) {
+      if (request.headers.get("X-WOPI-Lock") !== currentLock) return lockConflict(currentLock);
+    } else if (file.bytes.byteLength !== 0) {
+      return lockConflict(null, "File is not locked");
+    }
+    return null;
+  }
+
+  function validateRelativeTarget(request: Request, file: ReferenceFile, overwrite: boolean): Response | null {
+    const targetLock = liveLock(file);
+    if (targetLock !== null) return lockConflict(targetLock);
+    if (!overwrite) return json({ error: "target exists" }, 412);
+    return timestampConflict(request, file);
   }
 
   function setFile(id: string, data: Uint8Array | string, opts: { name?: string; lastModifiedTime?: string } = {}): ReferenceFile {
@@ -223,10 +243,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   }
 
   async function readBody(request: Request): Promise<Uint8Array | null> {
-    if (!request.body) return new Uint8Array(await request.arrayBuffer());
-    const reader = request.body.getReader();
     const lengthHeader = request.headers.get("Content-Length");
     const announced = lengthHeader !== null && /^\d+$/.test(lengthHeader.trim()) ? Number(lengthHeader.trim()) : null;
+    if (!request.body) {
+      return announced !== null && Number.isSafeInteger(announced) && announced !== 0 ? null : new Uint8Array(0);
+    }
+    const reader = request.body.getReader();
     if (announced === null || !Number.isSafeInteger(announced)) {
       const chunks: Uint8Array[] = [];
       let total = 0;
@@ -258,7 +280,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       out.set(chunk.value, offset);
       offset += chunk.value.byteLength;
     }
-    return offset === out.length ? out : out.subarray(0, offset);
+    return offset === out.length ? out : null;
   }
 
   function chunkedBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
@@ -332,20 +354,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     if (isContents && request.method === "POST") {
       if (override !== "PUT") return json({ error: "X-WOPI-Override PUT is required" }, 400);
       if (!canWrite) return json({ error: "unauthorized" }, 401);
-      if (quirks.timestampConflict) {
-        const stamp = request.headers.get("X-COOL-WOPI-Timestamp");
-        if (stamp !== null && stamp !== file.lastModifiedTime) {
-          return json({ COOLStatusCode: 1010 }, 409);
-        }
-      }
-      const requestLock = request.headers.get("X-WOPI-Lock");
-      if (currentLock !== null) {
-        if (requestLock !== currentLock) return lockConflict(currentLock);
-      } else if (file.bytes.byteLength !== 0) {
-        return lockConflict(null, "File is not locked");
-      }
+      const initialConflict = validatePutFile(request, file);
+      if (initialConflict) return initialConflict;
       const putBody = await readBody(request);
-      if (putBody === null) return json({ error: "body exceeds Content-Length" }, 413);
+      if (putBody === null) return json({ error: "body does not match Content-Length" }, 413);
+      const conflict = validatePutFile(request, file);
+      if (conflict) return conflict;
       file.bytes = putBody;
       file.version += 1;
       file.itemVersion = String(file.version);
@@ -398,34 +412,31 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         if ((suggested === null && relative === null) || (suggested !== null && relative !== null) || suggested === "" || relative === "") {
           return json({ error: "exactly one target header is required" }, 400);
         }
-        const overwrite = (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
+        const overwrite = relative !== null && (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
         const targetName = decodeUtf7(relative ?? suggested ?? "copy");
         if (targetName === "") return json({ error: "target header is required" }, 400);
         let finalName = targetName;
         const existing = [...files.values()].find((entry) => entry.name === targetName);
-        if (existing && relative && !overwrite) {
-          return json({ error: "target exists" }, 412);
-        }
-        if (existing && overwrite) {
-          const targetLock = liveLock(existing);
-          const requestLock = request.headers.get("X-WOPI-Lock");
-          if (targetLock !== null && requestLock !== targetLock) return lockConflict(targetLock);
-          const body = await readBody(request);
-          if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
-          existing.bytes = body;
-          existing.version += 1;
-          existing.itemVersion = String(existing.version);
-          existing.lastModifiedTime = new Date(now()).toISOString();
-          const existingUrl = new URL(request.url);
-          existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(existing.id));
-          existingUrl.search = "";
-          return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": existing.itemVersion });
+        if (existing && relative !== null) {
+          const conflict = validateRelativeTarget(request, existing, overwrite);
+          if (conflict) return conflict;
         }
         const body = await readBody(request);
-        if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
+        if (body === null) return json({ error: "body does not match Content-Length" }, 413);
         const current = [...files.values()].find((entry) => entry.name === targetName);
-        if (current && relative && !overwrite) return json({ error: "target exists" }, 412);
-        if (current && suggested && !overwrite) {
+        if (current && relative !== null) {
+          const conflict = validateRelativeTarget(request, current, overwrite);
+          if (conflict) return conflict;
+          current.bytes = body;
+          current.version += 1;
+          current.itemVersion = String(current.version);
+          current.lastModifiedTime = new Date(now()).toISOString();
+          const existingUrl = new URL(request.url);
+          existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(current.id));
+          existingUrl.search = "";
+          return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": current.itemVersion });
+        }
+        if (current && suggested !== null) {
           const ext = extensionOf(targetName);
           const stem = ext ? targetName.slice(0, -ext.length) : targetName;
           let counter = 1;
