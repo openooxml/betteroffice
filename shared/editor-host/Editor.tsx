@@ -116,6 +116,7 @@ export async function prepareFile(
 
 export interface EditorApi {
   flushPendingInput(): Promise<void>;
+  hasPendingUpdates(): boolean;
   whenReady(): Promise<void>;
   encodeStateVector(): Promise<Uint8Array>;
   serialize(): Promise<Uint8Array>;
@@ -207,6 +208,7 @@ export default function Editor({
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
   >(null);
+  const providerRef = useRef(provider);
   const replicas = useRef({ replica, presentationReplica });
   replicas.current = { replica, presentationReplica };
   const [painted, setPainted] = useState(false);
@@ -245,6 +247,7 @@ export default function Editor({
         : file.format === "xlsx"
         ? new XlsxProvider(replica!, transport, options)
         : new PptxProvider(presentationReplica!, transport, options);
+    providerRef.current = next;
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
       callbacks.current.onStatus(synced ? "Connected" : status)
@@ -257,6 +260,7 @@ export default function Editor({
       unsubscribe();
       unsubscribeError();
       next.destroy();
+      if (providerRef.current === next) providerRef.current = null;
       setProvider(null);
     };
   }, [file.format, replica, presentationReplica, room, relayOrigin, createTransport]);
@@ -343,6 +347,11 @@ export default function Editor({
       return api;
     };
     callbacks.current.onReady({
+      hasPendingUpdates() {
+        if (!active) throw disposed;
+        const current = providerRef.current;
+        return !current || current.pendingBytes > 0;
+      },
       async flushPendingInput() {
         if (file.format === "docx") {
           if (!active || !docx.current) throw new Error("The document editor was disposed.");

@@ -110,13 +110,27 @@ mock.module("@betteroffice/pptx-react", () => ({
     return null;
   },
 }));
+let providerPendingBytes = 0;
 class Provider {
+  get pendingBytes() { return providerPendingBytes; }
   constructor(replica: unknown) { providerReplicas.push(replica); }
   onStatus() { return () => {}; }
   onError() { return () => {}; }
   connect() {}
   destroy() {}
 }
+
+test.each(["docx", "xlsx", "pptx"] as const)("%s save readiness reads the live provider queue", async (format) => {
+  docxReplica = {
+    clientId: 42, encodeStateVector: () => Uint8Array.of(0), encodeStateAsUpdate: () => Uint8Array.of(0, 0),
+    applyUpdate() {}, onUpdate: () => () => {},
+  };
+  const { api } = await mount(format, true);
+  expect(api.hasPendingUpdates()).toBe(false);
+  providerPendingBytes = 7;
+  try { expect(api.hasPendingUpdates()).toBe(true); }
+  finally { providerPendingBytes = 0; }
+});
 mock.module("@betteroffice/docx-react", () => ({
   DocxEditor: forwardRef<unknown, DocxProps>(function DocxEditor(props, ref) {
     docxProps = props;

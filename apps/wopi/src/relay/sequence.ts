@@ -3,7 +3,7 @@ export interface SocketSaveBarrier {
   seq: number;
 }
 
-export type SaveBarrier = SocketSaveBarrier | Uint8Array;
+export type SaveBarrier = SocketSaveBarrier;
 
 const SEQUENCE_FRAME_TYPE = 4;
 const CONNECTION_ID_BYTES = 36;

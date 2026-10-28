@@ -28,6 +28,7 @@ export interface RelaySocket {
 /** Data attached at upgrade time. */
 export interface RelaySocketData {
   handle: string;
+  baselineGeneration: number;
 }
 
 export interface ResolvedHandle {
@@ -101,7 +102,11 @@ export class CollabRelay {
   }
 
   /** Registers a socket, replacing any previous socket for that user. */
-  attach(ws: RelaySocket, resolved: ResolvedHandle): SocketState {
+  attach(ws: RelaySocket, resolved: ResolvedHandle, baselineGeneration: number | null): SocketState | null {
+    if (baselineGeneration !== resolved.session.baselineGeneration) {
+      try { ws.close(4409, "rejoin from source"); } catch {}
+      return null;
+    }
     const generation = resolved.session.connect(resolved.user.id);
     const previous = this.#byUser.get(resolved.user.id);
     if (previous && previous.ws !== ws) {
@@ -434,7 +439,7 @@ export class CollabRelay {
           } catch {}
           return;
         }
-        this.attach(ws, resolved);
+        this.attach(ws, resolved, ws.data?.baselineGeneration ?? null);
       },
       message: (ws: RelaySocket, message: Uint8Array | ArrayBuffer | string) => {
         this.handleMessage(ws, message);

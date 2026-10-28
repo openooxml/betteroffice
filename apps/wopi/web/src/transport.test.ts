@@ -2,6 +2,9 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { collabUrl, createWopiTransport, type WebSocketLike } from "./transport";
 import { decodeSequencedFrame } from "../../src/relay/sequence";
+import { saveDocument } from "./documentActions";
+import { CollaborationProvider } from "../../../../packages/xlsx/src/collaboration/provider";
+import type { CollaborationReplica } from "../../../../packages/xlsx/src/collaboration/types";
 
 class FakeSocket implements WebSocketLike {
   binaryType = "";
@@ -24,6 +27,56 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
+test.each([false, true])("save waits for provider backpressure, timeout=%s", async (timeout) => {
+  const socket = new FakeSocket();
+  const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, origin: "https://office.example", createSocket: () => socket });
+  let update!: Parameters<CollaborationReplica["onUpdate"]>[0];
+  const provider = new CollaborationProvider({
+    clientId: 7, encodeStateVector: () => Uint8Array.of(0), encodeStateAsUpdate: () => Uint8Array.of(0, 0),
+    applyUpdate() {}, onUpdate(listener) { update = listener; return () => {}; },
+  }, transport);
+  const captures: number[] = [];
+  const saves: number[] = [];
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    provider.connect();
+    socket.readyState = 1;
+    socket.onopen?.();
+    const before = transport.captureSaveBarrier()!.seq;
+    socket.bufferedAmount = 2 * 1024 * 1024;
+    update(Uint8Array.of(1, 2, 3), "local");
+    expect(provider.pendingBytes).toBeGreaterThan(0);
+    const pending = saveDocument({
+      flushPendingInput: async () => {},
+      hasPendingUpdates: () => provider.pendingBytes > 0,
+    }, { async save(barrier) { saves.push(barrier.seq); } }, {
+      inputTimeoutMs: timeout ? 5 : 500,
+      captureBarrier() { const barrier = transport.captureSaveBarrier(); captures.push(barrier!.seq); return barrier; },
+    });
+    const outcome = pending.then(() => "saved", (error: Error) => error.message);
+    await new Promise((resolve) => setTimeout(resolve, timeout ? 15 : 0));
+    expect(captures).toEqual([]);
+    expect(saves).toEqual([]);
+    socket.bufferedAmount = 0;
+    if (timeout) {
+      expect(await outcome).toBe("notSynced");
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(captures).toEqual([]);
+      expect(saves).toEqual([]);
+    } else {
+      expect(await outcome).toBe("saved");
+      expect(provider.pendingBytes).toBe(0);
+      expect(captures).toEqual([before + 1]);
+      expect(saves).toEqual(captures);
+      expect(decodeSequencedFrame(new Uint8Array(socket.sent.at(-1)!))!.seq).toBe(before + 1);
+    }
+  } finally {
+    provider.destroy();
+    transport.disconnect();
+    warning.mockRestore();
+  }
+});
+
 describe("collabUrl", () => {
   test("maps http and https origins to the /collab endpoint", () => {
     expect(collabUrl("http://127.0.0.1:3000")).toBe("ws://127.0.0.1:3000/collab");
@@ -34,7 +87,7 @@ describe("collabUrl", () => {
 describe("createWopiTransport", () => {
   test("reports 4409 and never reconnects a replaced baseline", async () => {
     const sockets: FakeSocket[] = [];
-    const transport = createWopiTransport({ handle: "h", createSocket: () => {
+    const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => {
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket;
@@ -60,7 +113,7 @@ describe("createWopiTransport", () => {
 
   test.each([1006, 4401])("close code %i keeps the existing reconnect behavior", async (code) => {
     const sockets: FakeSocket[] = [];
-    const transport = createWopiTransport({ handle: "h", createSocket: () => {
+    const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => {
       const socket = new FakeSocket();
       sockets.push(socket);
       return socket;
@@ -89,7 +142,7 @@ describe("createWopiTransport", () => {
     const sockets: FakeSocket[] = [];
     const seen: Array<{ url: string; protocols: string[] }> = [];
     const transport = createWopiTransport({
-      handle: "handle-abc",
+      handle: "handle-abc", baselineGeneration: 1,
       origin: "https://office.example.com",
       createSocket: (url, protocols) => {
         seen.push({ url, protocols });
@@ -99,14 +152,14 @@ describe("createWopiTransport", () => {
       },
     });
     transport.connect();
-    expect(seen).toEqual([{ url: "wss://office.example.com/collab", protocols: ["bo-wopi.v1", "handle-abc"] }]);
+    expect(seen).toEqual([{ url: "wss://office.example.com/collab", protocols: ["bo-wopi.v1", "handle-abc", "bo-wopi.generation.1"] }]);
     expect(sockets[0]!.binaryType).toBe("arraybuffer");
   });
 
   test("forwards binary messages and sends only while open", () => {
     const socket = new FakeSocket();
     const transport = createWopiTransport({
-      handle: "h",
+      handle: "h", baselineGeneration: 1,
       origin: "http://127.0.0.1:3000",
       createSocket: () => socket,
     });
@@ -128,7 +181,7 @@ describe("createWopiTransport", () => {
 test("socket barriers number accepted frames and reset on reconnect", () => {
   const sockets: FakeSocket[] = [];
   const transport = createWopiTransport({
-    handle: "h",
+    handle: "h", baselineGeneration: 1,
     createSocket: () => {
       const socket = new FakeSocket();
       sockets.push(socket);
@@ -186,7 +239,7 @@ test("backpressure polls until drained and stops polling after close or disconne
   };
   try {
     const socket = new FakeSocket();
-    const transport = createWopiTransport({ handle: "h", createSocket: () => socket });
+    const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => socket });
     const events: string[] = [];
     transport.onEvent((event) => events.push(event.type));
     transport.connect();

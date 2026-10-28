@@ -1,5 +1,6 @@
 import type { CollaborationTransport, CollaborationTransportEvent } from "../../../../shared/editor-host/collaboration/types";
 import { encodeSequencedFrame, type SocketSaveBarrier } from "../../src/relay/sequence";
+import { BASELINE_GENERATION_PROTOCOL } from "../../src/baseline";
 
 /** WebSocket constructor surface, so tests can fake it. */
 export interface WebSocketLike {
@@ -16,6 +17,7 @@ export interface WebSocketLike {
 
 export interface WopiTransportOptions {
   handle: string;
+  baselineGeneration: number;
   origin?: string;
   createSocket?: (url: string, protocols: string[]) => WebSocketLike;
 }
@@ -45,7 +47,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
   const origin = options.origin ?? (typeof location !== "undefined" ? location.origin : "http://localhost");
   const createSocket = options.createSocket ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols) as unknown as WebSocketLike);
   const url = collabUrl(origin);
-  const protocols = ["bo-wopi.v1", options.handle];
+  const protocols = ["bo-wopi.v1", options.handle, `${BASELINE_GENERATION_PROTOCOL}${options.baselineGeneration}`];
   const listeners = new Set<(event: CollaborationTransportEvent) => void>();
   let socket: WebSocketLike | null = null;
   let connectionId: string | null = null;

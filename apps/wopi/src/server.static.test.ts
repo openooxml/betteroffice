@@ -9,6 +9,8 @@ import { initEngines } from "./replica/engines";
 import { openTestClient } from "../test/replica/clients";
 import { addToken, makeHarness, SRC } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
+import { CollabRelay } from "./relay/relay";
+import { encodeSequencedFrame } from "./relay/sequence";
 
 const TOKEN = "SECRETTOKEN-static-3c2b1a";
 
@@ -154,7 +156,8 @@ describe("editnew flow", () => {
     const h = makeHarness();
     h.host.setFile("file1", new Uint8Array(0), { name: "new.xlsx" });
     addToken(h, TOKEN, "user-a", { name: "Alice A" });
-    const server = startServer({ config: h.config, currentKey: generateKeyPair(), registry: h.registry }, 0);
+    const relay = new CollabRelay(h.registry);
+    const server = startServer({ config: h.config, currentKey: generateKeyPair(), registry: h.registry, relay }, 0);
     servers.push(server);
     const base = `http://127.0.0.1:${server.port}`;
 
@@ -180,7 +183,11 @@ describe("editnew flow", () => {
       const session = h.registry.list()[0]!;
       const applied = session.applyUpdate(handle, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
       expect(applied.accepted).toBe(true);
-      const save = await fetch(`${base}/api/session/save`, { method: "POST", headers: auth, body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
+      const socket = { send() {}, close() {} };
+      const barrier = { connectionId: crypto.randomUUID(), seq: 0 };
+      relay.attach(socket, { session, user: session.getUser(handle)! }, session.baselineGeneration);
+      relay.handleMessage(socket, encodeSequencedFrame(barrier));
+      const save = await fetch(`${base}/api/session/save`, { method: "POST", headers: auth, body: JSON.stringify(barrier) });
       expect(save.status).toBe(200);
       await save.text();
     } finally {

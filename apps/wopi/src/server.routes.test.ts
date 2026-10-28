@@ -7,12 +7,81 @@ import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/cl
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
 import { SessionRegistry } from "./session/registry";
-import { CollabRelay } from "./relay/relay";
+import { CollabRelay, type RelaySocketData } from "./relay/relay";
 import { encodeSequencedFrame } from "./relay/sequence";
 import { encodeUpdateFrame } from "./relay/frames";
 
 const TOKEN = "SECRETTOKEN-routes-9f8e7d6c";
 const TOKEN_B = "SECRETTOKEN-routes-b-1a2b3c";
+
+test("baseline replacement between join and attachment rejects stale sockets and event streams", async () => {
+  const s = setup();
+  const viewer = pageConfig(await (await postPage(s, "view")).text());
+  const session = s.h.registry.list()[0]!;
+  const handler = createHandler({ config: s.h.config, currentKey: generateKeyPair(), registry: s.h.registry });
+  const source = await fetch(`${s.base}/api/session/source`, { headers: auth(viewer) });
+  const initial = await (await fetch(`${s.base}/api/session/join`, { headers: auth(viewer) })).json() as { baselineGeneration: number };
+  expect(source.headers.get("X-WOPI-Baseline-Generation")).toBe(String(initial.baselineGeneration));
+  expect(Number.isSafeInteger(initial.baselineGeneration)).toBe(true);
+  await source.arrayBuffer();
+  let socketData!: RelaySocketData;
+  await handler(new Request("https://office.example/collab", { headers: {
+    "Sec-WebSocket-Protocol": `bo-wopi.v1, ${viewer.sessionHandle}, bo-wopi.generation.${initial.baselineGeneration}`,
+  } }), { upgrade(_request, options) { socketData = options!.data as RelaySocketData; return true; } });
+  const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 997001);
+  try {
+    external.edit("new-baseline ");
+    const file = s.h.host.files.get("file1")!;
+    file.bytes = await external.save();
+    file.itemVersion = "2";
+    await postPage(s, "edit", TOKEN_B);
+    expect(session.baselineGeneration).toBe(initial.baselineGeneration + 1);
+    const closed: number[] = [];
+    handler.relay.websocket.open({ data: socketData, send() {}, close(code) { closed.push(code!); } });
+    expect(closed).toEqual([4409]);
+    expect(handler.relay.hasSocket(session, viewer.sessionHandle)).toBe(false);
+    const stale = await handler(new Request("https://office.example/api/session/events", { headers: {
+      ...auth(viewer), "X-WOPI-Baseline-Generation": String(initial.baselineGeneration),
+    } }));
+    const reader = stale.body!.getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: rejoinRequired");
+      expect((await reader.read()).done).toBe(true);
+    } finally { await reader.cancel(); }
+    const latest = await (await fetch(`${s.base}/api/session/join`, { headers: auth(viewer) })).json() as { baselineGeneration: number };
+    handler.relay.websocket.open({ data: { handle: viewer.sessionHandle, baselineGeneration: latest.baselineGeneration }, send() {}, close(code) { closed.push(code!); } });
+    expect(closed).toEqual([4409]);
+    expect(handler.relay.hasSocket(session, viewer.sessionHandle)).toBe(true);
+    const matching = await handler(new Request("https://office.example/api/session/events", { headers: {
+      ...auth(viewer), "X-WOPI-Baseline-Generation": String(latest.baselineGeneration),
+    } }));
+    const events = matching.body!.getReader();
+    try { expect(new TextDecoder().decode((await events.read()).value)).toBe(": connected\n\n"); }
+    finally { await events.cancel(); }
+  } finally { external.destroy(); }
+});
+
+test("state vectors cannot authorize a disconnected deletion save", async () => {
+  const s = setup({ format: "docx", saveSyncTimeoutMs: 1 });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 997101);
+  try {
+    client.edit("delete-while-disconnected ", 0);
+    session.applyUpdate(config.sessionHandle, client.encodeStateAsUpdate());
+    await session.requestSave(config.sessionHandle);
+    const vector = client.encodeStateVector();
+    client.remove("delete-while-disconnected ");
+    expect(client.encodeStateVector()).toEqual(vector);
+    const before = s.h.putCount();
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(vector).toString("base64") }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
+    expect(s.h.putCount()).toBe(before);
+  } finally { client.destroy(); }
+});
 
 beforeAll(async () => {
   await initEngines();
@@ -87,6 +156,15 @@ interface PageConfig {
 
 function auth(config: PageConfig): Record<string, string> {
   return { Authorization: `Bearer ${config.sessionHandle}` };
+}
+
+function socketBarrier(s: Setup, config: PageConfig) {
+  const session = s.h.registry.list()[0]!;
+  const socket = { send() {}, close() {} };
+  const barrier = { connectionId: crypto.randomUUID(), seq: 0 };
+  s.relay.attach(socket, { session, user: session.getUser(config.sessionHandle)! }, session.baselineGeneration);
+  s.relay.handleMessage(socket, encodeSequencedFrame(barrier));
+  return barrier;
 }
 
 function pageConfig(html: string): PageConfig {
@@ -286,10 +364,10 @@ describe("session API", () => {
       const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: invalidation === "expiry" ? h.clock.t + 10000 : 0, mode: "edit" });
       const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "edit" });
       const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
-      const headers = { Authorization: `Bearer ${a.user.id}` };
+      const headers = { Authorization: `Bearer ${a.user.id}`, "X-WOPI-Baseline-Generation": String(a.session.baselineGeneration) };
       const request = (path: string, method = "GET") => handler(new Request(`https://office.example.com${path}`, { method, headers }));
       const closed: number[] = [];
-      handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
+      handler.relay.websocket.open({ data: { handle: a.user.id, baselineGeneration: a.session.baselineGeneration }, send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
       expect((await request("/api/session/source")).status).toBe(200);
       const events = await request("/api/session/events");
       const reader = events.body!.getReader();
@@ -330,7 +408,7 @@ describe("session API", () => {
         expect(upgrade.status).toBe(401);
         expect(upgrades).toBe(0);
         const lateClosed: number[] = [];
-        handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { lateClosed.push(code!); } });
+        handler.relay.websocket.open({ data: { handle: a.user.id, baselineGeneration: a.session.baselineGeneration }, send: (frame) => frame.length, close: (code) => { lateClosed.push(code!); } });
         expect(lateClosed).toEqual([4401]);
         expect((await handler(new Request("https://office.example.com/api/session/source", { headers: { Authorization: `Bearer ${b.user.id}` } }))).status).toBe(200);
       } finally {
@@ -389,7 +467,7 @@ describe("session API", () => {
         client.encodeStateAsUpdate(replica.encodeStateVector()),
       );
       expect(result.accepted).toBe(true);
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save.status).toBe(200);
       const saved = (await save.json()) as { itemVersion: string | null };
       s.bodies.push(JSON.stringify(saved));
@@ -424,7 +502,7 @@ describe("session API", () => {
     const session = viewers[0]!.session;
     const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
     const requestEvents = (handle: string) => handler(new Request("https://office.example.com/api/session/events", {
-      headers: { Authorization: `Bearer ${handle}` },
+      headers: { Authorization: `Bearer ${handle}`, "X-WOPI-Baseline-Generation": String(session.baselineGeneration) },
     }));
     const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
     const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 990251);
@@ -482,7 +560,7 @@ describe("session API", () => {
     const viewer = pageConfig(await tracked(s, await postPage(s, "view", TOKEN_B)));
     const controller = new AbortController();
     const eventsResponse = await fetch(`${s.base}/api/session/events`, {
-      headers: auth(viewer),
+      headers: { ...auth(viewer), "X-WOPI-Baseline-Generation": String(s.h.registry.list()[0]!.baselineGeneration) },
       signal: controller.signal,
     });
     expect(eventsResponse.status).toBe(200);
@@ -515,7 +593,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save.status).toBe(200);
       await save.text();
       await readUntil("event: saved");
@@ -529,7 +607,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
+      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify(socketBarrier(s, config)) });
       expect(save2.status).toBe(200);
       await save2.text();
       await readUntil("event: conflict");
@@ -551,49 +629,7 @@ describe("session API", () => {
   });
 });
 
-test("ordered save waits for the requesting client's edits before PutFile", async () => {
-  const s = setup();
-  const config = pageConfig(await (await postPage(s, "edit")).text());
-  const session = s.h.registry.list()[0]!;
-  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995001);
-  try {
-    client.edit("ordered-save-marker", 0);
-    let completed = false;
-    const saving = fetch(`${s.base}/api/session/save`, {
-      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }),
-    }).then((response) => { completed = true; return response; });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(completed).toBe(false);
-    expect(s.h.putCount()).toBe(0);
-    expect(session.applyUpdate(config.sessionHandle, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
-    expect((await saving).status).toBe(200);
-    expect(s.h.putCount()).toBe(1);
-  } finally {
-    client.destroy();
-  }
-});
-
-test("ordered save returns 409 notSynced without writing when updates never arrive", async () => {
-  const s = setup({ saveSyncTimeoutMs: 1 });
-  const config = pageConfig(await (await postPage(s, "edit")).text());
-  const session = s.h.registry.list()[0]!;
-  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995002);
-  try {
-    client.edit("missing-update", 0);
-    const response = await fetch(`${s.base}/api/session/save`, {
-      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }),
-    });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { kind: "notSynced" } });
-    expect(s.h.putCount()).toBe(0);
-  } finally {
-    client.destroy();
-  }
-});
-
-test("save rejects a missing or malformed state vector", async () => {
+test("save rejects missing and legacy state vector barriers", async () => {
   const s = setup();
   const config = pageConfig(await (await postPage(s, "edit")).text());
   for (const body of ["", "{}", '{"stateVector":"!bad"}', '{"stateVector":"/w=="}']) {
@@ -601,7 +637,7 @@ test("save rejects a missing or malformed state vector", async () => {
       method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}` }, body,
     });
     expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: { kind: "invalidStateVector" } });
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
   }
   expect(s.h.putCount()).toBe(0);
 });
@@ -615,7 +651,7 @@ test.each(["deletion", "insertion"] as const)("HTTP save waits for a delayed %s 
   const socket = { send() {}, close() {} };
   const connectionId = crypto.randomUUID();
   let seq = 0;
-  s.relay.attach(socket, { session, user });
+  s.relay.attach(socket, { session, user }, session.baselineGeneration);
   s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }));
   try {
     const marker = "socket-save-marker ";

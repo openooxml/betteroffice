@@ -31,16 +31,20 @@ export interface Loaded {
 }
 
 export async function loadBaseline(api: SessionApi, signal?: AbortSignal): Promise<Pick<Loaded, "file" | "join" | "clientId">> {
-  const source = await api.source(signal);
-  signal?.throwIfAborted();
-  wopiDebug({ step: "source", sourceBytes: source.byteLength });
-  const join = await api.join(signal);
-  signal?.throwIfAborted();
-  wopiDebug({ step: "join", joinFormat: join.format, initialUpdateBytes: join.initialUpdate.byteLength });
-  const file = await prepareFile(source, join.format, { fontBaseUrl: "/fonts/" });
-  signal?.throwIfAborted();
-  wopiDebug({ step: "prepared", preparedFormat: file.format });
-  return { file, join, clientId: randomClientId() };
+  for (;;) {
+    signal?.throwIfAborted();
+    const source = await api.source(signal);
+    signal?.throwIfAborted();
+    wopiDebug({ step: "source", sourceBytes: source.bytes.byteLength });
+    const join = await api.join(signal);
+    signal?.throwIfAborted();
+    if (source.baselineGeneration !== join.baselineGeneration) continue;
+    wopiDebug({ step: "join", joinFormat: join.format, initialUpdateBytes: join.initialUpdate.byteLength });
+    const file = await prepareFile(source.bytes, join.format, { fontBaseUrl: "/fonts/" });
+    signal?.throwIfAborted();
+    wopiDebug({ step: "prepared", preparedFormat: file.format });
+    return { file, join, clientId: randomClientId() };
+  }
 }
 
 export default function WopiApp({ loaded }: { loaded: Loaded }) {
@@ -120,7 +124,6 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
       await saveDocument(editorApi.current, api, {
         ...options,
         signal: lifetime.signal,
-        isModified: () => modified.current,
         captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
         onFlushed: () => { version = changeVersion.current; },
         onProgress: wopiDebug,
@@ -148,7 +151,6 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
     setSaveState("saving");
     const pending = closeDocument(editorApi.current, api, {
       signal: lifetime.signal,
-      isModified: () => modified.current,
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
       onProgress: wopiDebug,
       setInputBlocked: (blocked) => {
@@ -215,12 +217,12 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
           setBanner("This file is being edited elsewhere. You are viewing a live read-only copy.");
         }
       }
-    }).catch(() => undefined);
+    }, { baselineGeneration: loaded.join.baselineGeneration }).catch(() => undefined);
     return () => {
       lifetime.signal.removeEventListener("abort", abort);
       controller.abort();
     };
-  }, [api, closed, lifetime, rejoin]);
+  }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin]);
 
   useEffect(() => {
     if (config.tokenExpiresAt === null) return;
@@ -236,7 +238,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
   const createTransport = useCallback(
     (_roomId: string) => {
       wopiDebug({ transportCreated: true });
-      const transport = createWopiTransport({ handle: config.sessionHandle, origin: window.location.origin });
+      const transport = createWopiTransport({ handle: config.sessionHandle, baselineGeneration: loaded.join.baselineGeneration, origin: window.location.origin });
       transportRef.current = transport;
       return {
         ...transport,
@@ -254,7 +256,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
           }),
       };
     },
-    [config.sessionHandle, lifetime, rejoin],
+    [config.sessionHandle, loaded.join.baselineGeneration, lifetime, rejoin],
   );
 
   const onViewsChange = useCallback(

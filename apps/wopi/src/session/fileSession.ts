@@ -166,6 +166,7 @@ export class FileSession {
   #userTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
   #format: Format | null = null;
   #sourceBytes: Uint8Array | null = null;
+  #baselineGeneration = 0;
   #journalActive = false;
   #journalBroken = false;
   #pendingJoins = 0;
@@ -217,6 +218,10 @@ export class FileSession {
 
   get sourceBytes(): Uint8Array | null {
     return this.#sourceBytes;
+  }
+
+  get baselineGeneration(): number {
+    return this.#baselineGeneration;
   }
 
   get lockHeld(): boolean {
@@ -359,6 +364,7 @@ export class FileSession {
         this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
+        this.#baselineGeneration += 1;
         this.#openedClientId = this.#replica!.clientId;
         try {
           this.#openedInitialState = this.#replica!.encodeStateAsUpdate();
@@ -512,6 +518,7 @@ export class FileSession {
     this.#destroyReplica();
     this.#attachReplica(replica);
     this.#sourceBytes = bytes;
+    this.#baselineGeneration += 1;
     this.#openedClientId = replica.clientId;
     this.#openedInitialState = replica.encodeStateAsUpdate();
     this.#savedVersion = 0;
@@ -608,6 +615,7 @@ export class FileSession {
       this.#destroyReplica();
       this.#attachReplica(recovered);
       this.#sourceBytes = existing.source;
+      this.#baselineGeneration += 1;
       this.#savedVersion = 0;
       if (existing.updates.length > 0) {
         this.#firstDirtyAt = this.#now();

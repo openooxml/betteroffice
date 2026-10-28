@@ -9,9 +9,10 @@ function sseResponse(text: string): Response {
 
 describe("decodeJoinResponse", () => {
   test("decodes the base64 initial update", () => {
-    const decoded = decodeJoinResponse({ format: "xlsx", initialUpdate: Buffer.from([1, 2, 3]).toString("base64") });
+    const decoded = decodeJoinResponse({ format: "xlsx", baselineGeneration: 1, initialUpdate: Buffer.from([1, 2, 3]).toString("base64") });
     expect(decoded.format).toBe("xlsx");
     expect(decoded.initialUpdate).toEqual(Uint8Array.of(1, 2, 3));
+    expect(decoded.baselineGeneration).toBe(1);
   });
 });
 
@@ -20,12 +21,12 @@ describe("SessionApi default fetch", () => {
     const original = globalThis.fetch;
     function fake(this: unknown, _input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
       if (this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
-      return Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+      return Promise.resolve(new Response(new Uint8Array([1, 2, 3]), { headers: { "X-WOPI-Baseline-Generation": "1" } }));
     }
     globalThis.fetch = fake as unknown as typeof fetch;
     try {
       const api = new SessionApi("handle-1");
-      expect(await api.source()).toEqual(Uint8Array.of(1, 2, 3));
+      expect(await api.source()).toEqual({ bytes: Uint8Array.of(1, 2, 3), baselineGeneration: 1 });
     } finally {
       globalThis.fetch = original;
     }
@@ -35,15 +36,18 @@ describe("SessionApi default fetch", () => {
 describe("SessionApi events", () => {
   test("delivers rejoinRequired once and leaves stream replacement to the page", async () => {
     let calls = 0;
-    const api = new SessionApi("handle-1", async () => {
+    const api = new SessionApi("handle-1", async (input, init) => {
       calls += 1;
+      expect(String(input)).toBe("/api/session/events");
+      expect(new Headers(init?.headers).get("X-WOPI-Baseline-Generation")).toBe("1");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer handle-1");
       return sseResponse('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\nevent: saved\ndata: {}\n\n');
     });
     const controller = new AbortController();
     const seen: SessionEvent[] = [];
     const timeout = setTimeout(() => controller.abort(), 50);
     try {
-      await api.events(controller.signal, (event) => { seen.push(event); }, { retryMs: 1 });
+      await api.events(controller.signal, (event) => { seen.push(event); }, { baselineGeneration: 1, retryMs: 1 });
       expect(calls).toBe(1);
       expect(seen).toEqual([{ type: "rejoinRequired", reason: "sourceChanged" }]);
     } finally {
@@ -65,7 +69,7 @@ describe("SessionApi events", () => {
     const done = api.events(controller.signal, (event) => {
       seen.push(event);
       if (seen.length === 2) controller.abort();
-    }, { retryMs: 1 });
+    }, { baselineGeneration: 1, retryMs: 1 });
     await done;
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(seen).toEqual([
@@ -82,21 +86,9 @@ describe("SessionApi events", () => {
     }) as unknown as typeof fetch;
     const api = new SessionApi("handle-1", fetchFn);
     const controller = new AbortController();
-    await api.events(controller.signal, () => {}, { retryMs: 1 });
+    await api.events(controller.signal, () => {}, { baselineGeneration: 1, retryMs: 1 });
     expect(calls).toBe(1);
   });
-});
-
-test("save posts the client state vector as base64 JSON", async () => {
-  let request: RequestInit | undefined;
-  const api = new SessionApi("handle-1", (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    request = init;
-    return Response.json({ itemVersion: "2" });
-  }) as unknown as typeof fetch);
-  expect(await api.save(Uint8Array.of(1, 2, 255))).toEqual({ itemVersion: "2" });
-  expect(request?.method).toBe("POST");
-  expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
-  expect(JSON.parse(String(request?.body))).toEqual({ stateVector: "AQL/" });
 });
 
 test("save posts the captured socket sequence without a state vector", async () => {
@@ -112,7 +104,7 @@ test("save posts the captured socket sequence without a state vector", async () 
 
 test("save exposes a short typed synchronization failure", async () => {
   const api = new SessionApi("handle-1", (async () => Response.json({ error: { kind: "notSynced" } }, { status: 409 })) as unknown as typeof fetch);
-  await expect(api.save(Uint8Array.of(0))).rejects.toThrow("notSynced");
+  await expect(api.save({ connectionId: crypto.randomUUID(), seq: 0 })).rejects.toThrow("notSynced");
 });
 
 test("save forwards the request cancellation signal", async () => {
@@ -122,7 +114,7 @@ test("save forwards the request cancellation signal", async () => {
     signal = init?.signal;
     return Response.json({ itemVersion: "2" });
   }) as unknown as typeof fetch);
-  await api.save(Uint8Array.of(0), controller.signal);
+  await api.save({ connectionId: crypto.randomUUID(), seq: 0 }, controller.signal);
   expect(signal).toBe(controller.signal);
 });
 

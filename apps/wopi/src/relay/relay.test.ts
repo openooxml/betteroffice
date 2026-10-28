@@ -139,7 +139,7 @@ class FrameClient {
   }
 
   static async connect(s: Setup, handle: string, client: TestClient, sequenced = false): Promise<FrameClient> {
-    const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle]);
+    const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle, `bo-wopi.generation.${s.h.registry.list()[0]!.baselineGeneration}`]);
     const frameClient = new FrameClient(client, ws);
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => resolve(), { once: true });
@@ -262,8 +262,8 @@ describe("collab relay", () => {
           },
           close: (code) => { closed.push(code!); },
         };
-        relay.attach(healthy, relay.resolve(a.user.id)!);
-        relay.attach(dropped, relay.resolve(b.user.id)!);
+        relay.attach(healthy, relay.resolve(a.user.id)!, a.session.baselineGeneration);
+        relay.attach(dropped, relay.resolve(b.user.id)!, b.session.baselineGeneration);
         relay.handleMessage(dropped, encodeAwarenessFrame([{ clientId: 909101, clock: 1, state: { name: "Bob" } }]));
         const client = await openTestClient(a.joinPayload, a.session.sourceBytes!, 909001);
         const trigger = (): void => {
@@ -285,7 +285,7 @@ describe("collab relay", () => {
           expect(attempts).toBe(1);
           const replacementFrames: Uint8Array[] = [];
           const replacement: RelaySocket = { send: (frame) => { replacementFrames.push(frame); return frame.length; }, close: () => {} };
-          relay.attach(replacement, relay.resolve(b.user.id)!);
+          relay.attach(replacement, relay.resolve(b.user.id)!, b.session.baselineGeneration);
           relay.handleMessage(replacement, encodeSyncStep1(client.encodeStateVector()));
           expect(replacementFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "sync-step-2"))).toBe(true);
           client.edit("delivery-recovers ", 0);
@@ -620,8 +620,8 @@ describe("collab relay", () => {
         send: (frame) => { peerFrames.push(frame); events.push("peer frame"); return frame.length; },
         close: (code) => { peerClosed.push(code!); },
       };
-      relay.attach(authorSocket, relay.resolve(a.user.id)!);
-      relay.attach(peerSocket, relay.resolve(b.user.id)!);
+      relay.attach(authorSocket, relay.resolve(a.user.id)!, a.session.baselineGeneration);
+      relay.attach(peerSocket, relay.resolve(b.user.id)!, b.session.baselineGeneration);
       const applyUpdate = a.session.applyUpdate.bind(a.session);
       const mockedApply = spyOn(a.session, "applyUpdate");
       try {
@@ -732,7 +732,7 @@ describe("collab relay", () => {
     const first: RelaySocket = { send: (frame) => frame.length, close: () => {} };
     const replacementClosed: number[] = [];
     const replacement: RelaySocket = { send: (frame) => frame.length, close: (code) => { replacementClosed.push(code!); } };
-    relay.attach(first, relay.resolve(a.user.id)!);
+    relay.attach(first, relay.resolve(a.user.id)!, a.session.baselineGeneration);
     const firstGeneration = a.user.connectionGeneration;
     const client = await openTestClient(a.joinPayload, a.session.sourceBytes!, 955501);
     let save: Promise<unknown> | undefined;
@@ -742,7 +742,7 @@ describe("collab relay", () => {
       save = a.session.requestSave(a.user.id);
       await putEntered;
       relay.detach(first);
-      relay.attach(replacement, relay.resolve(a.user.id)!);
+      relay.attach(replacement, relay.resolve(a.user.id)!, a.session.baselineGeneration);
       expect(a.user.connectionGeneration).toBeGreaterThan(firstGeneration);
       releasePut();
       await save;
@@ -880,9 +880,9 @@ describe("collab relay", () => {
 class WsTransport implements CollaborationTransport {
   ws: WebSocket | null = null;
   listeners = new Set<(event: CollaborationTransportEvent) => void>();
-  constructor(private url: string, private handle: string) {}
+  constructor(private url: string, private handle: string, private baselineGeneration: number) {}
   connect(): void {
-    const ws = new WebSocket(this.url, ["bo-wopi.v1", this.handle]);
+    const ws = new WebSocket(this.url, ["bo-wopi.v1", this.handle, `bo-wopi.generation.${this.baselineGeneration}`]);
     this.ws = ws;
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => this.emit({ type: "open" }));
@@ -932,7 +932,7 @@ async function providerClient(
     session.openDocx(source.slice(), false);
     session.loadState(payload.initialUpdate.slice());
     replica = session as unknown as CollaborationReplica;
-    provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
+    provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => {
         const paragraphs = session.paragraphs("body");
@@ -947,7 +947,7 @@ async function providerClient(
     if (payload.format !== "xlsx") throw new Error("payload format");
     workbook.applyUpdate(payload.initialUpdate.slice());
     replica = workbook as unknown as CollaborationReplica;
-    provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
+    provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => { workbook.editCell(0, 25 + slot, 0, marker); },
       contains: (marker) => {
@@ -959,7 +959,7 @@ async function providerClient(
   } else {
     const presentation = openPresentation(source.slice(), { clientId, initialUpdate: payload.format === "pptx" ? payload.initialUpdate.slice() : undefined });
     replica = presentation as unknown as CollaborationReplica;
-    provider = new PptxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle)) as never;
+    provider = new PptxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => {
         const stories = presentation.snapshot().slides.flatMap((slide) => slide.shapes.flatMap((shape) => shape.textStories));

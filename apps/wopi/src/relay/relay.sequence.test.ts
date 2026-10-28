@@ -23,7 +23,7 @@ function setup() {
   const socket: RelaySocket = { send() {}, close(code) { closeCodes.push(code); } };
   const replica = { version: 0, encodeStateVector: () => encodeStateVector(server) };
   const session = {
-    fileKey: "file", viewOnly: false, users: [user],
+    fileKey: "file", viewOnly: false, users: [user], baselineGeneration: 1,
     replica,
     on() { return () => {}; },
     connect(userId: string) {
@@ -51,7 +51,7 @@ function setup() {
       return { saved: true, itemVersion: "2", by: user.id };
     },
   } satisfies Pick<FileSession,
-    "fileKey" | "viewOnly" | "users" | "on" | "connect" | "heartbeat" | "disconnect" |
+    "fileKey" | "viewOnly" | "users" | "baselineGeneration" | "on" | "connect" | "heartbeat" | "disconnect" |
     "getUser" | "isUserTokenValid" | "applyUpdate" | "requestSave"
   > & { replica: Pick<ServerReplica, "version" | "encodeStateVector"> };
   const file = session as unknown as FileSession;
@@ -59,7 +59,7 @@ function setup() {
   const relay = new CollabRelay(registry);
   const connectionId = crypto.randomUUID();
   let seq = 0;
-  relay.attach(socket, { session: file, user });
+  relay.attach(socket, { session: file, user }, file.baselineGeneration);
   relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }));
   return {
     server, client, file, user, socket, relay, saved, closeCodes, connectionId,
@@ -99,7 +99,7 @@ test("socket saves time out without falling back to an already covered vector", 
     await expect(requestOrderedSave(h.file, h.user.id, { connectionId: h.connectionId, seq: 1 }, {
       relay: h.relay, timeoutMs: 1,
     })).rejects.toMatchObject({ kind: "notSynced" });
-    await expect(requestOrderedSave(h.file, h.user.id, encodeStateVector(h.client), {
+    await expect(requestOrderedSave(h.file, h.user.id, { connectionId: crypto.randomUUID(), seq: 0 }, {
       relay: h.relay, timeoutMs: 1,
     })).rejects.toMatchObject({ kind: "notSynced" });
     expect(h.saved).toEqual([]);
@@ -117,7 +117,7 @@ test("replacement sockets reset the applied sequence and cannot acknowledge an o
     const generation = h.user.connectionGeneration;
     const socket: RelaySocket = { send() {}, close() {} };
     const connectionId = crypto.randomUUID();
-    h.relay.attach(socket, { session: h.file, user: h.user });
+    h.relay.attach(socket, { session: h.file, user: h.user }, h.file.baselineGeneration);
     expect(h.user.connectionGeneration).toBe(generation + 1);
     h.relay.detach(h.socket);
     expect(h.user.connected).toBe(true);

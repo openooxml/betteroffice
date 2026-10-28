@@ -1,10 +1,12 @@
 import { SseParser, toSessionEvent, type SessionEvent } from "./sse";
 import type { SaveBarrier } from "../../src/relay/sequence";
+import { BASELINE_GENERATION_HEADER, parseBaselineGeneration } from "../../src/baseline";
 
 /** Join payload as served by /api/session/join. */
 export interface JoinResponse {
   format: "docx" | "xlsx" | "pptx";
   initialUpdate: Uint8Array;
+  baselineGeneration: number;
 }
 
 function fromBase64(value: string): Uint8Array {
@@ -22,7 +24,10 @@ export function decodeJoinResponse(raw: unknown): JoinResponse {
     throw new Error("Invalid join response format.");
   }
   if (typeof record.initialUpdate !== "string") throw new Error("Invalid join response update.");
-  return { format: record.format, initialUpdate: fromBase64(record.initialUpdate) };
+  if (typeof record.baselineGeneration !== "number" || !Number.isSafeInteger(record.baselineGeneration) || record.baselineGeneration < 0) {
+    throw new Error("Invalid baseline generation.");
+  }
+  return { format: record.format, initialUpdate: fromBase64(record.initialUpdate), baselineGeneration: record.baselineGeneration };
 }
 
 function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -43,10 +48,12 @@ export class SessionApi {
     return { Authorization: `Bearer ${this.#handle}` };
   }
 
-  async source(signal?: AbortSignal): Promise<Uint8Array> {
+  async source(signal?: AbortSignal): Promise<{ bytes: Uint8Array; baselineGeneration: number }> {
     const response = await this.#fetch("/api/session/source", { headers: this.#headers(), signal });
     if (!response.ok) throw new Error(`Could not load the document (${response.status}).`);
-    return new Uint8Array(await response.arrayBuffer());
+    const baselineGeneration = parseBaselineGeneration(response.headers.get(BASELINE_GENERATION_HEADER));
+    if (baselineGeneration === null) throw new Error("Invalid baseline generation.");
+    return { bytes: new Uint8Array(await response.arrayBuffer()), baselineGeneration };
   }
 
   async join(signal?: AbortSignal): Promise<JoinResponse> {
@@ -56,16 +63,10 @@ export class SessionApi {
   }
 
   async save(barrier: SaveBarrier, signal?: AbortSignal): Promise<{ itemVersion: string | null }> {
-    let body: string;
-    if (barrier instanceof Uint8Array) {
-      let binary = "";
-      for (const byte of barrier) binary += String.fromCharCode(byte);
-      body = JSON.stringify({ stateVector: btoa(binary) });
-    } else body = JSON.stringify(barrier);
     const response = await this.#fetch("/api/session/save", {
       method: "POST",
       headers: { ...this.#headers(), "Content-Type": "application/json" },
-      body,
+      body: JSON.stringify(barrier),
       signal,
     });
     if (!response.ok) {
@@ -83,12 +84,14 @@ export class SessionApi {
   }
 
   /** Streams session events, reconnecting until aborted or closed. */
-  async events(signal: AbortSignal, onEvent: (event: SessionEvent) => void, options: { retryMs?: number } = {}): Promise<void> {
+  async events(signal: AbortSignal, onEvent: (event: SessionEvent) => void, options: { baselineGeneration: number; retryMs?: number }): Promise<void> {
     const retryMs = options.retryMs ?? 1000;
     while (!signal.aborted) {
       let closed = false;
       try {
-        const response = await this.#fetch("/api/session/events", { headers: this.#headers(), signal });
+        const response = await this.#fetch("/api/session/events", {
+          headers: { ...this.#headers(), [BASELINE_GENERATION_HEADER]: String(options.baselineGeneration) }, signal,
+        });
         if (response.ok && response.body) {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();

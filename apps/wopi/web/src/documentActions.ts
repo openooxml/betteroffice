@@ -3,12 +3,11 @@ import type { SaveBarrier, SocketSaveBarrier } from "../../src/relay/sequence";
 
 interface InputEditor {
   flushPendingInput(): Promise<void>;
-  encodeStateVector(): Promise<Uint8Array>;
+  hasPendingUpdates(): boolean;
 }
 
 interface SaveDocumentOptions extends SaveOptions {
   signal?: AbortSignal;
-  isModified(): boolean;
   captureBarrier?(): SocketSaveBarrier | null;
   onFlushed?(): void;
   onProgress?(patch: Record<string, unknown>): void;
@@ -66,6 +65,7 @@ export async function saveDocument(
     options.signal?.throwIfAborted();
     if (!editor) throw new Error("editorNotReady");
     step = "flush";
+    const flushDeadline = Date.now() + (options.inputTimeoutMs ?? 3000);
     if (!options.DontTerminateEdit) {
       await bounded(() => editor.flushPendingInput(), options.inputTimeoutMs ?? 3000, "flushPendingInputTimeout", options.signal);
     }
@@ -73,22 +73,19 @@ export async function saveDocument(
     options.onFlushed?.();
     step = "flushed";
     progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
-    if (options.DontSaveIfUnmodified && !options.isModified()) {
-      step = "result";
-      progress({ saveResult: "skipped" });
-      return;
+    step = "drain";
+    while (editor.hasPendingUpdates()) {
+      const remaining = flushDeadline - Date.now();
+      if (remaining <= 0) throw new Error("notSynced");
+      await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "notSynced", options.signal);
     }
+    options.signal?.throwIfAborted();
+    if (Date.now() >= flushDeadline) throw new Error("notSynced");
     step = "sequence";
-    let barrier: SaveBarrier | null = options.captureBarrier?.() ?? null;
-    if (barrier) {
-      barrier = { connectionId: barrier.connectionId, seq: barrier.seq };
-      progress({ saveConnectionId: barrier.connectionId, saveSequence: barrier.seq });
-    } else {
-      step = "stateVector";
-      barrier = await bounded(() => editor.encodeStateVector(), options.inputTimeoutMs ?? 3000, "encodeStateVectorTimeout", options.signal);
-      progress({ saveStateVectorBytes: barrier.byteLength });
-    }
-    const capturedBarrier = barrier;
+    const barrier = options.captureBarrier?.();
+    if (!barrier) throw new Error("notSynced");
+    const capturedBarrier = { connectionId: barrier.connectionId, seq: barrier.seq };
+    progress({ saveConnectionId: barrier.connectionId, saveSequence: barrier.seq });
     step = "posted";
     await bounded(() => {
       const saving = api.save(capturedBarrier, controller.signal);

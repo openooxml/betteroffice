@@ -2,7 +2,24 @@ import { expect, spyOn, test } from "bun:test";
 import { closeDocument, finishClose, saveDocument } from "./documentActions";
 import type { SaveBarrier } from "../../src/relay/sequence";
 
-test.each(["flush", "vector", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
+test("a provider drain shares the input flush deadline and never captures after timeout", async () => {
+  const h = setup();
+  let captures = 0;
+  let now = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  h.editor.flushPendingInput = async () => { now = 40; };
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument({ ...h.editor, hasPendingUpdates: () => true }, h.api, {
+      ...h.saveOptions, inputTimeoutMs: 40,
+      captureBarrier() { captures += 1; return { connectionId: crypto.randomUUID(), seq: 0 }; },
+    })).rejects.toThrow("notSynced");
+    expect(captures).toBe(0);
+    expect(h.calls).not.toContain("save");
+  } finally { warning.mockRestore(); clock.mockRestore(); }
+});
+
+test.each(["flush", "drain", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
   const h = setup();
   const controller = new AbortController();
   let entered!: () => void;
@@ -10,7 +27,7 @@ test.each(["flush", "vector", "save"])("rejoining rejects a pending %s without w
   const started = new Promise<void>((resolve) => { entered = resolve; });
   const stalled = new Promise<void>((resolve) => { release = resolve; });
   if (stage === "flush") h.editor.flushPendingInput = () => { entered(); return stalled; };
-  if (stage === "vector") h.editor.encodeStateVector = async () => { entered(); await stalled; return Uint8Array.of(9); };
+  if (stage === "drain") h.editor.hasPendingUpdates = () => { entered(); return true; };
   let requestSignal: AbortSignal | undefined;
   const api = {
     save: async (barrier: SaveBarrier, signal?: AbortSignal) => {
@@ -20,7 +37,7 @@ test.each(["flush", "vector", "save"])("rejoining rejects a pending %s without w
     },
   };
   const warning = spyOn(console, "error").mockImplementation(() => {});
-  const pending = saveDocument(h.editor, api, { isModified: h.isModified, signal: controller.signal });
+  const pending = saveDocument(h.editor, api, { ...h.saveOptions, signal: controller.signal });
   const outcome = pending.then(() => "saved", (error: Error) => error.message);
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -45,58 +62,53 @@ test.each(["flush", "vector", "save"])("rejoining rejects a pending %s without w
 function setup() {
   const calls: string[] = [];
   let dirty = false;
+  const barrier = { connectionId: crypto.randomUUID(), seq: 1 };
+  const captureBarrier = () => { calls.push("sequence"); return barrier; };
   const editor = {
+    hasPendingUpdates: () => false,
     async flushPendingInput() { calls.push("flush"); dirty = true; },
     async encodeStateVector() { calls.push("vector"); return Uint8Array.of(9); },
   };
   const api = {
-    async save(barrier: SaveBarrier) { expect(barrier).toEqual(Uint8Array.of(9)); calls.push("save"); return { itemVersion: "2" }; },
+    async save(captured: SaveBarrier) { expect(captured).toEqual(barrier); calls.push("save"); return { itemVersion: "2" }; },
     async close() { calls.push("close"); },
   };
   const isModified = () => dirty;
-  return { calls, editor, api, isModified, closeOptions: { isModified, setInputBlocked() {} } };
+  return { calls, editor, api, isModified, barrier, saveOptions: { captureBarrier }, closeOptions: { captureBarrier, setInputBlocked() {} } };
 }
 
-test("save flushes pending input before capturing the ordered save vector", async () => {
+test("save flushes pending input before capturing the socket sequence", async () => {
   const h = setup();
-  await saveDocument(h.editor, h.api, { isModified: h.isModified });
-  expect(h.calls).toEqual(["flush", "vector", "save"]);
+  await saveDocument(h.editor, h.api, { ...h.saveOptions });
+  expect(h.calls).toEqual(["flush", "sequence", "save"]);
 });
 
-test.each(["flushPendingInput", "encodeStateVector"] as const)("a stalled docx %s fails without posting a save", async (method) => {
+test("a stalled input flush fails without posting a save", async () => {
   const h = setup();
-  h.editor[method] = () => new Promise<never>(() => {});
+  h.editor.flushPendingInput = () => new Promise<never>(() => {});
   const progress: Record<string, unknown>[] = [];
   const warning = spyOn(console, "error").mockImplementation(() => {});
   try {
     await expect(saveDocument(h.editor, h.api, {
-      isModified: h.isModified,
-      inputTimeoutMs: 5,
+      ...h.saveOptions, inputTimeoutMs: 5,
       onProgress: (patch) => { progress.push(patch); },
-    })).rejects.toThrow(`${method}Timeout`);
+    })).rejects.toThrow("flushPendingInputTimeout");
     expect(h.calls).not.toContain("save");
     expect(warning).toHaveBeenCalledTimes(1);
-    expect(progress.at(-1)).toMatchObject({ saveStep: "result", saveResult: "failed", saveError: `${method}Timeout` });
-  } finally {
-    warning.mockRestore();
-  }
+    expect(progress.at(-1)).toMatchObject({ saveStep: "result", saveResult: "failed", saveError: "flushPendingInputTimeout" });
+  } finally { warning.mockRestore(); }
 });
 
-test("a throwing docx state vector API reports its failure", async () => {
+test("a disconnected save never reads the state vector", async () => {
   const h = setup();
   h.editor.encodeStateVector = () => { throw new Error("worker-hosted replica"); };
-  const progress: Record<string, unknown>[] = [];
   const warning = spyOn(console, "error").mockImplementation(() => {});
   try {
     await expect(saveDocument(h.editor, h.api, {
-      isModified: h.isModified,
-      onProgress: (patch) => { progress.push(patch); },
-    })).rejects.toThrow("worker-hosted replica");
+      ...h.saveOptions, captureBarrier: () => null,
+    })).rejects.toThrow("notSynced");
     expect(h.calls).toEqual(["flush"]);
-    expect(progress.at(-1)).toMatchObject({ saveStep: "result", saveResult: "failed", saveFailedStep: "stateVector" });
-  } finally {
-    warning.mockRestore();
-  }
+  } finally { warning.mockRestore(); }
 });
 
 test("save diagnostics record every stage and capture changes committed by the flush", async () => {
@@ -104,13 +116,13 @@ test("save diagnostics record every stage and capture changes committed by the f
   const progress: Record<string, unknown>[] = [];
   let modifiedAfterFlush = false;
   await saveDocument(h.editor, h.api, {
-    isModified: h.isModified,
+    ...h.saveOptions,
     onFlushed: () => { modifiedAfterFlush = h.isModified(); },
     onProgress: (patch) => { progress.push(patch); },
   });
   expect(modifiedAfterFlush).toBe(true);
-  expect(progress.map((patch) => patch.saveStep)).toEqual(["started", "flushed", "stateVector", "posted", "result"]);
-  expect(progress[2]).toMatchObject({ saveStateVectorBytes: 1 });
+  expect(progress.map((patch) => patch.saveStep)).toEqual(["started", "flushed", "sequence", "posted", "result"]);
+  expect(progress[2]).toMatchObject({ saveConnectionId: h.barrier.connectionId, saveSequence: 1 });
   expect(progress.at(-1)).toMatchObject({ saveResult: "saved" });
 });
 
@@ -124,7 +136,7 @@ test("a stalled save response times out and aborts the request", async () => {
         signal = requestSignal;
         return new Promise<never>(() => {});
       },
-    }, { isModified: h.isModified, saveTimeoutMs: 5 })).rejects.toThrow("saveTimeout");
+    }, { ...h.saveOptions, saveTimeoutMs: 5 })).rejects.toThrow("saveTimeout");
     expect(signal?.aborted).toBe(true);
     expect(h.isModified()).toBe(true);
   } finally {
@@ -135,7 +147,7 @@ test("a stalled save response times out and aborts the request", async () => {
 test("close saves an edit committed by the final flush before closing", async () => {
   const h = setup();
   await closeDocument(h.editor, h.api, h.closeOptions, () => { h.calls.push("host-close"); });
-  expect(h.calls).toEqual(["flush", "vector", "save", "close", "host-close"]);
+  expect(h.calls).toEqual(["flush", "sequence", "save", "close", "host-close"]);
 });
 
 test("failed final saves leave the session and host open", async () => {
@@ -143,7 +155,7 @@ test("failed final saves leave the session and host open", async () => {
   await expect(closeDocument(h.editor, {
     async save() { h.calls.push("save"); throw new Error("notSynced"); }, close: () => h.api.close(),
   }, h.closeOptions, () => { h.calls.push("host-close"); })).rejects.toThrow("notSynced");
-  expect(h.calls).toEqual(["flush", "vector", "save"]);
+  expect(h.calls).toEqual(["flush", "sequence", "save"]);
 });
 
 test("failed input flush does not close or save", async () => {
@@ -157,13 +169,13 @@ test("unmodified close still performs an ordered save", async () => {
   const h = setup();
   h.editor.flushPendingInput = async () => { h.calls.push("flush"); };
   await closeDocument(h.editor, h.api, h.closeOptions, () => {});
-  expect(h.calls).toEqual(["flush", "vector", "save", "close"]);
+  expect(h.calls).toEqual(["flush", "sequence", "save", "close"]);
 });
 
-test("host save options preserve editing and skip unmodified saves", async () => {
+test("host save options preserve editing and still perform an ordered save", async () => {
   const h = setup();
-  await saveDocument(h.editor, h.api, { DontTerminateEdit: true, DontSaveIfUnmodified: true, isModified: h.isModified });
-  expect(h.calls).toEqual([]);
+  await saveDocument(h.editor, h.api, { DontTerminateEdit: true, DontSaveIfUnmodified: true, ...h.saveOptions });
+  expect(h.calls).toEqual(["sequence", "save"]);
 });
 
 test("close selects UI_Close only when requested and otherwise navigates the top window", () => {
@@ -187,7 +199,7 @@ test("a failed close request leaves the host open", async () => {
     save: h.api.save,
     async close() { h.calls.push("close"); throw new Error("Close failed"); },
   }, h.closeOptions, () => { h.calls.push("host-close"); })).rejects.toThrow("Close failed");
-  expect(h.calls).toEqual(["flush", "vector", "save", "close"]);
+  expect(h.calls).toEqual(["flush", "sequence", "save", "close"]);
 });
 
 test("save captures the socket barrier immediately after input flush", async () => {
@@ -201,7 +213,7 @@ test("save captures the socket barrier immediately after input flush", async () 
       h.calls.push("save");
     },
   }, {
-    isModified: h.isModified,
+    ...h.saveOptions,
     captureBarrier: () => ({ connectionId, seq }),
   });
   expect(h.calls).toEqual(["flush", "save"]);

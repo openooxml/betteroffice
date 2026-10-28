@@ -1239,6 +1239,7 @@ describe("session safety regressions", () => {
       addToken(h, "tok-a", "writer");
       const viewer = await joinEditor(h, "tok-v", "view");
       const session = viewer.session;
+      const baselineGeneration = session.baselineGeneration;
       const events: unknown[] = [];
       session.on("rejoinRequired", (event) => events.push(event));
       const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
@@ -1257,6 +1258,7 @@ describe("session safety regressions", () => {
         };
         const writer = await joinEditor(h, "tok-a");
         expect(changedUnderLock).toBe(true);
+        expect(session.baselineGeneration).toBe(baselineGeneration + 1);
         expect(events).toEqual([{ reason: "sourceChanged" }]);
         client = await clientFor(session, writer.joinPayload, bytes);
         expect(client.contains("external-before-lock")).toBe(true);

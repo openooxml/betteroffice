@@ -1,4 +1,3 @@
-import { decodeStateVector } from "yjs";
 import type { FileSession } from "./session/fileSession";
 import type { JoinPayload } from "./replica/replica";
 import type { CollabRelay } from "./relay/relay";
@@ -40,7 +39,7 @@ export function sourceContentType(format: string | null): string {
 }
 
 export class SaveSyncError extends Error {
-  constructor(readonly kind: "notSynced" | "invalidStateVector" | "invalidSaveBarrier") {
+  constructor(readonly kind: "notSynced" | "invalidSaveBarrier") {
     super(kind);
     this.name = "SaveSyncError";
   }
@@ -51,68 +50,26 @@ export function decodeSaveBarrier(body: Uint8Array): SaveBarrier {
   try {
     value = JSON.parse(new TextDecoder().decode(body));
   } catch {
-    throw new SaveSyncError("invalidStateVector");
+    throw new SaveSyncError("invalidSaveBarrier");
   }
-  if (typeof value === "object" && value !== null && ("connectionId" in value || "seq" in value)) {
-    if (!isSocketSaveBarrier(value)) throw new SaveSyncError("invalidSaveBarrier");
-    return { connectionId: value.connectionId, seq: value.seq };
-  }
-  return decodeSaveStateVector(body);
-}
-
-export function decodeSaveStateVector(body: Uint8Array): Uint8Array {
-  try {
-    const value = JSON.parse(new TextDecoder().decode(body)) as { stateVector?: unknown } | null;
-    const encoded = value?.stateVector;
-    if (typeof encoded !== "string" || encoded === "" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
-      throw new SaveSyncError("invalidStateVector");
-    }
-    const vector = fromBase64(encoded);
-    decodeStateVector(vector.slice());
-    return vector;
-  } catch {
-    throw new SaveSyncError("invalidStateVector");
-  }
-}
-
-export async function waitForStateVector(
-  readVector: () => Uint8Array,
-  wanted: Uint8Array,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
-): Promise<void> {
-  const required = decodeStateVector(wanted.slice());
-  const deadline = Date.now() + (options.timeoutMs ?? 5000);
-  for (;;) {
-    if (options.signal?.aborted) throw new SaveSyncError("notSynced");
-    const current = decodeStateVector(readVector().slice());
-    if ([...required].every(([client, clock]) => (current.get(client) ?? 0) >= clock)) return;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new SaveSyncError("notSynced");
-    await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
-  }
+  if (!isSocketSaveBarrier(value)) throw new SaveSyncError("invalidSaveBarrier");
+  return { connectionId: value.connectionId, seq: value.seq };
 }
 
 export async function requestOrderedSave(
   session: FileSession,
   userId: string,
   barrier: SaveBarrier,
-  options: { timeoutMs?: number; signal?: AbortSignal; relay?: Pick<CollabRelay, "hasSocket" | "appliedSequence"> } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal; relay?: Pick<CollabRelay, "appliedSequence"> } = {},
 ) {
-  if (barrier instanceof Uint8Array) {
-    await waitForStateVector(() => {
-      if (!session.replica || options.relay?.hasSocket(session, userId)) throw new SaveSyncError("notSynced");
-      return session.replica.encodeStateVector();
-    }, barrier, options);
-  } else {
-    const deadline = Date.now() + (options.timeoutMs ?? 5000);
-    for (;;) {
-      if (options.signal?.aborted) throw new SaveSyncError("notSynced");
-      const applied = options.relay?.appliedSequence(session, userId, barrier.connectionId);
-      if (applied !== undefined && applied !== null && applied >= barrier.seq) break;
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new SaveSyncError("notSynced");
-      await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
-    }
+  const deadline = Date.now() + (options.timeoutMs ?? 5000);
+  for (;;) {
+    if (options.signal?.aborted) throw new SaveSyncError("notSynced");
+    const applied = options.relay?.appliedSequence(session, userId, barrier.connectionId);
+    if (applied !== undefined && applied !== null && applied >= barrier.seq) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new SaveSyncError("notSynced");
+    await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
   }
   return session.requestSave(userId);
 }
