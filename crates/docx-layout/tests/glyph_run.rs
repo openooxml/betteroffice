@@ -424,6 +424,7 @@ fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
         let view = store.register_named_substitute(base, family).unwrap();
         let text = "1111111111中あア";
         let width = shaped_width(&store, view, text);
+        let numeric_auto_space = 0.25 * 16.0;
         assert!(
             (width - shaped_width(&store, base, text)).abs() > 0.01,
             "{family}"
@@ -443,8 +444,9 @@ fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
                 let run = browser_text_run(&store, family, view, text, formatting);
                 assert!(run.substitute_scale.is_none(), "{family} {bold} {italic}");
                 assert!(run.horizontal_scale.is_none(), "{family} {bold} {italic}");
-                assert_eq!(run.attrs.canvas_clusters.len(), 13, "{family}");
-                for (index, cluster) in run.attrs.canvas_clusters.iter().take(11).enumerate() {
+                let clusters = run.attrs.canvas_clusters.as_deref().unwrap();
+                assert_eq!(clusters.len(), 13, "{family}");
+                for (index, cluster) in clusters.iter().take(10).enumerate() {
                     assert_eq!(
                         cluster.offset.as_f64(),
                         Some(index as f64 * 8.0),
@@ -452,18 +454,22 @@ fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
                     );
                 }
                 assert_eq!(
-                    run.attrs.canvas_clusters[11].offset.as_f64(),
-                    Some(96.0),
+                    clusters[10].offset.as_f64(),
+                    Some(80.0 + numeric_auto_space),
                     "{family}"
                 );
-                let katakana_x = 96.0 + shaped_width(&store, view, "あ");
+                assert_eq!(
+                    clusters[11].offset.as_f64(),
+                    Some(96.0 + numeric_auto_space),
+                    "{family}"
+                );
+                let katakana_x = 96.0 + numeric_auto_space + shaped_width(&store, view, "あ");
                 assert!(
-                    (run.attrs.canvas_clusters[12].offset.as_f64().unwrap() - katakana_x).abs()
-                        < 0.001,
+                    (clusters[12].offset.as_f64().unwrap() - katakana_x).abs() < 0.001,
                     "{family}"
                 );
                 assert!(
-                    (run.width.as_f64().unwrap() - width).abs() < 0.002,
+                    (run.width.as_f64().unwrap() - width - numeric_auto_space).abs() < 0.002,
                     "{family} {bold} {italic}"
                 );
             }

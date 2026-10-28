@@ -449,9 +449,10 @@ pub struct DocAttrs {
     /// so the fallback keeps the measured face instead of generic sans-serif.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_font: Option<String>,
-    /// Browser text clusters positioned without scaling their outlines.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub canvas_clusters: Vec<CanvasTextCluster>,
+    /// Positioned browser text clusters, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_clusters: Option<Box<Vec<CanvasTextCluster>>>,
     /// Text/GlyphRun-only member: modern w14 text effects payload
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
@@ -7776,7 +7777,8 @@ fn emit_text_segment(
             word_spacing.as_ref().map(num_f64).unwrap_or(0.0),
             auto_space,
         )
-        .unwrap_or_default();
+        .filter(|clusters| !clusters.is_empty())
+        .map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),

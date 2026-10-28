@@ -204,7 +204,8 @@ fn tracked_ms_mincho_lines_measure_half_width_digits_and_full_width_ideographs()
     let tracked_own = measure(&store, base, "MS Mincho", tracking, 1000.0).lines[0].width;
     let tracking_width = tracked_own - own;
     assert!(tracking_width > 0.0);
-    let expected = (6.0 * 0.5 + 36.0) * 16.0;
+    let numeric_auto_space = 0.25 * 16.0;
+    let expected = (6.0 * 0.5 + 36.0) * 16.0 + numeric_auto_space;
     for family in ["MS Mincho", "ＭＳ 明朝"] {
         let view = store.register_named_substitute(base, family).unwrap();
         let plain = measure(&store, view, family, 0.0, 1000.0);
