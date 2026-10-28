@@ -64,7 +64,6 @@ pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 mod shapes;
-mod toc_fields;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -692,8 +691,6 @@ fn walk_story_chunks<T: ReadTxn>(
     mut hidden_field_blocks: BTreeSet<String>,
     mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
-    let toc_paragraphs = toc_field_paragraphs(txn, chunks, story_id, initial.story_index);
-    local.depend_on(toc_paragraphs.keys().cloned());
     let starts_at_boundary =
         initial.at_block_boundary && initial.paragraph_start == initial.story_index;
     let preview::WalkPosition {
@@ -976,7 +973,6 @@ fn walk_story_chunks<T: ReadTxn>(
                     revealable,
                     segments,
                     placed.hides_mark,
-                    toc_paragraphs.get(&para_id).copied(),
                 );
                 suppress_cell_edge_spacing(
                     &mut paragraph_blocks,
@@ -1944,7 +1940,6 @@ impl FieldJoin {
             revealable,
             self.segments,
             false,
-            None,
         );
         suppress_cell_edge_spacing(
             &mut blocks,
@@ -1964,92 +1959,6 @@ fn hidden_field_result_blocks<T: ReadTxn>(field: &MapRef, txn: &T) -> BTreeSet<S
         return BTreeSet::new();
     };
     ids.iter().filter_map(any_str).map(str::to_owned).collect()
-}
-
-fn toc_field_paragraphs<T: ReadTxn>(
-    txn: &T,
-    chunks: &[yrs::types::text::Diff<YChange>],
-    story_id: &str,
-    story_start: u32,
-) -> BTreeMap<String, u32> {
-    let mut paragraphs = Vec::new();
-    let mut contents = Vec::new();
-    let mut starts = Vec::new();
-    let mut fields = Vec::new();
-    let mut index = story_start;
-    let mut paragraph_start = story_start;
-    let mut content = String::new();
-    for chunk in chunks {
-        match &chunk.insert {
-            Out::Any(Any::String(text)) => {
-                index += utf16_len(text);
-                content.push_str(text);
-            }
-            Out::YMap(map) if is_pilcrow(map, txn) => {
-                paragraphs.push(shared_map_string(map, txn, "paraId").unwrap_or_default());
-                contents.push(std::mem::take(&mut content));
-                starts.push(paragraph_start);
-                index += 1;
-                paragraph_start = index;
-            }
-            Out::YMap(map) => {
-                if shared_map_string(map, txn, "_kind").as_deref() == Some("field")
-                    && shared_map_string(map, txn, "instruction").is_some_and(|instruction| {
-                        instruction
-                            .split_whitespace()
-                            .next()
-                            .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
-                    })
-                    && let Some(data) = shared_map_string(map, txn, "fieldData")
-                        .and_then(|data| serde_json::from_str::<Value>(&data).ok())
-                {
-                    fields.push((paragraphs.len(), data));
-                }
-                index += 1;
-                content.push('\0');
-            }
-            _ => {
-                index += 1;
-                content.push('\0');
-            }
-        }
-    }
-    let mut members = BTreeMap::new();
-    for (owner, field) in fields {
-        let following: Vec<_> = ["structuredCode", "structuredResult"]
-            .into_iter()
-            .flat_map(|key| field[key]["blocks"].as_array().into_iter().flatten())
-            .filter(|block| block["type"] == "paragraph")
-            .collect();
-        let Some(closing) = following.last() else {
-            continue;
-        };
-        let Some(owner_id) = paragraphs.get(owner) else {
-            continue;
-        };
-        let end_id = closing["paraId"].as_str().map(str::to_owned).or_else(|| {
-            let prefix = format!("{story_id}:p");
-            let ordinal = owner_id.strip_prefix(&prefix)?.parse::<usize>().ok()?;
-            Some(format!("{prefix}{}", ordinal + following.len()))
-        });
-        let Some(end) = end_id.as_ref().and_then(|id| {
-            paragraphs[owner..]
-                .iter()
-                .position(|paragraph| paragraph == id)
-                .map(|offset| owner + offset)
-        }) else {
-            continue;
-        };
-        for paragraph in &paragraphs[owner..end] {
-            members.insert(paragraph.clone(), u32::MAX);
-        }
-        if let Some(offset) = toc_fields::live_end(closing, &contents[end])
-            && offset > 0
-        {
-            members.insert(paragraphs[end].clone(), starts[end] + offset);
-        }
-    }
-    members
 }
 
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {
@@ -3731,7 +3640,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     mut carried: Vec<(u32, Vec<RawRun>)>,
     hides_mark: bool,
-    toc_field_end: Option<u32>,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraph_count();
     map.paragraphs.push((
@@ -3786,7 +3694,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
             list_state,
             (map, source),
             carried,
-            toc_field_end,
         );
         if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
             paragraph
@@ -3834,7 +3741,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
                     list_state,
                     (map, source),
                     Vec::new(),
-                    toc_field_end,
                 ),
                 segment_start,
                 &mut first_part,
@@ -3862,7 +3768,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 list_state,
                 (map, source),
                 Vec::new(),
-                toc_field_end,
             ),
             segment_start,
             &mut first_part,
@@ -3886,7 +3791,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
             &mut list_state.clone(),
             (&mut preview::LoweringOutput::default(), 0),
             Vec::new(),
-            toc_field_end,
         )));
     }
     for block in &mut blocks {
@@ -3933,7 +3837,6 @@ fn flush_paragraph<T: ReadTxn>(
     list_state: &mut ListState,
     (map, source): (&mut preview::LoweringOutput, u32),
     carried: Vec<(u32, Vec<RawRun>)>,
-    toc_field_end: Option<u32>,
 ) -> ParagraphBlock {
     #[cfg(test)]
     PARAGRAPHS_FLUSHED.with(|flushed| flushed.set(flushed.get() + 1));
@@ -3957,23 +3860,14 @@ fn flush_paragraph<T: ReadTxn>(
     });
     let toc_entry =
         semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
-    let toc_end = if toc_entry {
-        Some(u32::MAX)
-    } else {
-        toc_field_end
-    };
-    if let Some(end) = toc_end {
-        split_toc_boundary(&mut raw_runs, end);
-    }
     for run in &mut raw_runs {
-        if toc_end.is_some_and(|end| run.story_end <= end) {
+        if toc_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
         apply_run_defaults(&mut run.formatting, &defaults);
     }
-    if let Some(end) = toc_end {
-        let count = raw_runs.partition_point(|run| run.story_end <= end);
-        clamp_toc_auxiliary_sizes(&mut raw_runs[..count], defaults.font_size);
+    if toc_entry {
+        clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
     }
     let raw_runs = coalesce_runs(raw_runs);
     map.paragraph_blocks.push((paragraph_pm_start, source));
@@ -5186,29 +5080,6 @@ fn carries_toc_entry_text(kind: &RawRunKind) -> bool {
         _ => None,
     };
     text.is_some_and(|text| text.chars().any(|c| !c.is_whitespace()))
-}
-
-fn split_toc_boundary(runs: &mut Vec<RawRun>, end: u32) {
-    let Some(index) = runs
-        .iter()
-        .position(|run| !run.atom && run.story_start < end && end < run.story_end)
-    else {
-        return;
-    };
-    let mut after = runs[index].clone();
-    let RawRunKind::Text(text) = &after.kind else {
-        return;
-    };
-    let cut = end - after.story_start;
-    let before_text = utf16_slice(text, 0, cut);
-    let after_text = utf16_slice(text, cut, utf16_len(text));
-    after.kind = RawRunKind::Text(after_text);
-    after.story_start = end;
-    after.pm_start += cut;
-    runs[index].kind = RawRunKind::Text(before_text);
-    runs[index].story_end = end;
-    runs[index].pm_end = after.pm_start;
-    runs.insert(index + 1, after);
 }
 
 /// Caps TOC tabs, whitespace and auxiliary fields at the entry text size.

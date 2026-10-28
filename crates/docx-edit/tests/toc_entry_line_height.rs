@@ -1,4 +1,10 @@
-//! TOC entry line heights and paragraph style font sizes.
+//! A TOC entry takes its line height from its entry text at the TOC style
+//! size. Word renders the leader tab and the PAGEREF page number at that
+//! size even when the tab run, the field result run or the paragraph mark
+//! carries a larger one, and it does not apply a Hyperlink character style
+//! size to entry text inside the TOC field result. Measured against the
+//! Word reference PDFs of the corpus TOC documents (Arial 10pt entries
+//! whose tab and mark runs carry 11 to 12pt sit on a 10pt line).
 
 use docx_edit::{
     EditCtx, EngineSession, FormatPolicy, ParaSelector, Position, StyleResolver, seed_from_docx,
@@ -694,7 +700,7 @@ fn a_save_round_trip_never_writes_a_chain_defaults_key() {
     assert_eq!(saved_xml, source_xml);
 }
 
-fn lowered_blocks(bytes: &[u8], render_env: Value) -> Value {
+fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
     let doc = docx_edit::EditingDoc::new(77109);
     seed_from_docx(&doc, bytes).unwrap();
     let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
@@ -703,222 +709,10 @@ fn lowered_blocks(bytes: &[u8], render_env: Value) -> Value {
         &serde_json::from_value(render_env).unwrap(),
     )
     .unwrap();
-    serde_json::to_value(blocks).unwrap()
-}
-
-fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
-    lowered_blocks(bytes, render_env)[0]["runs"]
+    serde_json::to_value(blocks).unwrap()[0]["runs"]
         .as_array()
         .unwrap()
         .clone()
-}
-
-#[test]
-fn a_toc_field_sizes_custom_entries_before_an_unknown_closing_boundary() {
-    for with_ids in [true, false] {
-        let paragraph = |index: usize, text: &str, begin: bool, end: bool| {
-            let id = if with_ids {
-                format!(r#" w14:paraId="{index:08X}""#)
-            } else {
-                String::new()
-            };
-            let begin = if begin {
-                concat!(
-                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-                    r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
-                    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                )
-            } else {
-                ""
-            };
-            let end = if end {
-                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
-            } else {
-                ""
-            };
-            format!(
-                concat!(
-                    r#"<w:p{id}><w:pPr><w:pStyle w:val="ContentsEntry"/></w:pPr>{begin}"#,
-                    r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-                    r#"<w:rStyle w:val="Hyperlink"/></w:rPr><w:t>{text}</w:t></w:r>"#,
-                    r#"<w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:tab/></w:r>"#,
-                    r#"<w:fldSimple w:instr=" PAGEREF entry "><w:r><w:rPr>"#,
-                    r#"<w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple>"#,
-                    r#"</w:hyperlink>{end}</w:p>"#,
-                ),
-                id = id,
-                begin = begin,
-                text = text,
-                end = end,
-            )
-        };
-        let body = [
-            paragraph(1, "Before", false, false),
-            paragraph(2, "Entry one", true, false),
-            paragraph(3, "Entry two", false, false),
-            paragraph(4, "Entry three", false, true),
-            paragraph(5, "After", false, false),
-        ]
-        .concat();
-        let styles = styles(Some(20), Some(28))
-            .replace("TOC1", "ContentsEntry")
-            .replace("toc 1", "Contents Entry");
-        let bytes = document(&body, &styles);
-        let blocks = lowered_blocks(&bytes, chain_env(&bytes));
-        assert_eq!(blocks.as_array().unwrap().len(), 5);
-        for index in 1..=3 {
-            let runs = blocks[index]["runs"].as_array().unwrap();
-            let text = ["Entry one", "Entry two", "Entry three"][index - 1];
-            assert!(runs.iter().any(|run| run["text"] == text));
-            for run in runs {
-                let size = if index == 3 { 14.0 } else { 10.0 };
-                assert_eq!(run["fontSize"], size, "{run}");
-            }
-        }
-        for index in [0, 4] {
-            assert_eq!(blocks[index]["runs"][0]["fontSize"], 14.0);
-        }
-        let heights = line_heights(&bytes);
-        assert_eq!(heights.len(), 5);
-        for (height, size) in heights.into_iter().zip([14.0, 10.0, 10.0, 14.0, 14.0]) {
-            assert_height(height, size);
-        }
-    }
-}
-
-#[test]
-fn an_unknown_toc_end_does_not_change_the_closing_paragraph() {
-    for with_ids in [true, false] {
-        for prefix in ["", "Last 😀"] {
-            let link = |text: &str| {
-                format!(
-                    concat!(
-                        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-                        r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-                        r#"<w:t>{text}</w:t></w:r></w:hyperlink>"#,
-                    ),
-                    text = text,
-                )
-            };
-            let paragraph = |index: usize, content: &str| {
-                let id = if with_ids {
-                    format!(r#" w14:paraId="{index:08X}""#)
-                } else {
-                    String::new()
-                };
-                format!(r#"<w:p{id}><w:pPr><w:pStyle w:val="Normal"/></w:pPr>{content}</w:p>"#)
-            };
-            let first = format!(
-                concat!(
-                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-                    r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
-                    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{}"#,
-                ),
-                link("First entry"),
-            );
-            let last = format!(
-                r#"{}<w:r><w:fldChar w:fldCharType="end"/></w:r>{}"#,
-                link(prefix),
-                link("Body link"),
-            );
-            let body = [
-                paragraph(1, &first),
-                paragraph(2, &link("Middle entry")),
-                paragraph(3, &last),
-            ]
-            .concat();
-            let bytes = document(&body, &styles(Some(20), Some(28)));
-            let doc = docx_edit::EditingDoc::new(77110);
-            seed_from_docx(&doc, &bytes).unwrap();
-            let env = serde_json::from_value(chain_env(&bytes)).unwrap();
-            for edited in [false, true] {
-                if edited {
-                    doc.insert_text(
-                        &EditCtx::local("", ""),
-                        Position::new("body", 0),
-                        "😀",
-                        FormatPolicy::Plain,
-                    )
-                    .unwrap();
-                }
-                let blocks =
-                    docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
-                let blocks = serde_json::to_value(blocks).unwrap();
-                let runs = blocks[2]["runs"].as_array().unwrap();
-                let text: String = runs.iter().filter_map(|run| run["text"].as_str()).collect();
-                assert_eq!(text, format!("{prefix}Body link"));
-                for run in runs {
-                    assert_eq!(run["fontSize"], 14.0, "{run}");
-                    assert_ne!(run["hyperlink"]["noDefaultStyle"], true);
-                }
-            }
-            assert_height(line_heights(&bytes)[2], 14.0);
-        }
-    }
-}
-
-#[test]
-fn a_live_field_end_keeps_entry_sizes_when_the_closing_paragraph_is_split() {
-    let body = concat!(
-        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/></w:pPr>"#,
-        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-        r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
-        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-        r#"<w:rStyle w:val="Hyperlink"/></w:rPr><w:t>First entry</w:t>"#,
-        r#"</w:r></w:hyperlink></w:p>"#,
-        r#"<w:p w14:paraId="00000002"><w:pPr><w:pStyle w:val="Normal"/></w:pPr>"#,
-        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-        r#"<w:t>Middle entry</w:t></w:r></w:p>"#,
-        r#"<w:p w14:paraId="00000003"><w:pPr><w:pStyle w:val="Normal"/></w:pPr>"#,
-        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-        r#"<w:t>Last entry</w:t><w:fldChar w:fldCharType="end"/></w:r>"#,
-        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-        r#"<w:t>Body link</w:t></w:r></w:p>"#,
-    );
-    let bytes = document(body, &styles(Some(20), Some(28)));
-    let doc = docx_edit::EditingDoc::new(77111);
-    seed_from_docx(&doc, &bytes).unwrap();
-    let env = serde_json::from_value(chain_env(&bytes)).unwrap();
-    let check = || {
-        let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
-        let blocks = serde_json::to_value(blocks).unwrap();
-        for (index, text) in [(0, "First entry"), (1, "Middle entry"), (2, "Last entry")] {
-            let run = blocks[index]["runs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|run| run["text"] == text)
-                .unwrap();
-            assert_eq!(run["fontSize"], 10.0, "{run}");
-        }
-        let body = blocks[2]["runs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|run| run["text"] == "Body link")
-            .unwrap();
-        assert_eq!(body["fontSize"], 14.0, "{body}");
-    };
-    check();
-    let mut at = 0;
-    for segment in doc.story_segments("body").unwrap() {
-        match segment.content {
-            docx_edit::SegmentContent::Pilcrow(properties) if properties.para_id == "00000003" => {
-                break;
-            }
-            docx_edit::SegmentContent::Text(text) => at += text.encode_utf16().count() as u32,
-            _ => at += 1,
-        }
-    }
-    let mut undo = doc.undo_manager();
-    doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", at), None)
-        .unwrap();
-    check();
-    assert!(undo.undo());
-    check();
-    assert!(undo.redo());
-    check();
 }
 
 #[test]

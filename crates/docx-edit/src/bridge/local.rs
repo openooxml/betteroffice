@@ -412,10 +412,6 @@ impl LocalLowering {
         self.preview_blocked |= blocked;
     }
 
-    pub(super) fn depend_on(&mut self, paragraphs: impl IntoIterator<Item = String>) {
-        self.dependent.extend(paragraphs);
-    }
-
     pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
         self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
         #[cfg(test)]
@@ -836,7 +832,6 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut output, seed.source),
             Vec::new(),
-            None,
         );
         if current
             .attrs
@@ -928,7 +923,6 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut replacement, source),
             Vec::new(),
-            None,
         );
         let LayoutBlock::Paragraph(old) = blocks.get(slot)?.as_ref() else {
             return None;
