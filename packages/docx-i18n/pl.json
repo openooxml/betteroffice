@@ -36,9 +36,7 @@
     "open": "Otwórz",
     "openShortcut": "Ctrl+O",
     "save": "Zapisz",
-    "saveShortcut": "Ctrl+S",
     "print": "Drukuj",
-    "printShortcut": "Ctrl+P",
     "pageSetup": "Ustawienia strony",
     "leftToRight": "Tekst od lewej do prawej",
     "rightToLeft": "Tekst od prawej do lewej",
@@ -49,7 +47,6 @@
     "sectionBreakNextPage": "Podział sekcji (następna strona)",
     "sectionBreakContinuous": "Podział sekcji (ciągły)",
     "tableOfContents": "Spis treści",
-    "symbol": "Symbol",
     "watermark": "Znak wodny",
     "help": "Pomoc",
     "reportIssue": "Zgłoś problem",
@@ -71,29 +68,18 @@
       "table": "Tabela"
     },
     "undo": "Cofnij",
-    "undoShortcut": "Cofnij (Ctrl+Z)",
     "redo": "Ponów",
-    "redoShortcut": "Ponów (Ctrl+Y)",
     "bold": "Pogrubienie",
-    "boldShortcut": "Pogrubienie (Ctrl+B)",
     "italic": "Kursywa",
-    "italicShortcut": "Kursywa (Ctrl+I)",
     "underline": "Podkreślenie",
-    "underlineShortcut": "Podkreślenie (Ctrl+U)",
     "strikethrough": "Przekreślenie",
     "fontColor": "Kolor czcionki",
     "highlightColor": "Kolor wyróżnienia tekstu",
     "insertLink": "Wstaw łącze",
-    "insertLinkShortcut": "Wstaw łącze (Ctrl+K)",
     "superscript": "Indeks górny",
-    "superscriptShortcut": "Indeks górny (Ctrl+Shift+=)",
     "subscript": "Indeks dolny",
-    "subscriptShortcut": "Indeks dolny (Ctrl+=)",
     "imageProperties": "Właściwości obrazu",
-    "imagePropertiesShortcut": "Właściwości obrazu (tekst alternatywny, obramowanie)...",
-    "clearFormatting": "Wyczyść formatowanie",
-    "commentsAndChanges": "Komentarze i zmiany",
-    "moreItems": "{count, plural, one {# dodatkowy element} few {# dodatkowe elementy} many {# dodatkowych elementów} other {# dodatkowych elementów}}"
+    "clearFormatting": "Wyczyść formatowanie"
   },
   "alignment": {
     "left": "Do lewej",
@@ -108,8 +94,6 @@
   },
   "lists": {
     "ariaLabel": "Formatowanie listy",
-    "typeAriaLabel": "Typ listy",
-    "indentationAriaLabel": "Wcięcie listy",
     "bulletList": "Lista punktowana",
     "numberedList": "Lista numerowana",
     "decreaseIndent": "Zmniejsz wcięcie",
@@ -156,56 +140,22 @@
     "ariaLabel": "Próbnik kolorów — {type}",
     "pickerLabel": "Selektor {title}",
     "customHexColor": "Niestandardowy kolor szesnastkowy",
-    "highlightColors": "Kolory wyróżnienia",
     "customColor": "Kolor niestandardowy",
     "noColor": "Brak koloru",
     "automatic": "Automatyczny",
     "themeColors": "Kolory motywu",
     "standardColors": "Kolory standardowe",
     "colors": {
-      "black": "Czarny",
       "darkRed": "Ciemnoczerwony",
       "red": "Czerwony",
       "orange": "Pomarańczowy",
       "yellow": "Żółty",
-      "darkYellow": "Ciemnożółty",
       "green": "Zielony",
-      "darkGreen": "Ciemnozielony",
-      "teal": "Morski",
-      "darkTeal": "Ciemnomorski",
       "blue": "Niebieski",
       "darkBlue": "Ciemnoniebieski",
       "purple": "Purpurowy",
-      "darkPurple": "Ciemnopurpurowy",
-      "brown": "Brązowy",
-      "grey50": "Szary 50%",
-      "grey25": "Szary 25%",
-      "grey10": "Szary 10%",
-      "white": "Biały",
-      "lightRed": "Jasnoczerwony",
-      "lightOrange": "Jasnopomarańczowy",
-      "lightYellow": "Jasnożółty",
       "lightGreen": "Jasnozielony",
-      "lightBlue": "Jasnoniebieski",
-      "lightPurple": "Jasnopurpurowy",
-      "pink": "Różowy",
-      "rose": "Różany",
-      "gold": "Złoty",
-      "aqua": "Akwamaryna",
-      "lavender": "Lawendowy",
-      "silver": "Srebrny",
-      "darkOrange": "Ciemnopomarańczowy",
-      "darkGray": "Ciemnoszary",
-      "gray": "Szary",
-      "cyan": "Cyjan",
-      "magenta": "Magenta",
-      "paleGreen": "Bladozielony",
-      "lightCyan": "Jasny cyjan",
-      "skyBlue": "Błękitny",
-      "lightBlue2": "Jasnoniebieski 2",
-      "lightMagenta": "Jasna magenta",
-      "brightGreen": "Jaskrawozielony",
-      "violet": "Fioletowy"
+      "lightBlue": "Jasnoniebieski"
     }
   },
   "dialogs": {
@@ -230,7 +180,6 @@
       "replaceAllTitle": "Zamień wszystkie dopasowania",
       "matchCase": "Uwzględnij wielkość liter",
       "wholeWords": "Całe wyrazy",
-      "matchesFound": "{total} wyników",
       "toggleReplace": "+ Zamień"
     },
     "hyperlink": {
@@ -254,18 +203,10 @@
     },
     "insertTable": {
       "title": "Wstaw tabelę",
-      "hoverToSelect": "Najedź, aby wybrać rozmiar",
       "tableSize": "Tabela {cols} x {rows}",
-      "orSpecifySize": "lub podaj rozmiar",
       "rowsLabel": "Wiersze:",
       "columnsLabel": "Kolumny:",
-      "insertButton": "Wstaw tabelę",
       "sizeSelector": "Wybór rozmiaru tabeli",
-      "columnWidthLabel": "Szerokość kolumny",
-      "fixedWidth": "Stała",
-      "autofit": "Autodopasowanie do zawartości",
-      "tableStyleLabel": "Styl tabeli",
-      "validationHint": "Wiersze: {minRows}-{maxRows}, Kolumny: {minCols}-{maxCols}",
       "selectSize": "Wybierz rozmiar",
       "cellSize": "{cols} kolumn, {rows} wierszy"
     },
@@ -299,42 +240,9 @@
       "minValue": "Minimalna liczba wierszy to {rows}, a kolumn — {cols}.",
       "notOneByOne": "Wybierz co najmniej dwie wynikowe komórki."
     },
-    "insertImage": {
-      "title": "Wstaw obraz",
-      "uploadAriaLabel": "Kliknij lub przeciągnij, aby przesłać obraz",
-      "uploadText": "Kliknij, aby wybrać, lub przeciągnij i upuść obraz",
-      "uploadSubtext": "PNG, JPG, GIF do 10 MB",
-      "dimensions": "Wymiary",
-      "widthLabel": "Szerokość:",
-      "heightLabel": "Wysokość:",
-      "aspectRatioLocked": "Proporcje zablokowane",
-      "aspectRatioUnlocked": "Proporcje odblokowane",
-      "altTextLabel": "Tekst alternatywny (opcjonalnie)",
-      "altTextPlaceholder": "Opisz obraz na potrzeby dostępności",
-      "insertButton": "Wstaw obraz",
-      "invalidFile": "Wybierz prawidłowy plik obrazu",
-      "fileTooLarge": "Plik obrazu jest zbyt duży (maks. 10 MB)",
-      "readFailed": "Nie udało się odczytać pliku obrazu",
-      "loadFailed": "Nie udało się załadować obrazu",
-      "preview": "Podgląd"
-    },
     "insertSymbol": {
-      "title": "Wstaw symbol",
-      "searchPlaceholder": "Szukaj symboli (znak lub Unicode)...",
-      "noResultsEmpty": "Nie znaleziono symboli",
-      "noResults": "Nie znaleziono symboli dla \"{query}\"",
-      "decimal": "Dziesiętny: {value}",
-      "recent": "Ostatnio używane:",
       "categories": {
-        "common": "Popularne",
-        "arrows": "Strzałki",
-        "math": "Matematyczne",
-        "greek": "Greckie",
-        "shapes": "Kształty",
-        "punctuation": "Interpunkcja",
-        "currency": "Waluty",
-        "music": "Muzyczne",
-        "emoji": "Emoji"
+        "common": "Popularne"
       }
     },
     "imageProperties": {
@@ -346,19 +254,10 @@
       "style": "Styl",
       "color": "Kolor",
       "preview": "Podgląd",
-      "textWrapping": "Zawijanie tekstu",
       "dimensions": "Wymiary",
       "widthLabel": "Szerokość:",
       "heightLabel": "Wysokość:",
       "lockAspectRatio": "Zablokuj proporcje",
-      "wrapOptions": {
-        "inline": "Równo z tekstem",
-        "wrapRight": "Zawijanie tekstu, pływające z lewej",
-        "wrapLeft": "Zawijanie tekstu, pływające z prawej",
-        "topAndBottom": "Góra i dół",
-        "behind": "Za tekstem",
-        "inFront": "Przed tekstem"
-      },
       "borderStyles": {
         "solid": "Ciągłe",
         "dashed": "Kreskowane",
@@ -439,19 +338,6 @@
         "center": "Do środka",
         "right": "Do prawej"
       }
-    },
-    "pasteSpecial": {
-      "title": "Wklej specjalnie",
-      "keepFormatting": "Zachowaj formatowanie źródłowe",
-      "keepFormattingDescription": "Wklej z oryginalnym formatowaniem",
-      "keepFormattingShortcut": "Ctrl+V",
-      "plainText": "Wklej jako zwykły tekst",
-      "plainTextDescription": "Wklej bez formatowania",
-      "plainTextShortcut": "Ctrl+Shift+V",
-      "readingClipboard": "Odczytywanie schowka...",
-      "preview": "Podgląd:",
-      "noContent": "Brak zawartości do wklejenia",
-      "clipboardError": "Nie można odczytać schowka. Użyj Ctrl+V, aby wkleić."
     },
     "footnoteProperties": {
       "title": "Właściwości przypisów dolnych i końcowych",
@@ -570,11 +456,7 @@
         "pageDown": "Strona w dół",
         "pageDownDescription": "Przewiń o stronę w dół",
         "zoomIn": "Powiększ",
-        "zoomInDescription": "Zwiększ powiększenie",
         "zoomOut": "Pomniejsz",
-        "zoomOutDescription": "Zmniejsz powiększenie",
-        "resetZoom": "Resetuj powiększenie",
-        "resetZoomDescription": "Przywróć powiększenie do 100%",
         "keyboardShortcuts": "Skróty klawiaturowe",
         "keyboardShortcutsDescription": "Pokaż to okno pomocy",
         "insertLink": "Wstaw łącze",
@@ -610,10 +492,7 @@
   },
   "trackedChanges": {
     "unknown": "Nieznany",
-    "replaced": "Zamieniono",
-    "with": "na",
     "added": "Dodano",
-    "deleted": "Usunięto",
     "agent": "agent",
     "previousChange": "Poprzednia zmiana",
     "nextChange": "Następna zmiana",
@@ -640,7 +519,6 @@
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",
     "textMenuAriaLabel": "Menu edycji tekstu",
-    "customPromptPlaceholder": "Wprowadź własne polecenie...",
     "cut": "Wytnij",
     "cutShortcut": "Ctrl+X",
     "copy": "Kopiuj",
@@ -654,18 +532,6 @@
     "selectAll": "Zaznacz wszystko",
     "selectAllShortcut": "Ctrl+A",
     "selected": "Zaznaczono:",
-    "aiActions": {
-      "askAi": "Zapytaj AI",
-      "rewrite": "Przepisz",
-      "expand": "Rozwiń",
-      "summarize": "Podsumuj",
-      "translate": "Przetłumacz",
-      "explain": "Wyjaśnij",
-      "fixGrammar": "Popraw gramatykę",
-      "makeFormal": "Zmień na formalny",
-      "makeCasual": "Zmień na potoczny",
-      "custom": "Własne"
-    },
     "addComment": "Dodaj komentarz",
     "resizeImage": "Zmień rozmiar obrazu",
     "moveImage": "Przenieś obraz",
@@ -706,7 +572,6 @@
     "tryAgain": "Spróbuj ponownie",
     "showDetails": "Pokaż szczegóły",
     "hideDetails": "Ukryj szczegóły",
-    "unsavedChanges": "Masz niezapisane zmiany. Czy na pewno chcesz opuścić stronę?",
     "canvasRendererFailed": "Błąd renderowania elementu Canvas.",
     "userFriendly": {
       "network": "Błąd sieci. Sprawdź połączenie internetowe i spróbuj ponownie.",
@@ -777,21 +642,7 @@
     "top": "Do góry",
     "middle": "Do środka",
     "bottom": "Do dołu",
-    "cellMargins": "Marginesy komórki",
-    "textDirection": "Kierunek tekstu",
-    "textDirections": {
-      "horizontal": "Poziomo (LR)",
-      "verticalRL": "Pionowo (z góry na dół, RL)",
-      "verticalLR": "Pionowo (z dołu do góry, LR)"
-    },
     "toggleNoWrap": "Przełącz zawijanie tekstu",
-    "rowHeight": "Wysokość wiersza",
-    "heightRules": {
-      "auto": "Automatyczna",
-      "atLeast": "Co najmniej",
-      "exact": "Dokładnie"
-    },
-    "rule": "Reguła",
     "height": "Wysokość",
     "toggleHeaderRow": "Przełącz wiersz nagłówka",
     "distributeColumns": "Rozłóż kolumny równomiernie",
@@ -800,9 +651,7 @@
     "tableAlignment": "Wyrównanie tabeli",
     "alignTableLeft": "Wyrównaj tabelę do lewej",
     "alignTableCenter": "Wyśrodkuj tabelę",
-    "alignTableRight": "Wyrównaj tabelę do prawej",
-    "tableOptionsMenu": "Menu opcji tabeli",
-    "tableOptions": "Opcje tabeli"
+    "alignTableRight": "Wyrównaj tabelę do prawej"
   },
   "imageTransform": {
     "tooltip": "Przekształcanie",
@@ -835,16 +684,6 @@
       "behindText": "Obraz za tekstem",
       "inFrontOfText": "Obraz przed tekstem"
     }
-  },
-  "responsePreview": {
-    "loading": "{action}...",
-    "result": "Wynik — {action}",
-    "closeEsc": "Zamknij (Esc)",
-    "editPrompt": "Edytuj wynik przed zaakceptowaniem:",
-    "changes": "Zmiany:",
-    "original": "Oryginał:",
-    "new": "Nowy:",
-    "cancelEdit": "Anuluj edycję"
   },
   "commentMarkers": {
     "resolvedComment": "Rozwiązany komentarz",
@@ -895,15 +734,7 @@
     "closeEditing": "Zamknij edycję — {label}"
   },
   "image": {
-    "placeholder": "Symbol zastępczy obrazu",
-    "placeholderText": "[Obraz]",
-    "editableAriaLabel": "Edytowalny obraz"
-  },
-  "imageOverlay": {
-    "rotate": "Obróć",
-    "imageProperties": "Właściwości obrazu",
-    "deleteImage": "Usuń obraz",
-    "replaceImage": "Zamień obraz…"
+    "placeholder": "Symbol zastępczy obrazu"
   },
   "ruler": {
     "tabStop": "Tabulator {alignment} w pozycji {position}",
@@ -912,7 +743,9 @@
       "center": "Do środka",
       "right": "Do prawej",
       "decimal": "Dziesiętne",
-      "bar": "Pionowy"
+      "bar": "Pionowy",
+      "clear": "Usunięty",
+      "num": "Listy"
     },
     "horizontal": "Linijka pozioma",
     "vertical": "Linijka pionowa",
@@ -928,30 +761,8 @@
     "singlePage": "Strona {start}",
     "pageRange": "Strony {start}–{end}"
   },
-  "unsaved": {
-    "unsaved": "Niezapisane",
-    "saved": "Zapisane",
-    "unsavedTitle": "Dokument ma niezapisane zmiany",
-    "savedTitle": "Wszystkie zmiany zapisane",
-    "unsavedAriaLabel": "Niezapisane zmiany",
-    "savedAriaLabel": "Wszystkie zmiany zapisane"
-  },
   "loading": {
     "label": "Ładowanie"
-  },
-  "agentPanel": {
-    "defaultTitle": "Asystent",
-    "toggle": "Otwórz asystenta",
-    "close": "Zamknij panel",
-    "resizeHandle": "Zmień rozmiar panelu asystenta",
-    "thinking": "Asystent myśli",
-    "composerPlaceholder": "Zapytaj asystenta…",
-    "send": "Wyślij",
-    "timeline": {
-      "working": "Pracuję… {count, plural, one {# krok} few {# kroki} many {# kroków} other {# kroków}}",
-      "summary": "{count, plural, one {# krok} few {# kroki} many {# kroków} other {# kroków}}",
-      "earlier": "+ {count, plural, one {# wcześniejszy krok} few {# wcześniejsze kroki} many {# wcześniejszych kroków} other {# wcześniejszych kroków}}"
-    }
   },
   "a11y": {
     "pageLabel": "Strona {number}",

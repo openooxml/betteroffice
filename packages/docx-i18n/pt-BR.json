@@ -36,9 +36,7 @@
     "open": "Abrir",
     "openShortcut": "Ctrl+O",
     "save": "Salvar",
-    "saveShortcut": "Ctrl+S",
     "print": "Imprimir",
-    "printShortcut": "Ctrl+P",
     "pageSetup": "Configurar página",
     "leftToRight": "Texto da esquerda para a direita",
     "rightToLeft": "Texto da direita para a esquerda",
@@ -49,7 +47,6 @@
     "sectionBreakNextPage": "Quebra de seção (próxima página)",
     "sectionBreakContinuous": "Quebra de seção (contínua)",
     "tableOfContents": "Sumário",
-    "symbol": "Símbolo",
     "watermark": "Marca d'água",
     "help": "Ajuda",
     "reportIssue": "Reportar problema",
@@ -71,29 +68,18 @@
       "table": "Tabela"
     },
     "undo": "Desfazer",
-    "undoShortcut": "Desfazer (Ctrl+Z)",
     "redo": "Refazer",
-    "redoShortcut": "Refazer (Ctrl+Y)",
     "bold": "Negrito",
-    "boldShortcut": "Negrito (Ctrl+B)",
     "italic": "Itálico",
-    "italicShortcut": "Itálico (Ctrl+I)",
     "underline": "Sublinhado",
-    "underlineShortcut": "Sublinhado (Ctrl+U)",
     "strikethrough": "Tachado",
     "fontColor": "Cor da fonte",
     "highlightColor": "Cor de realce de texto",
     "insertLink": "Inserir link",
-    "insertLinkShortcut": "Inserir link (Ctrl+K)",
     "superscript": "Sobrescrito",
-    "superscriptShortcut": "Sobrescrito (Ctrl+Shift+=)",
     "subscript": "Subscrito",
-    "subscriptShortcut": "Subscrito (Ctrl+=)",
     "imageProperties": "Propriedades da imagem",
-    "imagePropertiesShortcut": "Propriedades da imagem (texto alternativo, borda)...",
-    "clearFormatting": "Limpar toda a formatação",
-    "commentsAndChanges": "Comentários e alterações",
-    "moreItems": "{count, plural, one {# item a mais} many {# itens a mais} other {# itens a mais}}"
+    "clearFormatting": "Limpar toda a formatação"
   },
   "alignment": {
     "left": "Esquerda",
@@ -108,8 +94,6 @@
   },
   "lists": {
     "ariaLabel": "Formatação de lista",
-    "typeAriaLabel": "Tipo de lista",
-    "indentationAriaLabel": "Recuo da lista",
     "bulletList": "Lista com marcadores",
     "numberedList": "Lista numerada",
     "decreaseIndent": "Diminuir recuo",
@@ -156,56 +140,22 @@
     "ariaLabel": "Seletor de cores {type}",
     "pickerLabel": "Seletor de {title}",
     "customHexColor": "Cor hexadecimal personalizada",
-    "highlightColors": "Cores de realce",
     "customColor": "Cor personalizada",
     "noColor": "Sem cor",
     "automatic": "Automático",
     "themeColors": "Cores do tema",
     "standardColors": "Cores padrão",
     "colors": {
-      "black": "Preto",
       "darkRed": "Vermelho escuro",
       "red": "Vermelho",
       "orange": "Laranja",
       "yellow": "Amarelo",
-      "darkYellow": "Amarelo escuro",
       "green": "Verde",
-      "darkGreen": "Verde escuro",
-      "teal": "Verde-azulado",
-      "darkTeal": "Verde-azulado escuro",
       "blue": "Azul",
       "darkBlue": "Azul escuro",
       "purple": "Roxo",
-      "darkPurple": "Roxo escuro",
-      "brown": "Marrom",
-      "grey50": "Cinza 50%",
-      "grey25": "Cinza 25%",
-      "grey10": "Cinza 10%",
-      "white": "Branco",
-      "lightRed": "Vermelho claro",
-      "lightOrange": "Laranja claro",
-      "lightYellow": "Amarelo claro",
       "lightGreen": "Verde claro",
-      "lightBlue": "Azul claro",
-      "lightPurple": "Roxo claro",
-      "pink": "Rosa",
-      "rose": "Rosa",
-      "gold": "Dourado",
-      "aqua": "Verde-água",
-      "lavender": "Lavanda",
-      "silver": "Prata",
-      "darkOrange": "Laranja escuro",
-      "darkGray": "Cinza escuro",
-      "gray": "Cinza",
-      "cyan": "Ciano",
-      "magenta": "Magenta",
-      "paleGreen": "Verde pálido",
-      "lightCyan": "Ciano claro",
-      "skyBlue": "Azul céu",
-      "lightBlue2": "Azul claro 2",
-      "lightMagenta": "Magenta claro",
-      "brightGreen": "Verde brilhante",
-      "violet": "Violeta"
+      "lightBlue": "Azul claro"
     }
   },
   "dialogs": {
@@ -230,7 +180,6 @@
       "replaceAllTitle": "Substituir todas as ocorrências",
       "matchCase": "Diferenciar maiúsculas e minúsculas",
       "wholeWords": "Palavras inteiras",
-      "matchesFound": "{total} ocorrências",
       "toggleReplace": "+ Substituir"
     },
     "hyperlink": {
@@ -254,18 +203,10 @@
     },
     "insertTable": {
       "title": "Inserir tabela",
-      "hoverToSelect": "Passe o mouse para selecionar o tamanho",
       "tableSize": "Tabela {cols} x {rows}",
-      "orSpecifySize": "ou especificar o tamanho",
       "rowsLabel": "Linhas:",
       "columnsLabel": "Colunas:",
-      "insertButton": "Inserir tabela",
       "sizeSelector": "Seletor de tamanho da tabela",
-      "columnWidthLabel": "Largura da coluna",
-      "fixedWidth": "Fixa",
-      "autofit": "Ajustar automaticamente ao conteúdo",
-      "tableStyleLabel": "Estilo da tabela",
-      "validationHint": "Linhas: {minRows}-{maxRows}, Colunas: {minCols}-{maxCols}",
       "selectSize": "Selecionar tamanho",
       "cellSize": "{cols} colunas, {rows} linhas"
     },
@@ -299,42 +240,9 @@
       "minValue": "Use pelo menos {rows} linha(s) e {cols} coluna(s).",
       "notOneByOne": "Escolha pelo menos duas células resultantes."
     },
-    "insertImage": {
-      "title": "Inserir imagem",
-      "uploadAriaLabel": "Clique ou arraste para fazer upload da imagem",
-      "uploadText": "Clique para selecionar ou arraste e solte uma imagem",
-      "uploadSubtext": "PNG, JPG, GIF até 10MB",
-      "dimensions": "Dimensões",
-      "widthLabel": "Largura:",
-      "heightLabel": "Altura:",
-      "aspectRatioLocked": "Proporção bloqueada",
-      "aspectRatioUnlocked": "Proporção desbloqueada",
-      "altTextLabel": "Texto alternativo (opcional)",
-      "altTextPlaceholder": "Descreva a imagem para acessibilidade",
-      "insertButton": "Inserir imagem",
-      "invalidFile": "Selecione um arquivo de imagem válido",
-      "fileTooLarge": "Arquivo de imagem muito grande (máx. 10MB)",
-      "readFailed": "Falha ao ler arquivo de imagem",
-      "loadFailed": "Falha ao carregar imagem",
-      "preview": "Visualizar"
-    },
     "insertSymbol": {
-      "title": "Inserir símbolo",
-      "searchPlaceholder": "Pesquisar símbolos (caractere ou Unicode)...",
-      "noResultsEmpty": "Nenhum símbolo encontrado",
-      "noResults": "Nenhum símbolo encontrado para \"{query}\"",
-      "decimal": "Decimal: {value}",
-      "recent": "Recentes:",
       "categories": {
-        "common": "Comuns",
-        "arrows": "Setas",
-        "math": "Matemáticos",
-        "greek": "Gregos",
-        "shapes": "Formas",
-        "punctuation": "Pontuação",
-        "currency": "Moeda",
-        "music": "Música",
-        "emoji": "Emoji"
+        "common": "Comuns"
       }
     },
     "imageProperties": {
@@ -346,19 +254,10 @@
       "style": "Estilo",
       "color": "Cor",
       "preview": "Visualizar",
-      "textWrapping": "Quebra de texto",
       "dimensions": "Dimensões",
       "widthLabel": "Largura:",
       "heightLabel": "Altura:",
       "lockAspectRatio": "Bloquear proporção",
-      "wrapOptions": {
-        "inline": "Em linha com o texto",
-        "wrapRight": "Quebra de texto, flutuar à esquerda",
-        "wrapLeft": "Quebra de texto, flutuar à direita",
-        "topAndBottom": "Acima e abaixo",
-        "behind": "Atrás do texto",
-        "inFront": "Na frente do texto"
-      },
       "borderStyles": {
         "solid": "Sólido",
         "dashed": "Tracejado",
@@ -439,19 +338,6 @@
         "center": "Centro",
         "right": "Direita"
       }
-    },
-    "pasteSpecial": {
-      "title": "Colar especial",
-      "keepFormatting": "Manter formatação original",
-      "keepFormattingDescription": "Colar com formatação original",
-      "keepFormattingShortcut": "Ctrl+V",
-      "plainText": "Colar como texto sem formatação",
-      "plainTextDescription": "Colar sem formatação",
-      "plainTextShortcut": "Ctrl+Shift+V",
-      "readingClipboard": "Lendo área de transferência...",
-      "preview": "Visualizar:",
-      "noContent": "Nenhum conteúdo disponível para colar",
-      "clipboardError": "Não foi possível ler a área de transferência. Use Ctrl+V para colar."
     },
     "footnoteProperties": {
       "title": "Propriedades de notas de rodapé e fim",
@@ -570,11 +456,7 @@
         "pageDown": "Page Down",
         "pageDownDescription": "Rolar uma página para baixo",
         "zoomIn": "Ampliar",
-        "zoomInDescription": "Aumentar nível de zoom",
         "zoomOut": "Reduzir",
-        "zoomOutDescription": "Diminuir nível de zoom",
-        "resetZoom": "Redefinir zoom",
-        "resetZoomDescription": "Redefinir zoom para 100%",
         "keyboardShortcuts": "Atalhos de teclado",
         "keyboardShortcutsDescription": "Mostrar esta caixa de diálogo de ajuda",
         "insertLink": "Inserir link",
@@ -610,10 +492,7 @@
   },
   "trackedChanges": {
     "unknown": "Desconhecido",
-    "replaced": "Substituído",
-    "with": "por",
     "added": "Adicionado",
-    "deleted": "Excluído",
     "agent": "agente",
     "previousChange": "Alteração anterior",
     "nextChange": "Próxima alteração",
@@ -640,7 +519,6 @@
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",
     "textMenuAriaLabel": "Menu de edição de texto",
-    "customPromptPlaceholder": "Digite um prompt personalizado...",
     "cut": "Recortar",
     "cutShortcut": "Ctrl+X",
     "copy": "Copiar",
@@ -654,18 +532,6 @@
     "selectAll": "Selecionar tudo",
     "selectAllShortcut": "Ctrl+A",
     "selected": "Selecionado:",
-    "aiActions": {
-      "askAi": "Perguntar à IA",
-      "rewrite": "Reescrever",
-      "expand": "Expandir",
-      "summarize": "Resumir",
-      "translate": "Traduzir",
-      "explain": "Explicar",
-      "fixGrammar": "Corrigir gramática",
-      "makeFormal": "Tornar formal",
-      "makeCasual": "Tornar informal",
-      "custom": "Personalizado"
-    },
     "addComment": "Comentar",
     "resizeImage": "Redimensionar imagem",
     "moveImage": "Mover imagem",
@@ -706,7 +572,6 @@
     "tryAgain": "Tentar novamente",
     "showDetails": "Mostrar detalhes",
     "hideDetails": "Ocultar detalhes",
-    "unsavedChanges": "Você tem alterações não salvas. Tem certeza que deseja sair?",
     "canvasRendererFailed": "Falha no renderizador de tela.",
     "userFriendly": {
       "network": "Erro de rede. Verifique sua conexão com a Internet e tente novamente.",
@@ -777,21 +642,7 @@
     "top": "Superior",
     "middle": "Meio",
     "bottom": "Inferior",
-    "cellMargins": "Margens da célula",
-    "textDirection": "Direção do texto",
-    "textDirections": {
-      "horizontal": "Horizontal (LR)",
-      "verticalRL": "Vertical (cima-baixo, RL)",
-      "verticalLR": "Vertical (baixo-cima, LR)"
-    },
     "toggleNoWrap": "Alternar sem quebra",
-    "rowHeight": "Altura da linha",
-    "heightRules": {
-      "auto": "Automático",
-      "atLeast": "Pelo menos",
-      "exact": "Exato"
-    },
-    "rule": "Regra",
     "height": "Altura",
     "toggleHeaderRow": "Alternar linha de cabeçalho",
     "distributeColumns": "Distribuir colunas uniformemente",
@@ -800,9 +651,7 @@
     "tableAlignment": "Alinhamento da tabela",
     "alignTableLeft": "Alinhar tabela à esquerda",
     "alignTableCenter": "Centralizar tabela",
-    "alignTableRight": "Alinhar tabela à direita",
-    "tableOptionsMenu": "Menu de opções da tabela",
-    "tableOptions": "Opções da tabela"
+    "alignTableRight": "Alinhar tabela à direita"
   },
   "imageTransform": {
     "tooltip": "Transformar",
@@ -835,16 +684,6 @@
       "behindText": "A imagem fica atrás do texto",
       "inFrontOfText": "A imagem fica na frente do texto"
     }
-  },
-  "responsePreview": {
-    "loading": "{action}...",
-    "result": "Resultado de {action}",
-    "closeEsc": "Fechar (Esc)",
-    "editPrompt": "Edite o resultado antes de aceitar:",
-    "changes": "Alterações:",
-    "original": "Original:",
-    "new": "Novo:",
-    "cancelEdit": "Cancelar edição"
   },
   "commentMarkers": {
     "resolvedComment": "Comentário resolvido",
@@ -895,15 +734,7 @@
     "closeEditing": "Fechar edição de {label}"
   },
   "image": {
-    "placeholder": "Espaço reservado para imagem",
-    "placeholderText": "[Imagem]",
-    "editableAriaLabel": "Imagem editável"
-  },
-  "imageOverlay": {
-    "rotate": "Girar",
-    "imageProperties": "Propriedades da imagem",
-    "deleteImage": "Excluir imagem",
-    "replaceImage": "Substituir imagem…"
+    "placeholder": "Espaço reservado para imagem"
   },
   "ruler": {
     "tabStop": "Tabulação {alignment} em {position}",
@@ -912,7 +743,9 @@
       "center": "Centro",
       "right": "Direita",
       "decimal": "Decimal",
-      "bar": "Barra"
+      "bar": "Barra",
+      "clear": "Removida",
+      "num": "Lista"
     },
     "horizontal": "Régua horizontal",
     "vertical": "Régua vertical",
@@ -928,30 +761,8 @@
     "singlePage": "Página {start}",
     "pageRange": "Páginas {start}-{end}"
   },
-  "unsaved": {
-    "unsaved": "Não salvo",
-    "saved": "Salvo",
-    "unsavedTitle": "Documento tem alterações não salvas",
-    "savedTitle": "Todas as alterações salvas",
-    "unsavedAriaLabel": "Alterações não salvas",
-    "savedAriaLabel": "Todas as alterações salvas"
-  },
   "loading": {
     "label": "Carregando"
-  },
-  "agentPanel": {
-    "defaultTitle": "Assistente",
-    "toggle": "Abrir assistente",
-    "close": "Fechar painel",
-    "resizeHandle": "Redimensionar painel do assistente",
-    "thinking": "Assistente pensando",
-    "composerPlaceholder": "Pergunte ao assistente…",
-    "send": "Enviar",
-    "timeline": {
-      "working": "Trabalhando… {count, plural, one {# etapa} many {# etapas} other {# etapas}}",
-      "summary": "{count, plural, one {# etapa} many {# etapas} other {# etapas}}",
-      "earlier": "+ {count, plural, one {# etapa anterior} many {# etapas anteriores} other {# etapas anteriores}}"
-    }
   },
   "a11y": {
     "pageLabel": "Página {number}",
