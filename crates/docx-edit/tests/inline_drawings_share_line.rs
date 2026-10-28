@@ -1023,6 +1023,133 @@ fn shared_text_box_requests_its_unique_font_and_script() {
 }
 
 #[test]
+fn converted_text_box_sequences_count_before_the_body_caption() {
+    let sequence = r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+    let text_box = text_box_drawing_with(EXTENT, &format!("<w:p>{sequence}</w:p>"));
+    let body = format!(
+        "{}{}",
+        paragraph(
+            "A0000001",
+            &format!("{}{}", run(&chart_drawing()), run(&text_box)),
+        ),
+        paragraph("A0000002", sequence),
+    );
+    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78301);
+    assert!(
+        layout["measured"][0]["block"]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["inlineShape"].is_object())
+    );
+    let results: Vec<_> = primitives(&display)
+        .iter()
+        .filter(|primitive| {
+            primitive["field"]["instruction"]
+                .as_str()
+                .is_some_and(|instruction| instruction.trim() == "SEQ Figure")
+        })
+        .map(|primitive| primitive["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, ["1", "2"], "{display}");
+}
+
+#[test]
+fn converted_text_box_opaque_sequences_keep_body_captions_cached() {
+    let content = concat!(
+        "<w:p><w:r><w:t>Visible</w:t></w:r>",
+        r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:rPr><w:vanish/></w:rPr>"#,
+        "<w:t>7</w:t></w:r></w:fldSimple></w:p>"
+    );
+    let text_box = text_box_drawing_with(EXTENT, content);
+    let body = format!(
+        "{}{}",
+        paragraph(
+            "A0000003",
+            &format!("{}{}", run(&chart_drawing()), run(&text_box)),
+        ),
+        paragraph(
+            "A0000004",
+            r#"<w:fldSimple w:instr=" SEQ Figure "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#,
+        ),
+    );
+    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78302);
+    let shape = layout["measured"][0]["block"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|run| run.get("inlineShape"))
+        .unwrap();
+    assert_eq!(shape["nestedSequences"], json!(["figure"]));
+    let results: Vec<_> = primitives(&display)
+        .iter()
+        .filter(|primitive| {
+            primitive["field"]["instruction"]
+                .as_str()
+                .is_some_and(|instruction| instruction.trim() == "SEQ Figure")
+        })
+        .map(|primitive| primitive["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(results, ["7"], "{display}");
+}
+
+#[test]
+fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let text_box = text_box_drawing_with(
+        EXTENT,
+        r#"<w:p><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let mut body = paragraph(
+        "A0000005",
+        &format!("{}{}", run(&chart_drawing()), run(&text_box)),
+    );
+    for index in 0..200 {
+        body.push_str(&paragraph(
+            &format!("{:08X}", 0xA0000100_u32 + index),
+            &text_run("Body text fills the document after the page total."),
+        ));
+    }
+    let bytes = document(&body, 20160, 12240, 1080);
+    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let engine = EngineSession::new(78303);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let request = json!({
+        "bodyStory": "body", "renderEnv": {},
+        "regions": {"sections": [{"properties": package.document.final_section_properties}]},
+        "measurement": {"fontChains": {"calibri|0|0": [font]},
+            "defaults": {"fontFamily": "Calibri", "fontSize": 11}}
+    });
+    let result = engine
+        .layout_document_with_regions_exact_prefix_retained(&request.to_string(), 1)
+        .unwrap();
+    assert!(!result.provisional);
+    assert!(result.pages > 3);
+    let output = engine.retained_layout_json().unwrap();
+    let layout: Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        layout["measured"][0]["block"]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["inlineShape"].is_object())
+    );
+    let display: Value =
+        serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+    let total = display["pages"].as_array().unwrap().len().to_string();
+    let field = primitives(&display)
+        .iter()
+        .find(|primitive| primitive["field"]["category"] == "NUMPAGES")
+        .unwrap();
+    assert_eq!(field["text"], total);
+}
+
+#[test]
 fn page_break_before_keeps_anchored_charts_in_main_block_order() {
     for (wrap, behind) in [
         ("<wp:wrapNone/>", false),

@@ -808,40 +808,57 @@ fn prefix_boundary(blocks: &[LayoutBlock], mut end: usize) -> usize {
     end
 }
 
+fn exact_prefix_shape(shape: &docx_layout::types::ShapeBlock) -> bool {
+    shape.position.is_none()
+        && matches!(shape.wrap_type.as_deref(), None | Some("inline"))
+        && shape.nested_sequences.is_empty()
+        && shape
+            .inner_text
+            .iter()
+            .flatten()
+            .all(exact_prefix_paragraph)
+        && shape.children.iter().all(exact_prefix_shape)
+}
+
+fn exact_prefix_paragraph(paragraph: &docx_layout::types::ParagraphBlock) -> bool {
+    let local = |fmt: &docx_layout::types::RunFormatting| {
+        fmt.footnote_ref_id.is_none() && fmt.endnote_ref_id.is_none()
+    };
+    paragraph.runs.iter().all(|run| match run {
+        Run::Text(run) => local(&run.fmt),
+        Run::Tab(run) => local(&run.fmt),
+        Run::LineBreak(_) => true,
+        Run::Image(run) => {
+            run.position.is_none()
+                && matches!(run.wrap_type.as_deref(), None | Some("inline"))
+                && matches!(run.display_mode.as_deref(), None | Some("inline"))
+                && matches!(run.css_float.as_deref(), None | Some("none"))
+                && run.inline_shape.as_deref().is_none_or(exact_prefix_shape)
+        }
+        Run::Field(run) => {
+            run.field_type == "PAGE"
+                && run.nested_sequences.is_empty()
+                && run.instruction.as_deref().is_none_or(|instruction| {
+                    !instruction.contains(['{', '}'])
+                        && instruction.split_whitespace().all(|token| {
+                            !matches!(
+                                token.to_ascii_uppercase().as_str(),
+                                "NUMPAGES" | "SECTIONPAGES" | "DATE" | "TIME"
+                            )
+                        })
+                })
+                && local(&run.fmt)
+        }
+        Run::Reserved(_) | Run::Unsupported => false,
+    })
+}
+
 /// Whether the pages before `block` lay out and paint as they do in the whole
 /// document whatever follows it. Page totals, note references, floats, columns
 /// and continuous section breaks couple earlier pages to later content.
 fn exact_prefix_block(block: &LayoutBlock) -> bool {
-    let local = |fmt: &docx_layout::types::RunFormatting| {
-        fmt.footnote_ref_id.is_none() && fmt.endnote_ref_id.is_none()
-    };
     match block {
-        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().all(|run| match run {
-            Run::Text(run) => local(&run.fmt),
-            Run::Tab(run) => local(&run.fmt),
-            Run::LineBreak(_) => true,
-            Run::Image(run) => {
-                run.position.is_none()
-                    && matches!(run.wrap_type.as_deref(), None | Some("inline"))
-                    && matches!(run.display_mode.as_deref(), None | Some("inline"))
-                    && matches!(run.css_float.as_deref(), None | Some("none"))
-            }
-            Run::Field(run) => {
-                run.field_type == "PAGE"
-                    && run.nested_sequences.is_empty()
-                    && run.instruction.as_deref().is_none_or(|instruction| {
-                        !instruction.contains(['{', '}'])
-                            && instruction.split_whitespace().all(|token| {
-                                !matches!(
-                                    token.to_ascii_uppercase().as_str(),
-                                    "NUMPAGES" | "SECTIONPAGES" | "DATE" | "TIME"
-                                )
-                            })
-                    })
-                    && local(&run.fmt)
-            }
-            Run::Reserved(_) | Run::Unsupported => false,
-        }),
+        LayoutBlock::Paragraph(paragraph) => exact_prefix_paragraph(paragraph),
         LayoutBlock::Table(table) => {
             table.floating.is_none()
                 && table.rows.iter().all(|row| {
@@ -2536,6 +2553,22 @@ fn relative_run_position_fingerprint(block: &LayoutBlock) -> u64 {
                 }
             }
         }
+        for run in &block.runs {
+            if let Run::Image(image) = run
+                && let Some(inline) = &image.inline_shape
+            {
+                shape(inline, positions);
+            }
+        }
+    }
+
+    fn shape(block: &docx_layout::types::ShapeBlock, positions: &mut DefaultHasher) {
+        for block in block.inner_text.iter().flatten() {
+            paragraph(block, positions);
+        }
+        for child in &block.children {
+            shape(child, positions);
+        }
     }
 
     fn collect(block: &LayoutBlock, positions: &mut DefaultHasher) {
@@ -2555,16 +2588,7 @@ fn relative_run_position_fingerprint(block: &LayoutBlock) -> u64 {
                     paragraph(block, positions);
                 }
             }
-            LayoutBlock::Shape(shape) => {
-                for block in shape.inner_text.iter().flatten().chain(
-                    shape
-                        .children
-                        .iter()
-                        .flat_map(|child| child.inner_text.iter().flatten()),
-                ) {
-                    paragraph(block, positions);
-                }
-            }
+            LayoutBlock::Shape(block) => shape(block, positions),
             _ => {}
         }
     }
@@ -3689,8 +3713,10 @@ fn resident_float_kinds(
 
 /// Whether `block` is, or nests, one of `paragraphs`.
 fn block_holds_paragraph(block: &LayoutBlock, paragraphs: &HashSet<String>) -> bool {
-    if let LayoutBlock::Paragraph(paragraph) = block {
-        return paragraphs.contains(block_key(&paragraph.id).as_ref());
+    if let LayoutBlock::Paragraph(paragraph) = block
+        && paragraphs.contains(block_key(&paragraph.id).as_ref())
+    {
+        return true;
     }
     let mut keys = Vec::new();
     nested_block_keys(block, &mut keys);
@@ -3698,7 +3724,30 @@ fn block_holds_paragraph(block: &LayoutBlock, paragraphs: &HashSet<String>) -> b
 }
 
 fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
+    fn paragraph(block: &docx_layout::types::ParagraphBlock, out: &mut Vec<String>) {
+        for run in &block.runs {
+            if let Run::Image(image) = run
+                && let Some(inline) = &image.inline_shape
+            {
+                out.push(block_key(&inline.id).into_owned());
+                shape(inline, out);
+            }
+        }
+    }
+
+    fn shape(block: &docx_layout::types::ShapeBlock, out: &mut Vec<String>) {
+        for inner in block.inner_text.iter().flatten() {
+            out.push(block_key(&inner.id).into_owned());
+            paragraph(inner, out);
+        }
+        for child in &block.children {
+            out.push(block_key(&child.id).into_owned());
+            shape(child, out);
+        }
+    }
+
     match block {
+        LayoutBlock::Paragraph(block) => paragraph(block, out),
         LayoutBlock::Table(table) => {
             for row in &table.rows {
                 for cell in &row.cells {
@@ -3712,24 +3761,12 @@ fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
             }
         }
         LayoutBlock::TextBox(textbox) => {
-            for paragraph in &textbox.content {
-                out.push(block_key(&paragraph.id).into_owned());
+            for block in &textbox.content {
+                out.push(block_key(&block.id).into_owned());
+                paragraph(block, out);
             }
         }
-        LayoutBlock::Shape(shape) => {
-            if let Some(inner_text) = &shape.inner_text {
-                for paragraph in inner_text {
-                    out.push(block_key(&paragraph.id).into_owned());
-                }
-            }
-            for child in &shape.children {
-                if let Some(inner_text) = &child.inner_text {
-                    for paragraph in inner_text {
-                        out.push(block_key(&paragraph.id).into_owned());
-                    }
-                }
-            }
-        }
+        LayoutBlock::Shape(block) => shape(block, out),
         _ => {}
     }
 }
@@ -22983,6 +23020,132 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 format!("<w:p><w:r><w:t>{label} {index} fills several pages.</w:t></w:r></w:p>")
             })
             .collect()
+    }
+
+    fn inline_shape_audit_block(run: serde_json::Value) -> LayoutBlock {
+        serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "pmStart": 0, "pmEnd": 5,
+            "runs": [{
+                "kind": "image", "src": "", "width": 60, "height": 40,
+                "pmStart": 1, "pmEnd": 2, "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+                    "geometryPath": [], "pmStart": 1, "pmEnd": 2,
+                    "innerText": [{
+                        "id": "box-text", "pmStart": 1, "pmEnd": 5, "runs": [{
+                            "kind": "image", "src": "", "width": 20, "height": 20,
+                            "pmStart": 2, "pmEnd": 3, "inlineShape": {
+                                "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+                                "geometryPath": [], "children": [],
+                                "innerText": [{
+                                    "id": "nested-text", "pmStart": 1, "pmEnd": 5,
+                                    "runs": [run]
+                                }]
+                            }
+                        }]
+                    }],
+                    "children": [{
+                        "id": "child", "shapeType": "rect", "width": 20, "height": 20,
+                        "geometryPath": [], "children": [], "innerText": [{
+                            "id": "child-text", "pmStart": 1, "pmEnd": 5, "runs": [run]
+                        }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_prefix_checks_fields_and_notes_inside_nested_inline_shapes() {
+        let safe = inline_shape_audit_block(json!({
+            "kind": "field", "fieldType": "PAGE", "instruction": "PAGE", "fallback": "1"
+        }));
+        assert!(exact_prefix_block(&safe));
+        let nested = "/runs/0/inlineShape/innerText/0/runs/0/inlineShape/innerText/0/runs/0";
+        let child = "/runs/0/inlineShape/children/0/innerText/0/runs/0";
+        let mut unsafe_runs = Vec::new();
+        for field in ["NUMPAGES", "SECTIONPAGES", "DATE", "TIME", "SEQ", "REF"] {
+            unsafe_runs.push(json!({
+                "kind": "field", "fieldType": field, "instruction": field, "fallback": "7"
+            }));
+        }
+        unsafe_runs.extend([
+            json!({"kind": "text", "text": "1", "footnoteRefId": 1}),
+            json!({"kind": "text", "text": "1", "endnoteRefId": 1}),
+            json!({"kind": "field", "fieldType": "PAGE", "nestedSequences": ["figure"]}),
+            json!({"kind": "field", "fieldType": "PAGE", "instruction": "PAGE NUMPAGES"}),
+        ]);
+        for path in [nested, child] {
+            for run in &unsafe_runs {
+                let mut block = serde_json::to_value(&safe).unwrap();
+                *block.pointer_mut(path).unwrap() = run.clone();
+                let block: LayoutBlock = serde_json::from_value(block).unwrap();
+                assert!(!exact_prefix_block(&block), "{path}: {run}");
+            }
+        }
+        let mut opaque = serde_json::to_value(&safe).unwrap();
+        opaque["runs"][0]["inlineShape"]["children"][0]["nestedSequences"] = json!(["figure"]);
+        let opaque: LayoutBlock = serde_json::from_value(opaque).unwrap();
+        assert!(!exact_prefix_block(&opaque));
+    }
+
+    #[test]
+    fn inline_shape_positions_participate_in_measurement_fingerprints() {
+        let original = inline_shape_audit_block(json!({
+            "kind": "text", "text": "Text", "pmStart": 2, "pmEnd": 3
+        }));
+        for path in [
+            "/runs/0/inlineShape/innerText/0/runs/0/inlineShape/innerText/0/runs/0/pmStart",
+            "/runs/0/inlineShape/children/0/innerText/0/runs/0/pmStart",
+        ] {
+            let mut changed = serde_json::to_value(&original).unwrap();
+            *changed.pointer_mut(path).unwrap() = json!(3);
+            let changed: LayoutBlock = serde_json::from_value(changed).unwrap();
+            assert_ne!(
+                relative_run_position_fingerprint(&original),
+                relative_run_position_fingerprint(&changed),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_shape_ids_participate_in_dirty_checks_and_position_deltas() {
+        let block = inline_shape_audit_block(json!({
+            "kind": "text", "text": "Text", "pmStart": 2, "pmEnd": 3
+        }));
+        let mut keys = Vec::new();
+        nested_block_keys(&block, &mut keys);
+        assert_eq!(
+            keys,
+            [
+                "box",
+                "box-text",
+                "nested",
+                "nested-text",
+                "child",
+                "child-text"
+            ]
+        );
+        for key in ["outer", "box-text", "nested-text", "child-text"] {
+            assert!(block_holds_paragraph(
+                &block,
+                &HashSet::from([key.to_owned()])
+            ));
+        }
+        let previous = LayoutInput {
+            measured: vec![MeasuredBlock {
+                block,
+                measure: BlockExtent::Unsupported,
+            }],
+            options: Default::default(),
+        };
+        let mut next = previous.clone();
+        crate::bridge::local::shift_block(&mut next.measured[0].block, 7);
+        let deltas = position_deltas(&previous, &next);
+        for key in std::iter::once("outer").chain(keys.iter().map(String::as_str)) {
+            assert_eq!(deltas.get(key), Some(&7), "{key}");
+        }
     }
 
     #[test]

@@ -3770,18 +3770,25 @@ fn retain_visible_drawings(
 
 /// Keeps the sequences a field run holds opaque when the view leaves it out.
 fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
-    if let RawRunKind::Field {
-        instruction,
-        nested_sequences,
-        ..
-    } = &run.kind
-    {
-        opaque_sequences.extend(
-            instruction
-                .as_deref()
-                .and_then(docx_layout::sequence_fields::sequence_name),
-        );
-        opaque_sequences.extend(nested_sequences.iter().cloned());
+    match &run.kind {
+        RawRunKind::Field {
+            instruction,
+            nested_sequences,
+            ..
+        } => {
+            opaque_sequences.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(nested_sequences.iter().cloned());
+        }
+        RawRunKind::Image(image) => {
+            if let Some(shape) = &image.inline_shape {
+                collect_shape_sequences(shape, opaque_sequences);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3793,14 +3800,22 @@ fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<S
         .flatten()
         .flat_map(|paragraph| &paragraph.runs)
     {
-        if let Run::Field(field) = run {
-            opaque_sequences.extend(
-                field
-                    .instruction
-                    .as_deref()
-                    .and_then(docx_layout::sequence_fields::sequence_name),
-            );
-            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        match run {
+            Run::Field(field) => {
+                opaque_sequences.extend(
+                    field
+                        .instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(field.nested_sequences.iter().cloned());
+            }
+            Run::Image(image) => {
+                if let Some(shape) = &image.inline_shape {
+                    collect_shape_sequences(shape, opaque_sequences);
+                }
+            }
+            _ => {}
         }
     }
     for child in &shape.children {
@@ -6682,6 +6697,52 @@ mod tests {
         )
         .unwrap();
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
+    }
+
+    #[test]
+    fn hidden_inline_shapes_collect_nested_sequence_metadata() {
+        let nested = json!({
+            "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+            "geometryPath": [], "children": [], "nestedSequences": ["figure"],
+            "innerText": [{"id": "nested-text", "runs": [{
+                "kind": "field", "fieldType": "OTHER", "rawType": "SEQ",
+                "instruction": "SEQ Table", "nestedSequences": ["listing"], "fallback": "7"
+            }]}]
+        });
+        let shape: ShapeBlock = serde_json::from_value(json!({
+            "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+            "geometryPath": [], "children": [],
+            "innerText": [{"id": "box-text", "runs": [{
+                "kind": "image", "src": "", "width": 20, "height": 20, "inlineShape": nested
+            }]}]
+        }))
+        .unwrap();
+        let expected = BTreeSet::from([
+            "figure".to_owned(),
+            "listing".to_owned(),
+            "table".to_owned(),
+        ]);
+        let mut sequences = BTreeSet::new();
+        collect_shape_sequences(&shape, &mut sequences);
+        assert_eq!(sequences, expected);
+        let carrier = inline_drawing_run(
+            DrawingMarker {
+                pm_offset: 0,
+                story_index: 0,
+                block: LayoutBlock::Shape(shape),
+                hidden: true,
+                revision_hidden: false,
+                anchored: false,
+                formatting: RunFormatting::default(),
+                inline_text_box: true,
+                from_opaque: false,
+                fallback_twin: None,
+            },
+            false,
+        );
+        let mut sequences = BTreeSet::new();
+        collect_run_sequences(&carrier, &mut sequences);
+        assert_eq!(sequences, expected);
     }
 
     #[test]
