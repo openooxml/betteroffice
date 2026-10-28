@@ -457,7 +457,7 @@ test('pipe payloads reject invalid cursors, frame sizes and worker options', asy
   } finally { await room.dispose(); }
 });
 
-for (const shared of [false, true]) for (const kind of ['collabPipe', 'applyRemoteUpdate'] as const) test(`remote ${kind} stamped before a local applyEdits is not refused for its basis (${shared ? 'shared' : 'command'} client)`, async () => {
+for (const shared of [false, true]) test(`remote applyRemoteUpdate stamped before a local applyEdits is not refused for its basis (${shared ? 'shared' : 'command'} client)`, async () => {
   const room = await open({}, shared);
   const peer = openPresentation(bytes, { clientId: 8104 });
   try {
@@ -468,10 +468,7 @@ for (const shared of [false, true]) for (const kind of ['collabPipe', 'applyRemo
     expect(restyled.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
     const peerStory = content(peer.readContent()).stories[0]!;
     peer.insertText(peerStory.storyId, 0, 'Z');
-    const ack = kind === 'collabPipe'
-      ? await room.client.dispatch({ kind: 'collabPipe', payload: { provider: 99, ops: [{ op: 'create', seq: 1, options: {} }, { op: 'connect', seq: 2 },
-        { op: 'event', seq: 3, event: { type: 'message', data: new Uint8Array(encodeSyncStep2(peer.encodeStateAsUpdate())).buffer } }], inputTime: 2, undoGroup: 'remote' } }, basis)
-      : await room.client.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: peer.encodeStateAsUpdate().slice().buffer, inputTime: 2, undoGroup: 'remote' } }, basis);
+    const ack = await room.client.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: peer.encodeStateAsUpdate().slice().buffer, inputTime: 2, undoGroup: 'remote' } }, basis);
     expect(ack.outcomes).toMatchObject([{ status: 'applied', committed: true }]);
     const text = content((await room.client.read()).result).stories[0]!.text;
     expect(text).toBe(content(peer.readContent()).stories[0]!.text);
@@ -480,6 +477,31 @@ for (const shared of [false, true]) for (const kind of ['collabPipe', 'applyRemo
     expect(runs.map((run) => run.text).join('')).toBe(text);
     expect(runs.find((run) => run.text.includes('a'))?.style.bold).toBe(true);
     expect(room.errors).toEqual([]);
+  } finally { peer.dispose(); await room.dispose(); }
+});
+
+for (const shared of [false, true]) test(`remote collabPipe stamped before a local applyEdits is not refused for its basis (${shared ? 'shared' : 'command'} client)`, async () => {
+  const room = await open({}, shared);
+  const peer = openPresentation(bytes, { clientId: 8104 });
+  try {
+    await sync(room, peer);
+    const story = content((await room.client.read()).result).stories[0]!;
+    const restyled = room.client.dispatch({ kind: 'applyEdits', payload: { inputTime: 1, undoGroup: 'agent', request: {
+      expectVersion: room.client.state.version, steps: [{ op: 'formatText', target: { kind: 'range', slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 3 }, patch: { bold: true } }] } } });
+    const peerStory = content(peer.readContent()).stories[0]!;
+    const vector = peer.encodeStateVector();
+    peer.insertText(peerStory.storyId, 0, 'Z');
+    room.wire.emit({ type: 'message', data: encodeUpdate(peer.encodeStateAsUpdate(vector)) });
+    expect((await restyled).outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    await room.client.flush();
+    const text = content((await room.client.read()).result).stories[0]!.text;
+    expect(room.errors).toEqual([]);
+    expect(room.provider.status).toBe('connected');
+    expect(text).toBe(content(peer.readContent()).stories[0]!.text);
+    expect(text.split('Z')).toHaveLength(2);
+    const runs = (await room.client.access!('story', story.storyId)).paragraphs[0]!.runs;
+    expect(runs.map((run) => run.text).join('')).toBe(text);
+    expect(runs.find((run) => run.text.includes('a'))?.style.bold).toBe(true);
   } finally { peer.dispose(); await room.dispose(); }
 });
 
