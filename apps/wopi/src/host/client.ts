@@ -318,7 +318,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     return new WopiHostError("invalidResponse", `${op} failed with status ${status}${detail}`, { status });
   }
 
-  function wrapDownload(source: ReadableStream<Uint8Array>, op: string, accessToken: string, abort: () => void): ReadableStream<Uint8Array> {
+  function wrapDownload(source: ReadableStream<Uint8Array>, op: string, accessToken: string, abort: () => void, announced: number | null): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
     return new ReadableStream<Uint8Array>({
@@ -331,12 +331,21 @@ export function createHostClient(options: HostClientOptions): HostClient {
           return;
         }
         if (chunk.done) {
+          if (announced !== null && count < announced) {
+            controller.error(new WopiHostError("invalidResponse", `${op} returned fewer bytes than announced`));
+            return;
+          }
           controller.close();
           return;
         }
         count += chunk.value.byteLength;
         if (count > maxFileBytes) {
           controller.error(tooLarge(op));
+          cancelStream(reader, abort);
+          return;
+        }
+        if (announced !== null && count > announced) {
+          controller.error(new WopiHostError("invalidResponse", `${op} returned more bytes than announced`));
           cancelStream(reader, abort);
           return;
         }
@@ -502,6 +511,10 @@ export function createHostClient(options: HostClientOptions): HostClient {
       if (response.status < 200 || response.status >= 300) {
         throw await responseError({ response, controller }, spec.op, input.accessToken);
       }
+      if (response.status !== 200) {
+        cancelStream(response.body, () => controller.abort());
+        throw new WopiHostError("invalidResponse", `${spec.op} returned status ${response.status} instead of 200`);
+      }
       return { response, controller };
     }
     throw lastError ?? new WopiHostError("network", `${spec.op} network error`);
@@ -535,17 +548,13 @@ export function createHostClient(options: HostClientOptions): HostClient {
 
   async function getFile(input: WopiRequest): Promise<GetFileResult> {
     const { response, controller } = await execute(input, { op: "GetFile", contents: true, method: "GET", idempotent: true });
-    if (response.status !== 200) {
-      cancelStream(response.body, () => controller.abort());
-      throw new WopiHostError("invalidResponse", `GetFile returned status ${response.status} instead of the whole file`);
-    }
     const announced = parseContentLength(response.headers.get("Content-Length"));
     if (announced !== null && announced > maxFileBytes) {
       cancelStream(response.body, () => controller.abort());
       throw tooLarge("GetFile");
     }
     const source = response.body ?? new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
-    const stream = wrapDownload(source, "GetFile", input.accessToken, () => controller.abort());
+    const stream = wrapDownload(source, "GetFile", input.accessToken, () => controller.abort(), announced);
     return { stream, size: announced, itemVersion: response.headers.get("X-WOPI-ItemVersion") };
   }
 
@@ -597,7 +606,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }
     const headers = new Headers(extra);
     if (args.lock) headers.set("X-WOPI-Lock", args.lock);
-    const result = await execute(input, {
+    return execute(input, {
       op,
       contents,
       method: "POST",
@@ -607,11 +616,6 @@ export function createHostClient(options: HostClientOptions): HostClient {
       size: declaredSize,
       idempotent: false,
     });
-    if (result.response.status !== 200) {
-      discard(result);
-      throw new WopiHostError("invalidResponse", `${op} returned status ${result.response.status} instead of a completed write`);
-    }
-    return result;
   }
 
   async function putFile(args: PutFileArgs): Promise<PutFileResult> {

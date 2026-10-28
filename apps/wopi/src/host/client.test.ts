@@ -755,6 +755,42 @@ describe("content length and truncation", () => {
     }
   }, 1000);
 
+  test("every operation rejects success statuses other than 200", async () => {
+    const calls: Array<[string, (client: ReturnType<typeof makeClient>) => Promise<unknown>]> = [
+      ["CheckFileInfo", (client) => client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })],
+      ["Lock", (client) => client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["RefreshLock", (client) => client.refreshLock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["Unlock", (client) => client.unlock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["UnlockAndRelock", (client) => client.unlockAndRelock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L", oldLock: "O" })],
+      ["GetLock", (client) => client.getLock({ wopiSrc: SRC, accessToken: TOKEN })],
+      ["RenameFile", (client) => client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "renamed" })],
+    ];
+    for (const status of [202, 204]) {
+      for (const [op, call] of calls) {
+        let signal: AbortSignal | null | undefined;
+        const client = makeClient(async (_input, init) => {
+          signal = init?.signal;
+          return new Response(status === 204 ? null : "{}", { status, headers: { "X-WOPI-Lock": "" } });
+        });
+        const err = await kindOf(call(client));
+        expect([op, err.kind]).toEqual([op, "invalidResponse"]);
+        expect(signal?.aborted).toBe(true);
+      }
+    }
+  });
+
+  test("a streamed download errors on premature EOF and on excess bytes", async () => {
+    for (const [bytes, length] of [[new Uint8Array([1, 2, 3]), "10"], [new Uint8Array([1, 2, 3]), "2"]] as const) {
+      const client = makeClient(async () => new Response(bytes, { status: 200, headers: { "Content-Length": length } }));
+      const { stream } = await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+      const reader = stream.getReader();
+      const err = await kindOf((async () => {
+        for (;;) if ((await reader.read()).done) return;
+      })());
+      expect(err.kind).toBe("invalidResponse");
+    }
+  });
+
   test("writes reject success statuses other than 200", async () => {
     for (const status of [202, 204]) {
       let signal: AbortSignal | null | undefined;
