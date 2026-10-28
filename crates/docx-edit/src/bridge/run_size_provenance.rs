@@ -92,6 +92,16 @@ pub(crate) fn paragraph_sizes(
     }
 
     impl Scan {
+        fn accepts(&self, field: &Field, simple: bool) -> bool {
+            let below = &self.fields[..self.fields.len().saturating_sub(usize::from(!simple))];
+            if field.kind("TOC") {
+                return !simple && below.is_empty() && !self.outside_text;
+            }
+            field.kind("PAGEREF")
+                && below.len() <= 1
+                && below.iter().all(|field| field.kind("TOC"))
+        }
+
         fn close(&mut self) {
             match self.fields.pop() {
                 None => self.closed = true,
@@ -152,7 +162,7 @@ pub(crate) fn paragraph_sizes(
                 instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
                 result: true,
             };
-            if field.kind("TOC") && scan.outside_text {
+            if !scan.accepts(&field, true) {
                 return false;
             }
             let depth = scan.fields.len();
@@ -184,9 +194,8 @@ pub(crate) fn paragraph_sizes(
                             if scan.fields.is_empty() {
                                 scan.fields.push(Field::default());
                             }
-                            let field = scan.fields.last_mut().unwrap();
-                            field.result = true;
-                            if field.kind("TOC") && scan.outside_text {
+                            scan.fields.last_mut().unwrap().result = true;
+                            if !scan.accepts(scan.fields.last().unwrap(), false) {
                                 return false;
                             }
                         }
@@ -496,7 +505,7 @@ mod tests {
                     r#"<w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t>3</w:t></w:r>"#,
                     &format!("<w:r><w:t>Ref text </w:t></w:r>{complex}"),
                 ),
-                true,
+                false,
             ),
             (format!("<w:r>{sized}<w:t>Direct entry</w:t></w:r>"), false),
             (
@@ -582,7 +591,7 @@ mod tests {
             (format!("{begin}{entry}{end}{reference}"), false),
             (format!("{entry}{end}{reference}"), false),
             (format!("{reference}{begin}{entry}"), false),
-            (format!("{reference}{entry}"), true),
+            (format!("{reference}{entry}"), false),
             (
                 format!(
                     concat!(
