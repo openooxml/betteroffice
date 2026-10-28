@@ -20378,3 +20378,55 @@ static TW_CEN_MT_CONDENSED_BOLD: FamilyMetrics = FamilyMetrics {
         (8482, 1000),
     ],
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The tables are read off font files outside the repository, so their shape is pinned here:
+    /// `family_advance` binary-searches `extra`, and a zero or missing ASCII width would measure a
+    /// character as nothing.
+    #[test]
+    fn every_table_is_complete_and_searchable() {
+        for entry in FAMILIES {
+            let metrics = entry.metrics;
+            let name = entry.family;
+            assert!(metrics.ascii.iter().all(|&width| width > 0), "{name}");
+            assert!(
+                metrics
+                    .extra
+                    .windows(2)
+                    .all(|pair| pair[0].0 < pair[1].0),
+                "{name}"
+            );
+            assert!(
+                metrics
+                    .extra
+                    .iter()
+                    .all(|&(code, width)| code > 0x7e && width > 0),
+                "{name}"
+            );
+            assert!(metrics.ascent > 0 && metrics.descent <= 0 && metrics.line_gap >= 0, "{name}");
+        }
+    }
+
+    /// Lookups take the family lowercased and trimmed and the substitute's own weight and slope, so
+    /// every family needs its upright regular table and no style may be listed twice.
+    #[test]
+    fn every_family_has_a_regular_table_and_no_duplicate_style() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in FAMILIES {
+            assert_eq!(entry.family, entry.family.trim().to_lowercase());
+            assert!(
+                seen.insert((entry.family, entry.bold, entry.italic)),
+                "{} listed twice",
+                entry.family
+            );
+            assert!(
+                family_metrics(entry.family, false, false).is_some(),
+                "{} has no regular table",
+                entry.family
+            );
+        }
+    }
+}
