@@ -11,7 +11,7 @@ name = "pptx_engine"
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
-pptx-edit.workspace = true
+pptx-edit = { workspace = true, features = ["engine"] }
 pptx-parse.workspace = true
 pptx-render.workspace = true
 serde = { version = "1", features = ["derive"] }
