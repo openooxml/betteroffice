@@ -188,7 +188,7 @@ export function renderPages(data: SiteData): Map<string, string> {
       const routes = routesFor(s);
       for (const [route] of routes) {
         const body = route === '/' ? overview(s, suites, base) : route === '/failures' ? failures(s, base) : route === '/method' ? method(s) : route === '/reproduce' ? reproduce(s) : taskPage(s, route!.slice(1));
-        const nav = `<nav class="flex flex-wrap items-center gap-x-7 gap-y-2 max-[44rem]:gap-x-5 max-[36rem]:gap-x-4" aria-label="Sections">${routes.map(([path, label]) => `<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="${location(base, path!)}"${path === route ? ' aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>`;
+        const nav = `<nav class="flex flex-wrap items-center gap-x-7 gap-y-2 max-[44rem]:gap-x-5 max-[36rem]:gap-x-4" aria-label="Sections">${routes.map(([path, label]) => `<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="${location(base, path!)}"${path === route ? ' aria-current="page"' : ''}>${escape(label)}</a>`).join('')}<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="https://betteroffice.dev">website</a></nav>`;
         const meta = pageMeta(s, route!, base !== '');
         const canonical = ORIGIN + canonicalPath(index === 0 ? '' : base, route!);
         const html = data.frame.replace('{{TITLE}}', () => escape(meta.title)).replace('{{DESCRIPTION}}', () => escape(meta.description)).replace('{{CANONICAL}}', () => escape(canonical)).replace('{{NAV}}', () => nav).replace('{{CONTENT}}', () => body);

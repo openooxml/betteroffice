@@ -67,8 +67,6 @@ mod shapes;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
-const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
-
 /// Document-level values lowering cannot read off a story. Every field
 /// defaults, so an empty env lowers a story with built-in fallbacks.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -4471,6 +4469,8 @@ fn lower_paragraph_attrs(
         });
     let mut result = ParagraphAttrs {
         alignment,
+        justification_mode: value_string(values.get("alignment"))
+            .filter(|mode| matches!(mode.as_str(), "distribute" | "thaiDistribute")),
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
@@ -4727,7 +4727,7 @@ fn lower_paragraph_spacing(
     {
         (twips_to_pixels(100.0), twips_to_pixels(200.0))
     } else {
-        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+        (twips_to_pixels(280.0), twips_to_pixels(280.0))
     };
     let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
@@ -4755,6 +4755,8 @@ fn lower_paragraph_spacing(
         || after_lines.is_some()
     {
         let mut spacing = ParagraphSpacing {
+            before_auto: auto_before.then_some(true),
+            after_auto: auto_after.then_some(true),
             before_lines,
             after_lines,
             before: if suppress_before {

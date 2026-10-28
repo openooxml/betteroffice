@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import type { ProposalChange } from '@betteroffice/pptx';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 
-interface Props { change: ProposalChange; t: TFunction; textOnly?: boolean; testId?: string }
+interface Props { change: ProposalChange; t: TFunction; lang?: string; textOnly?: boolean; testId?: string }
 
 function ProposalTextDiff({ change, t, testId }: Props) {
   if (change.oldText === change.newText) return null;
@@ -17,16 +17,16 @@ function ProposalTextDiff({ change, t, testId }: Props) {
   );
 }
 
-export function ProposalChangeDetails({ change, t, textOnly, testId }: Props) {
+export function ProposalChangeDetails({ change, t, lang, textOnly, testId }: Props) {
   return (
     <>
       <ProposalTextDiff change={change} t={t} testId={testId} />
-      {!textOnly && change.before && change.after && <ShapeChange change={change} t={t} />}
+      {!textOnly && change.before && change.after && <ShapeChange change={change} t={t} lang={lang} />}
     </>
   );
 }
 
-function ShapeChange({ change, t }: Props) {
+function ShapeChange({ change, t, lang }: Props) {
   const before = change.before!;
   const after = change.after!;
   const geometryChanged =
@@ -34,9 +34,10 @@ function ShapeChange({ change, t }: Props) {
     before.y !== after.y ||
     before.width !== after.width ||
     before.height !== after.height;
+  const points = new Intl.NumberFormat(lang ?? 'en', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
   const rectangle = (shape: typeof before) =>
     [shape.x, shape.y, shape.width, shape.height]
-      .map((value) => (value / 12700).toFixed(1))
+      .map((value) => points.format(value / 12700))
       .join(', ');
   return (
     <>
@@ -44,7 +45,7 @@ function ShapeChange({ change, t }: Props) {
         <p style={styles.detail}>
           {t('proposals.geometry')}
           <br />
-          {rectangle(before)} → {rectangle(after)} pt
+          {t('proposals.geometryValues', { before: rectangle(before), after: rectangle(after) })}
         </p>
       )}
       {JSON.stringify({ ...before, x: 0, y: 0, width: 0, height: 0 }) !==

@@ -3087,6 +3087,29 @@ fn simple_table_payload(
         })
 }
 
+/// `simple_table_payload` without the merged and offset exclusions: the shape a
+/// merge may produce from a simple table, never a shape it may start from.
+fn shaped_table_payload(
+    payload: &serde_json::Value,
+    stories: &BTreeMap<&String, &StoryState>,
+) -> bool {
+    let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
+        return false;
+    };
+    rows.iter().all(|row| {
+        row["cells"].as_array().is_some_and(|cells| {
+            !cells.is_empty()
+                && cells.iter().all(|cell| {
+                    cell["story"].as_str().is_some_and(|story| {
+                        stories
+                            .get(&story.to_owned())
+                            .is_some_and(|state| state.units.iter().all(|unit| !unit.has_blocks()))
+                    })
+                })
+        })
+    })
+}
+
 fn admit_row_splices(
     was: &UnitState,
     now: &UnitState,
@@ -3109,6 +3132,9 @@ fn admit_row_splices(
             .map(|cell| cell.get("story")?.as_str())
             .collect()
     }
+    let unit_tables_plain = was.block_content.iter().all(|other| {
+        other[0]["embed"] != "table" || simple_table_payload(&other[0]["payload"], before)
+    });
     for (was, now) in was.block_content.iter().zip(&now.block_content) {
         if was == now {
             continue;
@@ -3160,7 +3186,26 @@ fn admit_row_splices(
             ordinals.sort_unstable();
             (!ordinals.is_empty()).then_some(ordinals)
         };
-        if simple {
+        let merged = patch_tables
+            && unit_tables_plain
+            && old_payload == new_payload
+            && old_keys.len() == new_keys.len()
+            && old_keys.iter().zip(&new_keys).all(|(old, new)| {
+                !new.is_empty()
+                    && new.iter().all(|story| old.contains(story))
+                    && new.windows(2).all(|pair| {
+                        old.iter().position(|story| story == &pair[0])
+                            < old.iter().position(|story| story == &pair[1])
+                    })
+            })
+            && simple_table_payload(&was[0]["payload"], before)
+            && shaped_table_payload(&now[0]["payload"], after);
+        if simple || merged {
+            for story in old_keys.iter().flatten() {
+                if !new_keys.iter().flatten().any(|kept| kept == story) {
+                    edits.removed.insert((*story).to_owned());
+                }
+            }
             let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
             edits.tables.push(S13TablePatch {
                 ordinal: *ordinals.first()?,
@@ -3283,6 +3328,25 @@ fn spliced_part(
         Some(rows)
     };
     let rows = admit(true).or_else(|| admit(false))?;
+    let seeded_by_key: HashMap<&str, &UnitState> = before
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref().map(|key| (key, unit)))
+        .collect();
+    let seeded_story_by_key: HashMap<&str, &str> = before
+        .iter()
+        .flat_map(|(story, state)| {
+            state
+                .units
+                .iter()
+                .filter_map(move |unit| unit.key.as_deref().map(|key| (key, story.as_str())))
+        })
+        .collect();
+    let live_keys: HashSet<&str> = after
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref())
+        .collect();
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
@@ -3299,6 +3363,9 @@ fn spliced_part(
                     return None;
                 }
                 let key = unit.key.as_deref()?;
+                if live_keys.contains(key) {
+                    continue;
+                }
                 match source.view_of(key) {
                     Some(((part_index, ordinal), 0)) if part_index == index => {
                         removed.push(ordinal)
@@ -3360,6 +3427,26 @@ fn spliced_part(
                 }
             }
             let Some(was) = was_keys.get(key) else {
+                if !is.has_blocks()
+                    && let Some(((part_index, ordinal), 0)) = source.view_of(key)
+                    && part_index == index
+                    && seeded_story_by_key
+                        .get(key)
+                        .is_some_and(|origin| !after.keys().any(|story| story.as_str() == *origin))
+                {
+                    let origin = seeded_by_key.get(key)?;
+                    paragraphs.push((ordinal, key.to_owned()));
+                    if origin.content_digest != is.content_digest {
+                        changed.push(ordinal);
+                        if origin.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
+                    }
+                    inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
+                    pending = 0;
+                    anchor = Some(ordinal);
+                    continue;
+                }
                 if is.has_blocks() || source.view_of(key).is_some() {
                     return None;
                 }
@@ -3386,7 +3473,22 @@ fn spliced_part(
                     pending = 0;
                     anchor = Some(ordinal);
                 }
-                None if same && synthetic(key) => {}
+                None if was.has_blocks()
+                    && !was.inline
+                    && !source.seeded.contains_key(key)
+                    && was.blocks == is.blocks =>
+                {
+                    let ordinal = last_block_paragraph(was, &before, source, index)?;
+                    if !synthetic(key) || is.inline {
+                        inserted.push(SpliceAnchor::After(ordinal));
+                    }
+                    anchor = Some(ordinal);
+                }
+                None if same && synthetic(key) => {
+                    if is.has_blocks() && was.blocks == is.blocks {
+                        anchor = last_block_paragraph(is, &before, source, index);
+                    }
+                }
                 _ => return None,
             }
         }
@@ -3435,6 +3537,63 @@ fn spliced_part(
     })
 }
 
+fn last_block_paragraph(
+    unit: &UnitState,
+    stories: &BTreeMap<&String, &StoryState>,
+    source: &SourceIndex,
+    index: usize,
+) -> Option<u32> {
+    fn visit(
+        unit: &UnitState,
+        stories: &BTreeMap<&String, &StoryState>,
+        source: &SourceIndex,
+        index: usize,
+        visited: &mut HashSet<String>,
+        ordinals: &mut Vec<u32>,
+    ) -> Option<()> {
+        for block in &unit.block_content {
+            let payload = &block[0]["payload"];
+            let children = match block[0]["embed"].as_str()? {
+                "table" => payload["rows"]
+                    .as_array()?
+                    .iter()
+                    .flat_map(|row| row["cells"].as_array().into_iter().flatten())
+                    .map(|cell| cell["story"].as_str())
+                    .collect::<Option<Vec<_>>>()?,
+                "blockSdt" => vec![payload["story"].as_str()?],
+                _ => return None,
+            };
+            for story in children {
+                if !visited.insert(story.to_owned()) {
+                    return None;
+                }
+                for child in &stories.get(&story.to_owned())?.units {
+                    if let Some(key) = child.key.as_deref()
+                        && let Some(((part, ordinal), 0)) = source.view_of(key)
+                    {
+                        if part != index {
+                            return None;
+                        }
+                        ordinals.push(ordinal);
+                    }
+                    visit(child, stories, source, index, visited, ordinals)?;
+                }
+            }
+        }
+        Some(())
+    }
+    let mut ordinals = Vec::new();
+    visit(
+        unit,
+        stories,
+        source,
+        index,
+        &mut HashSet::new(),
+        &mut ordinals,
+    )?;
+    ordinals.into_iter().max()
+}
+
 /// `units` without, and then with, the segments after the last pilcrow.
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
@@ -3459,12 +3618,172 @@ fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FormatPolicy, Position, StoryRange};
+    use crate::{
+        EditHistory, EditOperation, EditRequest, EditSource, EditStep, FormatPolicy,
+        ParagraphInput, ParagraphTarget, Position, StoryRange, TargetEdge, UndoSession,
+    };
 
     const DATE: &str = "2026-09-24T00:00:00Z";
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    #[test]
+    fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
+        let xml = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+            "<w:body><w:p><w:r><w:t>Title</w:t></w:r></w:p><w:tbl><w:tblGrid>",
+            "<w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/>",
+            "</w:tblGrid><w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
+            "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr><w:tr>",
+            "<w:tc><w:tcPr><w:gridSpan w:val=\"3\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Last</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            "</w:body></w:document>",
+        );
+        for shaped in [false, true] {
+            let xml = if shaped {
+                xml.to_owned()
+            } else {
+                xml.replace(
+                    "<w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/>",
+                    "<w:gridCol w:w=\"10\"/>",
+                )
+                .replace("<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>", "")
+                .replace("<w:gridSpan w:val=\"2\"/>", "")
+                .replace("<w:gridSpan w:val=\"3\"/>", "")
+            };
+            let parts = [
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+            ];
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let doc = EditingDoc::new(41);
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let target = doc.paragraphs("body").unwrap()[1].para_id.clone();
+            assert!(
+                doc.paragraph_identities()
+                    .paragraphs
+                    .iter()
+                    .any(|identity| {
+                        matches!(
+                            &identity.paragraph,
+                            ParagraphRef::Session { para_id, .. } if para_id == &target
+                        ) && identity.origin == ParagraphOrigin::Synthetic
+                    })
+            );
+            doc.apply_edits(
+                &EditRequest {
+                    expect_version: doc.version(),
+                    source: EditSource::Host,
+                    history: EditHistory::Separate,
+                    steps: vec![EditStep::new(EditOperation::InsertParagraphs {
+                        target: ParagraphTarget {
+                            story: "body".to_owned(),
+                            para_id: target.clone(),
+                        },
+                        at: TargetEdge::End,
+                        paragraphs: vec![ParagraphInput {
+                            text: "Inserted".to_owned(),
+                            style_id: None,
+                        }],
+                    })],
+                },
+                &UndoSession::new(),
+            )
+            .unwrap()
+            .unwrap();
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+            assert_eq!(
+                identities
+                    .paragraphs
+                    .iter()
+                    .filter(|identity| identity.origin == ParagraphOrigin::Authored)
+                    .count(),
+                2
+            );
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+            assert!(part.removed.is_empty());
+            assert_eq!(part.paragraphs.len(), 3);
+            let at = doc.paragraph_mark_position(&target).unwrap();
+            doc.insert_text(&ctx(), at, "Block note", FormatPolicy::Plain)
+                .unwrap();
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+        }
+    }
+
+    #[test]
+    fn paragraph_records_still_promote_an_empty_synthetic_paragraph_at_either_boundary() {
+        for at in [0, 1] {
+            let doc = EditingDoc::new(41);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let target = {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let (_, map) = crate::next_pilcrow(&story, &txn, 0).unwrap();
+                map.insert(&mut txn, PARA_ORIGIN, SYNTHETIC);
+                map_string(&map, &txn, PARA_ID).unwrap()
+            };
+            doc.insert_paragraph_records(
+                "body",
+                at,
+                &[crate::ops::paragraph::ParagraphRecord {
+                    text: "Inserted".to_owned(),
+                    properties: Vec::new(),
+                    run: Vec::new(),
+                }],
+            )
+            .unwrap();
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+        }
     }
 
     #[test]

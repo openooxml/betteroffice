@@ -58,7 +58,9 @@ pub use workbook::{
 
 pub use workbook::charts::{ChartInfo, ChartMutation};
 pub use xlsx_model::{ChartEdit, ChartSeriesName};
-pub use xlsx_parse::{ChartMetadata, ChartSeriesInfo};
+pub use xlsx_parse::{
+    ChartMetadata, ChartSeriesInfo, HeaderFooterPair, HeaderFooterText, SheetHeaderFooter,
+};
 
 pub use xlsx_calc::set_progress_hook;
 pub use xlsx_model::addr::AddrError;

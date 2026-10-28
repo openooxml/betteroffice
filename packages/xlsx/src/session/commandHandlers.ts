@@ -728,8 +728,9 @@ export function applyWorkbookCommand(
   if (cached) return { throughSeq: state.throughSeq, version: handle.version(), statuses: [cached] };
   if (command.seq !== state.throughSeq + 1) throw new Error(`Expected workbook command sequence ${state.throughSeq + 1}`);
   const dependency = command.afterSeq === undefined ? undefined : state.statuses.get(command.afterSeq);
-  const refused = command.afterSeq !== undefined && !dependency ? 'dependency-expired' : undefined;
-  const cancelled = dependency?.status === 'refused' || dependency?.status === 'cancelled';
+  const remote = command.kind === 'applyUpdate' || command.kind === 'collabPipe';
+  const refused = !remote && command.afterSeq !== undefined && !dependency ? 'dependency-expired' : undefined;
+  const cancelled = !remote && (dependency?.status === 'refused' || dependency?.status === 'cancelled');
   const reply = applyWorkbookCommandIntent(handle, state, command, refused, cancelled);
   state.throughSeq = command.seq;
   state.statuses.set(command.seq, structuredClone(reply.statuses[0]));
@@ -742,13 +743,14 @@ export function applyWorkbookCommandIntent(
   refusal?: string, cancelled = false, applyPipe?: (payload: PipeCommandPayload<AwarenessCursor>) => void
 ): WorkbookWireAck {
   let status: CommandStatus;
+  const remote = command.kind === 'applyUpdate' || command.kind === 'collabPipe';
   try {
-    if (refusal) throw new WorkbookCommandRefusal(refusal);
-    if (cancelled) {
+    if (refusal && !remote) throw new WorkbookCommandRefusal(refusal);
+    if (cancelled && !remote) {
       status = { seq: command.seq, status: 'cancelled', reason: 'dependency-refused', committed: false,
         affectedSeqs: [command.seq] };
     } else {
-      if (!state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
+      if (!remote && !state.bases.has(command.basis.version)) throw new WorkbookCommandRefusal('stale-basis');
       status = applyIntent(handle, state, command, applyPipe);
     }
   } catch (error) {

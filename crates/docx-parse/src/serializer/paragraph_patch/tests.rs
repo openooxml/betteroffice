@@ -130,9 +130,23 @@ fn paragraph_patch_checks_seed_marker_positions_and_identities() {
 }
 
 #[test]
+fn paragraph_patch_seed_direct_color_auto_agrees_with_an_inherited_seeded_color() {
+    let marks = json!({"textColor": {"rgb": "FF0000"}});
+    let source = r#"<w:p><w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t>a</w:t></w:r></w:p>"#;
+    let mut plan = patch(
+        vec![text("a", marks.clone())],
+        vec![text("b", marks.clone())],
+    );
+    replace(&mut plan, 0, 1, "b", marks);
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        r#"<w:p><w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:t>b</w:t></w:r></w:p>"#
+    );
+}
+
+#[test]
 fn paragraph_patch_seed_color_disagreements_request_ambiguous_replace() {
     for (color, marks) in [
-        (r#"w:val="auto""#, json!({"textColor": {"rgb": "FF0000"}})),
         (
             r#"w:val="FF0000""#,
             json!({"textColor": {"rgb": "FF0000", "themeColor": "accent1"}}),

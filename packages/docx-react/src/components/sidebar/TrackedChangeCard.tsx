@@ -49,7 +49,7 @@ export const TrackedChangeCard = memo(function TrackedChangeCard({
   author: suppliedAuthor, defaultKind = 'human', reviewItemId, isActive = isExpanded, index: suppliedIndex, total: suppliedTotal,
   onNext, onPrevious, renderCard,
 }: TrackedChangeCardProps) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const context = useContext(TrackedChangesContext);
   const author = useMemo(() => suppliedAuthor ?? resolveReviewAuthor(change.author || t('trackedChanges.unknown'), defaultKind,
     context.options, context.peers, context.user, context.clientId),
@@ -70,8 +70,8 @@ export const TrackedChangeCard = memo(function TrackedChangeCard({
   const custom = renderCard ?? context.options?.renderCard;
   const time = useMemo(() => {
     const date = !custom && change.date && new Date(change.date);
-    return date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-  }, [change.date, custom]);
+    return date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString(lang, { hour: 'numeric', minute: '2-digit' }) : '';
+  }, [change.date, custom, lang]);
   if (custom) return custom({ change, author, isActive, index, total, ambiguous, accept, reject, next, previous,
     isExpanded, onToggleExpand, measureRef: measured });
 

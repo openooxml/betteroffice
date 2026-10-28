@@ -508,6 +508,58 @@ fn text_number_formats_are_width_free() {
 }
 
 #[test]
+fn text_formats_text_that_reads_as_a_number_or_date() {
+    check(&[
+        (
+            "TEXT(\"November 2025\", \"MMMM YYYY \")&\"x\"",
+            t("November 2025 x"),
+        ),
+        (
+            "UPPER(CONCAT(\"(3) \",TEXT(IF(ISNUMBER(DATE(2025,11,1)),TEXT(DATE(2025,11,1),\"mmmm yyyy\"),\"\"),\"MMMM YYYY \"),\"contract submission(s)\"))",
+            t("(3) NOVEMBER 2025 CONTRACT SUBMISSION(S)"),
+        ),
+        ("TEXT(\"1.5\", \"0.00\")", t("1.50")),
+        ("TEXT(\"12%\", \"0.000\")", t("0.120")),
+        ("TEXT(\"abc\", \"0.0\")", t("abc")),
+        ("TEXT(\"\", \"0\")", t("")),
+    ]);
+}
+
+#[test]
+fn text_keeps_text_when_the_section_does_not_render_a_number() {
+    check(&[
+        ("TEXT(\"November 2025\", \"@\")", t("November 2025")),
+        ("TEXT(\"November 2025\", \"General\")", t("November 2025")),
+        ("TEXT(\"12%\", \"@\")", t("12%")),
+        ("TEXT(\"12%\", \"General\")", t("12%")),
+        ("TEXT(\" 12 \", \"@\")", t(" 12 ")),
+        ("TEXT(\" 12 \", \"General\")", t(" 12 ")),
+        ("TEXT(\"1e3\", \"@\")", t("1e3")),
+        ("TEXT(\"1e3\", \"General\")", t("1e3")),
+        ("TEXT(\"-5\", \"x@\")", t("x-5")),
+        ("TEXT(\"1.5\", \"\"\"lit\"\"\")", t("1.5")),
+        ("TEXT(\"1.5\", \"%\")", t("1.5")),
+        ("TEXT(\"1.5\", \"\"\"lit\"\"%\")", t("1.5")),
+    ]);
+}
+
+#[test]
+fn text_keeps_text_when_a_date_parse_would_not_consume_it() {
+    check(&[
+        (
+            "TEXT(\"2025-11-01 13:30\", \"yyyy-mm-dd hh:mm\")",
+            t("2025-11-01 13:30"),
+        ),
+        (
+            "TEXT(\"2025-11-01 foo:bar\", \"yyyy-mm-dd\")",
+            t("2025-11-01 foo:bar"),
+        ),
+        ("TEXT(\"2025-11\", \"MMMM YYYY \")", t("2025-11")),
+        ("TEXT(\"1-2\", \"mm/dd\")", t("1-2")),
+    ]);
+}
+
+#[test]
 fn text_formats_fraction_placeholders() {
     check(&[
         ("TEXT(2.75, \"# ?/?\")", t("2 3/4")),

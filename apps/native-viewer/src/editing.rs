@@ -2032,7 +2032,8 @@ fn paragraph_projection_risks(paragraph: &Paragraph) -> Vec<&'static str> {
             | ParagraphContent::Inline(InlineNode::ComplexField(_)) => risks.push("fields"),
             ParagraphContent::Inline(InlineNode::Math(_)) => risks.push("math"),
             ParagraphContent::Inline(InlineNode::RawXml(_)) => risks.push("foreign markup"),
-            ParagraphContent::Tracked(_)
+            ParagraphContent::Inline(InlineNode::Tracked(_))
+            | ParagraphContent::Tracked(_)
             | ParagraphContent::RangeStart(_)
             | ParagraphContent::RangeEnd(_) => risks.push("revision marks"),
             ParagraphContent::CommentRange(_) => risks.push("comment anchors"),
@@ -2705,6 +2706,32 @@ mod tests {
         assert_eq!(
             paragraph_projection_risks(&paragraph),
             vec!["foreign markup"]
+        );
+    }
+
+    #[test]
+    fn tracked_inline_content_is_a_revision_risk() {
+        let mut paragraph: Paragraph = serde_json::from_value(serde_json::json!({
+            "type": "paragraph", "content": []
+        }))
+        .unwrap();
+        let tracked = docx_parse::paragraph::TrackedInline {
+            node_type: "insertion".to_owned(),
+            info: docx_parse::paragraph::TrackedChangeInfo {
+                id: 1.0,
+                author: "Author".to_owned(),
+                date: None,
+            },
+            content: Vec::new(),
+        };
+        paragraph
+            .content
+            .push(ParagraphContent::Inline(InlineNode::Tracked(Box::new(
+                tracked,
+            ))));
+        assert_eq!(
+            paragraph_projection_risks(&paragraph),
+            vec!["revision marks"]
         );
     }
 

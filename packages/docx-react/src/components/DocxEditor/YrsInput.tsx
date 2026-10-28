@@ -53,6 +53,7 @@ import {
   shouldScrollCaretIntoView,
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
+import { useTranslation } from '../../i18n';
 
 const READER_SCROLL = ['wheel', 'touchmove'] as const;
 
@@ -320,6 +321,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   },
   ref
 ) {
+  const { t } = useTranslation();
   const replicaReady = replicaReadyRef?.current !== false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
@@ -2172,7 +2174,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       className="paged-editor__yrs-input paged-editor__hidden-pm ProseMirror"
       data-testid="yrs-input"
       data-yrs-story={story}
-      aria-label="Document input"
+      aria-label={t('editor.documentInput')}
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
