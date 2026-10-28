@@ -104,15 +104,27 @@ pub enum RunContent {
     #[serde(rename = "noBreakHyphen")]
     NoBreakHyphen,
     #[serde(rename = "drawing")]
-    Drawing { image: Box<crate::image::Image> },
+    Drawing {
+        image: Box<crate::image::Image>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
+    },
     #[serde(rename = "shape")]
-    Shape { shape: Box<crate::shape::Shape> },
+    Shape {
+        shape: Box<crate::shape::Shape>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
+    },
     #[serde(rename = "horizontalRule")]
     HorizontalRule {
         rule: Box<crate::vml::HorizontalRule>,
     },
     #[serde(rename = "chart")]
-    Chart { chart: Box<crate::chart::Chart> },
+    Chart {
+        chart: Box<crate::chart::Chart>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
+    },
     /// A drawing the parser does not model, replayed verbatim on save.
     #[serde(rename = "opaqueDrawing")]
     OpaqueDrawing {
@@ -124,7 +136,47 @@ pub enum RunContent {
         previews: Vec<crate::image::Image>,
         #[serde(rename = "textBox", default, skip_serializing_if = "Option::is_none")]
         text_box: Option<Box<crate::shape::Shape>>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
     },
+}
+
+impl RunContent {
+    pub fn drawing_properties(&self) -> Option<&crate::image::DrawingProperties> {
+        match self {
+            Self::Drawing {
+                drawing_properties, ..
+            }
+            | Self::Shape {
+                drawing_properties, ..
+            }
+            | Self::Chart {
+                drawing_properties, ..
+            }
+            | Self::OpaqueDrawing {
+                drawing_properties, ..
+            } => drawing_properties.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_drawing_properties(&mut self, properties: Option<crate::image::DrawingProperties>) {
+        match self {
+            Self::Drawing {
+                drawing_properties, ..
+            }
+            | Self::Shape {
+                drawing_properties, ..
+            }
+            | Self::Chart {
+                drawing_properties, ..
+            }
+            | Self::OpaqueDrawing {
+                drawing_properties, ..
+            } => *drawing_properties = properties,
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -358,6 +410,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
@@ -366,6 +419,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     preview: None,
                     previews: Vec::new(),
                     text_box: None,
+                    drawing_properties: None,
                 });
             }
             "cr" => output.push(RunContent::Break {

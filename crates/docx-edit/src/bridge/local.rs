@@ -15,6 +15,7 @@ pub(crate) struct LocalLowering {
     pub(super) source_font_scheme: Option<docx_parse::ThemeFontScheme>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<SeedChunks>>,
+    pub(super) run_size_sources: run_size_provenance::Sources,
     validation_epoch: u64,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,

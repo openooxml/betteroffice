@@ -21,6 +21,9 @@ serde = { version = "1", features = ["derive", "rc"] }
 unicode-segmentation = "1.12"
 xlsx-model.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libm.workspace = true
+
 [features]
 test-counters = []
 

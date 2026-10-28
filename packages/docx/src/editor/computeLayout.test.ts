@@ -186,6 +186,23 @@ describe('buildResidentRegionLayoutRequest defaultParagraphStyleId', () => {
     expect(preserved.renderEnv.defaultParagraphStyleId).toBe('Normal');
   });
 
+  test('a styles part without docDefaults sz resolves every paragraph style chain', () => {
+    const doc = {
+      package: {
+        styles: {
+          styles: [
+            { styleId: 'Normal', type: 'paragraph', default: true, rPr: { fontSize: 24 } },
+            { styleId: 'Plain', type: 'paragraph' },
+          ],
+        },
+        document: { content: [] },
+      },
+    } as unknown as Document;
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 12, Plain: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
+  });
+
   test('ignores character defaults and empty ids', () => {
     const characterOnly = stylesDoc([{ styleId: 'BodyDefault', type: 'character', default: true }]);
     expect(
@@ -235,6 +252,87 @@ describe('buildResidentRegionLayoutRequest defaultParagraphStyleId', () => {
     const repeat = buildResidentRegionLayoutRequest(custom, 24, {});
     expect(repeat.renderEnv.defaultParagraphStyleId).toBe('BodyDefault');
     expect(repeat.renderEnv).not.toBe(second.renderEnv);
+  });
+});
+
+describe('buildResidentRegionLayoutRequest paragraph style font sizes', () => {
+  function sizedDoc(docDefault: number | undefined, styles: Array<Record<string, unknown>>): Document {
+    return {
+      package: {
+        styles: {
+          ...(docDefault === undefined ? {} : { docDefaults: { rPr: { fontSize: docDefault } } }),
+          styles,
+        },
+        document: { content: [] },
+      },
+    } as unknown as Document;
+  }
+
+  test('walks basedOn to the first sized style and converts half points', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } },
+      { styleId: 'TOC1', type: 'paragraph', basedOn: 'Normal' },
+      { styleId: 'Heading1', type: 'paragraph', basedOn: 'Normal', rPr: { fontSize: 32 } },
+      { styleId: 'Plain', type: 'paragraph' },
+      { styleId: 'Strong', type: 'character', rPr: { fontSize: 40 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 11, TOC1: 11, Heading1: 16, Plain: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
+  });
+
+  test('a basedOn cycle ends the walk at the docDefaults size', () => {
+    const doc = sizedDoc(undefined, [
+      { styleId: 'A', type: 'paragraph', basedOn: 'B' },
+      { styleId: 'B', type: 'paragraph', basedOn: 'A' },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ A: 10, B: 10 });
+    expect(env.docDefaultFontSize).toBe(10);
+  });
+
+  test('resolves Hyperlink and FollowedHyperlink sizes from their own style chains', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } },
+      { styleId: 'LinkBase', type: 'character', rPr: { fontSize: 28 } },
+      { styleId: 'Hyperlink', type: 'character', basedOn: 'LinkBase' },
+      { styleId: 'Visited', name: 'FollowedHyperlink', type: 'character', basedOn: 'Hyperlink' },
+      { styleId: 'Strong', type: 'character', rPr: { fontSize: 40 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toEqual({ Hyperlink: 14, Visited: 14 });
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 11 });
+  });
+
+  test('omits unsized Hyperlink chains without falling back to docDefaults', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Hyperlink', type: 'character', basedOn: 'FollowedHyperlink' },
+      { styleId: 'FollowedHyperlink', type: 'character', basedOn: 'Hyperlink' },
+      { styleId: 'Link', name: 'Hyperlink', type: 'character', basedOn: 'Missing' },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toBeUndefined();
+  });
+
+  test('preserves caller supplied Hyperlink sizes per style', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Hyperlink', type: 'character', rPr: { fontSize: 28 } },
+      { styleId: 'FollowedHyperlink', type: 'character', rPr: { fontSize: 30 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {
+      hyperlinkStyleFontSizes: { Hyperlink: 12 },
+    }).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toEqual({ Hyperlink: 12, FollowedHyperlink: 15 });
+  });
+
+  test('caller supplied sizes win per style', () => {
+    const doc = sizedDoc(20, [{ styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } }]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {
+      paragraphStyleFontSizes: { Normal: 9 },
+      docDefaultFontSize: 8,
+    }).renderEnv;
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 9 });
+    expect(env.docDefaultFontSize).toBe(8);
   });
 });
 

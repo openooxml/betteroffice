@@ -11,6 +11,9 @@ use ooxml_drawingml::{
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_effects, style_fill,
     style_outline, style_reference_color,
 };
+use ooxml_text::family_metrics::{
+    FamilyMetrics, family_advance, family_metrics, runs_at_own_widths,
+};
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
@@ -34,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
-use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
@@ -3412,32 +3414,6 @@ fn resolve_style(
     })
 }
 
-/// Characters used to check whether a registered face matches a metric table.
-const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
-
-/// Preserve the face's kerning when its individual advances already match.
-fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
-    let Ok(own) = fonts.metrics(id) else {
-        return true;
-    };
-    let units = f32::from(own.units_per_em);
-    if units <= 0.0 {
-        return true;
-    }
-    for character in ADVANCE_SAMPLE.chars() {
-        let Some(wanted) = family_advance(metrics, character) else {
-            continue;
-        };
-        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
-            return false;
-        };
-        if (wanted - advance / units).abs() > 0.002 {
-            return false;
-        }
-    }
-    true
-}
-
 /// Whether `id` already stacks its lines the way `metrics` does.
 fn sits_on_own_baseline(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
     let Ok(own) = fonts.metrics(id) else {
@@ -6407,7 +6383,9 @@ mod tests {
             base: ShapeBase {
                 id: 1,
                 name: "Photo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform::default(),
@@ -8673,7 +8651,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_002,
                     name: "Filled".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform {
@@ -9322,7 +9302,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform,
@@ -10776,7 +10758,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 4_242,
                 name: "Logo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform {
@@ -11235,6 +11219,9 @@ mod tests {
             source_id: 1,
             kind: ShapeKind::Shape,
             name: "Title".to_owned(),
+            title: None,
+            description: None,
+            decorative: false,
             x: 0,
             y: 0,
             width: 0,
@@ -11267,7 +11254,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 2,
                 name: "Layout title".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: Some(title),
                 transform: ShapeTransform {

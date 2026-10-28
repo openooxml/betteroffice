@@ -322,6 +322,13 @@ pub fn measure_paragraph_typed(
     }
     input::validate_pt_size(request.defaults.font_size, "defaults.fontSize")?;
 
+    let space_shrink_limit = request.compat.space_shrink_limit.unwrap_or(0.25);
+    if !(space_shrink_limit.is_finite() && (0.0..=0.25).contains(&space_shrink_limit)) {
+        return Err(MeasureError::Unsupported(
+            "spaceShrinkLimit out of range".to_owned(),
+        ));
+    }
+
     let runs = &request.block.runs;
     if runs.len() > MAX_RUNS {
         return Err(MeasureError::Unsupported(format!(
@@ -436,6 +443,7 @@ pub fn measure_paragraph_typed(
         (body_width - insets.first_line_offset - insets.marker_inline_width).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {
+        space_shrink_limit,
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,

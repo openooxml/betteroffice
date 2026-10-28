@@ -35,6 +35,100 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+#[derive(Default)]
+struct InlineShapeDependencies {
+    entries: HashMap<Vec<u8>, FontChainDependencies, foldhash::fast::RandomState>,
+    retained_bytes: usize,
+}
+
+impl InlineShapeDependencies {
+    fn replay(&self, key: &[u8], chains: FontChains<'_>) -> bool {
+        let Some(dependencies) = self.entries.get(key) else {
+            return false;
+        };
+        if !dependencies.matches(chains) {
+            return false;
+        }
+        dependencies.record();
+        true
+    }
+
+    fn insert(&mut self, key: Vec<u8>, dependencies: FontChainDependencies) {
+        if let Some(previous) = self.entries.remove(&key) {
+            self.retained_bytes -= key.len() + previous.retained_bytes();
+        }
+        let weight = key.len() + dependencies.retained_bytes();
+        if weight > MAX_EXTENT_CACHE_KEY_BYTES {
+            return;
+        }
+        if self.entries.len() >= MAX_EXTENT_CACHE_ENTRIES
+            || self.retained_bytes + weight > MAX_EXTENT_CACHE_KEY_BYTES
+        {
+            *self = Self::default();
+        }
+        self.retained_bytes += weight;
+        self.entries.insert(key, dependencies);
+    }
+}
+
+thread_local! {
+    static INLINE_SHAPE_DEPENDENCIES: RefCell<InlineShapeDependencies> =
+        RefCell::new(InlineShapeDependencies::default());
+}
+
+fn inline_shape_dependency_key(shape: &ShapeBlock, config: &MeasurementConfig) -> Option<Vec<u8>> {
+    let mut key = Vec::new();
+    crate::extent_key::encode(
+        &mut key,
+        &(
+            shape,
+            &config.defaults,
+            &config.compat,
+            config.authoritative_shaping,
+            crate::measure_font_cache_identity(&config.font_chains),
+        ),
+    )
+    .ok()?;
+    (key.len() <= MAX_EXTENT_KEY_BYTES).then_some(key)
+}
+
+fn measure_inline_shape_text(
+    paragraph: &mut ParagraphBlock,
+    config: &MeasurementConfig,
+) -> Result<(), String> {
+    for run in &mut paragraph.runs {
+        let Run::Image(image) = run else {
+            continue;
+        };
+        let Some(shape) = &mut image.inline_shape else {
+            continue;
+        };
+        if shape.inner_text.as_ref().is_none_or(Vec::is_empty)
+            && shape.nested_sequences.is_empty()
+            && shape.children.is_empty()
+        {
+            shape.inner_measures = None;
+            continue;
+        }
+        if let Some(key) = inline_shape_dependency_key(shape, config)
+            && INLINE_SHAPE_DEPENDENCIES.with(|cache| {
+                cache
+                    .borrow()
+                    .replay(&key, FontChains::BTree(&config.font_chains))
+            })
+        {
+            continue;
+        }
+        let (result, dependencies) =
+            FontChainDependencies::capture(|| measure_shape(shape, config));
+        result?;
+        if let Some(key) = inline_shape_dependency_key(shape, config) {
+            INLINE_SHAPE_DEPENDENCIES.with(|cache| cache.borrow_mut().insert(key, dependencies));
+        }
+    }
+    Ok(())
+}
+
 /// An image run measurement skips as a float: it takes no room on the line.
 fn floats_off_the_line(image: &crate::types::ImageRun) -> bool {
     image.position.is_some()
@@ -77,6 +171,32 @@ pub struct FloatPageGeometry {
     pub page_height: f64,
     pub margin_top: f64,
     pub content_height: f64,
+}
+
+/// Float widths selected once for the complete document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatWidthPolicy {
+    FirstBlock,
+    PerBlock,
+}
+
+impl FloatWidthPolicy {
+    pub fn for_document<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> Self {
+        if blocks.into_iter().any(|block| {
+            matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
+        }) {
+            Self::PerBlock
+        } else {
+            Self::FirstBlock
+        }
+    }
+
+    fn resolve(self, default_width: f64, block_width: Option<f64>) -> f64 {
+        match self {
+            Self::FirstBlock => default_width,
+            Self::PerBlock => block_width.unwrap_or(default_width),
+        }
+    }
 }
 
 const MAX_COLUMN_ZONE_Y: f64 = 10_000_000.0;
@@ -361,7 +481,7 @@ pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExt
 fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
     for block in blocks {
         match block {
-            LayoutBlock::Paragraph(paragraph) => visit(paragraph),
+            LayoutBlock::Paragraph(paragraph) => walk_paragraph_contents(paragraph, visit),
             LayoutBlock::Table(table) => {
                 for row in &table.rows {
                     for cell in &row.cells {
@@ -371,20 +491,22 @@ fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBloc
             }
             LayoutBlock::TextBox(text_box) => {
                 for paragraph in &text_box.content {
-                    visit(paragraph);
+                    walk_paragraph_contents(paragraph, visit);
                 }
             }
-            LayoutBlock::Shape(shape) => {
-                if let Some(paragraphs) = &shape.inner_text {
-                    for paragraph in paragraphs {
-                        visit(paragraph);
-                    }
-                }
-                for child in &shape.children {
-                    walk_shape_paragraphs(child, visit);
-                }
-            }
+            LayoutBlock::Shape(shape) => walk_shape_paragraphs(shape, visit),
             _ => {}
+        }
+    }
+}
+
+fn walk_paragraph_contents(paragraph: &ParagraphBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
+    visit(paragraph);
+    for run in &paragraph.runs {
+        if let Run::Image(image) = run
+            && let Some(shape) = &image.inline_shape
+        {
+            walk_shape_paragraphs(shape, visit);
         }
     }
 }
@@ -392,7 +514,7 @@ fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBloc
 fn walk_shape_paragraphs(shape: &ShapeBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
     if let Some(paragraphs) = &shape.inner_text {
         for paragraph in paragraphs {
-            visit(paragraph);
+            walk_paragraph_contents(paragraph, visit);
         }
     }
     for child in &shape.children {
@@ -779,6 +901,7 @@ pub fn measure_blocks_with_column_frames(
         blocks,
         default_width,
         widths,
+        FloatWidthPolicy::for_document(blocks.iter()),
         table_frames,
         config,
         page_geometry,
@@ -837,14 +960,34 @@ pub fn floating_zone_kinds(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<(bool, bool), String> {
-    let zones = extract_floating_zones(
+    floating_zone_kinds_with_width_policy(
         blocks,
         content_width,
         &[],
-        &[],
+        FloatWidthPolicy::for_document(blocks.iter()),
+        config,
+        page_geometry,
+    )
+}
+
+pub fn floating_zone_kinds_with_width_policy(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    widths: &[f64],
+    width_policy: FloatWidthPolicy,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+) -> Result<(bool, bool), String> {
+    let (zones, _) = extract_floating_zones_recorded(
+        blocks,
+        content_width,
+        widths,
+        width_policy,
+        &[] as &[bool],
         config,
         page_geometry,
         &BTreeMap::new(),
+        false,
     )?;
     Ok((
         !zones.is_empty(),
@@ -928,10 +1071,36 @@ pub fn measure_float_segment_with_table_frames(
     page_geometry: Option<&FloatPageGeometry>,
     section_break_marks: &[bool],
 ) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
+    let width_policy = FloatWidthPolicy::for_document(blocks.iter());
+    measure_float_segment_with_width_policy(
+        blocks,
+        widths,
+        default_width,
+        width_policy,
+        table_frames,
+        config,
+        page_geometry,
+        section_break_marks,
+    )
+}
+
+/// Measures a segment using its complete document's float width policy.
+#[allow(clippy::too_many_arguments)]
+pub fn measure_float_segment_with_width_policy(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    width_policy: FloatWidthPolicy,
+    table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
     let (extracted, zone_dependencies) = extract_floating_zones_recorded(
         blocks,
         default_width,
         widths,
+        width_policy,
         table_frames,
         config,
         page_geometry,
@@ -1338,11 +1507,30 @@ impl FloatFlow {
         config: &MeasurementConfig,
         page_geometry: Option<&FloatPageGeometry>,
     ) -> Result<Self, String> {
+        Self::with_width_policy(
+            blocks,
+            widths,
+            FloatWidthPolicy::for_document(blocks.iter()),
+            table_frames,
+            config,
+            page_geometry,
+        )
+    }
+
+    pub fn with_width_policy(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        width_policy: FloatWidthPolicy,
+        table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
         let default_width = widths.first().copied().unwrap_or(0.0);
         let (extracted, zone_dependencies) = extract_floating_zones_recorded(
             blocks,
             default_width,
             widths,
+            width_policy,
             table_frames,
             config,
             page_geometry,
@@ -1419,6 +1607,7 @@ pub fn measure_block(
 ) -> Result<BlockExtent, String> {
     match block {
         LayoutBlock::Paragraph(paragraph) => {
+            measure_inline_shape_text(paragraph, config)?;
             measure_paragraph(paragraph, content_width, config).map(BlockExtent::Paragraph)
         }
         LayoutBlock::Table(table) => {
@@ -1478,14 +1667,17 @@ fn measure_block_with_context(
     cumulative_y: f64,
 ) -> Result<BlockExtent, String> {
     match block {
-        LayoutBlock::Paragraph(paragraph) => measure_paragraph_with_context(
-            paragraph,
-            content_width,
-            config,
-            floating_zones,
-            cumulative_y,
-        )
-        .map(BlockExtent::Paragraph),
+        LayoutBlock::Paragraph(paragraph) => {
+            measure_inline_shape_text(paragraph, config)?;
+            measure_paragraph_with_context(
+                paragraph,
+                content_width,
+                config,
+                floating_zones,
+                cumulative_y,
+            )
+            .map(BlockExtent::Paragraph)
+        }
         _ => measure_block(block, content_width, config),
     }
 }
@@ -1716,6 +1908,8 @@ thread_local! {
 pub(crate) fn clear_extent_cache() {
     let _ = EXTENT_CACHE.try_with(|cache| *cache.borrow_mut() = ExtentCache::default());
     let _ = EXTENT_KEY_BUF.try_with(|scratch| *scratch.borrow_mut() = Vec::new());
+    let _ = INLINE_SHAPE_DEPENDENCIES
+        .try_with(|cache| *cache.borrow_mut() = InlineShapeDependencies::default());
 }
 
 #[cfg(test)]
@@ -2355,6 +2549,7 @@ fn extract_floating_zones(
         blocks,
         content_width,
         widths,
+        FloatWidthPolicy::for_document(blocks.iter()),
         table_wrap_frames,
         config,
         page_geometry,
@@ -2369,6 +2564,7 @@ fn extract_floating_zones_recorded(
     blocks: &[LayoutBlock],
     content_width: f64,
     widths: &[f64],
+    width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
@@ -2382,6 +2578,7 @@ fn extract_floating_zones_recorded(
         Vec::new()
     };
     for (block_index, block) in blocks.iter().enumerate() {
+        let content_width = width_policy.resolve(content_width, widths.get(block_index).copied());
         let mut extract = || -> Result<(), String> {
             match block {
                 LayoutBlock::Paragraph(paragraph) => {
@@ -3020,11 +3217,14 @@ fn measure_shape(
     };
     let inner_measures = shape
         .inner_text
-        .as_ref()
+        .as_mut()
         .map(|paragraphs| {
             paragraphs
-                .iter()
-                .map(|paragraph| measure_paragraph(paragraph, inner_width, config))
+                .iter_mut()
+                .map(|paragraph| {
+                    measure_inline_shape_text(paragraph, config)?;
+                    measure_paragraph(paragraph, inner_width, config)
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
@@ -3062,6 +3262,9 @@ fn measure_cell_blocks_with_table_floats(
         // `y` tracks the paragraph's top, space-before included, which is the
         // origin the measurer probes float zones from.
         y += (previous_after - before).max(0.0);
+        if let LayoutBlock::Paragraph(paragraph) = &mut *block {
+            measure_inline_shape_text(paragraph, config)?;
+        }
         let extent = match &*block {
             LayoutBlock::Paragraph(paragraph) => {
                 BlockExtent::Paragraph(measure_paragraph_with_context(
@@ -3214,10 +3417,7 @@ fn cell_content_widths(
     Some((minimum + padding, maximum + padding))
 }
 
-/// Whether painting places the paragraph's lines where intrinsic sizing does:
-/// painting clamps negative indents and moves a hanging paragraph's text by
-/// the hang when its leading indent (the right one when right-to-left) doesn't
-/// cover it.
+/// Whether painting and intrinsic sizing agree for the paragraph's indents.
 fn painted_indent_matches(paragraph: &crate::types::ParagraphBlock) -> bool {
     let Some(attrs) = paragraph.attrs.as_ref() else {
         return true;
@@ -4810,6 +5010,161 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_sections_extract_image_zones_at_the_current_section_width() {
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "cover", "runs": []},
+            {"kind": "sectionBreak", "id": "cover-break", "type": "nextPage",
+             "sdtGroups": [{"id": "cover-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "contents", "runs": []},
+            {"kind": "sectionBreak", "id": "contents-break", "type": "nextPage",
+             "sdtGroups": [{"id": "contents-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "body-image",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "image", "src": "image", "width": 614.4, "height": 512,
+                       "wrapType": "square", "distLeft": 12, "distRight": 12,
+                       "position": {"horizontal": {"relativeTo": "margin", "align": "left"},
+                                    "vertical": {"relativeTo": "margin", "align": "top"}}}]}
+        ]))
+        .unwrap();
+        let widths = [690.0, 690.0, 624.0, 624.0, 624.0];
+        let config = MeasurementConfig::default();
+        let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
+        assert!(!flow.zones_by_anchor.contains_key(&4));
+        flow.measure_until(&mut blocks, &widths, &config, 5)
+            .unwrap();
+        let BlockExtent::Paragraph(image) = &flow.extents()[4] else {
+            panic!("paragraph extent expected");
+        };
+        assert_eq!(image.total_height, 20.0);
+        assert_eq!(image.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+    }
+
+    fn wrapped_section_float_blocks(relative_to: &str) -> Vec<LayoutBlock> {
+        serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "cover", "runs": []},
+            {"kind": "sectionBreak", "id": "cover-break", "type": "nextPage",
+             "sdtGroups": [{"id": "cover-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "body-start", "runs": []},
+            {"kind": "pageBreak", "id": "body-page"},
+            {"kind": "paragraph", "id": "body-image",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "image", "src": "image", "width": 614.4, "height": 512,
+                       "wrapType": "square", "distLeft": 12, "distRight": 12,
+                       "position": {"horizontal": {"relativeTo": "margin", "align": "left"},
+                                    "vertical": {"relativeTo": relative_to, "posOffset": 0}}}]},
+            {"kind": "paragraph", "id": "body-text",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "text", "text": "Body text beside the floating image. ".repeat(20)}]}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn wrapped_section_float_segments_keep_width_policy_after_a_text_edit() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            ..Default::default()
+        };
+        for (cover_width, body_width) in [(690.0, 624.0), (624.0, 690.0)] {
+            let mut blocks = wrapped_section_float_blocks("paragraph");
+            let widths = [
+                cover_width,
+                cover_width,
+                body_width,
+                body_width,
+                body_width,
+                body_width,
+            ];
+            let policy = FloatWidthPolicy::for_document(blocks.iter());
+            let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
+            flow.measure_until(&mut blocks, &widths, &config, 6)
+                .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &mut blocks[5] else {
+                panic!("paragraph expected");
+            };
+            let Run::Text(text) = &mut paragraph.runs[0] else {
+                panic!("text expected");
+            };
+            text.text.push_str("Edited text.");
+            let mut segment = blocks[3..].to_vec();
+            assert_eq!(
+                FloatWidthPolicy::for_document(segment.iter()),
+                FloatWidthPolicy::FirstBlock
+            );
+            let marks = section_break_marks(&blocks);
+            let (incremental, _) = measure_float_segment_with_width_policy(
+                &mut segment,
+                &widths[3..],
+                cover_width,
+                policy,
+                &[] as &[bool],
+                &config,
+                None,
+                &marks[3..],
+            )
+            .unwrap()
+            .unwrap();
+            let fresh = measure_blocks_with_floats(&mut blocks, &widths, &config, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&incremental).unwrap(),
+                serde_json::to_value(&fresh[3..]).unwrap(),
+                "cover {cover_width}, body {body_width}"
+            );
+            let BlockExtent::Paragraph(text) = &incremental[2] else {
+                panic!("paragraph extent expected");
+            };
+            let offset = text.lines[0].left_offset.unwrap_or(0.0);
+            assert_eq!(offset > 600.0, body_width == 690.0);
+            assert_eq!(text.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn wrapped_section_float_classification_uses_body_width_and_detects_margin_coupling() {
+        let config = MeasurementConfig::default();
+        for relative_to in ["paragraph", "margin", "page"] {
+            for (cover_width, body_width) in [(690.0, 624.0), (624.0, 690.0)] {
+                let mut blocks = wrapped_section_float_blocks(relative_to);
+                let policy = FloatWidthPolicy::for_document(blocks.iter());
+                let kinds = floating_zone_kinds_with_width_policy(
+                    &blocks[4..5],
+                    cover_width,
+                    &[body_width],
+                    policy,
+                    &config,
+                    None,
+                )
+                .unwrap();
+                let has_float = body_width == 690.0;
+                assert_eq!(kinds, (has_float, has_float && relative_to != "paragraph"));
+                let LayoutBlock::SectionBreak(section) = &mut blocks[1] else {
+                    panic!("section break expected");
+                };
+                section.sdt_groups = None;
+                let policy = FloatWidthPolicy::for_document(blocks.iter());
+                assert_eq!(policy, FloatWidthPolicy::FirstBlock);
+                assert_eq!(
+                    floating_zone_kinds_with_width_policy(
+                        &blocks[4..5],
+                        cover_width,
+                        &[body_width],
+                        policy,
+                        &config,
+                        None,
+                    )
+                    .unwrap(),
+                    floating_zone_kinds(&blocks[4..5], cover_width, &config, None).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn negative_indents_preserve_known_section_table_geometry() {
         for (width, table_width, position, expected, switched) in [
             (
@@ -5520,6 +5875,103 @@ mod tests {
             };
             assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
             assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn anchored_charts_match_main_block_measurement() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        for (wrap, behind_doc) in [
+            ("none", false),
+            ("topAndBottom", false),
+            ("square", false),
+            ("tight", false),
+            ("through", false),
+            ("none", true),
+        ] {
+            let source: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"previous-float","shapeType":"rect",
+                 "geometryPath":[],"children":[],"width":80,"height":40,
+                 "wrapType":"square","position":{
+                     "horizontal":{"relativeTo":"column","posOffset":0},
+                     "vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"chart","id":"chart","chart":{},"width":40,"height":40,
+                 "wrapType":wrap,"behindDoc":behind_doc,"position":{
+                     "horizontal":{"relativeTo":"column","posOffset":0},
+                     "vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"paragraph","id":"body",
+                 "runs":[{"kind":"text","text":"Body words words words words"}]}
+            ]))
+            .unwrap();
+            let mut main = source.clone();
+            let LayoutBlock::Chart(chart) = &mut main[1] else {
+                panic!()
+            };
+            chart.position = None;
+            chart.wrap_type = None;
+            chart.behind_doc = None;
+            let expected =
+                measure_blocks_with_floats(&mut main, &[200.0; 3], &config, None).unwrap();
+            let BlockExtent::Paragraph(body) = &expected[2] else {
+                panic!()
+            };
+            assert_eq!(body.lines[0].left_offset.unwrap_or(0.0), 0.0);
+            assert_eq!(body.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+
+            let mut blocks = source.clone();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&measures).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{wrap}, behindDoc={behind_doc}"
+            );
+
+            let mut chunks = source.clone();
+            let mut flow = FloatFlow::new(&chunks, &[200.0; 3], &config, None).unwrap();
+            for end in 1..=chunks.len() {
+                flow.measure_until(&mut chunks, &[200.0; 3], &config, end)
+                    .unwrap();
+            }
+            assert_eq!(
+                serde_json::to_value(flow.into_extents()).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+
+            let mut columns = source.clone();
+            let column_measures = measure_blocks_with_column_frames(
+                &mut columns,
+                &[200.0; 3],
+                &[] as &[bool],
+                &config,
+                None,
+                &BTreeMap::new(),
+                &BTreeMap::from([(
+                    2,
+                    vec![ColumnWidthBand {
+                        top: 0.0,
+                        bottom: 1000.0,
+                        width: 200.0,
+                    }],
+                )]),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&column_measures).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+
+            let mut segment = source;
+            let segment_measures =
+                measure_float_segment(&mut segment, &[200.0; 3], 200.0, &config, None, &[false; 3])
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(&segment_measures).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
         }
     }
 
@@ -6609,6 +7061,235 @@ mod tests {
             requirement["key"] == "yu mincho|0|0"
                 && requirement["scripts"] == serde_json::json!(["cjk-jp"])
         }));
+    }
+
+    #[test]
+    fn inline_shape_measurements_invalidate_when_inputs_change() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        let mut block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 80, "height": 60,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 80, "height": 60,
+                    "geometryPath": [], "children": [], "innerText": [{
+                        "id": "box-text", "runs": [{
+                            "kind": "text", "text": "Words to wrap inside the text box. ".repeat(4)
+                        }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        measure_block(&mut block, 300.0, &config).unwrap();
+        let measured = serde_json::to_value(&block).unwrap();
+        let original = &measured["runs"][0]["inlineShape"]["innerMeasures"];
+        assert!(
+            original
+                .as_array()
+                .is_some_and(|measures| !measures.is_empty())
+        );
+        for change in [
+            "width",
+            "padding",
+            "text",
+            "spacing",
+            "defaults",
+            "remove text",
+        ] {
+            let mut warm = measured.clone();
+            let shape = &mut warm["runs"][0]["inlineShape"];
+            let mut config = config.clone();
+            match change {
+                "width" => shape["width"] = json!(40),
+                "padding" => shape["textBodyProperties"] = json!({"margins": {"left": 30}}),
+                "text" => shape["innerText"][0]["runs"][0]["text"] = json!("Short"),
+                "spacing" => {
+                    shape["innerText"][0]["attrs"] =
+                        json!({"spacing": {"line": 40, "lineRule": "exact"}});
+                }
+                "defaults" => config.defaults["fontSize"] = json!(24),
+                "remove text" => shape["innerText"] = json!([]),
+                _ => unreachable!(),
+            }
+            let mut cold = warm.clone();
+            cold["runs"][0]["inlineShape"]
+                .as_object_mut()
+                .unwrap()
+                .remove("innerMeasures");
+            let mut warm: LayoutBlock = serde_json::from_value(warm).unwrap();
+            let mut cold: LayoutBlock = serde_json::from_value(cold).unwrap();
+            let actual = measure_block(&mut warm, 300.0, &config).unwrap();
+            let expected = measure_block(&mut cold, 300.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{change}"
+            );
+            assert_eq!(warm, cold, "{change}");
+            let updated = serde_json::to_value(&warm).unwrap();
+            assert_ne!(
+                &updated["runs"][0]["inlineShape"]["innerMeasures"], original,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_shape_measurements_refresh_when_a_pending_font_arrives() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = cache_measurement_config();
+        config
+            .font_chains
+            .insert("box font|0|0".to_owned(), vec![1]);
+        let source: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 80, "height": 60,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 80, "height": 60,
+                    "geometryPath": [], "children": [], "innerText": [{
+                        "id": "box-text", "runs": [{
+                            "kind": "text", "text": "Text inside the box",
+                            "fontFamily": "Box Font"
+                        }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let mut warm = source.clone();
+        measure_block(&mut warm, 300.0, &config).unwrap();
+        let original = serde_json::to_value(&warm).unwrap();
+        assert_eq!(
+            crate::register_measure_font_bytes(include_bytes!(
+                "../../docx-raster/tests/assets/Carlito-Regular.ttf"
+            ))
+            .unwrap(),
+            1
+        );
+        measure_block(&mut warm, 300.0, &config).unwrap();
+        let mut cold = source;
+        measure_block(&mut cold, 300.0, &config).unwrap();
+        assert_eq!(warm, cold);
+        let updated = serde_json::to_value(&warm).unwrap();
+        assert_ne!(
+            updated["runs"][0]["inlineShape"]["innerMeasures"],
+            original["runs"][0]["inlineShape"]["innerMeasures"]
+        );
+    }
+
+    #[test]
+    fn anchored_charts_keep_main_table_cell_geometry() {
+        for (wrap_type, behind_doc) in [
+            ("none", false),
+            ("none", true),
+            ("topAndBottom", false),
+            ("square", false),
+            ("tight", false),
+            ("through", false),
+        ] {
+            let mut cell_blocks = vec![json!({
+                "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
+                "position": {}, "wrapType": wrap_type, "behindDoc": behind_doc
+            })];
+            cell_blocks.extend((0..6).map(|index| {
+                json!({
+                    "kind": "paragraph", "id": index, "runs": [],
+                    "attrs": {"spacing": {"line": 20, "lineRule": "exact"}}
+                })
+            }));
+            let mut block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "table", "id": "table", "columnWidths": [200],
+                "rows": [{"id": "row", "cells": [{
+                    "id": "cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                    "blocks": cell_blocks
+                }]}]
+            }))
+            .unwrap();
+            let extent = measure_block(&mut block, 200.0, &MeasurementConfig::default()).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &extent) else {
+                panic!("table measure");
+            };
+            assert_eq!(extent.rows[0].height, 221.0, "{wrap_type}, {behind_doc}");
+            assert_eq!(extent.rows[0].cells[0].height, 221.0);
+            let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
+            assert_eq!(
+                breaks.break_offsets[0].as_slice(),
+                &[101.0, 121.0, 141.0, 161.0, 181.0, 201.0, 221.0],
+                "{wrap_type}, behindDoc={behind_doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn collects_fonts_from_inline_shape_children_and_nested_carriers() {
+        let nested = json!({
+            "kind": "image", "src": "", "width": 100, "height": 40,
+            "inlineShape": {
+                "id": "nested", "shapeType": "rect", "width": 100, "height": 40,
+                "geometryPath": [], "children": [],
+                "innerText": [{"id": "nested-text", "runs": [{
+                    "kind": "text", "text": "日本語かな", "fontFamily": "Nested Font",
+                    "bold": true, "italic": true
+                }]}]
+            }
+        });
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 200, "height": 100,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 200, "height": 100,
+                    "geometryPath": [],
+                    "innerText": [{"id": "box-text", "runs": [{
+                        "kind": "text", "text": "Only in box", "fontFamily": "Box Font"
+                    }]}],
+                    "children": [{
+                        "id": "child", "shapeType": "rect", "width": 100, "height": 40,
+                        "geometryPath": [], "children": [],
+                        "innerText": [{"id": "child-text", "runs": [nested]}]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let mut ordinary = FontRequirementCollector::default();
+        ordinary.collect([&block], "Calibri");
+        let ordinary = ordinary.finish();
+        assert!(ordinary.contains_key("box font|0|0"));
+        let mut preview = FontRequirementCollector::default();
+        preview.collect_preview([&block], "Calibri");
+        let preview = preview.finish();
+        for key in ["calibri|0|0", "nested font|0|0", "nested font|1|1"] {
+            assert_eq!(ordinary[key].scripts, ["cjk-jp"]);
+            assert_eq!(preview[key].scripts, ["cjk-jp", "cjk-sc"]);
+        }
+        let LayoutBlock::Paragraph(paragraph) = &block else {
+            panic!("paragraph");
+        };
+        let Run::Image(image) = &paragraph.runs[0] else {
+            panic!("inline shape");
+        };
+        let mut shape = image.inline_shape.as_deref().unwrap().clone();
+        let child = &mut shape.children[0];
+        let Run::Image(mut nested) = child.inner_text.as_mut().unwrap()[0].runs.remove(0) else {
+            panic!("nested inline shape");
+        };
+        child.children.push(*nested.inline_shape.take().unwrap());
+        let standalone = LayoutBlock::Shape(shape);
+        let mut standalone_ordinary = FontRequirementCollector::default();
+        standalone_ordinary.collect([&standalone], "Calibri");
+        let mut standalone_preview = FontRequirementCollector::default();
+        standalone_preview.collect_preview([&standalone], "Calibri");
+        assert_eq!(
+            serde_json::to_value(ordinary).unwrap(),
+            serde_json::to_value(standalone_ordinary.finish()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(preview).unwrap(),
+            serde_json::to_value(standalone_preview.finish()).unwrap()
+        );
     }
 
     fn font_requirement_keys(run: Value) -> Vec<String> {
