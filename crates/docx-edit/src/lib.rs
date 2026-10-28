@@ -128,6 +128,7 @@ mod update_chunks;
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
+pub mod session;
 
 pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
@@ -865,7 +866,6 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
         let Some(source) = self.source_metadata() else {
             return;
@@ -1159,7 +1159,6 @@ impl EditingDoc {
 
     /// Records that the stories now hold exactly what seeding the retained source and its
     /// installed media writes, as a fresh seed of that package would.
-    #[cfg(feature = "wasm")]
     pub(crate) fn mark_seeded(&self) {
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1171,7 +1170,6 @@ impl EditingDoc {
     }
 
     /// Whether the replica holds nothing yet: no content, local or remote, and no deletions.
-    #[cfg(feature = "wasm")]
     pub(crate) fn holds_nothing(&self) -> bool {
         self.doc.transact().state_vector().is_empty()
     }

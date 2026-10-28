@@ -42,9 +42,8 @@
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::rc::Rc;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use js_sys::{Function, Uint8Array};
@@ -52,16 +51,18 @@ use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::{Any, Assoc, ReadTxn, Subscription, Transact};
 
 use crate::batch::outcome_json;
-use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
+use crate::compare::CompareOutcome;
 use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
 use crate::engine::RelayoutTrigger;
-use crate::presence::{
-    apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
-};
+use crate::presence::{encode_sticky, resolve_sticky_selection};
 use crate::segments::SegKind;
+use crate::session::{
+    EditSessionCore, EngineError, EngineErrorKind, Host, LocalCellPoint, LocalCellSelection,
+    LocalSelection, ParagraphIdentitiesCache,
+};
 use crate::structured::ExportOptions;
 use crate::{
     AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
@@ -69,7 +70,7 @@ use crate::{
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
-    RawOp, ReadParagraphsRequest, ReadStoriesRequest, SeedParagraph, SegmentContent, SimpleFormat,
+    RawOp, ReadParagraphsRequest, ReadStoriesRequest, SegmentContent, SimpleFormat,
     SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
     TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession,
 };
@@ -136,6 +137,32 @@ fn peer_metadata_js_err(error: crate::PeerMetadataError) -> JsValue {
         &JsValue::from_str(error.code()),
     );
     value.into()
+}
+
+impl From<EngineError> for JsValue {
+    fn from(error: EngineError) -> Self {
+        match error.kind {
+            EngineErrorKind::PeerMetadata { code } => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("PeerMetadataError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str(code),
+                );
+                value.into()
+            }
+            EngineErrorKind::Message => JsValue::from_str(&error.message),
+        }
+    }
+}
+
+fn wasm_host() -> Host {
+    Host::new(
+        Arc::new(|| js_sys::Date::now() as u64),
+        Arc::new(js_entropy),
+        Arc::new(|| performance_now()),
+    )
 }
 
 /// Host randomness for version nonces; the wasm target has no ambient entropy source.
@@ -335,34 +362,6 @@ fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> 
     Ok(segments
         .segment_at(index)
         .is_some_and(|segment| matches!(segment.kind, SegKind::Embed)))
-}
-
-/// Per-peer selection state. These sticky positions are deliberately held
-/// outside the yrs document: an awareness transport may publish them, but they
-/// are never serialized as document content or included in save updates.
-#[derive(Clone)]
-struct LocalSelection {
-    story: String,
-    anchor: StickyIndex,
-    head: StickyIndex,
-}
-
-/// One endpoint of a local table selection. The cell story is the stable
-/// identity; row/column are a fallback if that cell is removed locally.
-struct LocalCellPoint {
-    cell_story: String,
-    row: u32,
-    column: u32,
-}
-
-/// Per-peer cell selection, held outside the yrs document. The sticky table
-/// position survives unrelated edits in the parent story; cell-story identity
-/// lets each endpoint follow inserted/deleted rows and columns.
-struct LocalCellSelection {
-    parent_story: String,
-    table: StickyIndex,
-    anchor: LocalCellPoint,
-    head: LocalCellPoint,
 }
 
 /// Applies one boundary mark to `range`. `mark_json`:
@@ -885,25 +884,6 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
     Ok(env)
 }
 
-fn seed_paragraph(value: &Value) -> (String, String, String) {
-    let text = value
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let p_style = value
-        .get("pStyle")
-        .and_then(Value::as_str)
-        .unwrap_or("Normal")
-        .to_owned();
-    let alignment = value
-        .get("alignment")
-        .and_then(Value::as_str)
-        .unwrap_or("left")
-        .to_owned();
-    (text, p_style, alignment)
-}
-
 fn source_story_kind(kind: SourceStoryKind) -> &'static str {
     match kind {
         SourceStoryKind::Body => "body",
@@ -1151,346 +1131,25 @@ impl RunInheritance {
 /// multiplexes its own listener set over that one callback.
 #[wasm_bindgen]
 pub struct EditSession {
-    engine: EngineSession,
-    paragraph_identities_cache: RefCell<Option<ParagraphIdentitiesCache>>,
-    /// This session's measurement fonts; see the module docs.
-    fonts: docx_layout::MeasureFonts,
-    docx_source: RefCell<Option<PackageBytes>>,
-    paragraph_styles: RefCell<Option<crate::seed::StyleResolver>>,
-    /// The [`crate::seed::package_digest`] of `docx_source`, when known.
-    docx_digest: RefCell<Option<String>>,
-    awaiting_comment_baseline: Cell<bool>,
+    core: EditSessionCore,
     update_observer: Option<Subscription>,
-    update_event_observer: Option<UpdateEventObserver>,
-    undo: UndoSession,
-    selection: RefCell<Option<LocalSelection>>,
-    cell_selection: RefCell<Option<LocalCellSelection>>,
-    last_apply_profile_json: RefCell<String>,
-    resident_deleted_units: Cell<u32>,
-    /// The story and resulting doc epoch of the last
-    /// [`EditSession::edit_text_resident`], until a relayout takes it.
-    resident_text_edit: RefCell<Option<(String, u64)>>,
-    /// The comparison applied here, awaiting its saved bytes.
-    compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
-    /// Seed images as `media:{n}` tokens rather than `data:` URLs.
-    media_tokens: Cell<bool>,
 }
 
-struct ParagraphIdentitiesCache {
-    version: crate::DocumentVersion,
-    source: Option<Arc<crate::identity::SourceIndex>>,
-    json: String,
+// Temporary bridge: removed in slice 4.
+impl Deref for EditSession {
+    type Target = EditSessionCore;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
-struct UpdateEventObserver {
-    pending: Rc<RefCell<VecDeque<Vec<u8>>>>,
-    _subscription: Subscription,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DocxHostWire {
-    envelope: docx_parse::S9WireEnvelope,
-    referenced_fonts: Vec<String>,
-    /// Empty unless the stories were seeded from the package (a preview's
-    /// from its cut).
-    unused_script_fonts: Vec<String>,
-    /// A preview whose cut holds the whole body.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    whole_body: bool,
-}
-
-fn thin_header_footer(
-    entries: &Option<Vec<(String, docx_parse::HeaderFooter)>>,
-) -> Option<Vec<(String, docx_parse::HeaderFooter)>> {
-    entries.as_ref().map(|entries| {
-        entries
-            .iter()
-            .map(|(relationship_id, part)| {
-                (
-                    relationship_id.clone(),
-                    docx_parse::HeaderFooter {
-                        story_type: part.story_type.clone(),
-                        hdr_ftr_type: part.hdr_ftr_type.clone(),
-                        content: Vec::new(),
-                        custom_root_bindings: part.custom_root_bindings.clone(),
-                        watermark: part.watermark.clone(),
-                    },
-                )
-            })
-            .collect()
-    })
-}
-
-fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::Note>> {
-    notes.as_ref().map(|notes| {
-        notes
-            .iter()
-            .map(|note| docx_parse::Note {
-                story_type: note.story_type.clone(),
-                custom_root_bindings: note.custom_root_bindings.clone(),
-                id: note.id,
-                note_type: note.note_type.clone(),
-                content: Vec::new(),
-                verbatim_xml: None,
-                source_ordinal: None,
-            })
-            .collect()
-    })
-}
-
-fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9WireEnvelope {
-    let package = &envelope.document.package;
-    let sections = package.document.sections.as_ref().map(|sections| {
-        sections
-            .iter()
-            .map(|section| docx_parse::S9SectionWire {
-                id: section.id.clone(),
-                properties: section.properties.clone(),
-                content_start: 0,
-                content_end: 0,
-            })
-            .collect()
-    });
-    docx_parse::S9WireEnvelope {
-        wire_version: envelope.wire_version,
-        document: docx_parse::S9DocumentWire {
-            package: docx_parse::S9PackageWire {
-                document: docx_parse::S9DocumentBodyWire {
-                    content: Vec::new(),
-                    sections,
-                    final_section_properties: package.document.final_section_properties.clone(),
-                    custom_root_bindings: package.document.custom_root_bindings.clone(),
-                    comments: package.document.comments.clone(),
-                },
-                styles: package.styles.clone(),
-                theme: package.theme.clone(),
-                numbering: docx_parse::NumberingDefinitions::default(),
-                settings: package.settings.clone(),
-                font_table: package.font_table.clone(),
-                header_entries: thin_header_footer(&package.header_entries),
-                footer_entries: thin_header_footer(&package.footer_entries),
-                footnotes: thin_notes(&package.footnotes),
-                endnotes: thin_notes(&package.endnotes),
-                footnote_separators: None,
-                endnote_separators: None,
-                relationship_entries: package.relationship_entries.clone(),
-                media_entries: Vec::new(),
-                chart_entries: Vec::new(),
-            },
-            template_variables: None,
-            warnings: envelope.document.warnings.clone(),
-        },
-        embedded_font_parts: envelope.embedded_font_parts.clone(),
-        font_table_relationships_xml: envelope.font_table_relationships_xml.clone(),
-        canonical_base64: None,
-        canonical_sha256: None,
+impl DerefMut for EditSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
     }
 }
 
 impl EditSession {
-    /// The source package's style cascade, built on first use and cached until the source changes.
-    fn paragraph_style_resolver(
-        &self,
-    ) -> Result<std::cell::RefMut<'_, Option<crate::seed::StyleResolver>>, JsValue> {
-        let mut styles = self.paragraph_styles.borrow_mut();
-        if styles.is_none()
-            && let Some(source) = self.docx_source.borrow().as_ref()
-        {
-            let parts = ooxml_opc::unzip_parts_where(
-                source,
-                ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
-                |name| {
-                    matches!(
-                        name,
-                        "word/styles.xml" | "word/theme/theme1.xml" | "word/settings.xml"
-                    )
-                },
-            )
-            .map_err(js_err)?;
-            *styles = Some(crate::seed::StyleResolver::from_parts(&parts).map_err(js_err)?);
-        }
-        Ok(styles)
-    }
-
-    pub fn seed_from_docx(
-        &self,
-        bytes: &[u8],
-        generation: Option<String>,
-    ) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes.into(), true, generation.as_deref(), None)
-    }
-
-    pub fn open_docx(
-        &self,
-        bytes: &[u8],
-        seed_stories: bool,
-        generation: Option<String>,
-        digest: Option<String>,
-    ) -> Result<String, JsValue> {
-        self.open_docx_inner(
-            bytes.into(),
-            seed_stories,
-            generation.as_deref(),
-            digest.as_deref(),
-        )
-    }
-
-    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
-        self.open_docx_preview_with_budget(bytes, blocks, None)
-    }
-
-    pub fn open_docx_preview_with_budget(
-        &self,
-        bytes: &[u8],
-        blocks: u32,
-        paragraph_budget: Option<u32>,
-    ) -> Result<Option<String>, JsValue> {
-        self.open_preview_source(
-            bytes,
-            blocks as usize,
-            paragraph_budget.map(|value| value as usize),
-        )
-        .map_err(|error| js_err(&error))
-    }
-
-    fn open_docx_inner(
-        &self,
-        bytes: PackageBytes,
-        seed_stories: bool,
-        generation: Option<&str>,
-        digest: Option<&str>,
-    ) -> Result<String, JsValue> {
-        self.open_docx_retaining_source(bytes, seed_stories, generation, digest)
-            .map_err(|error| js_err(&error))
-    }
-
-    #[cfg(test)]
-    fn open_docx_retaining(
-        &self,
-        bytes: &[u8],
-        seed_stories: bool,
-        generation: Option<&str>,
-        digest: Option<&str>,
-    ) -> Result<String, String> {
-        self.open_docx_retaining_source(bytes.into(), seed_stories, generation, digest)
-    }
-
-    /// Opens `source`, retaining it and its digest only once opening succeeds.
-    fn open_docx_retaining_source(
-        &self,
-        source: PackageBytes,
-        seed_stories: bool,
-        generation: Option<&str>,
-        digest: Option<&str>,
-    ) -> Result<String, String> {
-        let digest = match digest {
-            Some(digest) => crate::seed::checked_package_digest(digest)?,
-            None => crate::seed::package_digest(&source),
-        };
-        let (envelope, parts, media) =
-            crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
-        let host_envelope = thin_docx_envelope(&envelope);
-        // Only stories seeded into an empty replica are what a fresh seed of the package holds.
-        let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
-        let fonts = if seed_stories {
-            let seed_media = if self.media_tokens.get() {
-                crate::seed::SeedMedia::AsParsed
-            } else {
-                crate::seed::SeedMedia::DataUrls {
-                    table: &media,
-                    layout_tokens: true,
-                }
-            };
-            let fonts = crate::seed::seed_parsed_docx(
-                self.engine.doc(),
-                envelope,
-                parts,
-                source.clone(),
-                digest.clone(),
-                seed_media,
-            )
-            .map_err(|error| error.to_string())?;
-            self.awaiting_comment_baseline.set(false);
-            self.engine.doc().begin_opening(generation);
-            self.engine.doc().install_media(media);
-            fonts
-        } else {
-            let (mut metadata, index, fonts) =
-                crate::seed::replica_source(envelope, parts, source.clone(), digest.clone())?;
-            metadata.watch_comments(self.engine.doc());
-            self.engine.doc().install_source(metadata, js_entropy());
-            self.awaiting_comment_baseline.set(true);
-            self.engine
-                .doc()
-                .retain_source(crate::identity::SourcePackage::Ready(Arc::new(index)));
-            self.engine.doc().install_media(media);
-            self.engine
-                .doc()
-                .set_media_sources(crate::media::MediaSources::default());
-            crate::seed::SeededFonts {
-                referenced: fonts,
-                unused_script: Vec::new(),
-            }
-        };
-        let host = DocxHostWire {
-            envelope: host_envelope,
-            referenced_fonts: fonts.referenced,
-            unused_script_fonts: fonts.unused_script,
-            whole_body: false,
-        };
-        let json = serde_json::to_string(&host).map_err(|error| error.to_string())?;
-        self.docx_source.replace(Some(source));
-        self.paragraph_styles.replace(None);
-        self.docx_digest.replace(Some(digest));
-        self.engine.set_partial_document(false);
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        self.engine.doc().rotate_version(js_entropy());
-        if fresh_seed {
-            self.engine.doc().mark_seeded();
-        }
-        Ok(json)
-    }
-
-    #[cfg(test)]
-    fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<Option<String>, String> {
-        self.open_preview_source(bytes, blocks, None)
-    }
-
-    fn open_preview_source(
-        &self,
-        bytes: impl Into<PackageBytes>,
-        blocks: usize,
-        paragraph_budget: Option<usize>,
-    ) -> Result<Option<String>, String> {
-        // A preview holds a cut of the document and must never be saved, so
-        // it only opens into a session with nothing to save.
-        if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
-            return Err("a preview opens only into an empty session".to_owned());
-        }
-        let Some((envelope, media, budget_stopped)) =
-            crate::seed::parse_docx_preview(bytes.into(), blocks, paragraph_budget)?
-        else {
-            return Ok(None);
-        };
-        let host_envelope = thin_docx_envelope(&envelope);
-        let whole_body =
-            !budget_stopped && envelope.document.package.document.content.len() < blocks;
-        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
-        self.awaiting_comment_baseline.set(false);
-        self.engine.set_partial_document(true);
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        self.engine.doc().rotate_version(js_entropy());
-        serde_json::to_string(&DocxHostWire {
-            envelope: host_envelope,
-            referenced_fonts: fonts.referenced,
-            unused_script_fonts: fonts.unused_script,
-            whole_body,
-        })
-        .map(Some)
-        .map_err(|error| error.to_string())
-    }
-
     fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32), JsValue> {
         let selection = self.selection.borrow();
         let selection = selection
@@ -1672,32 +1331,15 @@ impl EditSession {
         {
             return Err(js_err("client_id must be a non-negative safe integer"));
         }
-        let session = Self {
-            engine: EngineSession::new(client_id as u64),
-            paragraph_identities_cache: RefCell::new(None),
-            fonts: docx_layout::MeasureFonts::default(),
-            docx_source: RefCell::new(None),
-            paragraph_styles: RefCell::new(None),
-            docx_digest: RefCell::new(None),
-            awaiting_comment_baseline: Cell::new(false),
+        Ok(Self {
+            core: EditSessionCore::new(client_id as u64, wasm_host()),
             update_observer: None,
-            update_event_observer: None,
-            undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
-            selection: RefCell::new(None),
-            cell_selection: RefCell::new(None),
-            last_apply_profile_json: RefCell::new("{}".to_owned()),
-            resident_deleted_units: Cell::new(0),
-            resident_text_edit: RefCell::new(None),
-            compared: RefCell::new(None),
-            media_tokens: Cell::new(false),
-        };
-        session.engine.doc().rotate_version(js_entropy());
-        Ok(session)
+        })
     }
 
     /// This replica's client id, as passed to the constructor.
     pub fn client_id(&self) -> f64 {
-        self.engine.doc().client_id() as f64
+        self.core.client_id()
     }
 
     /// Registers raw sfnt bytes in this session's resident measurement store
@@ -2435,31 +2077,11 @@ impl EditSession {
     /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
     /// comment writes and marks loaded fields differing from seed placeholders as authored.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
-        let session_id = self.engine.doc().session_id();
-        let written = self.awaiting_comment_baseline.get().then(|| {
-            self.engine
-                .doc()
-                .source_metadata()
-                .map(|source| source.read().comment_writes.snapshot())
-                .unwrap_or_default()
-        });
-        self.engine.doc().load_state_v1(update).map_err(js_err)?;
-        if self.engine.doc().session_id() != session_id {
-            self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        }
-        if let Some(written) = written {
-            self.engine.doc().rebase_comment_writes(written);
-            self.awaiting_comment_baseline.set(false);
-        }
-        self.engine.doc().rotate_version(js_entropy());
-        Ok(())
+        self.core.load(update).map_err(JsValue::from)
     }
 
     pub fn encode_peer_metadata(&self) -> Result<Vec<u8>, JsValue> {
-        self.engine
-            .doc()
-            .encode_peer_metadata()
-            .map_err(peer_metadata_js_err)
+        self.core.encode_peer_metadata().map_err(JsValue::from)
     }
 
     pub fn bootstrap_peer(
@@ -2468,25 +2090,9 @@ impl EditSession {
         metadata: &[u8],
         source: Option<Vec<u8>>,
     ) -> Result<(), JsValue> {
-        let source = source.map(PackageBytes::from);
-        let bootstrap = self
-            .engine
-            .doc()
-            .prepare_peer_bootstrap(state, metadata, source)
-            .map_err(peer_metadata_js_err)?;
-        let retained = self
-            .engine
-            .doc()
-            .install_peer_bootstrap(bootstrap, js_entropy())
-            .map_err(peer_metadata_js_err)?;
-        self.docx_source.replace(Some(retained.source));
-        self.paragraph_styles.replace(None);
-        self.docx_digest.replace(Some(retained.digest));
-        self.awaiting_comment_baseline.set(true);
-        self.engine.set_partial_document(false);
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        self.engine.doc().rotate_version(js_entropy());
-        self.load(state)
+        self.core
+            .bootstrap_peer(state, metadata, source)
+            .map_err(JsValue::from)
     }
 
     /// [`EditSession::open_docx`] with seeding always on.
@@ -2496,39 +2102,33 @@ impl EditSession {
         bytes: Vec<u8>,
         generation: Option<String>,
     ) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes.into(), true, generation.as_deref(), None)
+        self.core
+            .seed_from_docx_owned(bytes, generation)
+            .map_err(JsValue::from)
     }
 
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
     pub fn begin_opening(&self, generation: Option<String>) {
-        self.engine.doc().begin_opening(generation.as_deref());
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
+        self.core.begin_opening(generation)
     }
 
     /// Declares header/footer alias groups before host-side seeding.
     pub fn set_header_footer_aliases(&self, json: &str) -> Result<(), JsValue> {
-        self.engine
-            .doc()
+        self.core
             .set_header_footer_aliases(json)
-            .map_err(js_err)
+            .map_err(JsValue::from)
     }
 
     /// Returns active alias-to-canonical relationship ids as a JSON object.
     pub fn header_footer_aliases_json(&self) -> String {
-        let aliases: BTreeMap<_, _> = self
-            .engine
-            .doc()
-            .header_footer_aliases()
-            .into_iter()
-            .collect();
-        serde_json::to_string(&aliases).expect("header/footer aliases serialize")
+        self.core.header_footer_aliases_json()
     }
 
     /// Unions seeded opaque sequence names into document state.
     pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
-        let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
-        crate::seed::seed_opaque_sequences(self.engine.doc(), &names, None);
-        Ok(())
+        self.core
+            .seed_opaque_sequences(names_json)
+            .map_err(JsValue::from)
     }
 
     /// Parses a DOCX package, optionally seeds its editable stories into this
@@ -2556,12 +2156,9 @@ impl EditSession {
         generation: Option<String>,
         digest: Option<String>,
     ) -> Result<String, JsValue> {
-        self.open_docx_inner(
-            bytes.into(),
-            seed_stories,
-            generation.as_deref(),
-            digest.as_deref(),
-        )
+        self.core
+            .open_docx_owned(bytes, seed_stories, generation, digest)
+            .map_err(JsValue::from)
     }
 
     /// Opens `bytes` for display only, seeded from the body's first `blocks`
@@ -2577,7 +2174,7 @@ impl EditSession {
         bytes: Vec<u8>,
         blocks: u32,
     ) -> Result<Option<String>, JsValue> {
-        self.open_docx_preview_with_budget_owned(bytes, blocks, None)
+        self.core.open_docx_preview_owned(bytes, blocks).map_err(JsValue::from)
     }
 
     #[wasm_bindgen(js_name = open_docx_preview_with_budget)]
@@ -2587,75 +2184,45 @@ impl EditSession {
         blocks: u32,
         paragraph_budget: Option<u32>,
     ) -> Result<Option<String>, JsValue> {
-        self.open_preview_source(
-            bytes,
-            blocks as usize,
-            paragraph_budget.map(|value| value as usize),
-        )
-        .map_err(|error| js_err(&error))
+        self.core
+            .open_docx_preview_with_budget_owned(bytes, blocks, paragraph_budget)
+            .map_err(JsValue::from)
     }
 
     /// Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
     /// which only a replica opened from the same package resolves, instead of
     /// `data:` URLs. Off by default.
     pub fn set_media_tokens(&self, enabled: bool) {
-        self.media_tokens.set(enabled);
+        self.core.set_media_tokens(enabled)
     }
 
     /// The digests mapping the `data:` URLs this replica seeded to
     /// `media:{n}` tokens, for [`EditSession::load_media_sources`]; empty
     /// when it seeded none.
     pub fn media_sources_json(&self) -> String {
-        let sources = self.engine.doc().media_sources();
-        if sources.is_empty() {
-            String::new()
-        } else {
-            sources.to_json()
-        }
+        self.core.media_sources_json()
     }
 
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
     /// another replica seeded them from.
     pub fn load_media_sources(&self, json: &str) -> Result<(), JsValue> {
-        let sources = if json.is_empty() {
-            crate::media::MediaSources::default()
-        } else {
-            crate::media::MediaSources::from_json(json).map_err(|error| js_err(&error))?
-        };
-        self.engine.doc().set_media_sources(sources);
-        Ok(())
+        self.core.load_media_sources(json).map_err(JsValue::from)
     }
 
     /// The separator notes for another replica; empty when the package has none.
     pub fn note_separators_state(&self) -> Result<Vec<u8>, JsValue> {
-        self.engine
-            .doc()
-            .note_separator_state()
-            .map(|state| state.map_or_else(Vec::new, |state| state.to_vec()))
-            .map_err(|error| js_err(&error))
+        self.core.note_separators_state().map_err(JsValue::from)
     }
 
     /// Loads separator notes from a yrs v1 update; empty clears them.
     pub fn load_note_separators(&self, state: &[u8]) -> Result<(), JsValue> {
-        if self.engine.doc().has_note_separator_state(state) {
-            return Ok(());
-        }
-        let state = if state.is_empty() {
-            None
-        } else {
-            EditingDoc::new(1)
-                .load_state_v1(state)
-                .map_err(|error| js_err(error.to_string()))?;
-            Some(Arc::from(state))
-        };
-        self.engine.doc().set_note_separator_state(state);
-        Ok(())
+        self.core.load_note_separators(state).map_err(JsValue::from)
     }
 
     /// Marks whether the session's document is part of a package, as a
     /// replica of a preview is: its layouts render NUMPAGES empty.
     pub fn set_partial_document(&self, partial: bool) {
-        self.engine.set_partial_document(partial);
+        self.core.set_partial_document(partial)
     }
 
     /// Re-parses the DOCX bytes retained by the last
@@ -2663,41 +2230,24 @@ impl EditSession {
     /// JSON, or `None` when no DOCX has been opened. Unlike `open_docx` this
     /// keeps every part; it reflects the source file, not later edits.
     pub fn materialize_docx(&self) -> Result<Option<String>, JsValue> {
-        let source = self.docx_source.borrow();
-        let Some(source) = source.as_ref() else {
-            return Ok(None);
-        };
-        let digest = self
-            .docx_digest
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| crate::seed::package_digest(source));
-        let (envelope, _) =
-            crate::seed::parse_docx_package_with_digest(source, digest).map_err(js_err)?;
-        let json = serde_json::to_string(&envelope).map_err(js_err)?;
-        Ok(Some(json))
+        self.core.materialize_docx().map_err(JsValue::from)
     }
 
     /// The bytes a `media:{n}` image source displays, as the part's
     /// [`EditSession::media_type`]; `undefined` for any other source or a
     /// part that cannot be read.
     pub fn media_bytes(&self, token: &str) -> Option<Vec<u8>> {
-        let media = self.engine.doc().media_table()?;
-        let index = docx_parse::media::media_token_index(token)?;
-        media.bytes(index).ok().map(std::borrow::Cow::into_owned)
+        self.core.media_bytes(token)
     }
 
     /// The media type of [`EditSession::media_bytes`].
     pub fn media_type(&self, token: &str) -> Option<String> {
-        let media = self.engine.doc().media_table()?;
-        media
-            .mime_type(docx_parse::media::media_token_index(token)?)
-            .map(str::to_owned)
+        self.core.media_type(token)
     }
 
     /// The `data:` URL a `media:{n}` image source stands for.
     pub fn media_data_url(&self, token: &str) -> Option<String> {
-        self.engine.doc().media_table()?.resolve(token)
+        self.core.media_data_url(token)
     }
 
     /// Seeds stories from JSON:
@@ -2710,80 +2260,33 @@ impl EditSession {
     /// document that has no opening yet starts one; see
     /// [`EditingDoc::begin_opening`].
     pub fn load_json(&self, stories_json: &str) -> Result<String, JsValue> {
-        let value: Value = serde_json::from_str(stories_json).map_err(js_err)?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| js_err("load_json expects an array of stories"))?;
-        let mut receipt = serde_json::Map::new();
-        for entry in entries {
-            let story_id = entry
-                .get("storyId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("a story entry requires a string \"storyId\""))?;
-            let paragraphs = entry
-                .get("paragraphs")
-                .and_then(Value::as_array)
-                .ok_or_else(|| js_err("a story entry requires a \"paragraphs\" array"))?;
-            if paragraphs.is_empty() {
-                return Err(js_err(format!(
-                    "story {story_id:?} requires at least one paragraph"
-                )));
-            }
-
-            let seed_paragraphs: Vec<SeedParagraph> = paragraphs
-                .iter()
-                .map(|paragraph| {
-                    let (text, p_style, alignment) = seed_paragraph(paragraph);
-                    SeedParagraph {
-                        text,
-                        p_style,
-                        alignment,
-                    }
-                })
-                .collect();
-            let para_ids: Vec<Value> = self
-                .engine
-                .doc()
-                .seed_story(story_id, &seed_paragraphs)
-                .map_err(js_err)?
-                .into_iter()
-                .map(Value::String)
-                .collect();
-            receipt.insert(story_id.to_owned(), Value::Array(para_ids));
-            self.awaiting_comment_baseline.set(false);
-        }
-        if !self.engine.doc().has_opening() {
-            self.engine.doc().begin_opening(None);
-        }
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        serde_json::to_string(&Value::Object(receipt)).map_err(js_err)
+        self.core.load_json(stories_json).map_err(JsValue::from)
     }
 
     /// The full document state as one yrs v1 update. Hand it to
     /// [`EditSession::load`] on a fresh replica to reproduce this document.
     pub fn encode_state(&self) -> Vec<u8> {
-        self.engine.doc().encode_state_as_update_v1()
+        self.core.encode_state()
     }
 
     /// This replica's yrs v1 state vector — what a peer sends so
     /// [`EditSession::encode_diff`] can compute the update it is missing.
     pub fn encode_state_vector(&self) -> Vec<u8> {
-        self.engine.doc().encode_state_vector_v1()
+        self.core.encode_state_vector()
     }
 
     /// Whether a remote update is waiting on one that has not arrived yet.
     pub fn has_pending_update(&self) -> bool {
-        self.engine.doc().holds_pending_update()
+        self.core.has_pending_update()
     }
 
     /// The yrs v1 update carrying everything this replica has that the peer
     /// described by `remote_state_vector` does not. Errors on a malformed
     /// state vector.
     pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, JsValue> {
-        self.engine
-            .doc()
-            .encode_diff_v1(remote_state_vector)
-            .map_err(js_err)
+        self.core
+            .encode_diff(remote_state_vector)
+            .map_err(JsValue::from)
     }
 
     /// [`EditSession::encode_diff`] as ordered updates for a sync that must
@@ -2798,10 +2301,8 @@ impl EditSession {
         max_chunk_bytes: u32,
     ) -> Result<js_sys::Array, JsValue> {
         let chunks = self
-            .engine
-            .doc()
-            .encode_diff_chunks_v1(remote_state_vector, max_chunk_bytes as usize)
-            .map_err(js_err)?;
+            .core
+            .encode_diff_chunks(remote_state_vector, max_chunk_bytes)?;
         Ok(chunks
             .iter()
             .map(|chunk| Uint8Array::from(chunk.as_slice()))
@@ -2812,7 +2313,7 @@ impl EditSession {
     /// local origin, so this replica's undo manager never claims it. Errors on
     /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
-        self.engine.doc().apply_update_v1(update).map_err(js_err)
+        self.core.apply_update(update).map_err(JsValue::from)
     }
 
     /// Applies the ordered updates of one sync in a single remote transaction,
@@ -2829,10 +2330,7 @@ impl EditSession {
                     .map_err(|_| js_err("sync updates must be Uint8Arrays"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.engine
-            .doc()
-            .apply_update_chunks_v1(&chunks)
-            .map_err(js_err)
+        self.core.apply_update_chunks(&chunks).map_err(JsValue::from)
     }
 
     /// [`EditSession::apply_update`] plus an inference about where the peer
@@ -2842,40 +2340,22 @@ impl EditSession {
     /// than one client, ends in a non-text insertion, or inserts nothing.
     /// Errors on a malformed update.
     pub fn apply_update_with_inference(&self, update: &[u8]) -> Result<String, JsValue> {
-        let inference =
-            apply_update_with_typing_inference(self.engine.doc(), update).map_err(js_err)?;
-        serde_json::to_string(&inference.map(|inference| {
-            json!({
-                "clientId": inference.client_id,
-                "story": inference.story,
-                "paraId": inference.para_id,
-                "endOffset": inference.end_offset,
-            })
-        }))
-        .map_err(js_err)
+        self.core
+            .apply_update_with_inference(update)
+            .map_err(JsValue::from)
     }
 
     /// Applies an update produced by this document's dedicated local worker.
     /// The local origin lets the main replica's UndoManager retain ownership of
     /// the edit; remote/collaboration updates must use `apply_update` instead.
     pub fn apply_local_update(&self, update: &[u8]) -> Result<(), JsValue> {
-        self.engine
-            .doc()
-            .apply_local_update_v1(update)
-            .map_err(js_err)
+        self.core.apply_local_update(update).map_err(JsValue::from)
     }
 
     /// Applies an update another replica of this document committed for a host batch.
     /// It commits outside undo history and notifies as a local change.
     pub fn apply_host_update(&self, update: &[u8]) -> Result<(), JsValue> {
-        self.undo.add_undo_barrier();
-        let result = self
-            .engine
-            .doc()
-            .apply_host_update_v1(update)
-            .map_err(js_err);
-        self.undo.add_undo_barrier();
-        result
+        self.core.apply_host_update(update).map_err(JsValue::from)
     }
 
     /// Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
@@ -2912,26 +2392,9 @@ impl EditSession {
     /// [`EditSession::drain_update_event`] instead of pushing them through a
     /// callback. Idempotent while observation is running.
     pub fn start_update_event_observation(&mut self) -> Result<(), JsValue> {
-        if self.update_event_observer.is_some() {
-            return Ok(());
-        }
-        let pending = Rc::new(RefCell::new(VecDeque::new()));
-        let observed = Rc::clone(&pending);
-        let subscription = self
-            .engine
-            .doc()
-            .observe_update_v1(move |update, remote| {
-                let mut encoded = Vec::with_capacity(update.len() + 1);
-                encoded.push(u8::from(remote));
-                encoded.extend_from_slice(update);
-                observed.borrow_mut().push_back(encoded);
-            })
-            .map_err(js_err)?;
-        self.update_event_observer = Some(UpdateEventObserver {
-            pending,
-            _subscription: subscription,
-        });
-        Ok(())
+        self.core
+            .start_update_event_observation()
+            .map_err(JsValue::from)
     }
 
     /// Pops the oldest queued transaction, in arrival order. Byte 0 is `1`
@@ -2939,15 +2402,12 @@ impl EditSession {
     /// the v1 update. Empty when the queue is drained or observation never
     /// started.
     pub fn drain_update_event(&self) -> Vec<u8> {
-        self.update_event_observer
-            .as_ref()
-            .and_then(|observer| observer.pending.borrow_mut().pop_front())
-            .unwrap_or_default()
+        self.core.drain_update_event()
     }
 
     /// Stops queueing and discards anything not yet drained.
     pub fn clear_update_event_observation(&mut self) {
-        self.update_event_observer = None;
+        self.core.clear_update_event_observation()
     }
 
     // -- local input state (undo + awareness selection) --
