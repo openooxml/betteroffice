@@ -2351,7 +2351,7 @@ mod tests {
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert!(result.cycle_cells.is_empty());
         for at in 0..N - 1 {
-            let expected = num(2f64.powi((N - 2 - at) as i32));
+            let expected = num(crate::fmath::powi(2.0, (N - 2 - at) as i32));
             assert_eq!(value(&wb, s, &column(at)), expected);
             assert_eq!(value(&wb, s, &row(at)), expected);
         }
