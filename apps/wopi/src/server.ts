@@ -11,7 +11,7 @@ import {
 } from "./proof";
 import { existsSync, statSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
-import { CollabRelay, findByHandle } from "./relay/relay";
+import { CollabRelay, findByHandle, isSessionUserAuthorized } from "./relay/relay";
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
 import { decodeSaveBarrier, encodeJoinPayload, requestOrderedSave, SaveSyncError, sourceContentType } from "./sessionApi";
@@ -342,6 +342,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
+      if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
       try {
         const barrier = decodeSaveBarrier(body);
         const result = await requestOrderedSave(session, user.id, barrier, {
@@ -361,12 +362,13 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
+      if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
       try {
         await session.leave(user.id);
       } catch (err) {
         if (err instanceof SessionError && err.kind !== "unknownUser") return typedError(err.kind, 502);
       } finally {
-        ensure().relay.closeUser(user.id, 1000, "session closed");
+        ensure().relay.closeUser(user.id, 4401, "unauthorized");
       }
       return json({ closed: true }, 200, { "Cache-Control": "no-store" });
     }
@@ -454,8 +456,20 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
     if (heartbeat !== null) clearInterval(heartbeat);
     for (const unsubscribe of unsubscribes) unsubscribe();
   };
+  const end = (): void => {
+    cleanup();
+    try {
+      controller?.close();
+    } catch {}
+  };
+  const authorized = (): boolean => {
+    const user = session.getUser(userId);
+    if (user && isSessionUserAuthorized(session, user)) return true;
+    end();
+    return false;
+  };
   const send = (event: string, data: Record<string, unknown>): void => {
-    if (!controller || cleaned) return;
+    if (!controller || cleaned || !authorized()) return;
     try {
       controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
     } catch {}
@@ -467,6 +481,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         ctrl.enqueue(encoder.encode(": connected\n\n"));
       } catch {}
       heartbeat = setInterval(() => {
+        if (cleaned || !authorized()) return;
         try {
           ctrl.enqueue(encoder.encode(": heartbeat\n\n"));
         } catch {}
@@ -475,10 +490,17 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
       unsubscribes.push(
         session.on("saved", (p) => send("saved", { itemVersion: p.itemVersion, by: p.by === userId ? p.by : null })),
         session.on("saveFailed", (p) => send("saveFailed", { kind: p.kind })),
-        session.on("conflict", (p) => send("conflict", { name: p.name, url: p.url, copyName: p.copyName, copyUrl: p.copyUrl })),
+        session.on("conflict", (p) => send("conflict", { name: p.name, copyName: p.copyName })),
         session.on("viewOnly", (p) => send("viewOnly", { reason: p.reason })),
+        session.on("rejoinRequired", (p) => {
+          send("rejoinRequired", { reason: p.reason });
+          end();
+        }),
         session.on("tokenExpiring", (p) => {
           if (p.userId === userId) send("tokenExpiring", { expiresAt: p.expiresAt });
+        }),
+        session.on("userInvalidated", (p) => {
+          if (p.userId === userId) end();
         }),
         session.on("leaderChanged", (p) =>
           send("leaderChanged", {
@@ -488,10 +510,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         ),
         session.on("closed", () => {
           send("closed", {});
-          cleanup();
-          try {
-            controller?.close();
-          } catch {}
+          end();
         }),
       );
     },

@@ -2,7 +2,9 @@ import {
   decodeStateVector,
   decodeUpdate,
   encodeStateVector,
-  parseUpdateMeta,
+  mergeUpdates,
+  Skip,
+  UpdateEncoderV1,
 } from "yjs";
 
 import {
@@ -34,9 +36,7 @@ export interface ServerReplica {
   readonly version: number;
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
-  applyUpdate(
-    update: Uint8Array,
-  ): { accepted: true } | { accepted: false; reason: string };
+  applyUpdate(update: Uint8Array): ApplyResult;
   joinPayload(): JoinPayload;
   save(): Promise<SaveResult>;
   onLocalUpdate(listener: (update: Uint8Array) => void): () => void;
@@ -48,6 +48,7 @@ interface EngineReplica {
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): unknown;
+  onLocalUpdate?(listener: (update: Uint8Array) => void): () => void;
   engineVersion(): string;
   dispose(): void;
 }
@@ -58,6 +59,9 @@ function adaptDocx(session: YrsSession): EngineReplica {
     encodeStateVector: () => session.encodeStateVector(),
     encodeStateAsUpdate: (remote) => session.encodeStateAsUpdate(remote),
     applyUpdate: (update) => session.applyUpdate(update),
+    onLocalUpdate: (listener) => session.onUpdate((update, origin) => {
+      if (origin === "local") listener(update);
+    }),
     engineVersion: () => session.version(),
     dispose: () => session.destroy(),
   };
@@ -69,6 +73,9 @@ function adaptWorkbook(handle: WorkbookHandle): EngineReplica {
     encodeStateVector: () => handle.encodeStateVector(),
     encodeStateAsUpdate: (remote) => handle.encodeStateAsUpdate(remote),
     applyUpdate: (update) => handle.applyUpdate(update),
+    onLocalUpdate: (listener) => handle.onUpdate((update, origin) => {
+      if (origin === "local") listener(update);
+    }),
     engineVersion: () => handle.version(),
     dispose: () => handle.dispose(),
   };
@@ -80,6 +87,9 @@ function adaptPresentation(handle: PresentationHandle): EngineReplica {
     encodeStateVector: () => handle.encodeStateVector(),
     encodeStateAsUpdate: (remote) => handle.encodeStateAsUpdate(remote),
     applyUpdate: (update) => handle.applyUpdate(update),
+    onLocalUpdate: (listener) => handle.onUpdate((update, origin) => {
+      if (origin === "local") listener(update);
+    }),
     engineVersion: () => handle.version(),
     dispose: () => handle.dispose(),
   };
@@ -89,11 +99,15 @@ const FINGERPRINT_TAG = new TextEncoder().encode(
   "\0betteroffice-document-fingerprint-v1\0",
 );
 
-interface StructLike {
-  id: { client: number; clock: number };
-  length?: number;
-  origin?: { client: number; clock: number } | null;
-  rightOrigin?: { client: number; clock: number } | null;
+interface ClockId {
+  client: number;
+  clock: number;
+}
+
+function isClockId(value: unknown): value is ClockId {
+  return typeof value === "object" && value !== null &&
+    "client" in value && typeof value.client === "number" &&
+    "clock" in value && typeof value.clock === "number";
 }
 
 /** Whether an update depends on state the server does not have. */
@@ -108,58 +122,44 @@ export function hasCausalGap(
   } catch {
     return false;
   }
-  const serverClock = (client: number): number => serverVector.get(client) ?? 0;
+  let decoded: ReturnType<typeof decodeUpdate>;
   try {
-    const meta = parseUpdateMeta(bytes);
-    for (const [client, from] of meta.from) {
-      if (from > serverClock(client)) return true;
-    }
-  } catch {}
-  let structs: StructLike[] = [];
-  let deleteRanges: Array<{ client: number; clock: number; len: number }> = [];
-  try {
-    const decoded = decodeUpdate(bytes) as unknown as {
-      structs: StructLike[];
-      ds: { clients: Map<number, Array<{ clock: number; len: number }>> };
-    };
-    structs = decoded.structs;
-    deleteRanges = [...decoded.ds.clients.entries()].flatMap(([client, ranges]) =>
-      ranges.map((range) => ({ client, clock: range.clock, len: range.len })),
-    );
-  } catch {}
+    decoded = decodeUpdate(bytes);
+  } catch {
+    return false;
+  }
+  const structs = decoded.structs.filter((struct) => !(struct instanceof Skip));
   const provided = new Map<number, Array<[number, number]>>();
   for (const struct of structs) {
     const ranges = provided.get(struct.id.client) ?? [];
-    ranges.push([struct.id.clock, struct.id.clock + (struct.length ?? 1)]);
+    ranges.push([struct.id.clock, struct.id.clock + struct.length]);
     provided.set(struct.id.client, ranges);
   }
-  const covers = (client: number, clock: number): boolean =>
-    clock < serverClock(client) ||
-    (provided.get(client) ?? []).some(([start, end]) => clock >= start && clock < end);
-  const rangeCovered = (client: number, start: number, end: number): boolean => {
-    let cursor = start;
-    while (cursor < end) {
-      if (cursor < serverClock(client)) {
-        cursor = Math.max(cursor, Math.min(end, serverClock(client)));
-        continue;
-      }
-      const next = (provided.get(client) ?? [])
-        .filter(([from, to]) => from <= cursor && to > cursor)
-        .map(([, to]) => to)
-        .sort((a, b) => b - a)[0];
-      if (next === undefined) return false;
-      cursor = next;
+  const covered = new Map(serverVector);
+  for (const [client, ranges] of provided) {
+    let clock = covered.get(client) ?? 0;
+    for (const [start, end] of ranges.sort((a, b) => a[0] - b[0])) {
+      if (start > clock) return true;
+      clock = Math.max(clock, end);
     }
-    return true;
-  };
+    covered.set(client, clock);
+  }
   for (const struct of structs) {
-    for (const ref of [struct.origin, struct.rightOrigin]) {
-      if (ref && !covers(ref.client, ref.clock)) return true;
+    if (!("origin" in struct)) continue;
+    for (const ref of [
+      struct.origin,
+      struct.rightOrigin,
+      struct.parent,
+      struct.parentSub,
+    ]) {
+      if (isClockId(ref) && ref.clock >= (covered.get(ref.client) ?? 0)) {
+        return true;
+      }
     }
   }
-  for (const range of deleteRanges) {
-    if (!rangeCovered(range.client, range.clock, range.clock + range.len)) {
-      return true;
+  for (const [client, ranges] of decoded.ds.clients) {
+    for (const range of ranges) {
+      if (range.clock + range.len > (covered.get(client) ?? 0)) return true;
     }
   }
   return false;
@@ -180,9 +180,78 @@ function rejected(error: unknown): { accepted: false; reason: string } {
   return { accepted: false, reason: `engine rejected update (${name})` };
 }
 
-type ApplyResult = { accepted: true } | { accepted: false; reason: string };
+type ApplyResult =
+  | { accepted: true; followUps?: Uint8Array[] }
+  | { accepted: false; reason: string; followUps?: Uint8Array[] };
 
-class Replica implements ServerReplica {
+type DeleteRanges = Map<number, Array<{ clock: number; len: number }>>;
+
+interface LocalOperation {
+  updates: Uint8Array[];
+  checkpoint?: { vector: Uint8Array; deletions: DeleteRanges };
+  carried: DeleteRanges;
+}
+
+function residualDeletions(
+  deletions: DeleteRanges,
+  carried: DeleteRanges[],
+): DeleteRanges {
+  const residual = new Map<number, Array<{ clock: number; len: number }>>();
+  for (const [client, ranges] of deletions) {
+    const excluded = carried.flatMap((set) => set.get(client) ?? [])
+      .sort((a, b) => a.clock - b.clock);
+    const remaining: Array<{ clock: number; len: number }> = [];
+    for (const range of ranges) {
+      let clock = range.clock;
+      const end = clock + range.len;
+      for (const skip of excluded) {
+        if (skip.clock >= end) break;
+        if (skip.clock > clock) {
+          remaining.push({ clock, len: skip.clock - clock });
+        }
+        clock = Math.max(clock, skip.clock + skip.len);
+        if (clock >= end) break;
+      }
+      if (clock < end) remaining.push({ clock, len: end - clock });
+    }
+    if (remaining.length > 0) residual.set(client, remaining);
+  }
+  return residual;
+}
+
+function encodeAuthoredUpdate(
+  structs: ReturnType<typeof decodeUpdate>["structs"],
+  deletions: DeleteRanges,
+): Uint8Array | null {
+  if (structs.length === 0 && deletions.size === 0) return null;
+  const encoder = new UpdateEncoderV1();
+  const clients = new Map<number, typeof structs>();
+  for (const struct of structs) {
+    const items = clients.get(struct.id.client) ?? [];
+    items.push(struct);
+    clients.set(struct.id.client, items);
+  }
+  encoder.writeLen(clients.size);
+  for (const [client, items] of [...clients].sort((a, b) => b[0] - a[0])) {
+    encoder.writeLen(items.length);
+    encoder.writeClient(client);
+    encoder.writeLen(items[0]!.id.clock);
+    for (const item of items) item.write(encoder, 0);
+  }
+  encoder.writeLen(deletions.size);
+  for (const [client, ranges] of [...deletions].sort((a, b) => b[0] - a[0])) {
+    encoder.resetDsCurVal();
+    encoder.writeClient(client);
+    encoder.writeLen(ranges.length);
+    for (const range of ranges) {
+      encoder.writeDsClock(range.clock);
+      encoder.writeDsLen(range.len);
+    }
+  }
+  return encoder.toUint8Array();
+}
+
+export class Replica implements ServerReplica {
   readonly format: Format;
   readonly clientId: number;
   #engine: EngineReplica;
@@ -192,6 +261,8 @@ class Replica implements ServerReplica {
   #destroyed = false;
   #saveChain: Promise<unknown> = Promise.resolve();
   #listeners = new Set<(update: Uint8Array) => void>();
+  #operations: LocalOperation[] = [];
+  #unsubscribe?: () => void;
 
   constructor(
     format: Format,
@@ -204,6 +275,11 @@ class Replica implements ServerReplica {
     this.#engine = engine;
     this.#saveEngine = saveEngine;
     this.#joinPayload = joinPayload;
+    this.#unsubscribe = engine.onLocalUpdate?.((update) => {
+      const operation = this.#operations.at(-1);
+      if (operation) operation.updates.push(update.slice());
+      else this.#publish(update);
+    });
   }
 
   get version(): number {
@@ -231,39 +307,101 @@ class Replica implements ServerReplica {
   }
 
   #applyNow(update: Uint8Array): ApplyResult {
-    if (hasCausalGap(update, this.#engine.encodeStateVector())) {
+    const vectorBefore = this.#engine.encodeStateVector();
+    if (hasCausalGap(update, vectorBefore)) {
       return { accepted: false, reason: "causalGap" };
     }
-    const vectorBefore = this.#engine.encodeStateVector();
     const versionBefore = this.#engine.engineVersion();
+    const operation = this.#beginOperation(update);
     try {
       this.#engine.applyUpdate(update.slice());
     } catch (error) {
-      return rejected(error);
+      this.#endOperation(operation, false);
+      const rejection = rejected(error);
+      const vectorAfter = this.#engine.encodeStateVector();
+      if (
+        this.#engine.engineVersion() === versionBefore &&
+        vectorAfter.length === vectorBefore.length &&
+        vectorAfter.every((byte, index) => byte === vectorBefore[index])
+      ) {
+        return rejection;
+      }
+      this.#version += 1;
+      const integrated = this.#engine.encodeStateAsUpdate(vectorBefore);
+      this.#publish(integrated);
+      return { ...rejection, followUps: [integrated] };
     }
     if (this.#engine.engineVersion() !== versionBefore) {
       this.#version += 1;
     }
-    this.#emitAuthored(vectorBefore);
-    return { accepted: true };
+    const authored = this.#endOperation(operation);
+    if (!authored) return { accepted: true };
+    this.#publish(authored);
+    return { accepted: true, followUps: [authored] };
   }
 
-  #authoredUpdate(vectorBefore: Uint8Array): Uint8Array | null {
-    const clockBefore = decodeStateVector(vectorBefore.slice()).get(
+  #checkpoint(): NonNullable<LocalOperation["checkpoint"]> {
+    const vector = this.#engine.encodeStateVector();
+    const deletions = decodeUpdate(stripFingerprint(
+      this.#engine.encodeStateAsUpdate(vector),
+    )).ds.clients;
+    return { vector, deletions };
+  }
+
+  #captureFallback(operation: LocalOperation): void {
+    if (!operation.checkpoint) return;
+    const { vector, deletions } = operation.checkpoint;
+    const clockBefore = decodeStateVector(vector.slice()).get(
       this.clientId,
     ) ?? 0;
     const reference = decodeStateVector(
       this.#engine.encodeStateVector().slice(),
     );
-    if ((reference.get(this.clientId) ?? 0) === clockBefore) return null;
     reference.set(this.clientId, clockBefore);
-    return this.#engine.encodeStateAsUpdate(encodeStateVector(reference));
+    const decoded = decodeUpdate(stripFingerprint(
+      this.#engine.encodeStateAsUpdate(encodeStateVector(reference)),
+    ));
+    const update = encodeAuthoredUpdate(
+      decoded.structs,
+      residualDeletions(decoded.ds.clients, [deletions, operation.carried]),
+    );
+    if (update) operation.updates.push(update);
   }
 
-  #emitAuthored(vectorBefore: Uint8Array): void {
-    const update = this.#authoredUpdate(vectorBefore);
-    if (!update || this.#destroyed) return;
+  #beginOperation(carried?: Uint8Array): LocalOperation {
+    const operation: LocalOperation = { updates: [], carried: new Map() };
+    if (!this.#unsubscribe) {
+      const parent = this.#operations.at(-1);
+      if (parent) this.#captureFallback(parent);
+      operation.checkpoint = this.#checkpoint();
+      if (carried) {
+        try {
+          operation.carried = decodeUpdate(carried).ds.clients;
+        } catch {}
+      }
+    }
+    this.#operations.push(operation);
+    return operation;
+  }
+
+  #endOperation(operation: LocalOperation, accepted = true): Uint8Array | null {
+    try {
+      if (accepted) this.#captureFallback(operation);
+    } finally {
+      this.#operations.pop();
+      const parent = this.#operations.at(-1);
+      if (parent && !this.#unsubscribe) parent.checkpoint = this.#checkpoint();
+    }
+    if (!accepted || operation.updates.length === 0) return null;
+    return operation.updates.length === 1
+      ? operation.updates[0]!
+      : mergeUpdates(operation.updates);
+  }
+
+  #publish(update: Uint8Array): void {
+    if (this.#destroyed) return;
     for (const listener of [...this.#listeners]) {
+      if (this.#destroyed) return;
       try {
         listener(update.slice());
       } catch {}
@@ -287,16 +425,17 @@ class Replica implements ServerReplica {
     this.#assertAlive();
     const run = this.#saveChain.then(async (): Promise<SaveResult> => {
       this.#assertAlive();
-      const vectorBefore = this.#engine.encodeStateVector();
-      const bytes = await this.#saveEngine();
-      const update = this.#authoredUpdate(vectorBefore);
-      if (update && !this.#destroyed) {
-        for (const listener of [...this.#listeners]) {
-          try {
-            listener(update.slice());
-          } catch {}
-        }
+      const operation = this.#beginOperation();
+      let bytes: Uint8Array;
+      try {
+        bytes = await this.#saveEngine();
+      } catch (error) {
+        const update = this.#endOperation(operation);
+        if (update) this.#publish(update);
+        throw error;
       }
+      const update = this.#endOperation(operation);
+      if (update) this.#publish(update);
       return { bytes, update };
     });
     this.#saveChain = run.then(
@@ -311,6 +450,7 @@ class Replica implements ServerReplica {
     this.#destroyed = true;
     void this.#saveChain.then(() => {
       try {
+        this.#unsubscribe?.();
         this.#engine.dispose();
       } catch {}
     });

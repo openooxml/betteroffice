@@ -1,9 +1,8 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 
 import { generateKeyPair } from "./proof";
-import { startServer } from "./server";
+import { createHandler, startServer } from "./server";
 import { initEngines } from "./replica/engines";
-import type { Format } from "./replica/replica";
 import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
@@ -33,7 +32,7 @@ interface Setup {
   relay: CollabRelay;
 }
 
-function setup(options: { fileName?: string; format?: Format; saveSyncTimeoutMs?: number; quirks?: { timestampConflict?: boolean } } = {}): Setup {
+function setup(options: Parameters<typeof makeHarness>[0] & { saveSyncTimeoutMs?: number } = {}): Setup {
   const h = makeHarness({ fileName: options.fileName, format: options.format, quirks: options.quirks });
   if (options.fileName) h.host.setFile("file1", sourceBytes(options.format ?? "xlsx"), { name: options.fileName });
   addToken(h, TOKEN, "user-a", { name: "Alice A" });
@@ -273,6 +272,105 @@ describe("session API", () => {
     expectNoToken(s);
   });
 
+  for (const invalidation of ["expiry", "removal", "host rejection"] as const) {
+    test(`${invalidation} denies every session route and upgrade, closes sockets and ends SSE`, async () => {
+      let releasePut = (): void => {};
+      let putStarted = (): void => {};
+      const pendingPut = new Promise<void>((resolve) => { releasePut = resolve; });
+      const started = new Promise<void>((resolve) => { putStarted = resolve; });
+      const h = makeHarness({
+        beforePut: invalidation === "expiry" ? async () => { putStarted(); await pendingPut; } : undefined,
+      });
+      addToken(h, TOKEN, "user-a");
+      addToken(h, TOKEN_B, "user-b");
+      const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: invalidation === "expiry" ? h.clock.t + 10000 : 0, mode: "edit" });
+      const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "edit" });
+      const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+      const headers = { Authorization: `Bearer ${a.user.id}` };
+      const request = (path: string, method = "GET") => handler(new Request(`https://office.example.com${path}`, { method, headers }));
+      const closed: number[] = [];
+      handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
+      expect((await request("/api/session/source")).status).toBe(200);
+      const events = await request("/api/session/events");
+      const reader = events.body!.getReader();
+      expect((await reader.read()).done).toBe(false);
+      const client = await openTestClient(a.joinPayload, a.session.sourceBytes!, 990151);
+      let save: Promise<unknown> | undefined;
+      try {
+        if (invalidation === "expiry" || invalidation === "host rejection") {
+          client.edit("invalidate-token ", 0);
+          expect(a.session.applyUpdate(a.user.id, client.encodeStateAsUpdate(a.session.replica!.encodeStateVector())).accepted).toBe(true);
+          if (invalidation === "expiry") {
+            save = a.session.requestSave(b.user.id);
+            await started;
+            await h.clock.advance(10000);
+          } else {
+            h.host.tokens.delete(TOKEN);
+            await a.session.requestSave(a.user.id);
+          }
+        } else {
+          await a.session.leave(a.user.id);
+        }
+        expect(closed).toEqual([4401]);
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          expect(new TextDecoder().decode(chunk.value)).not.toContain(TOKEN);
+        }
+        expect(handler.relay.resolve(a.user.id)).toBeNull();
+        for (const [path, method] of [["source", "GET"], ["join", "GET"], ["save", "POST"], ["close", "POST"], ["events", "GET"]]) {
+          const response = await request(`/api/session/${path}`, method);
+          expect(response.status).toBe(401);
+          expect(await response.text()).not.toContain(TOKEN);
+        }
+        let upgrades = 0;
+        const upgrade = await handler(new Request("https://office.example.com/collab", {
+          headers: { "Sec-WebSocket-Protocol": `bo-wopi.v1, ${a.user.id}` },
+        }), { upgrade: () => { upgrades += 1; return true; } });
+        expect(upgrade.status).toBe(401);
+        expect(upgrades).toBe(0);
+        const lateClosed: number[] = [];
+        handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { lateClosed.push(code!); } });
+        expect(lateClosed).toEqual([4401]);
+        expect((await handler(new Request("https://office.example.com/api/session/source", { headers: { Authorization: `Bearer ${b.user.id}` } }))).status).toBe(200);
+      } finally {
+        releasePut();
+        await save;
+        await reader.cancel();
+        client.destroy();
+        a.session.abandon();
+      }
+    });
+  }
+
+  for (const action of ["save", "close"] as const) {
+    test(`${action} rechecks authorization after reading a slow request body`, async () => {
+      const h = makeHarness();
+      addToken(h, TOKEN, "user-a");
+      addToken(h, TOKEN_B, "user-b");
+      const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: h.clock.t + 10000, mode: "edit" });
+      await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "edit" });
+      const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+      let body: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const stream = new ReadableStream<Uint8Array>({ start: (controller) => { body = controller; } });
+      const response = handler(new Request(`https://office.example.com/api/session/${action}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${a.user.id}` },
+        body: stream,
+      }));
+      try {
+        await h.clock.advance(10000);
+        body!.enqueue(new TextEncoder().encode("{}"));
+        body!.close();
+        expect((await response).status).toBe(401);
+        expect(a.session.getUser(a.user.id)).toBe(a.user);
+        expect(h.putCount()).toBe(0);
+      } finally {
+        a.session.abandon();
+      }
+    });
+  }
+
   test("save returns itemVersion and close ends the handle", async () => {
     const s = setup();
     const config = await joined(s);
@@ -315,12 +413,76 @@ describe("session API", () => {
     expectNoToken(s);
   });
 
+  test("source replacement sends rejoinRequired to every existing SSE stream before closing", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "viewer-a", { canWrite: false });
+    addToken(h, TOKEN_B, "viewer-b", { canWrite: false });
+    addToken(h, "SECRETTOKEN-routes-writer-rejoin", "writer");
+    const viewers = await Promise.all([TOKEN, TOKEN_B].map((accessToken) => h.registry.join({
+      wopiSrc: SRC, accessToken, accessTokenTtl: 0, mode: "view",
+    })));
+    const session = viewers[0]!.session;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const requestEvents = (handle: string) => handler(new Request("https://office.example.com/api/session/events", {
+      headers: { Authorization: `Bearer ${handle}` },
+    }));
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 990251);
+    let writerClient: Awaited<ReturnType<typeof openTestClient>> | null = null;
+    try {
+      for (const viewer of viewers) {
+        const response = await requestEvents(viewer.user.id);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/event-stream");
+        const reader = response.body!.getReader();
+        readers.push(reader);
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+      }
+      external.edit("sse-replacement-baseline ", 0);
+      const file = h.host.files.get("file1")!;
+      file.bytes = await external.save();
+      file.itemVersion = "2";
+      const writer = await h.registry.join({
+        wopiSrc: SRC, accessToken: "SECRETTOKEN-routes-writer-rejoin", accessTokenTtl: 0, mode: "edit",
+      });
+      for (const reader of readers) {
+        let text = "";
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          text += new TextDecoder().decode(chunk.value);
+        }
+        expect(text).toBe('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n');
+        for (const token of [TOKEN, TOKEN_B, "SECRETTOKEN-routes-writer-rejoin"]) expect(text).not.toContain(token);
+      }
+
+      const fresh = await requestEvents(viewers[0]!.user.id);
+      const freshReader = fresh.body!.getReader();
+      readers.push(freshReader);
+      expect((await freshReader.read()).done).toBe(false);
+      writerClient = await openTestClient(writer.joinPayload, session.sourceBytes!, 990351);
+      expect(writerClient.contains("sse-replacement-baseline")).toBe(true);
+      writerClient.edit("sse-replacement-live ", 1);
+      expect(session.applyUpdate(writer.user.id, writerClient.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+      expect((await session.requestSave(writer.user.id)).saved).toBe(true);
+      const saved = await freshReader.read();
+      expect(saved.done).toBe(false);
+      expect(new TextDecoder().decode(saved.value)).toContain("event: saved\n");
+    } finally {
+      for (const reader of readers) await reader.cancel().catch(() => {});
+      external.destroy();
+      writerClient?.destroy();
+      session.abandon();
+    }
+  });
+
   test("SSE delivers saved and conflict without tokens", async () => {
-    const s = setup({ quirks: { timestampConflict: true } });
+    const s = setup({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     const config = await joined(s);
+    const viewer = pageConfig(await tracked(s, await postPage(s, "view", TOKEN_B)));
     const controller = new AbortController();
     const eventsResponse = await fetch(`${s.base}/api/session/events`, {
-      headers: auth(config),
+      headers: auth(viewer),
       signal: controller.signal,
     });
     expect(eventsResponse.status).toBe(200);
@@ -371,6 +533,14 @@ describe("session API", () => {
       expect(save2.status).toBe(200);
       await save2.text();
       await readUntil("event: conflict");
+      const data = text.split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
+      const conflict = data.find((event) => typeof event.name === "string");
+      expect(conflict.name).toContain("(conflict");
+      expect(Object.keys(conflict).sort()).toEqual(["copyName", "name"]);
+      for (const event of data) {
+        expect(JSON.stringify(event)).not.toContain("access_token");
+        expect(JSON.stringify(event)).not.toMatch(/https?:/);
+      }
     } finally {
       client.destroy();
       controller.abort();
