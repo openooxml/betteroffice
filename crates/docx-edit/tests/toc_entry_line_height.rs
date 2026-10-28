@@ -779,3 +779,69 @@ fn a_save_round_trip_never_writes_a_chain_defaults_key() {
     assert!(!text.contains("runDefaultTextFormatting"));
     assert_eq!(saved_xml, source_xml);
 }
+
+fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
+    let doc = docx_edit::EditingDoc::new(77109);
+    seed_from_docx(&doc, bytes).unwrap();
+    let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
+        &doc,
+        "body",
+        &serde_json::from_value(render_env).unwrap(),
+    )
+    .unwrap();
+    serde_json::to_value(blocks).unwrap()[0]["runs"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_body_pageref_preserves_the_hyperlink_style_size() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:hyperlink w:anchor="target"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Body link</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> see page </w:t></w:r><w:fldSimple w:instr=" PAGEREF target "><w:r><w:t>3</w:t></w:r></w:fldSimple></w:p>"#;
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs[0]["fontSize"], 14.0);
+    assert_ne!(runs[0]["hyperlink"]["noDefaultStyle"], true);
+    assert_height(line_heights(&bytes)[0], 14.0);
+}
+
+#[test]
+fn a_toc_field_result_with_a_custom_style_uses_the_entry_size() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert!(runs.iter().any(|run| run["text"] == "Entry one"));
+    assert!(runs.iter().any(|run| run["kind"] == "tab"));
+    for run in &runs {
+        assert_eq!(run["fontSize"], 10.0, "{run}");
+    }
+}
+
+#[test]
+fn stripping_a_toc_hyperlink_size_preserves_complex_script_sizes() {
+    let styles = styles(Some(20), Some(28)).replace(
+        r#"<w:sz w:val="28"/>"#,
+        r#"<w:sz w:val="28"/><w:szCs w:val="36"/>"#,
+    );
+    for (direct_cs, expected) in [("", 18.0), (r#"<w:szCs w:val="38"/>"#, 19.0)] {
+        let body = format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>{direct_cs}<w:cs/></w:rPr><w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#
+        );
+        let bytes = document(&body, &styles);
+        let runs = lowered_runs(&bytes, chain_env(&bytes));
+        assert_eq!(runs[0]["fontSize"], 10.0);
+        assert_eq!(runs[0]["fontSizeCs"], expected);
+    }
+}
+
+#[test]
+fn capping_toc_auxiliary_sizes_preserves_complex_script_sizes() {
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:r><w:t>Entry one</w:t></w:r><w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="32"/><w:cs/></w:rPr><w:tab/></w:r><w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="34"/><w:cs/></w:rPr><w:t xml:space="preserve"> </w:t></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 "><w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="36"/><w:cs/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:p>"#;
+    let bytes = document(body, &styles(Some(20), None));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs.len(), 4);
+    for (run, size_cs) in runs[1..].iter().zip([16.0, 17.0, 18.0]) {
+        assert_eq!(run["fontSize"], 10.0, "{run}");
+        assert_eq!(run["fontSizeCs"], size_cs, "{run}");
+    }
+}

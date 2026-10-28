@@ -3852,15 +3852,15 @@ fn flush_paragraph<T: ReadTxn>(
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
 
-    let toc_entry = semantic_toc || style_id.as_deref().is_some_and(is_toc_style);
-    // Entry runs in a generated TOC entry sit beside a PAGEREF field
-    // result in the same paragraph, whatever the entry style is named.
-    let pageref_entry = raw_runs.iter().any(|run| {
+    let toc_field_result = raw_runs.iter().any(|run| {
         matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
-            if instruction.contains("PAGEREF"))
+            if instruction.split_whitespace().next()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC")))
     });
+    let toc_entry =
+        semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
     for run in &mut raw_runs {
-        if toc_entry || pageref_entry {
+        if toc_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
         apply_run_defaults(&mut run.formatting, &defaults);
@@ -5031,7 +5031,6 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
         }
         if inherited.2 {
             formatting.font_size = None;
-            formatting.font_size_cs = None;
         }
     }
 }
@@ -5061,7 +5060,6 @@ fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>
             };
             if auxiliary {
                 run.formatting.font_size = None;
-                run.formatting.font_size_cs = None;
             }
         }
         return;
@@ -5080,9 +5078,6 @@ fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>
                 .font_size
                 .map_or(entry_size, |size| size.min(entry_size)),
         );
-        if let Some(size_cs) = run.formatting.font_size_cs {
-            run.formatting.font_size_cs = Some(size_cs.min(entry_size));
-        }
     }
 }
 

@@ -407,6 +407,10 @@ function runMarks(
         if (mark) mark.attrs.inheritedHyperlink = true;
       }
     }
+    if (run.formatting?.fontSize === undefined && runStyleFormatting?.fontSize !== undefined) {
+      const mark = marks.find((mark) => mark.name === 'fontSize');
+      if (mark) mark.attrs.inheritedHyperlink = true;
+    }
   }
   return marks;
 }
