@@ -230,7 +230,7 @@ test.each([
   const bridge = new PostMessageBridge(win, ORIGIN, {
     onSave: (options) => {
       saving = saveDocument(editor, { save: async () => { posted = true; } }, {
-        ...options, isModified: () => true, inputTimeoutMs: 5,
+        ...options, inputTimeoutMs: 5,
       });
       return saving;
     },
