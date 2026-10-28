@@ -436,6 +436,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         let finalName = targetName;
         const existing = [...files.values()].find((entry) => entry.name === targetName);
         if (existing && relative !== null) {
+          if (user.fileIds && !user.fileIds.has(existing.id)) return json({ error: "unauthorized" }, 401);
           const conflict = validateRelativeTarget(request, existing, overwrite);
           if (conflict) return conflict;
         }
@@ -443,6 +444,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         if (body === null) return json({ error: "body does not match Content-Length" }, 413);
         const current = [...files.values()].find((entry) => entry.name === targetName);
         if (current && relative !== null) {
+          if (user.fileIds && !user.fileIds.has(current.id)) return json({ error: "unauthorized" }, 401);
           const conflict = validateRelativeTarget(request, current, overwrite);
           if (conflict) return conflict;
           current.bytes = body;

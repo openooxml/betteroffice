@@ -208,6 +208,36 @@ describe("reference host and host client", () => {
     }
   });
 
+  test("a relative overwrite cannot replace a file outside the token's grants", async () => {
+    const { host, client, nowMs } = setup();
+    const user = { userId: "u", userName: "U", canWrite: true, expiresAt: nowMs() + 600000, fileIds: new Set(["file1"]) };
+    host.tokens.set(TOKEN, user);
+    const target = host.setFile("private", "secret", { name: "private.docx" });
+    const before = { ...target };
+    for (const overwrite of [true, false]) {
+      const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "private.docx", overwrite }));
+      expect(err.status).toBe(401);
+      expect(target).toEqual(before);
+      expect(user.fileIds.has("private")).toBe(false);
+    }
+  });
+
+  test("a grant check also runs when the destination appears during the upload", async () => {
+    const { host, client, nowMs } = setup();
+    host.tokens.set(TOKEN, { userId: "u", userName: "U", canWrite: true, expiresAt: nowMs() + 600000, fileIds: new Set(["file1"]) });
+    let late: ReturnType<typeof host.setFile> | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        late = host.setFile("late", "secret", { name: "late.docx" });
+        controller.enqueue(new Uint8Array([9]));
+        controller.close();
+      },
+    });
+    const err = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body, size: 1, relativeTarget: "late.docx", overwrite: true }));
+    expect(err.status).toBe(401);
+    expect(new TextDecoder().decode(late!.bytes)).toBe("secret");
+  });
+
   test("every relative file URL includes a fresh token with the same user's grants and expiry", async () => {
     const { host, client, signer, nowMs, advance } = setup();
     const user = {
