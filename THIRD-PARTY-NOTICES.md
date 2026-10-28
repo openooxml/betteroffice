@@ -194,3 +194,17 @@ Copyright (c) 2022 Craig
 
 License: MIT. The unmodified upstream licence is included under
 `packages/fonts/LICENSES/MIT-lol_alloc.txt` for decoder redistribution.
+
+---
+
+## wuff
+
+The internal font decoder links `wuff` 0.2.9 for WOFF2 reconstruction,
+https://github.com/nicoburns/wuff. Its wasm feature set excludes brotli and
+flate2. The native pack builder enables brotli for reference verification.
+
+Copyright (c) 2013-2017 by the WOFF2 Authors.
+Copyright (c) 2025 by Nico Burns.
+
+License: MIT. The unmodified upstream licence is included under
+`packages/fonts/LICENSES/MIT-wuff.txt` for decoder redistribution.
