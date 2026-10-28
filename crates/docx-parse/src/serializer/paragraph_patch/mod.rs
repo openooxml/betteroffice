@@ -159,7 +159,7 @@ fn patch_inner(
         &patch.seed.properties,
         PatchErrorCode::SeedMismatch,
     )?;
-    unchanged_inheritance(patch)?;
+    unchanged_inheritance(patch, &lowered.xml)?;
     verify::seed(source, &lowered, &patch.seed.units, &patch.seed.properties)?;
     for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&patch.seed.units)) {
         cell.unit = unit;
@@ -177,6 +177,7 @@ fn patch_inner(
             &patch.para_deltas,
             &patch.para_inherit,
             &properties,
+            &patch.seed.inherit.paragraph,
         )?;
         output = if let Some(at) = ppr {
             apply_bytes(&output, vec![(xml.nodes[at].span.clone(), replacement)])?
@@ -207,7 +208,7 @@ fn patch_inner(
     Ok(output)
 }
 
-fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
+fn unchanged_inheritance(patch: &ParagraphPatchV1, xml: &lower::Xml) -> Result<(), Failure> {
     let restyle = || Failure::structure("restyle: style or inheritance changed");
     let style_delta = |deltas: &[AttrDeltaV1], keys: &[&str]| {
         deltas.iter().any(|delta| {
@@ -217,9 +218,34 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
                 .is_some_and(|key| keys.contains(&key.as_str()))
         })
     };
-    if style_delta(&patch.para_deltas, &["pStyle", "styleId", "numPr"])
-        || patch.para_inherit != patch.seed.inherit.paragraph
-        || patch.mark_inherit != patch.seed.inherit.paragraph_mark
+    let direct_style_only = matches!(patch.para_deltas.as_slice(), [delta]
+        if delta.path == ["pStyle"])
+        && patch.text_edits.is_empty()
+        && patch.run_edits.is_empty()
+        && patch
+            .seed
+            .properties
+            .get("numPr")
+            .is_some_and(Value::is_object)
+        && match xml.child(0, "pPr")? {
+            Some(ppr) => xml.child(ppr, "numPr")?.is_some(),
+            None => false,
+        };
+    let numbered_restyle = style_delta(&patch.para_deltas, &["pStyle"])
+        && !style_delta(&patch.para_deltas, &["styleId", "numPr"])
+        && (direct_style_only
+            || patch.para_inherit != patch.seed.inherit.paragraph
+            || patch.mark_inherit != patch.seed.inherit.paragraph_mark
+            || patch
+                .run_edits
+                .iter()
+                .zip(patch.seed.inherit.runs.iter())
+                .any(|(edit, inherit)| edit.inherit != *inherit));
+    if style_delta(&patch.para_deltas, &["styleId", "numPr"])
+        || (style_delta(&patch.para_deltas, &["pStyle"]) && !numbered_restyle)
+        || (!numbered_restyle
+            && (patch.para_inherit != patch.seed.inherit.paragraph
+                || patch.mark_inherit != patch.seed.inherit.paragraph_mark))
         || (!patch.seed.inherit.runs.is_empty()
             && patch.seed.inherit.runs.len() != patch.seed.units.len())
     {
@@ -247,7 +273,7 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
             || runs.iter().any(|(from, to, attrs, inherit)| {
                 *from < edit.to
                     && edit.from < *to
-                    && (edit.inherit != **inherit
+                    && ((edit.inherit != **inherit && !numbered_restyle)
                         || edit.target.get("runStyle") != attrs.get("runStyle"))
             })
         {
@@ -280,7 +306,8 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
             }
         };
         if edit.insert.iter().any(|insert| {
-            insert.inherit != *inherit || insert.attrs.get("runStyle") != attrs.get("runStyle")
+            (!numbered_restyle && insert.inherit != *inherit)
+                || insert.attrs.get("runStyle") != attrs.get("runStyle")
         }) {
             return Err(restyle());
         }
