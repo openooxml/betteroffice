@@ -35,8 +35,12 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
-fn anchored_chart(chart: &ChartBlock) -> bool {
-    chart.position.is_some()
+fn floating_chart(chart: &ChartBlock) -> bool {
+    crate::anchor::chart_floats(
+        chart.position.as_ref(),
+        chart.wrap_type.as_deref(),
+        chart.behind_doc,
+    )
 }
 
 /// Measures the text a shape carried by an inline image run holds, so the
@@ -1347,7 +1351,7 @@ impl FlowState {
         }
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
-            && !matches!(block, LayoutBlock::Chart(chart) if anchored_chart(chart))
+            && !matches!(block, LayoutBlock::Chart(chart) if floating_chart(chart))
         {
             *cumulative_y += extent_height(&extent);
         }
@@ -2483,9 +2487,6 @@ fn extract_floating_zones_recorded(
                     shape_offsets.get(&block_index).copied(),
                     &mut zones,
                 ),
-                LayoutBlock::Chart(chart) => {
-                    extract_chart_zone(chart, block_index, content_width, page_geometry, &mut zones)
-                }
                 _ => {}
             }
             Ok(())
@@ -2530,31 +2531,6 @@ fn extract_shape_zone(
         content_width,
         geometry,
         resolved_x,
-        zones,
-    );
-}
-
-fn extract_chart_zone(
-    chart: &ChartBlock,
-    block_index: usize,
-    content_width: f64,
-    geometry: Option<&FloatPageGeometry>,
-    zones: &mut Vec<AnchoredFloatingZone>,
-) {
-    let Some(position) = chart.position.as_ref() else {
-        return;
-    };
-    extract_anchored_zone(
-        position,
-        chart.wrap_type.as_deref(),
-        chart.wrap_text.as_deref(),
-        chart.width,
-        chart.height,
-        None,
-        block_index,
-        content_width,
-        geometry,
-        None,
         zones,
     );
 }
@@ -3274,7 +3250,7 @@ fn cell_content_widths(
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
             LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
-            LayoutBlock::Chart(chart) if !anchored_chart(chart) => (chart.width, chart.width),
+            LayoutBlock::Chart(chart) if !floating_chart(chart) => (chart.width, chart.width),
             LayoutBlock::Chart(_) => return None,
             LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
             LayoutBlock::Reserved(reserved) => {
@@ -3892,8 +3868,8 @@ fn measure_table_with_compat_shift(
                     continue;
                 }
                 if let LayoutBlock::Chart(chart) = block
-                    && crate::cell_layout::cell_overlay_chart(
-                        chart.position.is_some(),
+                    && crate::anchor::chart_floats(
+                        chart.position.as_ref(),
                         chart.wrap_type.as_deref(),
                         chart.behind_doc,
                     )
@@ -5601,105 +5577,85 @@ mod tests {
     }
 
     #[test]
-    fn owned_chart_wrapping_survives_its_paragraph_page_break() {
+    fn wrapped_and_behind_doc_charts_match_main_block_measurement() {
         let fonts = crate::MeasureFonts::default();
         let _fonts = fonts.enter();
         let config = cache_measurement_config();
-        for wrap in ["topAndBottom", "square", "tight", "through"] {
-            for split in [false, true] {
-                let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
-                    {"kind":"shape","id":"previous-float","shapeType":"rect",
-                     "geometryPath":[],"children":[],"width":140,"height":400,
-                     "wrapType":"square","position":{
-                         "horizontal":{"relativeTo":"column","posOffset":0},
-                         "vertical":{"relativeTo":"paragraph","posOffset":0}},
-                     "pmStart":2,"pmEnd":3},
-                    {"kind":"paragraph","id":"previous","pmStart":0,"pmEnd":10,
-                     "runs":[{"kind":"text","text":"Previous"}]},
-                    {"kind":"chart","id":"chart","chart":{},"width":40,"height":40,
-                     "wrapType":wrap,"position":{
-                         "horizontal":{"relativeTo":"column","posOffset":0},
-                         "vertical":{"relativeTo":"paragraph","posOffset":0}},
-                     "pmStart":32,"pmEnd":33},
-                    {"kind":"paragraph","id":"owner","pmStart":20,"pmEnd":40,
-                     "attrs":{"pageBreakBefore":true},
-                     "runs":[{"kind":"text","text":"Owner words words words words"}]},
-                    {"kind":"pageBreak","id":"break"},
-                    {"kind":"paragraph","id":"after","pmStart":40,"pmEnd":50,
-                     "runs":[{"kind":"text","text":"After the break"}]}
-                ]))
-                .unwrap();
-                if split {
-                    let LayoutBlock::Paragraph(owner) = &mut blocks[3] else {
-                        panic!()
-                    };
-                    owner.pm_end = Some(30.0);
-                    owner.attrs.as_mut().unwrap().anchor_paragraph_offsets = Some((0.0, 20.0));
-                }
-                let source = blocks.clone();
-                let measures =
-                    measure_blocks_with_floats(&mut blocks, &[200.0; 6], &config, None).unwrap();
-                let BlockExtent::Paragraph(owner) = &measures[3] else {
-                    panic!()
-                };
-                let line = &owner.lines[0];
-                assert_eq!(
-                    line.float_skip_before.unwrap_or(0.0),
-                    if wrap == "topAndBottom" { 40.0 } else { 0.0 },
-                    "{wrap}, split={split}"
-                );
-                assert_eq!(
-                    line.left_offset.unwrap_or(0.0),
-                    if wrap == "topAndBottom" { 0.0 } else { 40.0 },
-                    "{wrap}, split={split}"
-                );
-                let BlockExtent::Paragraph(after) = &measures[5] else {
-                    panic!()
-                };
-                assert_eq!(after.lines[0].left_offset.unwrap_or(0.0), 0.0);
-                assert_eq!(after.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        for (wrap, behind_doc) in [
+            ("topAndBottom", false),
+            ("square", false),
+            ("tight", false),
+            ("through", false),
+            ("none", true),
+        ] {
+            let source: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"previous-float","shapeType":"rect",
+                 "geometryPath":[],"children":[],"width":80,"height":40,
+                 "wrapType":"square","position":{
+                     "horizontal":{"relativeTo":"column","posOffset":0},
+                     "vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"chart","id":"chart","chart":{},"width":40,"height":40,
+                 "wrapType":wrap,"behindDoc":behind_doc,"position":{
+                     "horizontal":{"relativeTo":"column","posOffset":0},
+                     "vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"paragraph","id":"body",
+                 "runs":[{"kind":"text","text":"Body words words words words"}]}
+            ]))
+            .unwrap();
+            let mut main = source.clone();
+            let LayoutBlock::Chart(chart) = &mut main[1] else {
+                panic!()
+            };
+            chart.position = None;
+            chart.wrap_type = None;
+            chart.behind_doc = None;
+            let expected =
+                measure_blocks_with_floats(&mut main, &[200.0; 3], &config, None).unwrap();
+            let BlockExtent::Paragraph(body) = &expected[2] else {
+                panic!()
+            };
+            assert_eq!(body.lines[0].left_offset.unwrap_or(0.0), 0.0);
+            assert_eq!(body.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
 
-                let mut chunks = source.clone();
-                let mut flow = FloatFlow::new(&chunks, &[200.0; 6], &config, None).unwrap();
-                for end in 1..=chunks.len() {
-                    flow.measure_until(&mut chunks, &[200.0; 6], &config, end)
-                        .unwrap();
-                }
-                assert_eq!(flow.into_extents(), measures);
+            let mut blocks = source.clone();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            assert_eq!(measures, expected, "{wrap}, behindDoc={behind_doc}");
 
-                let mut columns = source.clone();
-                let column_measures = measure_blocks_with_column_frames(
-                    &mut columns,
-                    &[200.0; 6],
-                    &[] as &[bool],
-                    &config,
-                    None,
-                    &BTreeMap::new(),
-                    &BTreeMap::from([(
-                        3,
-                        vec![ColumnWidthBand {
-                            top: 0.0,
-                            bottom: 1000.0,
-                            width: 200.0,
-                        }],
-                    )]),
-                )
-                .unwrap();
-                assert_eq!(column_measures, measures);
-
-                let mut segment = source[2..4].to_vec();
-                let segment_measures = measure_float_segment(
-                    &mut segment,
-                    &[200.0; 2],
-                    200.0,
-                    &config,
-                    None,
-                    &[false; 2],
-                )
-                .unwrap()
-                .unwrap();
-                assert_eq!(segment_measures, measures[2..4]);
+            let mut chunks = source.clone();
+            let mut flow = FloatFlow::new(&chunks, &[200.0; 3], &config, None).unwrap();
+            for end in 1..=chunks.len() {
+                flow.measure_until(&mut chunks, &[200.0; 3], &config, end)
+                    .unwrap();
             }
+            assert_eq!(flow.into_extents(), expected);
+
+            let mut columns = source.clone();
+            let column_measures = measure_blocks_with_column_frames(
+                &mut columns,
+                &[200.0; 3],
+                &[] as &[bool],
+                &config,
+                None,
+                &BTreeMap::new(),
+                &BTreeMap::from([(
+                    2,
+                    vec![ColumnWidthBand {
+                        top: 0.0,
+                        bottom: 1000.0,
+                        width: 200.0,
+                    }],
+                )]),
+            )
+            .unwrap();
+            assert_eq!(column_measures, expected);
+
+            let mut segment = source;
+            let segment_measures =
+                measure_float_segment(&mut segment, &[200.0; 3], 200.0, &config, None, &[false; 3])
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(segment_measures, expected);
         }
     }
 
@@ -6836,8 +6792,16 @@ mod tests {
     }
 
     #[test]
-    fn floating_charts_do_not_increase_table_cell_height() {
-        for (wrap_type, behind_doc) in [("none", false), ("square", true)] {
+    fn only_front_wrap_none_charts_add_no_table_cell_height() {
+        for (wrap_type, behind_doc, floating) in [
+            ("none", false, true),
+            ("none", true, false),
+            ("square", false, false),
+            ("square", true, false),
+            ("topAndBottom", false, false),
+            ("tight", false, false),
+            ("through", false, false),
+        ] {
             let mut cell_blocks = vec![json!({
                 "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
                 "position": {}, "wrapType": wrap_type, "behindDoc": behind_doc
@@ -6860,12 +6824,19 @@ mod tests {
             let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &extent) else {
                 panic!("table measure");
             };
-            assert_eq!(extent.rows[0].height, 120.0, "{wrap_type}, {behind_doc}");
-            assert_eq!(extent.rows[0].cells[0].height, 120.0);
+            let height = if floating { 120.0 } else { 221.0 };
+            assert_eq!(extent.rows[0].height, height, "{wrap_type}, {behind_doc}");
+            assert_eq!(extent.rows[0].cells[0].height, height);
             let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
+            let expected: &[f64] = if floating {
+                &[20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+            } else {
+                &[101.0, 121.0, 141.0, 161.0, 181.0, 201.0, 221.0]
+            };
             assert_eq!(
-                breaks.break_offsets[0],
-                [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+                breaks.break_offsets[0].as_slice(),
+                expected,
+                "{wrap_type}, behindDoc={behind_doc}"
             );
         }
     }

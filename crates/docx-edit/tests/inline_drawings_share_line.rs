@@ -693,61 +693,85 @@ fn wrap_none_anchored_chart_pair_adds_no_flow_height() {
     );
 }
 
-#[test]
-fn top_and_bottom_anchored_chart_pushes_text_below_it() {
-    let drawing = anchored_chart_drawing_with("<wp:wrapTopAndBottom/>", EXTENT, 0);
+fn assert_chart_uses_main_block_layout(drawing: &str, client_id: u64) {
     let body = paragraph(
-        "30000003",
-        &format!("{}{}", run(&drawing), text_run("Below the chart")),
+        "90000001",
+        &format!(
+            "{}{}{}",
+            text_run("Before the chart"),
+            run(drawing),
+            text_run("After the chart"),
+        ),
     );
-    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78216);
+    let (layout, display) = render(&document(&body, 20160, 12240, 1080), client_id);
     let charts = chart_block_fragments(&layout);
-    assert_eq!(charts.len(), 1, "one floating chart: {layout}");
-    assert_eq!(
-        charts[0]["isAnchored"], true,
-        "the floating chart paints at its anchor, not in flow: {layout}"
-    );
-    let (_, baseline) = text_origin(&display, "Below the chart");
-    assert!(
-        baseline >= num(charts[0], "y") + num(charts[0], "height"),
-        "text paints below the chart bottom, got baseline {baseline} under chart {}..{}: {display}",
-        num(charts[0], "y"),
-        num(charts[0], "y") + num(charts[0], "height"),
-    );
+    assert_eq!(charts.len(), 1, "one chart block: {layout}");
+    let chart = charts[0];
+    assert!(chart["isAnchored"].is_null(), "block placement: {layout}");
+    assert!(chart["zIndex"].is_null(), "block paint order: {layout}");
+    let blocks = layout["measured"].as_array().unwrap();
+    let chart_index = blocks
+        .iter()
+        .position(|entry| entry["block"]["kind"] == "chart")
+        .unwrap();
+    assert_eq!(blocks[chart_index - 1]["block"]["kind"], "paragraph");
+    assert_eq!(blocks[chart_index + 1]["block"]["kind"], "paragraph");
+    let block = &blocks[chart_index]["block"];
+    for field in [
+        "position",
+        "wrapType",
+        "wrapText",
+        "relativeHeight",
+        "behindDoc",
+    ] {
+        assert!(block[field].is_null(), "main chart field {field}: {layout}");
+    }
+    near(num(chart, "x"), 72.0, 0.01, "block left margin");
+    let (_, before) = text_origin(&display, "Before the chart");
+    let (after_x, after) = text_origin(&display, "After the chart");
+    assert!(before < num(chart, "y"), "source block order: {display}");
+    assert!(after >= num(chart, "y") + num(chart, "height"));
+    near(after_x, 72.0, 0.01, "text after the block");
 }
 
 #[test]
-fn square_anchored_chart_narrows_the_lines_beside_it() {
-    let drawing = anchored_chart_drawing_with(
-        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
-        r#"cx="2857500" cy="1905000""#,
-        0,
-    );
-    let prose = "Floating charts leave the body text beside them in Word. ".repeat(30);
-    let body = format!(
-        "{}{}",
-        paragraph("30000004", &run(&drawing)),
-        paragraph("30000005", &text_run(&prose)),
-    );
-    let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78217);
-    let charts = chart_block_fragments(&layout);
-    assert_eq!(charts.len(), 1, "one floating chart: {layout}");
-    assert_eq!(
-        charts[0]["isAnchored"], true,
-        "the floating chart paints at its anchor, not in flow: {layout}"
-    );
-    near(num(charts[0], "width"), 300.0, 2.0, "chart width");
-    let text = paragraph_fragment(&layout, "30000005").expect("text beside the chart");
-    assert!(
-        num(text, "y") < num(charts[0], "y") + 60.0,
-        "text starts beside the chart, not below it, got y {}: {layout}",
-        num(text, "y")
-    );
-    let (first_x, _) = text_origin(&display, "Floating charts leave");
-    assert!(
-        first_x >= num(charts[0], "x") + num(charts[0], "width") - 5.0,
-        "first line is narrowed past the chart, got x {first_x}: {display}"
-    );
+fn top_and_bottom_anchored_chart_keeps_main_block_layout() {
+    for relative in ["paragraph", "page", "margin"] {
+        let drawing = anchored_chart_drawing_with("<wp:wrapTopAndBottom/>", EXTENT, 914400)
+            .replace(
+                "relativeFrom=\"paragraph\"",
+                &format!("relativeFrom=\"{relative}\""),
+            );
+        assert_chart_uses_main_block_layout(&drawing, 78216);
+    }
+}
+
+#[test]
+fn square_anchored_chart_keeps_main_block_layout() {
+    let drawing =
+        anchored_chart_drawing_with(r#"<wp:wrapSquare wrapText="bothSides"/>"#, EXTENT, 914400);
+    assert_chart_uses_main_block_layout(&drawing, 78217);
+}
+
+#[test]
+fn tight_anchored_chart_keeps_main_block_layout() {
+    let drawing =
+        anchored_chart_drawing_with(r#"<wp:wrapTight wrapText="bothSides"/>"#, EXTENT, 914400);
+    assert_chart_uses_main_block_layout(&drawing, 78232);
+}
+
+#[test]
+fn through_anchored_chart_keeps_main_block_layout() {
+    let drawing =
+        anchored_chart_drawing_with(r#"<wp:wrapThrough wrapText="bothSides"/>"#, EXTENT, 914400);
+    assert_chart_uses_main_block_layout(&drawing, 78233);
+}
+
+#[test]
+fn behind_doc_anchored_chart_keeps_main_block_layout() {
+    let drawing = anchored_chart_drawing_with("<wp:wrapNone/>", EXTENT, -914400)
+        .replace("behindDoc=\"0\"", "behindDoc=\"1\"");
+    assert_chart_uses_main_block_layout(&drawing, 78234);
 }
 
 #[test]
@@ -847,7 +871,7 @@ fn ordinary_picture_before_matching_inline_chart_survives() {
 }
 
 #[test]
-fn converted_choice_drops_only_its_own_differently_sized_picture_fallback() {
+fn converted_choice_keeps_a_differently_sized_composite_preview() {
     let fallback = text_box_picture_twin(r#"cx="1270000" cy="635000""#);
     let text_box = text_box_with_opaque_picture_fallback(&fallback);
     let body = paragraph(
@@ -860,21 +884,15 @@ fn converted_choice_drops_only_its_own_differently_sized_picture_fallback() {
             .iter()
             .filter(|primitive| primitive["kind"] == "image")
             .count(),
-        1,
-        "only the ordinary picture paints: {display}"
+        2,
+        "the ordinary picture and composite preview paint: {display}"
     );
-    let boxed = box_shape(&display);
-    near(
-        num(&boxed, "x"),
-        72.0 + BOX_W,
-        2.0,
-        "Choice follows the picture",
-    );
+    let _ = box_shape(&display);
     let _ = text_origin(&display, "Selected Choice text");
 }
 
 #[test]
-fn matching_choice_doc_pr_drops_its_picture_twin() {
+fn matching_doc_pr_keeps_a_possibly_composite_preview() {
     let text_box = text_box_with_opaque_picture_fallback(&text_box_picture_twin(EXTENT));
     let body = paragraph(
         "40000007",
@@ -901,11 +919,13 @@ fn matching_choice_doc_pr_drops_its_picture_twin() {
     assert_eq!(sources.len(), 1);
     assert!(sources[0].contains(r#"<wp:docPr id="4" name="Text Box 4"/>"#));
     let (_, display) = render(&bytes, 78227);
-    assert!(
+    assert_eq!(
         primitives(&display)
             .iter()
-            .all(|primitive| primitive["kind"] != "image"),
-        "the real picture twin is omitted: {display}"
+            .filter(|primitive| primitive["kind"] == "image")
+            .count(),
+        1,
+        "matching drawing properties do not prove the preview content: {display}"
     );
     let _ = box_shape(&display);
     let _ = text_origin(&display, "Selected Choice text");
@@ -955,6 +975,7 @@ fn converting_a_text_box_keeps_an_unsupported_charts_grouped_fallback() {
 fn converting_a_text_box_keeps_an_unsupported_charts_composite_preview() {
     for fallback in [
         ordinary_picture().to_owned(),
+        text_box_picture_twin(EXTENT),
         text_box_picture_twin(EXTENT).replace(r#"id="4""#, r#"id="99""#),
         text_box_picture_twin(EXTENT).replace("Text Box 4", "Composite preview"),
     ] {
@@ -1104,12 +1125,12 @@ fn page_break_before_moves_the_paragraph_and_its_trailing_anchored_chart() {
 }
 
 #[test]
-fn page_break_before_preserves_owned_chart_wrapping() {
-    for (wrap, top_and_bottom) in [
-        ("<wp:wrapTopAndBottom/>", true),
-        (r#"<wp:wrapSquare wrapText="bothSides"/>"#, false),
-        (r#"<wp:wrapTight wrapText="bothSides"/>"#, false),
-        (r#"<wp:wrapThrough wrapText="bothSides"/>"#, false),
+fn page_break_before_keeps_wrapped_charts_in_main_block_order() {
+    for wrap in [
+        "<wp:wrapTopAndBottom/>",
+        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+        r#"<wp:wrapTight wrapText="bothSides"/>"#,
+        r#"<wp:wrapThrough wrapText="bothSides"/>"#,
     ] {
         let drawing = anchored_chart_drawing_with(wrap, r#"cx="2857500" cy="1905000""#, 0);
         let body = format!(
@@ -1129,18 +1150,12 @@ fn page_break_before_preserves_owned_chart_wrapping() {
             .expect("chart on the owner's page");
         let page = json!({"pages": [display["pages"][1].clone()]});
         let (x, baseline) = text_origin(&page, "Wrapped owner text");
-        if top_and_bottom {
-            assert!(
-                baseline >= num(chart, "y") + num(chart, "height"),
-                "text clears the chart after the break: {display}"
-            );
-        } else {
-            assert!(
-                x >= num(chart, "x") + num(chart, "width") - 1.0,
-                "text wraps beside the chart after the break: {display}"
-            );
-            assert!(baseline < num(chart, "y") + num(chart, "height"));
-        }
+        assert!(chart["isAnchored"].is_null(), "{wrap}: {layout}");
+        assert!(
+            baseline < num(chart, "y"),
+            "text precedes the chart block: {display}"
+        );
+        near(x, 72.0, 0.01, "full-width text before the block");
     }
 }
 

@@ -1983,14 +1983,15 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_foot: f64) -> bo
                     .and_then(|position| position.vertical.as_ref()),
                 shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top),
             ))),
-            LayoutBlock::Chart(chart) if chart.position.is_some() => Some(Some((
-                chart.wrap_type.as_deref(),
-                chart
-                    .position
-                    .as_ref()
-                    .and_then(|position| position.vertical.as_ref()),
-                0.0,
-            ))),
+            LayoutBlock::Chart(chart)
+                if crate::anchor::chart_floats(
+                    chart.position.as_ref(),
+                    chart.wrap_type.as_deref(),
+                    chart.behind_doc,
+                ) =>
+            {
+                Some(Some((Some("none"), None, 0.0)))
+            }
             LayoutBlock::TextBox(text_box) if is_floating_text_box_block(text_box) => Some(None),
             LayoutBlock::Table(table) if table.floating.is_some() => Some(None),
             LayoutBlock::Image(image) if is_anchored_image(image) => Some(None),
@@ -2134,7 +2135,11 @@ fn shape_has_text(shape: &ShapeBlock) -> bool {
 
 /// Charts use the same bbox placement rule as an in-flow image.
 fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Paginator) {
-    if block.position.is_some() {
+    if crate::anchor::chart_floats(
+        block.position.as_ref(),
+        block.wrap_type.as_deref(),
+        block.behind_doc,
+    ) {
         let (x, y) = resolve_object_position(
             block.position.as_ref(),
             measure.width,
@@ -2152,11 +2157,7 @@ fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Pagin
             doc_start: block.doc_start,
             doc_end: block.doc_end,
             is_anchored: Some(true),
-            z_index: Some(if block.behind_doc.unwrap_or(false) {
-                -1.0
-            } else {
-                block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64
-            }),
+            z_index: Some(block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64),
         }));
         return;
     }
@@ -2442,6 +2443,65 @@ mod pagination_rule_tests {
             assert_eq!(charts.len(), 2, "{attrs}");
             assert_eq!(charts[0].y, charts[1].y, "{attrs}");
             assert_eq!(charts[0].y, 10.0, "{attrs}");
+        }
+    }
+
+    #[test]
+    fn wrapped_and_behind_doc_charts_match_main_blocks_in_a_second_column() {
+        for (wrap, behind_doc) in [
+            ("topAndBottom", false),
+            ("square", false),
+            ("tight", false),
+            ("through", false),
+            ("none", true),
+        ] {
+            let mut value = input(vec![
+                paragraph(0, 1, 20.0, json!({})),
+                json!({
+                    "block":{"kind":"columnBreak","id":"column"},
+                    "measure":{"kind":"columnBreak"}
+                }),
+                paragraph(1, 1, 10.0, json!({})),
+                json!({
+                    "block":{
+                        "kind":"chart","id":"chart","chart":{},"width":40,"height":30,
+                        "wrapType":wrap,"behindDoc":behind_doc,
+                        "position":{
+                            "horizontal":{"relativeTo":"margin","posOffset":100},
+                            "vertical":{"relativeTo":"paragraph","posOffset":0}
+                        }
+                    },
+                    "measure":{"kind":"chart","width":40,"height":30}
+                }),
+                paragraph(2, 1, 10.0, json!({})),
+            ]);
+            value.options.columns =
+                Some(serde_json::from_value(json!({"count":2,"gap":20})).unwrap());
+            let mut main = value.clone();
+            let LayoutBlock::Chart(chart) = &mut main.measured[3].block else {
+                panic!()
+            };
+            chart.position = None;
+            chart.wrap_type = None;
+            chart.behind_doc = None;
+            let expected = layout_document(&mut main).unwrap();
+            let actual = layout_document(&mut value).unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{wrap}, behindDoc={behind_doc}"
+            );
+            let chart = actual
+                .pages
+                .iter()
+                .flat_map(|page| &page.fragments)
+                .find_map(|fragment| match fragment {
+                    Fragment::Chart(chart) => Some(chart),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(chart.x, 110.0);
+            assert_eq!(chart.is_anchored, None);
         }
     }
 

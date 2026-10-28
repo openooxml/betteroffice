@@ -1,5 +1,16 @@
 use crate::types::{ImageRunPosition, LayoutBlock, TextBoxBlock};
 
+pub(crate) fn chart_floats(
+    position: Option<&ImageRunPosition>,
+    wrap_type: Option<&str>,
+    behind_doc: Option<bool>,
+) -> bool {
+    position.is_some()
+        && wrap_type == Some("none")
+        && behind_doc != Some(true)
+        && position.and_then(|position| position.behind_doc) != Some(true)
+}
+
 pub(crate) fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
     block.display_mode.as_deref() == Some("float")
         || matches!(
@@ -18,7 +29,11 @@ pub(crate) fn is_floating_drawing(block: &LayoutBlock) -> bool {
             .as_ref()
             .and_then(|anchor| anchor.is_anchored)
             .unwrap_or(false),
-        LayoutBlock::Chart(chart) => chart.position.is_some(),
+        LayoutBlock::Chart(chart) => chart_floats(
+            chart.position.as_ref(),
+            chart.wrap_type.as_deref(),
+            chart.behind_doc,
+        ),
         _ => false,
     }
 }

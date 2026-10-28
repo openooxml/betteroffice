@@ -10897,8 +10897,8 @@ fn cell_content_frame<'m>(
                 block_tops.push(stack_cursor);
             }
             (BlockIn::Chart(chart), Some(MeasureIn::Chart(_)))
-                if crate::cell_layout::cell_overlay_chart(
-                    chart.position.is_some(),
+                if crate::anchor::chart_floats(
+                    chart.position.as_ref(),
                     chart.wrap_type.as_deref(),
                     chart.behind_doc,
                 ) =>
@@ -11014,8 +11014,8 @@ fn emit_cell_content(
             continue;
         }
         if let BlockIn::Chart(chart) = cell_block
-            && crate::cell_layout::cell_overlay_chart(
-                chart.position.is_some(),
+            && crate::anchor::chart_floats(
+                chart.position.as_ref(),
                 chart.wrap_type.as_deref(),
                 chart.behind_doc,
             )
@@ -11554,8 +11554,8 @@ fn emit_cell_floating_images(
     for (i, blk) in cell.blocks.iter().enumerate() {
         let BlockIn::Paragraph(pb) = blk else {
             if let BlockIn::Chart(chart) = blk
-                && crate::cell_layout::cell_overlay_chart(
-                    chart.position.is_some(),
+                && crate::anchor::chart_floats(
+                    chart.position.as_ref(),
                     chart.wrap_type.as_deref(),
                     chart.behind_doc,
                 )

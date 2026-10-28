@@ -1556,13 +1556,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 let values = shared_values(opaque, txn);
                 if map_string(&values, "kind").as_deref() == Some("alternateContent")
                     && let Some(source) = map_string(&values, "xml")
-                    && let Some(source) = alternate_content_source(
-                        &source,
-                        paragraph_pm_units,
-                        values.get("previews").is_some_and(
-                            |previews| matches!(previews, Any::Array(images) if !images.is_empty()),
-                        ),
-                    )
+                    && let Some(source) = alternate_content_source(&source, paragraph_pm_units)
                 {
                     alternate_content_sources
                         .entry(paragraph_pm_start)
@@ -1612,7 +1606,6 @@ fn walk_story_chunks<T: ReadTxn>(
             {
                 let pm_offset = paragraph_pm_units;
                 let values = shared_values(chart, txn);
-                let anchored = chart_drawing_anchored(&values);
                 let Some(block) = lower_chart_block(
                     &values,
                     Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
@@ -1623,6 +1616,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         index: story_index,
                     });
                 };
+                let anchored = block.position.is_some();
                 let provenance = chart_drawing_provenance(&block.chart);
                 paragraph_drawings.push(DrawingMarker {
                     pm_offset,
@@ -2826,7 +2820,6 @@ enum DrawingContent {
 struct AlternateContentSource {
     offset: u32,
     choices: Vec<Option<DrawingProvenance>>,
-    single_preview_identity: Option<(String, Option<String>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2834,7 +2827,6 @@ struct FallbackTwin {
     offset: u32,
     choice: usize,
     required: usize,
-    single_preview: bool,
 }
 
 fn shape_drawing_provenance(shape: &Value) -> Option<DrawingProvenance> {
@@ -2919,11 +2911,7 @@ fn chart_drawing_provenance(chart: &Value) -> Option<DrawingProvenance> {
         .then_some(provenance)
 }
 
-fn alternate_content_source(
-    source: &str,
-    offset: u32,
-    grouped: bool,
-) -> Option<AlternateContentSource> {
+fn alternate_content_source(source: &str, offset: u32) -> Option<AlternateContentSource> {
     let limits = docx_parse::xml::ParseLimits::default();
     let document = docx_parse::xml::parse_xml(
         source.as_bytes(),
@@ -2941,36 +2929,7 @@ fn alternate_content_source(
         .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
         .map(xml_drawing_provenance)
         .collect();
-    let single_preview_identity = (!grouped)
-        .then(|| {
-            let mut drawings = root
-                .child_elements()
-                .filter(|branch| branch.local_name() == "Fallback")
-                .flat_map(|branch| branch.child_elements());
-            let drawing = drawings.next()?;
-            if drawing.name != "w:drawing" || drawings.next().is_some() {
-                return None;
-            }
-            let container = drawing.child_by_full_name("wp:inline")?;
-            let data = container
-                .child_by_full_name("a:graphic")?
-                .child_by_full_name("a:graphicData")?;
-            let mut contents = data.child_elements();
-            if contents.next()?.name != "pic:pic" || contents.next().is_some() {
-                return None;
-            }
-            let properties = container.child_by_full_name("wp:docPr")?;
-            Some((
-                properties.attribute(None, "id")?.to_owned(),
-                properties.attribute(None, "name").map(str::to_owned),
-            ))
-        })
-        .flatten();
-    Some(AlternateContentSource {
-        offset,
-        choices,
-        single_preview_identity,
-    })
+    Some(AlternateContentSource { offset, choices })
 }
 
 fn alternate_content_fallback(
@@ -2993,35 +2952,19 @@ fn alternate_content_fallback(
             offset: source.offset,
             choice,
             required: source.choices.len(),
-            single_preview: source
-                .single_preview_identity
-                .as_ref()
-                .is_some_and(|(id, name)| {
-                    id == &drawing.id
-                        && name
-                            .as_ref()
-                            .is_none_or(|name| drawing.name.as_ref() == Some(name))
-                }),
         })
     });
     let twin = matches.next()?;
     matches.next().is_none().then_some(twin)
 }
 
-/// Whether a chart drawing is anchored (floating): its chart object
-/// carries a position or a wrap, which an inline (`wp:inline`) chart
-/// never has. Anchored charts keep the block path, like anchored shapes.
-fn chart_drawing_anchored(values: &std::collections::HashMap<String, Any>) -> bool {
-    map_string(values, "chartJson")
-        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-        .is_some_and(|chart| {
-            chart.get("position").is_some_and(Value::is_object)
-                || chart
-                    .get("wrap")
-                    .and_then(|wrap| wrap.get("type"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|wrap_type| wrap_type != "inline")
-        })
+fn chart_drawing_anchored(chart: &Value) -> bool {
+    chart.get("position").is_some_and(Value::is_object)
+        || chart
+            .get("wrap")
+            .and_then(|wrap| wrap.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
 fn lower_chart_block(
@@ -3041,32 +2984,24 @@ fn lower_chart_block(
         env,
     );
     let wrap = chart.get("wrap");
-    let wrap_type = wrap
+    let floating = wrap
         .and_then(|wrap| wrap.get("type"))
         .and_then(Value::as_str)
-        .filter(|wrap_type| *wrap_type != "inline")
-        .map(str::to_owned);
-    let position = (wrap_type.is_some() || chart.get("position").is_some_and(Value::is_object))
+        == Some("none");
+    let position = floating
         .then(|| shapes::shape_position(&chart))
-        .flatten();
-    let behind_doc = position
-        .as_ref()
-        .and_then(|position| position.behind_doc)
-        .or_else(|| (wrap_type.as_deref() == Some("behind")).then_some(true));
-    let relative_height = chart
-        .get("relativeHeight")
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| value as u64)
-        .or_else(|| {
-            position
-                .as_ref()
-                .and_then(|position| position.relative_height)
-        });
-    let wrap_text = wrap
-        .and_then(|wrap| wrap.get("wrapText"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+        .flatten()
+        .filter(|position| position.behind_doc != Some(true));
+    let wrap_type = position.as_ref().map(|_| "none".to_owned());
+    let behind_doc = position.as_ref().and_then(|position| position.behind_doc);
+    let relative_height = position.as_ref().and_then(|position| {
+        chart
+            .get("relativeHeight")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .map(|value| value as u64)
+            .or(position.relative_height)
+    });
     Some(ChartBlock {
         sdt_groups: None,
         id: BlockId::Str(
@@ -3079,7 +3014,7 @@ fn lower_chart_block(
         height,
         position,
         wrap_type,
-        wrap_text,
+        wrap_text: None,
         relative_height,
         behind_doc,
         doc_start: pm_start.map(|start| start as f64),
@@ -4046,7 +3981,7 @@ fn inline_shared_drawings(
     let convertible = |drawing: &DrawingMarker| {
         !drawing.anchored
             && match &drawing.block {
-                LayoutBlock::Chart(_) => true,
+                LayoutBlock::Chart(chart) => !chart_drawing_anchored(&chart.chart),
                 LayoutBlock::Shape(_) => drawing.inline_text_box,
                 _ => false,
             }
@@ -4082,16 +4017,15 @@ fn inline_shared_drawings(
             return;
         }
     }
-    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>, bool)>::new();
+    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>)>::new();
     let mut kept = Vec::new();
     for drawing in drawings.drain(..) {
         if convertible(&drawing) {
             if let Some(twin) = drawing.fallback_twin {
                 let converted = converted_choices
                     .entry(twin.offset)
-                    .or_insert_with(|| (twin.required, BTreeSet::new(), false));
+                    .or_insert_with(|| (twin.required, BTreeSet::new()));
                 converted.1.insert(twin.choice);
-                converted.2 |= twin.single_preview;
             }
             raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
         } else {
@@ -4100,9 +4034,7 @@ fn inline_shared_drawings(
     }
     let converted_fallbacks: BTreeSet<_> = converted_choices
         .into_iter()
-        .filter_map(|(offset, (required, choices, single_preview))| {
-            (single_preview || choices.len() == required).then_some(offset)
-        })
+        .filter_map(|(offset, (required, choices))| (choices.len() == required).then_some(offset))
         .collect();
     if !converted_fallbacks.is_empty() {
         kept.retain(|drawing| {
