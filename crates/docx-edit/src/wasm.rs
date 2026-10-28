@@ -66,13 +66,13 @@ use crate::session::{
 use crate::structured::ExportOptions;
 use crate::{
     AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
-    EditRefusal, EditRequest, EditTextView, EditingDoc, EngineSession, FindTextRequest,
+    EditRefusal, EditRequest, EditTextView, EditingDoc, FindTextRequest,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, ReadStoriesRequest, SegmentContent, SimpleFormat,
     SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
-    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode, UndoSession,
+    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode,
 };
 
 #[wasm_bindgen]
@@ -128,17 +128,6 @@ fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
 
-fn peer_metadata_js_err(error: crate::PeerMetadataError) -> JsValue {
-    let value = js_sys::Error::new(&error.to_string());
-    value.set_name("PeerMetadataError");
-    let _ = js_sys::Reflect::set(
-        &value,
-        &JsValue::from_str("code"),
-        &JsValue::from_str(error.code()),
-    );
-    value.into()
-}
-
 impl From<EngineError> for JsValue {
     fn from(error: EngineError) -> Self {
         match error.kind {
@@ -161,7 +150,7 @@ fn wasm_host() -> Host {
     Host::new(
         Arc::new(|| js_sys::Date::now() as u64),
         Arc::new(js_entropy),
-        Arc::new(|| performance_now()),
+        Arc::new(performance_now),
     )
 }
 
@@ -2174,7 +2163,9 @@ impl EditSession {
         bytes: Vec<u8>,
         blocks: u32,
     ) -> Result<Option<String>, JsValue> {
-        self.core.open_docx_preview_owned(bytes, blocks).map_err(JsValue::from)
+        self.core
+            .open_docx_preview_owned(bytes, blocks)
+            .map_err(JsValue::from)
     }
 
     #[wasm_bindgen(js_name = open_docx_preview_with_budget)]
@@ -2330,7 +2321,9 @@ impl EditSession {
                     .map_err(|_| js_err("sync updates must be Uint8Arrays"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.core.apply_update_chunks(&chunks).map_err(JsValue::from)
+        self.core
+            .apply_update_chunks(&chunks)
+            .map_err(JsValue::from)
     }
 
     /// [`EditSession::apply_update`] plus an inference about where the peer
@@ -5262,7 +5255,7 @@ pub fn render_docx_markdown_with_pages_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditCtx, RawOp, story_ref};
+    use crate::{EditCtx, RawOp, UndoSession, story_ref};
     use yrs::{IndexedSequence, Map};
 
     #[test]

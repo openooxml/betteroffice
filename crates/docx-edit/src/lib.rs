@@ -53,7 +53,6 @@
 extern crate self as docx_edit;
 
 use std::cell::RefCell;
-#[cfg(feature = "wasm")]
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;

@@ -128,18 +128,13 @@ impl EditSessionCore {
                 },
             )
             .map_err(EngineError::message)?;
-            *styles = Some(
-                crate::seed::StyleResolver::from_parts(&parts).map_err(EngineError::message)?,
-            );
+            *styles =
+                Some(crate::seed::StyleResolver::from_parts(&parts).map_err(EngineError::message)?);
         }
         Ok(styles)
     }
 
-    pub fn seed_from_docx(
-        &self,
-        bytes: &[u8],
-        generation: Option<String>,
-    ) -> EngineResult<String> {
+    pub fn seed_from_docx(&self, bytes: &[u8], generation: Option<String>) -> EngineResult<String> {
         self.open_docx_inner(bytes.into(), true, generation.as_deref(), None)
     }
 
@@ -241,7 +236,9 @@ impl EditSessionCore {
             let (mut metadata, index, fonts) =
                 crate::seed::replica_source(envelope, parts, source.clone(), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
-            self.engine.doc().install_source(metadata, self.host.entropy());
+            self.engine
+                .doc()
+                .install_source(metadata, self.host.entropy());
             self.awaiting_comment_baseline.set(true);
             self.engine
                 .doc()
@@ -347,7 +344,6 @@ impl EditSessionCore {
     ) -> EngineResult<Option<String>> {
         self.open_docx_preview_with_budget_owned(bytes, blocks, None)
     }
-
 
     pub fn open_docx_preview_with_budget_owned(
         &self,
