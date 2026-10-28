@@ -523,9 +523,7 @@ fn reordered_untouched_shapes_keep_their_source_bytes() {
     let third = kept_shape(4, "Charlie", "Charlie text");
     let fourth = kept_shape(5, "Delta", "Delta text");
     let edited = shape(6, "Edited", "Before");
-    let slide = slide_xml(&sp_tree(&format!(
-        "{first}{second}{third}{fourth}{edited}"
-    )));
+    let slide = slide_xml(&sp_tree(&format!("{first}{second}{third}{fourth}{edited}")));
     let saved = save(
         &deck(&slide),
         vec![
@@ -556,9 +554,7 @@ fn a_reordered_edited_shape_keeps_the_other_shapes_byte_identical() {
     let second = kept_shape(3, "Bravo", "Bravo text");
     let third = kept_shape(4, "Charlie", "Charlie text");
     let fourth = kept_shape(5, "Delta", "Delta text");
-    let slide = slide_xml(&sp_tree(&format!(
-        "{first}{second}{third}{fourth}"
-    )));
+    let slide = slide_xml(&sp_tree(&format!("{first}{second}{third}{fourth}")));
     let saved = save(
         &deck(&slide),
         vec![

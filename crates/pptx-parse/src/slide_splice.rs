@@ -265,10 +265,7 @@ fn align(
         prefix += 1;
     }
     let mut suffix = 0;
-    while suffix < n - prefix
-        && suffix < m - prefix
-        && equal(n - 1 - suffix, m - 1 - suffix)
-    {
+    while suffix < n - prefix && suffix < m - prefix && equal(n - 1 - suffix, m - 1 - suffix) {
         suffix += 1;
     }
     let middle_n = n - prefix - suffix;
@@ -290,7 +287,11 @@ fn align(
         for j in (0..middle_m).rev() {
             let mut best = i32::MIN / 2;
             if can_match(prefix + i, prefix + j) {
-                let score = if equal(prefix + i, prefix + j) { 100 } else { 10 };
+                let score = if equal(prefix + i, prefix + j) {
+                    100
+                } else {
+                    10
+                };
                 best = best.max(score + dp[i + 1][j + 1]);
             }
             best = best.max(-1 + dp[i + 1][j]);
@@ -302,7 +303,11 @@ fn align(
     let mut j = 0;
     while i < middle_n || j < middle_m {
         if i < middle_n && j < middle_m && can_match(prefix + i, prefix + j) {
-            let score = if equal(prefix + i, prefix + j) { 100 } else { 10 };
+            let score = if equal(prefix + i, prefix + j) {
+                100
+            } else {
+                10
+            };
             if dp[i][j] == score + dp[i + 1][j + 1] {
                 ops.push(Op::Match(prefix + i, prefix + j));
                 i += 1;
@@ -436,7 +441,7 @@ fn equivalent(before: &XmlElement, after: &XmlElement) -> bool {
         Element(&'a XmlElement),
         Text(String),
     }
-    let merged = |element: &XmlElement| {
+    fn merged(element: &XmlElement) -> Vec<Child<'_>> {
         let mut children: Vec<Child<'_>> = Vec::new();
         for child in &element.children {
             match (children.last_mut(), child) {
@@ -446,7 +451,7 @@ fn equivalent(before: &XmlElement, after: &XmlElement) -> bool {
             }
         }
         children
-    };
+    }
     let left = merged(before);
     let right = merged(after);
     if left.len() != right.len() {
