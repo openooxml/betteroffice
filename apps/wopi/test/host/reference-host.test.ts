@@ -171,16 +171,16 @@ describe("reference host and host client", () => {
     ] as const) {
       const { host, client } = setup();
       const source = host.setFile("file1", "hello", { name: original });
-      const before = { ...source };
-      const renamed = await client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: requested });
-      expect(renamed.name).toBe(requested);
-      expect(source).toEqual({ ...before, name: expected });
-      expect((await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })).BaseFileName).toBe(expected);
       host.setFile("target", "target bytes", { name: original.includes(".") ? "taken.v2.docx" : "taken.v2" });
       const snapshot = [...host.files.values()].map((file) => ({ ...file }));
       const collision = await kindOf(client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "taken.v2" }));
       expect(collision.status).toBe(400);
       expect([...host.files.values()]).toEqual(snapshot);
+      const before = { ...source };
+      const renamed = await client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: requested });
+      expect(renamed.name).toBe(requested);
+      expect(source).toEqual({ ...before, name: expected });
+      expect((await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })).BaseFileName).toBe(expected);
     }
   });
 
