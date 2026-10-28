@@ -235,7 +235,11 @@ function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
   let start = end;
   while (start > 0 && segments[start - 1].kind !== 'pilcrow') start--;
-  while (start < end && segments[start].kind === 'embed' && BLOCK_EMBEDS.has(segments[start].embedKind)) start++;
+  while (start < end) {
+    const segment = segments[start];
+    if (segment.kind !== 'embed' || !BLOCK_EMBEDS.has(segment.embedKind)) break;
+    start++;
+  }
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
 }
 
@@ -405,8 +409,12 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
   const { markProperties } = anchor;
   const anchorStyle = typeof markProperties.pStyle === 'string' ? markProperties.pStyle : null;
   const directSource = anchor.paragraphFormatting ?? markProperties._originalFormatting;
-  const direct = Object.fromEntries(Object.entries((directSource && typeof directSource === 'object' ? directSource : {}) as Record<string, unknown>)
+  let direct = Object.fromEntries(Object.entries((directSource && typeof directSource === 'object' ? directSource : {}) as Record<string, unknown>)
     .filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
+  const sameNumPr = (left: unknown, right: unknown) => left != null && right != null && JSON.stringify(left) === JSON.stringify(right);
+  if (sameNumPr(direct.numPr, direct.numPrFromStyle) || sameNumPr(markProperties.numPr, markProperties.numPrFromStyle)) {
+    direct = Object.fromEntries(Object.entries(direct).filter(([key]) => key !== 'numPr' && key !== 'numPrFromStyle'));
+  }
   const inheritance = draft.runInheritance(anchor.styles);
   let created: DocxParagraphTarget[] = [];
   let inherited: Record<string, unknown>[] = [];

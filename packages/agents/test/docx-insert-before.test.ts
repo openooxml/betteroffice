@@ -24,6 +24,7 @@ const pPrOf = (paragraph: string) => paragraph.match(/<w:pPr>[\s\S]*?<\/w:pPr>/)
 const firstRPrOf = (paragraph: string) => paragraph.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/, '').match(/<w:rPr>[\s\S]*?<\/w:rPr>/)?.[0] ?? '';
 const blockOf = (xml: string, text: string) => blocks(xml).find(paragraph => textOf(paragraph) === text)!;
 const item = (doc: DocxAgentDocument, text: string) => doc.list({ limit: 100 }).items.find(entry => entry.text === text)!;
+const itemAfterBlock = (doc: DocxAgentDocument, text: string) => doc.list({ limit: 100 }).items.find(entry => entry.text.endsWith(text))!;
 
 let nextId = 0x2000;
 function para(pPr: string, text: string, rPr = ''): string {
@@ -209,18 +210,18 @@ test('insert before a paragraph after a table formats the whole new text', async
   };
   const plain = await open(await build());
   await plain.edit({ version: plain.list().version, edits: [{
-    op: 'insert_paragraphs', before: item(plain, 'After table').ref, paragraphs: [{ text: 'Inserted plain' }],
+    op: 'insert_paragraphs', before: itemAfterBlock(plain, 'After table').ref, paragraphs: [{ text: 'Inserted plain' }],
   }] });
-  expect(plain.read(item(plain, 'Inserted plain').ref).runs).toHaveLength(1);
+  expect(plain.read(itemAfterBlock(plain, 'Inserted plain').ref).runs).toHaveLength(1);
   expect(blocks(await xmlOf(plain)).map(textOf)).toContain('Inserted plain');
   expect(firstRPrOf(blockOf(await xmlOf(plain), 'Inserted plain'))).not.toContain('C00000');
 
   const anchored = await open(await build());
   await anchored.edit({ version: anchored.list().version, edits: [{
-    op: 'insert_paragraphs', before: item(anchored, 'After table').ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted anchored' }],
+    op: 'insert_paragraphs', before: itemAfterBlock(anchored, 'After table').ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted anchored' }],
   }] });
   const saved = await xmlOf(anchored);
-  expect(anchored.read(item(anchored, 'Inserted anchored').ref).runs).toHaveLength(1);
+  expect(anchored.read(itemAfterBlock(anchored, 'Inserted anchored').ref).runs).toHaveLength(1);
   expect(canonical(firstRPrOf(blockOf(saved, 'Inserted anchored')))).toBe(canonical(firstRPrOf(blockOf(saved, 'After table'))));
 });
 
