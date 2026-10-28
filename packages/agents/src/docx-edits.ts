@@ -31,7 +31,6 @@ const LIST_PROPERTIES = [...PARAGRAPH_PROPERTIES,
   'listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor',
   'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'adjustRightInd',
 ].filter(key => !ONE_OFF.has(key));
-const COPIED_PROPERTIES = [...new Set([...LIST_PROPERTIES, 'cnfStyle', 'listStartOverride'])];
 
 export function tableCells(story: string, segments: readonly YrsStorySegment[]): Map<string, TableCell> {
   const cells = new Map<string, TableCell>();
@@ -335,8 +334,7 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
       for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
     }
   } finally { inheritance.dispose(); }
-  const defaultStyleId = source?.package.styles?.styles.find(style => style.type === 'paragraph' && style.default)?.styleId;
-  return { attrs, formatting, tableParagraph, tableRun, styles: source?.package.styles, markProperties: mark.properties, defaultStyleId };
+  return { attrs, formatting, tableParagraph, tableRun, styles: source?.package.styles, markProperties: mark.properties };
 }
 
 function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
@@ -410,11 +408,11 @@ function copiedProperties(anchor: Record<string, unknown>, original: unknown): R
   return properties;
 }
 
-function applyCopiedProperties(draft: YrsSession, story: string, created: readonly DocxParagraphTarget[], properties: Record<string, unknown>, keys: readonly string[], styleFor?: (index: number) => string | undefined) {
+function applyCopiedProperties(draft: YrsSession, story: string, created: readonly DocxParagraphTarget[], properties: Record<string, unknown>, keys: readonly string[]) {
   const current = new Map(draft.storySegments(story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
-  created.forEach(({ paraId }, index) => {
+  created.forEach(({ paraId }) => {
     for (const key of keys) {
-      const value = (key === 'pStyle' ? styleFor?.(index) : undefined) ?? properties[key] ?? null;
+      const value = properties[key] ?? null;
       if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
     }
   });
@@ -435,29 +433,14 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
   let created: DocxParagraphTarget[] = [];
   let inherited: Record<string, unknown>[] = [];
   try {
-    const anchorInherited = inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph);
-    const direct = directProperties(markProperties, anchorInherited);
+    const direct = directProperties(markProperties, inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph));
     const effective = paragraphs.map(({ styleId }) => styleId ?? anchorStyle);
-    const numbered = effective.map(style => inheritance.paragraphFormatting(style, undefined)?.numPr != null);
     inherited = effective.map(style => inheritance.attributes(style, null, anchor.tableRun));
-    const styleList = anchor.styles?.styles.filter(style => style.type === 'paragraph') ?? [];
-    const safeStyle = (anchor.defaultStyleId && !inheritance.paragraphFormatting(anchor.defaultStyleId, undefined)?.numPr ? anchor.defaultStyleId : undefined)
-      ?? styleList.find(style => !inheritance.paragraphFormatting(style.styleId, undefined)?.numPr)?.styleId;
-    const seededStyles = paragraphs.map(({ styleId }, index) => styleId ?? (numbered[index] && safeStyle ? safeStyle : effective[index]));
-    const seeded = paragraphs.map(({ text }, index) => seededStyles[index] ? { text, styleId: seededStyles[index] } : { text });
+    const seeded = paragraphs.map(({ text }, index) => effective[index] ? { text, styleId: effective[index] } : { text });
     created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'start', paragraphs: seeded }).newParagraphs;
     const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
     created.forEach((entry, index) => {
-      if (!paragraphs[index].styleId && numbered[index] && seededStyles[index] !== effective[index]) {
-        const properties = copiedProperties(markProperties, direct);
-        if (!('numPr' in direct)) {
-          properties.numPr = markProperties.numPr ?? anchorInherited?.numPr ?? null;
-          properties.numPrFromStyle = properties.numPr;
-        } else properties.numPrFromStyle = null;
-        applyCopiedProperties(draft, target.story, [entry], properties, COPIED_PROPERTIES);
-      } else {
-        applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
-      }
+      applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
     });
   } finally { inheritance.dispose(); }
   if (runFormat === 'anchor' && anchor.attrs) applyAnchorRunFormat(draft, created, paragraphs, anchor.attrs, anchor.formatting);
