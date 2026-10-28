@@ -282,6 +282,40 @@ describe('buildResidentRegionLayoutRequest paragraph style font sizes', () => {
     expect(env.docDefaultFontSize).toBe(10);
   });
 
+  test('resolves Hyperlink and FollowedHyperlink sizes from their own style chains', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } },
+      { styleId: 'LinkBase', type: 'character', rPr: { fontSize: 28 } },
+      { styleId: 'Hyperlink', type: 'character', basedOn: 'LinkBase' },
+      { styleId: 'Visited', name: 'FollowedHyperlink', type: 'character', basedOn: 'Hyperlink' },
+      { styleId: 'Strong', type: 'character', rPr: { fontSize: 40 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toEqual({ Hyperlink: 14, Visited: 14 });
+    expect(env.paragraphStyleFontSizes).toEqual({ Normal: 11 });
+  });
+
+  test('omits unsized Hyperlink chains without falling back to docDefaults', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Hyperlink', type: 'character', basedOn: 'FollowedHyperlink' },
+      { styleId: 'FollowedHyperlink', type: 'character', basedOn: 'Hyperlink' },
+      { styleId: 'Link', name: 'Hyperlink', type: 'character', basedOn: 'Missing' },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {}).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toBeUndefined();
+  });
+
+  test('preserves caller supplied Hyperlink sizes per style', () => {
+    const doc = sizedDoc(20, [
+      { styleId: 'Hyperlink', type: 'character', rPr: { fontSize: 28 } },
+      { styleId: 'FollowedHyperlink', type: 'character', rPr: { fontSize: 30 } },
+    ]);
+    const env = buildResidentRegionLayoutRequest(doc, 24, {
+      hyperlinkStyleFontSizes: { Hyperlink: 12 },
+    }).renderEnv;
+    expect(env.hyperlinkStyleFontSizes).toEqual({ Hyperlink: 12, FollowedHyperlink: 15 });
+  });
+
   test('caller supplied sizes win per style', () => {
     const doc = sizedDoc(20, [{ styleId: 'Normal', type: 'paragraph', rPr: { fontSize: 22 } }]);
     const env = buildResidentRegionLayoutRequest(doc, 24, {

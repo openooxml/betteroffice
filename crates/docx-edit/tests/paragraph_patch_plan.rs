@@ -1231,6 +1231,93 @@ fn hyperlink_mutation_is_legacy() {
 }
 
 #[test]
+fn a_direct_toc_hyperlink_size_patches_without_losing_preserved_xml() {
+    let content = concat!(
+        r#"<w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="entry">"#,
+        r#"<w:r xmlns:foreign="urn:toc-test" foreign:flag="kept"><w:rPr>"#,
+        r#"<w:rStyle w:val="Hyperlink"/><w:noProof/></w:rPr><w:t>Entry</w:t>"#,
+        r#"</w:r></w:hyperlink>"#,
+    );
+    let mut parts = ooxml_opc::unzip_parts(&package(content)).unwrap();
+    let (_, styles) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/styles.xml")
+        .unwrap();
+    *styles = std::str::from_utf8(styles)
+        .unwrap()
+        .replace(
+            "</w:styles>",
+            concat!(
+                r#"<w:style w:type="paragraph" w:styleId="TOC1">"#,
+                r#"<w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="20"/></w:rPr></w:style>"#,
+                r#"<w:style w:type="character" w:styleId="Hyperlink">"#,
+                r#"<w:rPr><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#,
+            ),
+        )
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &bytes).unwrap();
+    format(
+        &doc,
+        0,
+        5,
+        InlineFormatDelta {
+            font_size: Patch::Set(16.0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(patch(&doc).run_edits.len(), 1);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let document = save_document(&package.document, |document| {
+        let run = &mut document["content"][0]["content"][0]["children"][0];
+        assert_eq!(run["type"], "run");
+        run["formatting"]["fontSize"] = json!(32);
+        run["formatting"]["fontSizeCs"] = json!(32);
+    });
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0], "changed": part.changed,
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    let xml = String::from_utf8(xml).unwrap();
+    assert!(xml.contains("<w:noProof/>"), "{xml}");
+    assert!(xml.contains(r#"foreign:flag="kept""#), "{xml}");
+    assert!(xml.contains(r#"<w:sz w:val="32"/>"#), "{xml}");
+}
+
+#[test]
 fn numeric_marks_survive_the_json_transport() {
     let doc = open(&text("abc"));
     format(

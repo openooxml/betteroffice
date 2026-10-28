@@ -119,6 +119,9 @@ pub struct RenderEnv {
     /// Resolved paragraph style chain font size in pt, keyed by style id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub paragraph_style_font_sizes: BTreeMap<String, f64>,
+    /// Resolved Hyperlink character style chain font size in pt, keyed by style id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub hyperlink_style_font_sizes: BTreeMap<String, f64>,
     /// The docDefaults font size in pt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_default_font_size: Option<f64>,
@@ -1265,7 +1268,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1329,7 +1332,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1348,7 +1351,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1368,7 +1371,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1414,7 +1417,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1442,7 +1445,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     story_end: story_index + 1,
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(attributes),
+                    inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1541,7 +1544,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: pm_offset,
                         pm_end: pm_offset + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -1588,7 +1591,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inherited_hyperlink: inherited_hyperlink_style(attributes, env),
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -3022,7 +3025,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + child_size,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3037,7 +3040,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3051,7 +3054,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3071,7 +3074,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3114,7 +3117,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3142,7 +3145,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
-                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3170,7 +3173,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
-                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3541,7 +3544,7 @@ fn push_text_chunks(
             story_end: end,
             pm_start: chunk_pm_start + start - chunk_start,
             pm_end: chunk_pm_start + end - chunk_start,
-            inherited_hyperlink: inherited_hyperlink_style(attributes),
+            inherited_hyperlink: inherited_hyperlink_style(attributes, env),
             inline_sdt_widget: None,
             atom: false,
             revision_hidden: env.revision_hidden(attributes),
@@ -5008,19 +5011,36 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool, bool) {
+fn inherited_hyperlink_style(attributes: Option<&Attrs>, env: &RenderEnv) -> (bool, bool, bool) {
     let inherited = |key| {
         attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
             == Some(true)
     };
-    (
-        inherited("textColor"),
-        inherited("underline"),
-        inherited("fontSize"),
-    )
+    let color = inherited("textColor");
+    let underline = inherited("underline");
+    let style_id = attribute_map(attributes, "runStyle").and_then(|map| map_string(map, "styleId"));
+    let style_size = style_id
+        .as_ref()
+        .and_then(|id| env.hyperlink_style_font_sizes.get(id));
+    let mut formatting = RunFormatting::default();
+    lower_font_size(attributes, &mut formatting);
+    let size = formatting.font_size.is_some_and(|size| match style_size {
+        Some(style_size) => *style_size == size,
+        None => {
+            (color || underline)
+                && env
+                    .hyperlink_style_font_sizes
+                    .values()
+                    .any(|style_size| *style_size == size)
+        }
+    });
+    (color, underline, size)
 }
 
 fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool, bool)) {
+    if inherited.2 {
+        formatting.font_size = None;
+    }
     if let Some(hyperlink) = &mut formatting.hyperlink {
         hyperlink.no_default_style = Some(true);
         if inherited.0 {
@@ -5029,33 +5049,52 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
         if inherited.1 {
             formatting.underline = None;
         }
-        if inherited.2 {
-            formatting.font_size = None;
-        }
     }
 }
 
-/// Caps the runs that share a TOC entry line without carrying entry text
-/// (tabs, field results, whitespace only runs) at the entry text size. Word
-/// renders the leader and page number at the entry size even when a tab or
-/// field run carries a larger one, and sizes the line from the entry text.
+fn carries_toc_entry_text(kind: &RawRunKind) -> bool {
+    let text = match kind {
+        RawRunKind::Text(text) => Some(text),
+        RawRunKind::Field {
+            field_type,
+            raw_type,
+            instruction,
+            fallback,
+            ..
+        } => {
+            let field_type = instruction
+                .as_deref()
+                .and_then(|value| value.split_whitespace().next())
+                .or(raw_type.as_deref())
+                .unwrap_or(field_type);
+            if matches!(
+                field_type.to_ascii_uppercase().as_str(),
+                "PAGEREF" | "PAGE" | "NUMPAGES" | "SECTIONPAGES"
+            ) {
+                return false;
+            }
+            fallback.as_ref()
+        }
+        _ => None,
+    };
+    text.is_some_and(|text| text.chars().any(|c| !c.is_whitespace()))
+}
+
+/// Caps TOC tabs, whitespace and auxiliary fields at the entry text size.
 fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>) {
     let entry_size = raw_runs
         .iter()
-        .filter_map(|run| match &run.kind {
-            RawRunKind::Text(text) if text.chars().any(|c| !c.is_whitespace()) => {
-                run.formatting.font_size
-            }
-            _ => None,
-        })
+        .filter(|run| carries_toc_entry_text(&run.kind))
+        .filter_map(|run| run.formatting.font_size)
         .fold(None::<f64>, |size, next| {
             Some(size.map_or(next, |current| current.max(next)))
         });
     let Some(entry_size) = entry_size.or(fallback_size) else {
         for run in raw_runs.iter_mut() {
             let auxiliary = match &run.kind {
-                RawRunKind::Tab => true,
-                RawRunKind::Text(text) => text.chars().all(|c| c.is_whitespace()),
+                RawRunKind::Tab | RawRunKind::Text(_) | RawRunKind::Field { .. } => {
+                    !carries_toc_entry_text(&run.kind)
+                }
                 _ => false,
             };
             if auxiliary {
@@ -5066,8 +5105,9 @@ fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>
     };
     for run in raw_runs.iter_mut() {
         let auxiliary = match &run.kind {
-            RawRunKind::Tab | RawRunKind::Field { .. } => true,
-            RawRunKind::Text(text) => text.chars().all(|c| c.is_whitespace()),
+            RawRunKind::Tab | RawRunKind::Text(_) | RawRunKind::Field { .. } => {
+                !carries_toc_entry_text(&run.kind)
+            }
             _ => false,
         };
         if !auxiliary {

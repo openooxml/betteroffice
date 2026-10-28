@@ -131,14 +131,19 @@ export function buildResidentRegionLayoutRequest(
 function chainFontSizeEnv(
   document: Document | null,
   renderEnv: YrsRenderEnv
-): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'docDefaultFontSize'> {
+): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize'> {
   const styles = document?.package.styles;
   if (!styles) return {};
   const docDefault = styles.docDefaults?.rPr?.fontSize ?? 20;
   const byId = new Map((styles.styles ?? []).map((style) => [style.styleId, style]));
   const sizes: Record<string, number> = { ...(renderEnv.paragraphStyleFontSizes ?? {}) };
+  const hyperlinkSizes: Record<string, number> = { ...(renderEnv.hyperlinkStyleFontSizes ?? {}) };
   for (const style of styles.styles ?? []) {
-    if (style.type !== 'paragraph' || !style.styleId || style.styleId in sizes) continue;
+    const hyperlink = style.type === 'character' && [style.styleId, style.name]
+      .some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''));
+    if (!style.styleId || (style.type !== 'paragraph' && !hyperlink)) continue;
+    const target = hyperlink ? hyperlinkSizes : sizes;
+    if (style.styleId in target) continue;
     let size: number | undefined;
     const seen = new Set<string>();
     let current: typeof style | undefined = style;
@@ -150,11 +155,12 @@ function chainFontSizeEnv(
       }
       current = current.basedOn ? byId.get(current.basedOn) : undefined;
     }
-    const resolved = size ?? docDefault;
-    sizes[style.styleId] = resolved / 2;
+    const resolved = size ?? (hyperlink ? undefined : docDefault);
+    if (resolved !== undefined) target[style.styleId] = resolved / 2;
   }
   return {
     ...(Object.keys(sizes).length > 0 ? { paragraphStyleFontSizes: sizes } : {}),
+    ...(Object.keys(hyperlinkSizes).length > 0 ? { hyperlinkStyleFontSizes: hyperlinkSizes } : {}),
     ...(renderEnv.docDefaultFontSize == null
       ? { docDefaultFontSize: docDefault / 2 }
       : {}),

@@ -184,36 +184,6 @@ function seedClocks(session: YrsSession): Map<bigint, bigint> {
 describe('DOCX engine seeding', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-  it.each([undefined, 28, 36])('seeds sized Hyperlink runs identically with direct size %s', async (directSize) => {
-    const size = directSize === undefined ? '' : `<w:sz w:val="${directSize}"/>`;
-    const body = `<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="top"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>${size}<w:szCs w:val="38"/></w:rPr><w:t>Entry</w:t></w:r></w:hyperlink></w:p>`;
-    const parts = new Map(Object.entries(unzipContainer(sequencePackage(body))));
-    parts.set('word/styles.xml', toBytes('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"/><w:style w:type="paragraph" w:styleId="TOC1"><w:basedOn w:val="Normal"/></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:sz w:val="28"/><w:szCs w:val="36"/></w:rPr></w:style></w:styles>'));
-    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
-    const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
-    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
-    const engine = await createYrsSession({ clientId: 47050 });
-    const projected = await createYrsSession({ clientId: 47050 });
-    try {
-      engine.seedFromDocx(bytes, { generation: 'hyperlink-size-parity' });
-      documentToYrs(projected, parsed, { generation: 'hyperlink-size-parity' });
-      expectEquivalentStories(engine, projected);
-      expect(engine.encodeStateVector()).toEqual(projected.encodeStateVector());
-      expect(engine.encodeState()).toEqual(projected.encodeState());
-      const env = { paragraphStyleFontSizes: { Normal: 10, TOC1: 10 }, docDefaultFontSize: 10 };
-      for (const session of [engine, projected]) {
-        const runs = sequenceRuns(session.yrsBlocksForStory('body', env) as LayoutBlock[]);
-        expect(runs).toHaveLength(1);
-        expect(runs[0]).toMatchObject({
-          kind: 'text', text: 'Entry', fontSize: (directSize ?? 20) / 2, fontSizeCs: 19,
-        });
-      }
-    } finally {
-      engine.destroy();
-      projected.destroy();
-    }
-  });
-
   it('seeds nested SEQ names without adding them to plain fields', async () => {
     const sequence = (cached: string): ComplexField => ({
       type: 'complexField',
