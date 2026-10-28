@@ -1148,11 +1148,27 @@ fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
     let display: Value =
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
     let total = display["pages"].as_array().unwrap().len().to_string();
-    let field = primitives(&display)
-        .iter()
-        .find(|primitive| primitive["field"]["category"] == "NUMPAGES")
-        .unwrap();
-    assert_eq!(field["text"], total);
+    assert_eq!(
+        field_texts(&display["pages"][0]["primitives"], "NUMPAGES"),
+        [total],
+        "{display}"
+    );
+}
+
+fn field_texts(value: &Value, category: &str) -> Vec<String> {
+    fn collect(value: &Value, category: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) if map.get("field").is_some_and(|f| f["category"] == category) => {
+                out.push(map["text"].as_str().unwrap_or_default().to_owned())
+            }
+            Value::Object(map) => map.values().for_each(|value| collect(value, category, out)),
+            Value::Array(items) => items.iter().for_each(|value| collect(value, category, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    collect(value, category, &mut out);
+    out
 }
 
 #[test]
