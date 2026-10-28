@@ -1,6 +1,6 @@
 ---
-"@betteroffice/docx": patch
-"@betteroffice/docx-react": patch
+"@betteroffice/docx": minor
+"@betteroffice/docx-react": minor
 "@betteroffice/agents": patch
 ---
 
