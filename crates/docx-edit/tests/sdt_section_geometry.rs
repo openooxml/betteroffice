@@ -495,7 +495,10 @@ fn final_section_after_two_wrapped_sections_keeps_its_limits_after_a_split_table
         .unwrap()
         .0
         .replace("<wp:align>bottom</wp:align>", "<wp:align>top</wp:align>")
-        .replace("<wp:wrapTopAndBottom/>", "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        .replace(
+            "<wp:wrapTopAndBottom/>",
+            "<wp:wrapSquare wrapText=\"bothSides\"/>",
+        )
         .replace("cx=\"1143000\"", "cx=\"5852160\"")
         .replace("cy=\"1143000\"", "cy=\"4876800\"")
         .replace("distL=\"0\"", "distL=\"114300\"")
@@ -542,7 +545,10 @@ fn final_section_after_two_wrapped_sections_keeps_its_limits_after_a_split_table
         assert_eq!(margins["bottom"], 96.0);
         for fragment in page["fragments"].as_array().unwrap() {
             let bottom = fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap();
-            assert!(bottom <= 960.0, "body exceeds final-section limits: {fragment}");
+            assert!(
+                bottom <= 960.0,
+                "body exceeds final-section limits: {fragment}"
+            );
         }
     }
     assert_eq!(pages[4]["fragments"][0]["kind"], "table");
@@ -730,7 +736,10 @@ fn wrapped_float_edit_document(cover_width: u32, body_width: u32, relative_to: &
                 relative_to = relative_to,
             ),
         )
-        .replace("<wp:wrapTopAndBottom/>", "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        .replace(
+            "<wp:wrapTopAndBottom/>",
+            "<wp:wrapSquare wrapText=\"bothSides\"/>",
+        )
         .replace("cx=\"1143000\"", "cx=\"5852160\"")
         .replace("cy=\"1143000\"", "cy=\"4876800\"")
         .replace("distL=\"0\"", "distL=\"114300\"")
@@ -827,10 +836,12 @@ fn assert_wrapped_float_edit_matches_fresh(cover_width: u32, body_width: u32, re
             "properties": package.document.final_section_properties,
         }]);
         request["notes"]["contents"] = json!([]);
+        let extras = json!({"fontChains": request["measurement"]["fontChains"]}).to_string();
         let request = request.to_string();
         engine
             .layout_document_with_regions_retained(&request)
             .unwrap();
+        engine.build_display_list_frame(&extras, 0).unwrap();
         let initial: Value =
             serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
         assert_wrapped_float_measurements(&initial, body_width == 690);

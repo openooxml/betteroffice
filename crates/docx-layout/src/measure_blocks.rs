@@ -4925,7 +4925,8 @@ mod tests {
         let config = MeasurementConfig::default();
         let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
         assert!(!flow.zones_by_anchor.contains_key(&4));
-        flow.measure_until(&mut blocks, &widths, &config, 5).unwrap();
+        flow.measure_until(&mut blocks, &widths, &config, 5)
+            .unwrap();
         let BlockExtent::Paragraph(image) = &flow.extents()[4] else {
             panic!("paragraph extent expected");
         };
@@ -4976,7 +4977,8 @@ mod tests {
             ];
             let policy = FloatWidthPolicy::for_document(blocks.iter());
             let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
-            flow.measure_until(&mut blocks, &widths, &config, 6).unwrap();
+            flow.measure_until(&mut blocks, &widths, &config, 6)
+                .unwrap();
             let LayoutBlock::Paragraph(paragraph) = &mut blocks[5] else {
                 panic!("paragraph expected");
             };
