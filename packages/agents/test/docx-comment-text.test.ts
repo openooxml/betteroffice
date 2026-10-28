@@ -176,8 +176,16 @@ for (const op of ['reply_comment', 'resolve_comment'] as const) {
       const original = COMMENT_ZERO.replace(/ w14:paraId="[^"]*"/g, '');
       const xml = (await zip.file('word/comments.xml')!.async('string')).replace(EXISTING_COMMENT, `${original}${COMMENT_ONE}`);
       zip.file('word/comments.xml', xml);
+      const document = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', document.replace('<w:p><w:r><w:t>Obsolete remark.</w:t></w:r></w:p>',
+        '<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>Obsolete remark.</w:t></w:r><w:commentRangeEnd w:id="1"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r></w:p>'));
       const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
       const doc = await open(source);
+      const before = doc.list({ story: 'comments', limit: 100 }).items;
+      expect(before).toHaveLength(2);
+      expect(before.map(comment => comment.id)).toEqual(['0', '1']);
+      const untouched = before.find(comment => comment.id === '1')!;
+      expect(untouched.anchor).not.toBeNull();
       const edits: DocxAgentEdit[] = [
         { op: 'replace_comment_text', comment: '0', find: 'Closing line stays.', replace: 'Closing line updated.' },
         ...(op === 'reply_comment' ? [{ op, comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' } satisfies DocxAgentEdit] : []),
@@ -210,6 +218,7 @@ for (const op of ['reply_comment', 'resolve_comment'] as const) {
       const comments = reopened.list({ story: 'comments', limit: 100 }).items;
       expect(comments.find(comment => comment.id === '0')).toMatchObject({ done: true, text: 'First identity proofed here. Second identity proofed there.\nClosing line updated.' });
       expect(comments).toHaveLength(op === 'reply_comment' ? 3 : 2);
+      expect(comments.find(comment => comment.id === '1')).toMatchObject({ text: untouched.text, author: untouched.author, done: untouched.done, parentId: untouched.parentId });
       if (op === 'reply_comment') expect(comments.find(comment => comment.text === 'Follow up')).toMatchObject({ parentId: '0', author: 'Editor' });
       const input = await readCommentPart(await zip.generateAsync({ type: 'arraybuffer' }));
       const expected = comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(comment.id === '0' ? { done: true } : {}) }));
