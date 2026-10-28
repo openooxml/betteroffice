@@ -472,7 +472,7 @@ describe("reference host strictness", () => {
     await upload.started;
     const first = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "race.docx" });
     await client.lock({ wopiSrc: first.url, accessToken: TOKEN, lock: "holder" });
-    const before = [...host.files.values()].find((file) => file.name === first.name);
+    const before = [...host.files.values()].find((file) => file.name === first.name)!;
     const snapshot = { ...before };
     upload.finish();
     const second = await pending;
