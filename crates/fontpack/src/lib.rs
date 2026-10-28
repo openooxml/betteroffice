@@ -243,6 +243,7 @@ pub fn decode_face(
     codec: Codec,
     max_output: usize,
 ) -> Result<Decoded, DecodeError> {
+    let max_output = face_limit(codec, max_output);
     let payload = decode(frame, dict, max_output)?;
     match codec {
         Codec::Zstd => Ok(Decoded {
@@ -256,6 +257,15 @@ pub fn decode_face(
                 payload: Some(payload),
             })
         }
+    }
+}
+
+pub const WOFF2T_MAX_OUTPUT: usize = 64 << 20;
+
+fn face_limit(codec: Codec, max_output: usize) -> usize {
+    match codec {
+        Codec::Zstd => max_output,
+        Codec::Woff2tZstd => max_output.min(WOFF2T_MAX_OUTPUT),
     }
 }
 
@@ -286,7 +296,24 @@ fn reconstruct_woff2t(payload: &[u8], max_output: usize) -> Result<Vec<u8>, Deco
 
 #[cfg(test)]
 mod tests {
-    use super::{ZSTD_MAGIC, decode};
+    use super::{Codec, DecodeError, WOFF2T_MAX_OUTPUT, ZSTD_MAGIC, decode, decode_face};
+
+    #[test]
+    fn woff2t_faces_are_capped_whatever_the_caller_allows() {
+        let size = (WOFF2T_MAX_OUTPUT + 1) as u32;
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.push(0xa4);
+        frame.extend_from_slice(&size.to_le_bytes());
+        frame.extend_from_slice(&[0x09, 0x00, 0x00, 0x41, 0, 0, 0, 0]);
+        assert!(matches!(
+            decode_face(&frame, None, Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
+        ));
+        assert!(!matches!(
+            decode_face(&frame, None, Codec::Zstd, 300 << 20),
+            Err(DecodeError::TooLarge { .. })
+        ));
+    }
 
     #[test]
     fn arbitrary_headers_never_panic() {

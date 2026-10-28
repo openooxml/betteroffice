@@ -77,7 +77,9 @@ TypeScript `maxOutput` is 64 MiB; Rust callers supply their own limit. Oversized
 frames fail before output allocation. Decoders reject missing checksums,
 corruption, truncation and output lengths that disagree with the header.
 For `woff2t+zstd`, `maxOutput` bounds both the zstd payload and the reconstructed
-font. Before wuff runs, an allocation-free preflight validates the WOFF2 header,
+font, and is never more than 64 MiB whatever the caller passes: reconstruction
+briefly holds the payload, the table stream and growing glyph buffers at once, and
+that cap keeps the peak well inside the decoder's 1 GiB memory. Before wuff runs, an allocation-free preflight validates the WOFF2 header,
 directory and all transformed glyph streams. There may be at most 256 tables;
 stored lengths must fit the raw table stream, and no original table length may
 exceed eight times the payload length. The declared sfnt size and the sum of
