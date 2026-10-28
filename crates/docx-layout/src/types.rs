@@ -1153,6 +1153,15 @@ pub struct SectionBreakBlock {
     pub columns: Option<ColumnLayout>,
 }
 
+impl SectionBreakBlock {
+    /// Whether block-SDT geometry replaces a missing caller section entry.
+    pub fn is_self_describing(&self) -> bool {
+        self.sdt_groups
+            .as_ref()
+            .is_some_and(|groups| !groups.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageBreakBlock {
@@ -2079,6 +2088,9 @@ pub struct LayoutOptions {
     /// footer other than the default one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_margins: Option<Vec<SectionPageMargins>>,
+    /// Variant body margins indexed by physical section when callers are shared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_section_page_margins: Option<Vec<SectionPageMargins>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_float_bands: Option<Vec<SectionPageFloatBands>>,
     #[serde(default)]

@@ -87,6 +87,11 @@ function isDisabled(element: HTMLElement): boolean {
   return element.getAttribute('aria-disabled') === 'true' || (element as HTMLButtonElement).disabled;
 }
 
+it('pins the editor root to ltr', () => {
+  const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} />);
+  expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
 describe('shortcut matching', () => {
   it('needs exactly the chord\'s modifiers', () => {
     const press = (init: KeyboardEventInit) => new KeyboardEvent('keydown', { key: 'b', ...init });

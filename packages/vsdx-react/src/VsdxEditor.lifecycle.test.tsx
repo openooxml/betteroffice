@@ -59,6 +59,11 @@ function turnSnapOff(view: ReturnType<typeof render>): void {
   fireEvent.click(view.container.querySelector('[data-view-toggle="snap"]') as HTMLElement);
 }
 
+test('pins the editor root to ltr', () => {
+  const view = render(<VsdxEditor fonts={[]} />);
+  expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
 test('does not reopen for inline fonts and a state-setting onReady callback', async () => {
   let ready: { handle: DiagramHandle } | undefined;
   opens = 0;
