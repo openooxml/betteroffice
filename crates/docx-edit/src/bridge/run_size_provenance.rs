@@ -69,31 +69,49 @@ pub(crate) fn paragraph_sizes(
     }
 
     impl Field {
+        fn kind(&self, name: &str) -> bool {
+            self.instruction
+                .split_whitespace()
+                .next()
+                .is_some_and(|instruction| instruction.eq_ignore_ascii_case(name))
+        }
+
         fn entry_result(&self) -> bool {
-            self.result
-                && !self
-                    .instruction
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|instruction| instruction.eq_ignore_ascii_case("PAGEREF"))
+            self.result && !self.kind("PAGEREF")
         }
     }
 
-    fn visit(
-        node: &XmlElement,
-        fields: &mut Vec<Field>,
-        found: &mut bool,
-        direct_cs: &mut bool,
-    ) -> bool {
+    #[derive(Default)]
+    struct Scan {
+        fields: Vec<Field>,
+        found: bool,
+        direct_cs: bool,
+        outside_text: bool,
+        closed: bool,
+    }
+
+    impl Scan {
+        fn close(&mut self) {
+            match self.fields.pop() {
+                None => self.closed = true,
+                Some(field) if self.fields.is_empty() && field.kind("TOC") => self.closed = true,
+                Some(_) => {}
+            }
+        }
+    }
+
+    fn visit(node: &XmlElement, scan: &mut Scan) -> bool {
         if node.matches_name("w", "fldSimple") {
-            fields.push(Field {
+            let field = Field {
                 instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
                 result: true,
-            });
-            let valid = node
-                .child_elements()
-                .all(|child| visit(child, fields, found, direct_cs));
-            fields.pop();
+            };
+            if scan.fields.is_empty() && field.kind("TOC") && scan.outside_text {
+                return false;
+            }
+            scan.fields.push(field);
+            let valid = node.child_elements().all(|child| visit(child, scan));
+            scan.close();
             return valid;
         }
         if node.matches_name("w", "r") {
@@ -103,23 +121,26 @@ pub(crate) fn paragraph_sizes(
                 if child.matches_name("w", "fldChar") {
                     control = true;
                     match child.attribute(Some("w"), "fldCharType") {
-                        Some("begin") => fields.push(Field::default()),
+                        Some("begin") => scan.fields.push(Field::default()),
                         Some("separate") => {
-                            if fields.is_empty() {
-                                fields.push(Field::default());
+                            if scan.fields.is_empty() {
+                                scan.fields.push(Field::default());
                             }
-                            fields.last_mut().unwrap().result = true;
+                            let outermost = scan.fields.len() == 1;
+                            let field = scan.fields.last_mut().unwrap();
+                            field.result = true;
+                            if outermost && field.kind("TOC") && scan.outside_text {
+                                return false;
+                            }
                         }
-                        Some("end") => {
-                            fields.pop();
-                        }
+                        Some("end") => scan.close(),
                         _ => return false,
                     }
                 } else if child.matches_name("w", "instrText")
                     || child.matches_name("w", "delInstrText")
                 {
                     control = true;
-                    if let Some(field) = fields.last_mut() {
+                    if let Some(field) = scan.fields.last_mut() {
                         field.instruction.push_str(&child.text_content());
                     }
                 } else if child.matches_name("w", "t") || child.matches_name("w", "delText") {
@@ -131,30 +152,32 @@ pub(crate) fn paragraph_sizes(
                     text = true;
                 }
             }
-            if control || !text || !fields.last().is_none_or(Field::entry_result) {
+            if control || !text || !scan.fields.last().is_none_or(Field::entry_result) {
                 return true;
             }
-            *found = true;
+            if scan.fields.is_empty() {
+                if scan.closed {
+                    return false;
+                }
+                scan.outside_text = true;
+            }
+            scan.found = true;
             let properties = node.child("w", "rPr");
             if properties.is_some_and(|properties| properties.child("w", "sz").is_some()) {
                 return false;
             }
-            *direct_cs |=
+            scan.direct_cs |=
                 properties.is_some_and(|properties| properties.child("w", "szCs").is_some());
             return true;
         }
-        node.child_elements()
-            .all(|child| visit(child, fields, found, direct_cs))
+        node.child_elements().all(|child| visit(child, scan))
     }
 
-    let mut found = false;
-    let mut direct_cs = false;
-    (visit(paragraph, &mut Vec::new(), &mut found, &mut direct_cs) && found).then_some(
-        ParagraphSizes {
-            fingerprint,
-            direct_cs,
-        },
-    )
+    let mut scan = Scan::default();
+    (visit(paragraph, &mut scan) && scan.found).then_some(ParagraphSizes {
+        fingerprint,
+        direct_cs: scan.direct_cs,
+    })
 }
 
 #[cfg(test)]
@@ -465,6 +488,38 @@ mod tests {
                     assert!(proof.inherited(true), "{content}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn text_outside_the_toc_field_rejects_its_paragraph_proof() {
+        use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
+
+        let begin = concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        );
+        let entry = r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry</w:t></w:r>"#;
+        let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let body = r#"<w:hyperlink w:anchor="body"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Body link</w:t></w:r></w:hyperlink>"#;
+        let title = r#"<w:r><w:t>Contents</w:t></w:r>"#;
+        for (content, eligible) in [
+            (format!("{begin}{entry}{end}"), true),
+            (format!("{begin}{entry}"), true),
+            (format!("{entry}{end}"), true),
+            (format!("{begin}{entry}{end}{body}"), false),
+            (format!("{entry}{end}{body}"), false),
+            (format!("{title}{begin}{entry}"), false),
+        ] {
+            let xml = format!(
+                r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{content}</w:p>"#
+            );
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+            let proof = paragraph_sizes(document.root().unwrap(), [0; 32]);
+            assert_eq!(proof.is_some(), eligible, "{content}");
         }
     }
 
