@@ -158,9 +158,10 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
-/// Per row that starts a keep-with-next row chain (a row whose every cell
-/// ends in a keepNext paragraph, not inside a longer chain): the height of
-/// the chain's rows and the row that follows it.
+/// Per row that starts a keep-with-next row chain (a row whose first cell
+/// ends in a keepNext paragraph, as Word decides a row's keep with next,
+/// not inside a longer chain): the height of the chain's rows and the row
+/// that follows it.
 pub(crate) fn row_keep_chains(
     block: &TableBlock,
     measure: &TableExtent,
@@ -169,11 +170,10 @@ pub(crate) fn row_keep_chains(
     let keeps_next = |index: usize| {
         index + 1 < rows
             && block.rows.get(index).is_some_and(|row| {
-                !row.cells.is_empty()
-                    && row.cells.iter().all(|cell| {
-                        matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
-                            if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
-                    })
+                row.cells.first().is_some_and(|cell| {
+                    matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
+                        if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
+                })
             })
     };
     let mut chains = vec![None; rows];

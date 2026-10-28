@@ -2830,7 +2830,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn a_row_with_keep_next_in_only_one_cell_does_not_chain_to_the_next_row() {
+    fn a_row_with_keep_next_only_after_its_first_cell_does_not_chain_to_the_next_row() {
         let table = two_column_keep_table(&[
             (false, true),
             (false, true),
@@ -2848,7 +2848,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn a_row_with_keep_next_in_every_cell_still_chains_to_the_next_row() {
+    fn a_row_with_keep_next_in_every_cell_chains_to_the_next_row() {
         let table = two_column_keep_table(&[
             (true, true),
             (true, true),
@@ -2866,7 +2866,25 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn row_keep_chains_require_keep_next_in_every_cell() {
+    fn a_row_with_keep_next_in_its_first_cell_chains_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (true, false),
+            (true, false),
+            (true, false),
+            (true, false),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 1);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn row_keep_chains_follow_the_first_cell() {
         let chains = |table: serde_json::Value| {
             let measured: MeasuredBlock = serde_json::from_value(table).unwrap();
             let LayoutBlock::Table(block) = &measured.block else {
@@ -2881,6 +2899,8 @@ mod pagination_rule_tests {
         assert_eq!(chains(mixed), vec![None, None, None]);
         let every = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
         assert_eq!(chains(every), vec![Some((40.0, 2)), None, None]);
+        let first = two_column_keep_table(&[(true, false), (true, false), (false, false)]);
+        assert_eq!(chains(first), vec![Some((40.0, 2)), None, None]);
         let mut empty = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
         empty["block"]["rows"][0]["cells"] = json!([]);
         assert_eq!(chains(empty), vec![None, Some((20.0, 2)), None]);
