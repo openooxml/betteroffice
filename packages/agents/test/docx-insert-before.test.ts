@@ -342,3 +342,23 @@ test('insert before a list style anchor keeps inherited alignment out of direct 
     expect(item(doc, 'Plain before list').list).toBeUndefined();
   }
 });
+
+test('insert before preserves authored numbering even when it matches the anchor style', async () => {
+  const zip = await JSZip.loadAsync(await numberedStyleFixture());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const anchor = blockOf(xml, 'Style one');
+  zip.file('word/document.xml', xml.replace(anchor, anchor.replace('<w:pStyle w:val="ListNumber"/>', '<w:pStyle w:val="ListNumber"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr>')));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(doc, 'Style one').ref,
+    paragraphs: [{ text: 'With list style' }, { text: 'With normal style', style: 'Normal' }],
+  }] });
+  const saved = await xmlOf(doc);
+  for (const text of ['With list style', 'With normal style']) {
+    expect(item(doc, text).list).toEqual({ level: 0 });
+    const pPr = pPrOf(blockOf(saved, text));
+    expect(pPr).toContain('<w:numPr>');
+    expect(pPr).toContain('<w:ilvl w:val="0"/>');
+    expect(pPr).toContain('<w:numId w:val="3"/>');
+  }
+});

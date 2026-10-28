@@ -366,15 +366,22 @@ const DIRECT_FLATTENED = new Set([...PARAGRAPH_PROPERTIES, 'cnfStyle', 'adjustRi
 function directProperties(anchor: Record<string, unknown>, inherited: ParagraphFormatting | undefined): Record<string, unknown> {
   const original = anchor._originalFormatting;
   const direct: Record<string, unknown> = { ...(original && typeof original === 'object' ? original : {}) };
-  for (const key of ['alignment', 'numPr', 'widowControl', 'autoSpaceDE', 'autoSpaceDN', 'adjustRightInd', 'bidi', 'cnfStyle'] as const) {
+  for (const key of ['alignment', 'widowControl', 'autoSpaceDE', 'autoSpaceDN', 'adjustRightInd', 'bidi', 'cnfStyle'] as const) {
     const value = anchor[key] ?? undefined;
     if (JSON.stringify(value ?? null) !== JSON.stringify(direct[key] ?? inherited?.[key] ?? null)) direct[key] = value;
   }
-  const sameNumPr = (left: unknown, right: unknown) => left != null && right != null && JSON.stringify(left) === JSON.stringify(right);
-  if (sameNumPr(direct.numPr, direct.numPrFromStyle) || sameNumPr(anchor.numPr, anchor.numPrFromStyle)) {
+  const sameNumPr = (left: unknown, right: unknown) => {
+    const a = left as ParagraphFormatting['numPr'] | null;
+    const b = right as ParagraphFormatting['numPr'] | null;
+    return a != null && b != null && a.numId === b.numId && (a.ilvl ?? 0) === (b.ilvl ?? 0);
+  };
+  const styleNumbering = direct.numPrFromStyle ?? anchor.numPrFromStyle;
+  if ((direct.numPr == null || sameNumPr(direct.numPr, styleNumbering)) && sameNumPr(anchor.numPr, styleNumbering ?? inherited?.numPr)) {
     delete direct.numPr;
-    delete direct.numPrFromStyle;
+  } else if (!sameNumPr(anchor.numPr, direct.numPr)) {
+    direct.numPr = anchor.numPr ?? undefined;
   }
+  delete direct.numPrFromStyle;
   return Object.fromEntries(Object.entries(direct).filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
 }
 
@@ -428,7 +435,8 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
   let created: DocxParagraphTarget[] = [];
   let inherited: Record<string, unknown>[] = [];
   try {
-    const direct = directProperties(markProperties, inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph));
+    const anchorInherited = inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph);
+    const direct = directProperties(markProperties, anchorInherited);
     const effective = paragraphs.map(({ styleId }) => styleId ?? anchorStyle);
     const numbered = effective.map(style => inheritance.paragraphFormatting(style, undefined)?.numPr != null);
     inherited = effective.map(style => inheritance.attributes(style, null, anchor.tableRun));
@@ -441,7 +449,12 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
     const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
     created.forEach((entry, index) => {
       if (!paragraphs[index].styleId && numbered[index] && seededStyles[index] !== effective[index]) {
-        applyCopiedProperties(draft, target.story, [entry], copiedProperties(markProperties, direct), COPIED_PROPERTIES);
+        const properties = copiedProperties(markProperties, direct);
+        if (!('numPr' in direct)) {
+          properties.numPr = markProperties.numPr ?? anchorInherited?.numPr ?? null;
+          properties.numPrFromStyle = properties.numPr;
+        } else properties.numPrFromStyle = null;
+        applyCopiedProperties(draft, target.story, [entry], properties, COPIED_PROPERTIES);
       } else {
         applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
       }
