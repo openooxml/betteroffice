@@ -487,7 +487,7 @@ export async function createResidentEngineSession(
         for (const listener of [...listeners]) {
           if (!listeners.has(listener)) continue;
           try {
-            listener(update, origin);
+            listener(update.slice(), origin);
           } catch {}
         }
       } finally {
