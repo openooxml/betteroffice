@@ -91,6 +91,8 @@ export interface OpenPresentationOptions {
    * and `save()` throws.
    */
   initialUpdate?: Uint8Array;
+  /** @internal Retains the source bytes for `fork()` and `layouts()`; worker sessions pass false. */
+  retainSource?: boolean;
 }
 
 export type UndoCaptureMode = 'auto' | 'manual';
@@ -695,11 +697,12 @@ function openPresentationInternal(
     observerInstalled = false;
   };
 
-  const sourceBytes = new Uint8Array(bytes);
+  const sourceBytes = peer || options.retainSource === false ? undefined : new Uint8Array(bytes);
   let collaborative = false;
   const handle: PresentationHandle = {
     fork() {
       assertAlive();
+      if (!sourceBytes) throw new Error('Presentation source is unavailable for fork');
       const forked = openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
       if (collaborative) forked.setCollaborative();
       return forked;
@@ -713,6 +716,7 @@ function openPresentationInternal(
     },
     layouts() {
       assertAlive();
+      if (!sourceBytes) throw new Error('Presentation source is unavailable for layouts');
       type LayoutShape = { id: number; name: string; placeholder?: { placeholderType: string | null; index: number | null } | null; children?: LayoutShape[] };
       const placeholders = (shapes: LayoutShape[]): ReturnType<PresentationHandle['layouts']>[number]['placeholders'] => shapes.flatMap(shape => [
         ...(shape.placeholder ? [{ id: String(shape.id), name: shape.name, type: shape.placeholder.placeholderType, idx: shape.placeholder.index }] : []),

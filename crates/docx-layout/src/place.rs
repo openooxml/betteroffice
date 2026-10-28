@@ -482,7 +482,16 @@ fn origin_paginator(
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(indices) = &plan.region_section_indices {
+        paginator.set_region_section_indices(indices.clone());
+    }
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator.set_physical_section_page_margins(
+        options
+            .physical_section_page_margins
+            .clone()
+            .unwrap_or_default(),
+    );
     paginator
         .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
@@ -748,8 +757,17 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                     start.section_index,
                     options.footnote_reserved_heights.clone(),
                 )?;
+                if let Some(indices) = &plan.region_section_indices {
+                    paginator.set_region_section_indices(indices.clone());
+                }
                 paginator.set_section_page_margins(
                     options.section_page_margins.clone().unwrap_or_default(),
+                );
+                paginator.set_physical_section_page_margins(
+                    options
+                        .physical_section_page_margins
+                        .clone()
+                        .unwrap_or_default(),
                 );
                 paginator.set_section_page_float_bands(
                     options.section_page_float_bands.clone().unwrap_or_default(),
@@ -1237,11 +1255,7 @@ fn place<F: PartialEq>(
             LayoutBlock::SectionBreak(block) => {
                 // the NEXT section's columns and its own start type
                 let next_type = break_type_after_section(plan, section_idx);
-                let restart = plan
-                    .section_page_restarts
-                    .get(section_idx + 1)
-                    .copied()
-                    .flatten();
+                let restart = plan.section_page_restart(section_idx + 1);
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
@@ -2778,6 +2792,132 @@ mod pagination_rule_tests {
             })
             .next_back();
         assert_eq!(last_row_end, Some(2));
+    }
+
+    fn two_column_keep_table(keeps: &[(bool, bool)]) -> serde_json::Value {
+        let cell = |row: usize, column: usize, keep_next: bool| {
+            json!({ "id": 30 + 2 * row + column, "blocks": [{
+                "kind": "paragraph", "id": 50 + 2 * row + column,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                "attrs": { "keepNext": keep_next, "widowControl": false },
+            }] })
+        };
+        let extent = || {
+            json!({ "height": 20, "cells": [
+                { "width": 90, "height": 20,
+                  "blocks": [{ "kind": "paragraph", "lines": [line(20.0)], "totalHeight": 20 }] },
+                { "width": 90, "height": 20,
+                  "blocks": [{ "kind": "paragraph", "lines": [line(20.0)], "totalHeight": 20 }] },
+            ] })
+        };
+        json!({
+            "block": {
+                "kind": "table", "id": 2,
+                "rows": keeps.iter().enumerate().map(|(row, (first, second))| {
+                    json!({ "id": 20 + row, "cells": [cell(row, 0, *first), cell(row, 1, *second)] })
+                }).collect::<Vec<_>>(),
+                "columnWidths": [90, 90],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [90, 90],
+                "totalWidth": 180, "totalHeight": 20 * keeps.len(),
+                "rows": keeps.iter().map(|_| extent()).collect::<Vec<_>>(),
+            },
+        })
+    }
+
+    fn table_fragment_rows(result: &Layout) -> Vec<(usize, usize, usize)> {
+        result
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, value)| {
+                value
+                    .fragments
+                    .iter()
+                    .filter_map(move |fragment| match fragment {
+                        Fragment::Table(table) => Some((page, table.row_start, table.row_end)),
+                        _ => None,
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_row_with_keep_next_only_after_its_first_cell_does_not_chain_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (false, true),
+            (false, true),
+            (false, true),
+            (false, true),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 0);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn a_row_with_keep_next_in_every_cell_chains_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, true),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 1);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn a_row_with_keep_next_in_its_first_cell_chains_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (true, false),
+            (true, false),
+            (true, false),
+            (true, false),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 1);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn row_keep_chains_follow_the_first_cell() {
+        let chains = |table: serde_json::Value| {
+            let measured: MeasuredBlock = serde_json::from_value(table).unwrap();
+            let LayoutBlock::Table(block) = &measured.block else {
+                panic!("table block expected");
+            };
+            let BlockExtent::Table(measure) = &measured.measure else {
+                panic!("table measure expected");
+            };
+            hooks::row_keep_chains(block, measure)
+        };
+        let mixed = two_column_keep_table(&[(false, true), (false, true), (false, false)]);
+        assert_eq!(chains(mixed), vec![None, None, None]);
+        let every = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
+        assert_eq!(chains(every), vec![Some((40.0, 2)), None, None]);
+        let first = two_column_keep_table(&[(true, false), (true, false), (false, false)]);
+        assert_eq!(chains(first), vec![Some((40.0, 2)), None, None]);
+        let mut empty = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
+        empty["block"]["rows"][0]["cells"] = json!([]);
+        assert_eq!(chains(empty), vec![None, Some((20.0, 2)), None]);
     }
 
     #[test]

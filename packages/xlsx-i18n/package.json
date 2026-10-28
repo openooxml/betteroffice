@@ -15,9 +15,17 @@
       "types": "./dist/en.d.mts",
       "import": "./dist/en.mjs"
     },
+    "./ar": {
+      "types": "./dist/ar.d.mts",
+      "import": "./dist/ar.mjs"
+    },
     "./de": {
       "types": "./dist/de.d.mts",
       "import": "./dist/de.mjs"
+    },
+    "./es": {
+      "types": "./dist/es.d.mts",
+      "import": "./dist/es.mjs"
     },
     "./fr": {
       "types": "./dist/fr.d.mts",
@@ -35,6 +43,22 @@
       "types": "./dist/id.d.mts",
       "import": "./dist/id.mjs"
     },
+    "./it": {
+      "types": "./dist/it.d.mts",
+      "import": "./dist/it.mjs"
+    },
+    "./ja": {
+      "types": "./dist/ja.d.mts",
+      "import": "./dist/ja.mjs"
+    },
+    "./ko": {
+      "types": "./dist/ko.d.mts",
+      "import": "./dist/ko.mjs"
+    },
+    "./nl": {
+      "types": "./dist/nl.d.mts",
+      "import": "./dist/nl.mjs"
+    },
     "./pl": {
       "types": "./dist/pl.d.mts",
       "import": "./dist/pl.mjs"
@@ -43,13 +67,29 @@
       "types": "./dist/pt-BR.d.mts",
       "import": "./dist/pt-BR.mjs"
     },
+    "./ru": {
+      "types": "./dist/ru.d.mts",
+      "import": "./dist/ru.mjs"
+    },
     "./tr": {
       "types": "./dist/tr.d.mts",
       "import": "./dist/tr.mjs"
     },
+    "./uk": {
+      "types": "./dist/uk.d.mts",
+      "import": "./dist/uk.mjs"
+    },
+    "./vi": {
+      "types": "./dist/vi.d.mts",
+      "import": "./dist/vi.mjs"
+    },
     "./zh-CN": {
       "types": "./dist/zh-CN.d.mts",
       "import": "./dist/zh-CN.mjs"
+    },
+    "./zh-TW": {
+      "types": "./dist/zh-TW.d.mts",
+      "import": "./dist/zh-TW.mjs"
     },
     "./package.json": "./package.json"
   },

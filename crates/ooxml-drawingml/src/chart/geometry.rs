@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::GeometryPathCommand;
+use crate::fmath;
 
 use super::model::ChartSpace;
 
@@ -2621,7 +2622,7 @@ impl ValueScale {
     fn fraction(&self, value: f64) -> f64 {
         let raw = match self.log_base {
             Some(base) if base > 1.0 && self.min > 0.0 && self.max > self.min => {
-                let log = |value: f64| value.max(f64::MIN_POSITIVE).log(base);
+                let log = |value: f64| fmath::log(value.max(f64::MIN_POSITIVE), base);
                 (log(value.max(self.min)) - log(self.min)) / (log(self.max) - log(self.min))
             }
             _ if !(self.max - self.min).is_finite() => {
@@ -2749,7 +2750,7 @@ fn nice_unit(rough: f64) -> f64 {
     if rough <= 0.0 || !rough.is_finite() {
         return 1.0;
     }
-    let decade = 10.0_f64.powf(rough.log10().floor());
+    let decade = fmath::pow(10.0, fmath::log10(rough).floor());
     // 0.5 / 0.1 is 5.000000000000001.
     let scaled = rough / decade * (1.0 - 1e-9);
     let nice = if scaled <= 1.0 {
@@ -2778,7 +2779,7 @@ fn excel_unit(range: f64) -> f64 {
     if !range.is_finite() || range <= 0.0 {
         return 1.0;
     }
-    let major = 10.0_f64.powf(range.log10().round() - 1.0);
+    let major = fmath::pow(10.0, fmath::log10(range).round() - 1.0);
     let steps = range / major;
     if steps >= 20.0 {
         major * 5.0
@@ -3029,11 +3030,11 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
         return overflow_axis_ticks(scale, unit);
     }
     if let Some(base) = scale.log_base {
-        let first = scale.min.log(base).ceil();
-        let last = scale.max.log(base).floor();
+        let first = fmath::log(scale.min, base).ceil();
+        let last = fmath::log(scale.max, base).floor();
         if last >= first && (last - first) < MAX_PLOT_AXIS_TICKS as f64 {
             let ticks: Vec<f64> = (0..=(last - first) as usize)
-                .map(|step| base.powf(first + step as f64))
+                .map(|step| fmath::pow(base, first + step as f64))
                 .filter(|value| value.is_finite())
                 .collect();
             if ticks.len() >= 2 {
@@ -3072,11 +3073,11 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
 
 fn overflow_axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     if let Some(base) = scale.log_base {
-        let first = scale.min.log(base).ceil();
-        let last = scale.max.log(base).floor();
+        let first = fmath::log(scale.min, base).ceil();
+        let last = fmath::log(scale.max, base).floor();
         if last >= first && (last - first) < MAX_PLOT_AXIS_TICKS as f64 {
             let ticks: Vec<f64> = (0..=(last - first) as usize)
-                .map(|step| base.powf(first + step as f64))
+                .map(|step| fmath::pow(base, first + step as f64))
                 .filter(|value| value.is_finite())
                 .collect();
             if ticks.len() >= 2 {
@@ -3775,12 +3776,13 @@ fn pie_label_reach(
     if position == Some("ctr") {
         return r / 2.0;
     }
-    let (sin, cos) = middle.sin_cos();
-    let farthest = |d: f64| (d * cos.abs() + half_w).hypot(d * sin.abs() + half_h);
+    let (sin, cos) = fmath::sin_cos(middle);
+    let farthest = |d: f64| fmath::hypot(d * cos.abs() + half_w, d * sin.abs() + half_h);
     let nearest = |d: f64| {
-        (d * cos.abs() - half_w)
-            .max(0.0)
-            .hypot((d * sin.abs() - half_h).max(0.0))
+        fmath::hypot(
+            (d * cos.abs() - half_w).max(0.0),
+            (d * sin.abs() - half_h).max(0.0),
+        )
     };
     let gap = if position == Some("inEnd") {
         PIE_LABEL_INSIDE_GAP
@@ -3806,8 +3808,8 @@ fn pie_label_reach(
             || (clear_of_centre
                 && [-half_w, half_w].into_iter().all(|dx| {
                     [-half_h, half_h].into_iter().all(|dy| {
-                        let angle = (inside * sin + dy).atan2(inside * cos + dx) - middle;
-                        angle.sin().atan2(angle.cos()).abs() <= sweep / 2.0
+                        let angle = fmath::atan2(inside * sin + dy, inside * cos + dx) - middle;
+                        fmath::atan2(fmath::sin(angle), fmath::cos(angle)).abs() <= sweep / 2.0
                     })
                 })));
     if position == Some("inEnd") || (position != Some("outEnd") && fits) {
@@ -4595,7 +4597,10 @@ fn emit_radar<S: PlotSink + ?Sized>(
     let at = |index: usize, value: f64| {
         let reach = radius * scale.ratio(value);
         let angle = angle(index);
-        (cx + reach * angle.cos(), cy + reach * angle.sin())
+        (
+            cx + reach * fmath::cos(angle),
+            cy + reach * fmath::sin(angle),
+        )
     };
 
     let rings = !family
@@ -4928,7 +4933,7 @@ fn polygon_path(cx: f64, cy: f64, r: f64, sides: usize, rotation: f64) -> Vec<Ge
     let mut commands = Vec::with_capacity(sides + 1);
     for index in 0..sides {
         let angle = rotation + std::f64::consts::TAU * index as f64 / sides as f64;
-        let (x, y) = (cx + r * angle.cos(), cy + r * angle.sin());
+        let (x, y) = (cx + r * fmath::cos(angle), cy + r * fmath::sin(angle));
         commands.push(if index == 0 {
             GeometryPathCommand::Move { x, y }
         } else {
@@ -4983,7 +4988,10 @@ fn star_path(cx: f64, cy: f64, r: f64) -> Vec<GeometryPathCommand> {
     for index in 0..10 {
         let reach = if index % 2 == 0 { r } else { r * 0.42 };
         let angle = -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * index as f64 / 5.0;
-        let (x, y) = (cx + reach * angle.cos(), cy + reach * angle.sin());
+        let (x, y) = (
+            cx + reach * fmath::cos(angle),
+            cy + reach * fmath::sin(angle),
+        );
         commands.push(if index == 0 {
             GeometryPathCommand::Move { x, y }
         } else {
@@ -5011,7 +5019,7 @@ fn cross_path(cx: f64, cy: f64, r: f64, rotation: f64) -> Vec<GeometryPathComman
         (-1.0, -ARM),
         (-ARM, -ARM),
     ];
-    let (sin, cos) = rotation.sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation);
     let mut commands = Vec::with_capacity(corners.len() + 1);
     for (index, (dx, dy)) in corners.into_iter().enumerate() {
         let (x, y) = (
@@ -5123,7 +5131,10 @@ fn emit_pie<S: PlotSink + ?Sized>(
         let sweep = (value / total) * std::f64::consts::TAU;
         let middle = angle + sweep / 2.0;
         let offset = r * series.explosion(index) / 100.0;
-        let (ox, oy) = (cx + offset * middle.cos(), cy + offset * middle.sin());
+        let (ox, oy) = (
+            cx + offset * fmath::cos(middle),
+            cy + offset * fmath::sin(middle),
+        );
         // Varied slices arrive as points; a slice without one keeps the
         // series' own fill.
         let color = series.point_color(index, index);
@@ -5169,8 +5180,8 @@ fn emit_pie<S: PlotSink + ?Sized>(
                 middle,
                 sweep,
             );
-            let left = ox + reach * middle.cos() - box_width / 2.0 + key_width;
-            let baseline = oy + reach * middle.sin() + style.font.size_px * 0.34;
+            let left = ox + reach * fmath::cos(middle) - box_width / 2.0 + key_width;
+            let baseline = oy + reach * fmath::sin(middle) + style.font.size_px * 0.34;
             push_legend_key(ops, series, index, index, left, baseline);
             let top = baseline - step * (lines.len() - 1) as f64 / 2.0;
             for (line, text) in lines.iter().enumerate() {
@@ -5203,33 +5214,33 @@ fn pie_wedge_path(
     let mut path = Vec::new();
     if inner_r > 0.0 {
         path.push(GeometryPathCommand::Move {
-            x: cx + r * start.cos(),
-            y: cy + r * start.sin(),
+            x: cx + r * fmath::cos(start),
+            y: cy + r * fmath::sin(start),
         });
     } else {
         path.push(GeometryPathCommand::Move { x: cx, y: cy });
         path.push(GeometryPathCommand::Line {
-            x: cx + r * start.cos(),
-            y: cy + r * start.sin(),
+            x: cx + r * fmath::cos(start),
+            y: cy + r * fmath::sin(start),
         });
     }
     for i in 1..=steps {
         let a = start + (end - start) * i as f64 / steps as f64;
         path.push(GeometryPathCommand::Line {
-            x: cx + r * a.cos(),
-            y: cy + r * a.sin(),
+            x: cx + r * fmath::cos(a),
+            y: cy + r * fmath::sin(a),
         });
     }
     if inner_r > 0.0 {
         path.push(GeometryPathCommand::Line {
-            x: cx + inner_r * end.cos(),
-            y: cy + inner_r * end.sin(),
+            x: cx + inner_r * fmath::cos(end),
+            y: cy + inner_r * fmath::sin(end),
         });
         for i in (0..steps).rev() {
             let a = start + (end - start) * i as f64 / steps as f64;
             path.push(GeometryPathCommand::Line {
-                x: cx + inner_r * a.cos(),
-                y: cy + inner_r * a.sin(),
+                x: cx + inner_r * fmath::cos(a),
+                y: cy + inner_r * fmath::sin(a),
             });
         }
     }
@@ -5435,7 +5446,7 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     let digits = fraction_pattern.map_or(0, |fraction| fraction.len().min(9));
     let percent = codes.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
-    let factor = 10_f64.powi(digits as i32);
+    let factor = fmath::powi(10.0, digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
     let mut body = placeholder_digits(rounded, whole_pattern, fraction_pattern, digits);
     if codes.contains(',') {
@@ -8732,8 +8743,8 @@ mod tests {
 
     fn pie_label_distances((x, y, half_w, half_h): (f64, f64, f64, f64)) -> (f64, f64) {
         (
-            ((x.abs() - half_w).max(0.0)).hypot((y.abs() - half_h).max(0.0)),
-            (x.abs() + half_w).hypot(y.abs() + half_h),
+            fmath::hypot((x.abs() - half_w).max(0.0), (y.abs() - half_h).max(0.0)),
+            fmath::hypot(x.abs() + half_w, y.abs() + half_h),
         )
     }
 
@@ -8893,7 +8904,7 @@ mod tests {
                 for box_ in boxes {
                     let (nearest, farthest) = pie_label_distances(box_);
                     let (actual, expected) = match position {
-                        Some("ctr") => (box_.0.hypot(box_.1), r * 0.5),
+                        Some("ctr") => (fmath::hypot(box_.0, box_.1), r * 0.5),
                         Some("inEnd") => (farthest, r - 10.0),
                         Some("outEnd") => (nearest, r + 4.0 + 0.04 * r),
                         _ => (farthest, r - 7.0),
@@ -8952,7 +8963,7 @@ mod tests {
         assert_eq!(centres.len(), 2);
         for (dx, dy) in centres {
             assert!(
-                dx.hypot(dy) > r,
+                fmath::hypot(dx, dy) > r,
                 "label centre {dx}, {dy} inside radius {r}"
             );
         }
@@ -8970,7 +8981,7 @@ mod tests {
             ] {
                 let (r, boxes) = pie_label_geometry(&[1.0; 4], position, Some(hole), 0.0, true);
                 for (x, y, ..) in boxes {
-                    assert!((x.hypot(y) - r * (1.0 + hole / 100.0) / 2.0).abs() < 2.0);
+                    assert!((fmath::hypot(x, y) - r * (1.0 + hole / 100.0) / 2.0).abs() < 2.0);
                 }
             }
         }
@@ -9024,7 +9035,7 @@ mod tests {
                 for (value, (x, y, ..)) in values.into_iter().zip(boxes) {
                     let sweep = value / 100.0 * std::f64::consts::TAU;
                     let middle = angle + sweep / 2.0;
-                    assert!((x * middle.sin() - y * middle.cos()).abs() < 1.0);
+                    assert!((x * fmath::sin(middle) - y * fmath::cos(middle)).abs() < 1.0);
                     angle += sweep;
                 }
             }

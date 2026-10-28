@@ -337,6 +337,8 @@ pub enum InlineKind {
         relationship_id: Option<String>,
         part: Option<String>,
         external_target: Option<String>,
+        #[serde(default)]
+        drawing: Option<crate::DrawingProperties>,
     },
     ContentControl {
         control: ControlMetadata,
@@ -345,6 +347,8 @@ pub enum InlineKind {
     Unsupported {
         element: String,
         alt_text: Option<String>,
+        #[serde(default)]
+        drawing: Option<crate::DrawingProperties>,
     },
 }
 

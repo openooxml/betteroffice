@@ -410,6 +410,7 @@ export const ToolbarDropdownBase = forwardRef<DropdownHandle, ToolbarDropdownPro
         {open &&
           createPortal(
             <div
+              dir="ltr"
               ref={setPopupRef}
               id={popupId}
               role={kind}

@@ -1,6 +1,7 @@
 //! native raster backend: paints a display list to a png via tiny-skia.
 //! server-side twin of the browser's canvas backend; never enters the wasm build.
 
+mod fmath;
 mod font;
 use std::collections::{HashMap, hash_map::Entry};
 

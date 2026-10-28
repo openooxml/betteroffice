@@ -360,7 +360,13 @@ impl ShapeNode {
 pub struct ShapeBase {
     pub id: u32,
     pub name: String,
+    /// `cNvPr/@title`, the alternative-text title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: Option<String>,
+    /// True when `cNvPr` carries the a16 decorative extension.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
     pub hidden: bool,
     pub placeholder: Option<Placeholder>,
     pub transform: ShapeTransform,

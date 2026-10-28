@@ -2,8 +2,6 @@
   "_lang": "en",
   "toolbar": {
     "actionsLabel": "Spreadsheet actions",
-    "fileActionsLabel": "File actions",
-    "historyLabel": "History",
     "searchMenus": "Search menus",
     "print": "Print",
     "paintFormat": "Paint format",
@@ -143,6 +141,7 @@
       "proposalStale": "Cells changed since this was proposed.",
       "renderFailed": "The sheet could not be drawn for printing.",
       "commandFailed": "The change could not be applied.",
+      "commandRefused": "Command was refused",
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
       "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
       "pluginUnavailable": "The plugin is no longer active.",
@@ -161,12 +160,14 @@
     "reloadPage": "Reload page",
     "showDetails": "Show details",
     "openPrompt": "Open an XLSX file",
-    "sheetTabsLabel": "Sheets"
+    "sheetTabsLabel": "Sheets",
+    "clearExceedsLimit": "Clear exceeds the cell limit"
   },
   "presence": {
     "label": "Collaborators",
     "unavailableSheet": "Unavailable sheet",
-    "peerOnSheet": "{name} ({sheet})"
+    "peerOnSheet": "{name} ({sheet})",
+    "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}"
   },
   "proposals": {
     "panelLabel": "Agent proposals",

@@ -1,0 +1,57 @@
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+
+fn main() {
+    println!("cargo:rerun-if-changed=../../vendor/zstd/zstddeclib.c");
+    println!("cargo:rerun-if-changed=wasm-include");
+
+    let source = fs::read_to_string("../../vendor/zstd/zstddeclib.c")
+        .expect("vendor zstd first with bash scripts/fonts/vendor-zstd.sh");
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let source_path = output.join("fontpack_zstd.c");
+    fs::write(&source_path, namespace(&source)).expect("write namespaced zstd decoder");
+
+    let target = env::var("TARGET").expect("TARGET");
+    let mut build = cc::Build::new();
+    build
+        .file(source_path)
+        .define("ZSTD_LEGACY_SUPPORT", "0")
+        .define("ZSTD_MULTITHREAD", "0")
+        .warnings(false);
+    if target.starts_with("wasm32") {
+        build.define("ZSTD_NO_INLINE", "1").flag("-Oz");
+    }
+    if target == "wasm32-unknown-unknown" {
+        build.include("wasm-include").flag("-ffreestanding");
+        println!("cargo:rustc-link-arg-cdylib=--max-memory=1073741824");
+    }
+    build.compile("fontpack_zstd");
+}
+
+// Isolate decoder symbols from the full zstd compressor linked by the build tool.
+fn namespace(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut start = 0;
+    for (index, ch) in source.char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            continue;
+        }
+        push_token(&mut output, &source[start..index]);
+        output.push(ch);
+        start = index + ch.len_utf8();
+    }
+    push_token(&mut output, &source[start..]);
+    output
+}
+
+fn push_token(output: &mut String, token: &str) {
+    if ["ZSTD_", "FSE_", "HUF_", "HIST_", "ERR_"]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+        && token.bytes().any(|byte| byte.is_ascii_lowercase())
+    {
+        output.push_str("FONTPACK_");
+    }
+    output.push_str(token);
+}

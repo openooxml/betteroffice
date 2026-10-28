@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use crate::GeometryPathCommand;
+use crate::fmath;
 
 pub(super) fn paths(
     kind: &str,
@@ -546,8 +547,8 @@ fn teardrop(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPat
     let th = h / 2.0 * 2.0f64.sqrt();
     let sw = tw * a / 100000.0;
     let sh = th * a / 100000.0;
-    let dx1 = sw * ooxml_angle(2700000.0).cos();
-    let dy1 = sh * ooxml_angle(2700000.0).sin();
+    let dx1 = sw * fmath::cos(ooxml_angle(2700000.0));
+    let dy1 = sh * fmath::sin(ooxml_angle(2700000.0));
     let x1 = w / 2.0 + dx1;
     let y1 = h / 2.0 - dy1;
     let x2 = (w / 2.0 + x1) / 2.0;
@@ -1281,9 +1282,9 @@ fn swoosh_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<PresetG
     let x_b: f64 = w + 0.0 - ad2;
     let y_b: f64 = 0.0 + (100000.0 / 8.0) - 0.0;
     let alfa: f64 = divide(5400000.0 * 1.0, 14.0);
-    let dx0: f64 = (100000.0 / 8.0) * ooxml_angle(alfa).tan();
+    let dx0: f64 = (100000.0 / 8.0) * fmath::tan(ooxml_angle(alfa));
     let x_c: f64 = x_b + 0.0 - dx0;
-    let dx1: f64 = ad1 * ooxml_angle(alfa).tan();
+    let dx1: f64 = ad1 * fmath::tan(ooxml_angle(alfa));
     let y_f: f64 = y_b + ad1 - 0.0;
     let x_f: f64 = x_b + dx1 - 0.0;
     let x_e: f64 = x_f + dx0 - 0.0;
@@ -1351,7 +1352,7 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let u10: f64 = divide(u4 * 1.0, dx_h);
     let u11: f64 = divide(u10 * 1.0, dy_h);
     let u12: f64 = divide(1.0 + u9, u11);
-    let u13: f64 = f64::atan2(u12, 1.0).to_degrees() * 60000.0;
+    let u13: f64 = fmath::atan2(u12, 1.0).to_degrees() * 60000.0;
     let u14: f64 = u13 + 21600000.0 - 0.0;
     let u15: f64 = if u13 > 0.0 { u13 } else { u14 };
     let u16: f64 = u15 + 0.0 - en_ang;
@@ -1369,12 +1370,12 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let (dx_e, dy_e) = elliptical_point(ooxml_angle(st_ang), rw1, rh1, frame);
     let x_e: f64 = (w / 2.0) + dx_e - 0.0;
     let y_e: f64 = (h / 2.0) + dy_e - 0.0;
-    let dx_g: f64 = thh * ooxml_angle(pt_ang).cos();
-    let dy_g: f64 = thh * ooxml_angle(pt_ang).sin();
+    let dx_g: f64 = thh * fmath::cos(ooxml_angle(pt_ang));
+    let dy_g: f64 = thh * fmath::sin(ooxml_angle(pt_ang));
     let x_g: f64 = x_h + dx_g - 0.0;
     let y_g: f64 = y_h + dy_g - 0.0;
-    let dx_b: f64 = thh * ooxml_angle(pt_ang).cos();
-    let dy_b: f64 = thh * ooxml_angle(pt_ang).sin();
+    let dx_b: f64 = thh * fmath::cos(ooxml_angle(pt_ang));
+    let dy_b: f64 = thh * fmath::sin(ooxml_angle(pt_ang));
     let x_b: f64 = x_h + 0.0 - dx_b;
     let y_b: f64 = y_h + 0.0 - dy_b;
     let sx1: f64 = x_b + 0.0 - (w / 2.0);
@@ -1388,7 +1389,7 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let y2_o: f64 = divide(sy2 * r_o, rh1);
     let dx_o: f64 = x2_o + 0.0 - x1_o;
     let dy_o: f64 = y2_o + 0.0 - y1_o;
-    let d_o: f64 = f64::hypot(dx_o, dy_o).hypot(0.0);
+    let d_o: f64 = fmath::hypot(fmath::hypot(dx_o, dy_o), 0.0);
     let q1: f64 = divide(x1_o * y2_o, 1.0);
     let q2: f64 = divide(x2_o * y1_o, 1.0);
     let det_o: f64 = q1 + 0.0 - q2;
@@ -1417,8 +1418,8 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let q17: f64 = x2_o + 0.0 - dx_f2;
     let q18: f64 = y2_o + 0.0 - dy_f1;
     let q19: f64 = y2_o + 0.0 - dy_f2;
-    let q20: f64 = f64::hypot(q16, q18).hypot(0.0);
-    let q21: f64 = f64::hypot(q17, q19).hypot(0.0);
+    let q20: f64 = fmath::hypot(fmath::hypot(q16, q18), 0.0);
+    let q21: f64 = fmath::hypot(fmath::hypot(q17, q19), 0.0);
     let q22: f64 = q21 + 0.0 - q20;
     let dx_f: f64 = if q22 > 0.0 { dx_f1 } else { dx_f2 };
     let dy_f: f64 = if q22 > 0.0 { dy_f1 } else { dy_f2 };
@@ -1432,7 +1433,7 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let y2_i: f64 = divide(sy2 * r_i, rh2);
     let dx_i: f64 = x2_i + 0.0 - x1_i;
     let dy_i: f64 = y2_i + 0.0 - y1_i;
-    let d_i: f64 = f64::hypot(dx_i, dy_i).hypot(0.0);
+    let d_i: f64 = fmath::hypot(fmath::hypot(dx_i, dy_i), 0.0);
     let v1: f64 = divide(x1_i * y2_i, 1.0);
     let v2: f64 = divide(x2_i * y1_i, 1.0);
     let det_i: f64 = v1 + 0.0 - v2;
@@ -1459,8 +1460,8 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let v17: f64 = x1_i + 0.0 - dx_c2;
     let v18: f64 = y1_i + 0.0 - dy_c1;
     let v19: f64 = y1_i + 0.0 - dy_c2;
-    let v20: f64 = f64::hypot(v16, v18).hypot(0.0);
-    let v21: f64 = f64::hypot(v17, v19).hypot(0.0);
+    let v20: f64 = fmath::hypot(fmath::hypot(v16, v18), 0.0);
+    let v21: f64 = fmath::hypot(fmath::hypot(v17, v19), 0.0);
     let v22: f64 = v21 + 0.0 - v20;
     let dx_c: f64 = if v22 > 0.0 { dx_c1 } else { dx_c2 };
     let dy_c: f64 = if v22 > 0.0 { dy_c1 } else { dy_c2 };
@@ -1468,7 +1469,7 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let sdy_c: f64 = divide(dy_c * rh2, r_i);
     let x_c: f64 = (w / 2.0) + sdx_c - 0.0;
     let y_c: f64 = (h / 2.0) + sdy_c - 0.0;
-    let ist0: f64 = f64::atan2(sdy_c, sdx_c).to_degrees() * 60000.0;
+    let ist0: f64 = fmath::atan2(sdy_c, sdx_c).to_degrees() * 60000.0;
     let ist1: f64 = ist0 + 21600000.0 - 0.0;
     let ist_ang: f64 = if ist0 > 0.0 { ist0 } else { ist1 };
     let isw1: f64 = st_ang + 0.0 - ist_ang;
@@ -1476,14 +1477,14 @@ fn circular_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Prese
     let isw_ang: f64 = if isw1 > 0.0 { isw2 } else { isw1 };
     let p1: f64 = x_f + 0.0 - x_c;
     let p2: f64 = y_f + 0.0 - y_c;
-    let p3: f64 = f64::hypot(p1, p2).hypot(0.0);
+    let p3: f64 = fmath::hypot(fmath::hypot(p1, p2), 0.0);
     let p4: f64 = divide(p3 * 1.0, 2.0);
     let p5: f64 = p4 + 0.0 - thh;
     let x_gp: f64 = if p5 > 0.0 { x_f } else { x_g };
     let y_gp: f64 = if p5 > 0.0 { y_f } else { y_g };
     let x_bp: f64 = if p5 > 0.0 { x_c } else { x_b };
     let y_bp: f64 = if p5 > 0.0 { y_c } else { y_b };
-    let en0: f64 = f64::atan2(sdy_f, sdx_f).to_degrees() * 60000.0;
+    let en0: f64 = fmath::atan2(sdy_f, sdx_f).to_degrees() * 60000.0;
     let en1: f64 = en0 + 21600000.0 - 0.0;
     let en2: f64 = if en0 > 0.0 { en0 } else { en1 };
     let sw0: f64 = en2 + 0.0 - st_ang;
@@ -1563,15 +1564,15 @@ fn cloud_callout(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Preset
     let dy_pos: f64 = divide(h * adj2, 100000.0);
     let x_pos: f64 = (w / 2.0) + dx_pos - 0.0;
     let y_pos: f64 = (h / 2.0) + dy_pos - 0.0;
-    let ht: f64 = (h / 2.0) * f64::atan2(dy_pos, dx_pos).cos();
-    let wt: f64 = (w / 2.0) * f64::atan2(dy_pos, dx_pos).sin();
-    let g2: f64 = (w / 2.0) * f64::atan2(wt, ht).cos();
-    let g3: f64 = (h / 2.0) * f64::atan2(wt, ht).sin();
+    let ht: f64 = (h / 2.0) * fmath::cos(fmath::atan2(dy_pos, dx_pos));
+    let wt: f64 = (w / 2.0) * fmath::sin(fmath::atan2(dy_pos, dx_pos));
+    let g2: f64 = (w / 2.0) * fmath::cos(fmath::atan2(wt, ht));
+    let g3: f64 = (h / 2.0) * fmath::sin(fmath::atan2(wt, ht));
     let g4: f64 = (w / 2.0) + g2 - 0.0;
     let g5: f64 = (h / 2.0) + g3 - 0.0;
     let g6: f64 = g4 + 0.0 - x_pos;
     let g7: f64 = g5 + 0.0 - y_pos;
-    let g8: f64 = f64::hypot(g6, g7).hypot(0.0);
+    let g8: f64 = fmath::hypot(fmath::hypot(g6, g7), 0.0);
     let g9: f64 = divide(100000.0 * 6600.0, 21600.0);
     let g10: f64 = g8 + 0.0 - g9;
     let g11: f64 = divide(g10 * 1.0, 3.0);
@@ -2094,7 +2095,7 @@ fn left_circular_arrow(
     let u10 = divide(u4, dx_h);
     let u11 = divide(u10, dy_h);
     let u12 = divide(1.0 + u9, u11);
-    let u13 = f64::atan2(u12, 1.0).to_degrees() * 60000.0;
+    let u13 = fmath::atan2(u12, 1.0).to_degrees() * 60000.0;
     let u15 = if u13 > 0.0 { u13 } else { u13 + 21600000.0 };
     let u16 = u15 - en_ang;
     let u18 = if u16 > 0.0 { u16 } else { u16 + 21600000.0 };
@@ -2116,8 +2117,8 @@ fn left_circular_arrow(
     let (dx_d, dy_d) = elliptical_point(ooxml_angle(st_ang), rw2, rh2, frame);
     let x_d = w / 2.0 + dx_d;
     let y_d = h / 2.0 + dy_d;
-    let dx_g = thh * ooxml_angle(pt_ang).cos();
-    let dy_g = thh * ooxml_angle(pt_ang).sin();
+    let dx_g = thh * fmath::cos(ooxml_angle(pt_ang));
+    let dy_g = thh * fmath::sin(ooxml_angle(pt_ang));
     let x_g = x_h + dx_g;
     let y_g = y_h + dy_g;
     let x_b = x_h - dx_g;
@@ -2133,7 +2134,7 @@ fn left_circular_arrow(
     let y2_o = divide(sy2 * r_o, rh1);
     let dx_o = x2_o - x1_o;
     let dy_o = y2_o - y1_o;
-    let d_o = f64::hypot(dx_o, dy_o);
+    let d_o = fmath::hypot(dx_o, dy_o);
     let det_o = x1_o * y2_o - x2_o * y1_o;
     let q4 = d_o * d_o;
     let q7 = r_o * r_o * q4 - det_o * det_o;
@@ -2147,8 +2148,8 @@ fn left_circular_arrow(
     let q14 = -det_o * dx_o;
     let dy_f1 = divide(q14 + q13, q4);
     let dy_f2 = divide(q14 - q13, q4);
-    let q20 = f64::hypot(x2_o - dx_f1, y2_o - dy_f1);
-    let q21 = f64::hypot(x2_o - dx_f2, y2_o - dy_f2);
+    let q20 = fmath::hypot(x2_o - dx_f1, y2_o - dy_f1);
+    let q21 = fmath::hypot(x2_o - dx_f2, y2_o - dy_f2);
     let (dx_f, dy_f) = if q21 > q20 {
         (dx_f1, dy_f1)
     } else {
@@ -2164,7 +2165,7 @@ fn left_circular_arrow(
     let y2_i = divide(sy2 * r_i, rh2);
     let dx_i = x2_i - x1_i;
     let dy_i = y2_i - y1_i;
-    let d_i = f64::hypot(dx_i, dy_i);
+    let d_i = fmath::hypot(dx_i, dy_i);
     let det_i = x1_i * y2_i - x2_i * y1_i;
     let v4 = d_i * d_i;
     let v7 = r_i * r_i * v4 - det_i * det_i;
@@ -2177,8 +2178,8 @@ fn left_circular_arrow(
     let v14 = -det_i * dx_i;
     let dy_c1 = divide(v14 + v13, v4);
     let dy_c2 = divide(v14 - v13, v4);
-    let v20 = f64::hypot(x1_i - dx_c1, y1_i - dy_c1);
-    let v21 = f64::hypot(x1_i - dx_c2, y1_i - dy_c2);
+    let v20 = fmath::hypot(x1_i - dx_c1, y1_i - dy_c1);
+    let v21 = fmath::hypot(x1_i - dx_c2, y1_i - dy_c2);
     let (dx_c, dy_c) = if v21 > v20 {
         (dx_c1, dy_c1)
     } else {
@@ -2188,19 +2189,19 @@ fn left_circular_arrow(
     let sdy_c = divide(dy_c * rh2, r_i);
     let x_c = w / 2.0 + sdx_c;
     let y_c = h / 2.0 + sdy_c;
-    let ist0 = f64::atan2(sdy_c, sdx_c).to_degrees() * 60000.0;
+    let ist0 = fmath::atan2(sdy_c, sdx_c).to_degrees() * 60000.0;
     let ist_ang0 = if ist0 > 0.0 { ist0 } else { ist0 + 21600000.0 };
     let isw1 = st_ang - ist_ang0;
     let isw_ang0 = if isw1 > 0.0 { isw1 } else { isw1 + 21600000.0 };
     let ist_ang = ist_ang0 + isw_ang0;
     let isw_ang = -isw_ang0;
-    let p5 = f64::hypot(x_f - x_c, y_f - y_c) / 2.0 - thh;
+    let p5 = fmath::hypot(x_f - x_c, y_f - y_c) / 2.0 - thh;
     let (x_gp, y_gp, x_bp, y_bp) = if p5 > 0.0 {
         (x_f, y_f, x_c, y_c)
     } else {
         (x_g, y_g, x_b, y_b)
     };
-    let en0 = f64::atan2(sdy_f, sdx_f).to_degrees() * 60000.0;
+    let en0 = fmath::atan2(sdy_f, sdx_f).to_degrees() * 60000.0;
     let en2 = if en0 > 0.0 { en0 } else { en0 + 21600000.0 };
     let sw0 = en2 - st_ang;
     let sw_ang = if sw0 > 0.0 { sw0 - 21600000.0 } else { sw0 };
@@ -2253,9 +2254,9 @@ fn curved_left_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Pr
     let y8 = y7 + dh;
     let y6 = h - aw / 2.0;
     let x1 = ah;
-    let sw_ang = f64::atan2(dy, ah).to_degrees() * 60000.0;
+    let sw_ang = fmath::atan2(dy, ah).to_degrees() * 60000.0;
     let q12 = th / 2.0;
-    let dang2 = f64::atan2(q12, idx).to_degrees() * 60000.0;
+    let dang2 = fmath::atan2(q12, idx).to_degrees() * 60000.0;
     let sw_ang2 = dang2 - sw_ang;
     let sw_ang3 = sw_ang + dang2;
     let st_ang3 = -dang2;
@@ -2334,11 +2335,11 @@ fn curved_right_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<P
     let y8 = y7 + dh;
     let y6 = h - aw / 2.0;
     let x1 = w - ah;
-    let sw_ang = f64::atan2(dy, ah).to_degrees() * 60000.0;
+    let sw_ang = fmath::atan2(dy, ah).to_degrees() * 60000.0;
     let st_ang = 10800000.0 - sw_ang;
     let msw_ang = -sw_ang;
     let q12 = th / 2.0;
-    let dang2 = f64::atan2(q12, idx).to_degrees() * 60000.0;
+    let dang2 = fmath::atan2(q12, idx).to_degrees() * 60000.0;
     let sw_ang2 = dang2 - 5400000.0;
     let sw_ang3 = 5400000.0 + dang2;
     let st_ang3 = 10800000.0 - dang2;
@@ -2417,11 +2418,11 @@ fn curved_up_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Pres
     let x8 = x7 + dh;
     let x6 = w - aw / 2.0;
     let y1 = ah;
-    let sw_ang = f64::atan2(dx, ah).to_degrees() * 60000.0;
+    let sw_ang = fmath::atan2(dx, ah).to_degrees() * 60000.0;
     let iy = idy;
     let ix = (w_r + x3) / 2.0;
     let q12 = th / 2.0;
-    let dang2 = f64::atan2(q12, idy).to_degrees() * 60000.0;
+    let dang2 = fmath::atan2(q12, idy).to_degrees() * 60000.0;
     let sw_ang2 = dang2 - sw_ang;
     let st_ang3 = 5400000.0 - sw_ang;
     let sw_ang3 = sw_ang + dang2;
@@ -2499,10 +2500,10 @@ fn curved_down_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Pr
     let x8 = x7 + dh;
     let x6 = w - aw / 2.0;
     let y1 = h - ah;
-    let sw_ang = f64::atan2(dx, ah).to_degrees() * 60000.0;
+    let sw_ang = fmath::atan2(dx, ah).to_degrees() * 60000.0;
     let st_ang = 16200000.0 + sw_ang;
     let q12 = th / 2.0;
-    let dang2 = f64::atan2(q12, idy).to_degrees() * 60000.0;
+    let dang2 = fmath::atan2(q12, idy).to_degrees() * 60000.0;
     let msw_ang = -sw_ang;
     let iy = h - idy;
     let ix = (w_r + x3) / 2.0;
@@ -2570,12 +2571,12 @@ struct GearTooth {
 
 fn gear_angle(rw: f64, rh: f64, angle: f64) -> f64 {
     let rad = ooxml_angle(angle);
-    f64::atan2(rh * rad.sin(), rw * rad.cos()).to_degrees() * 60000.0
+    fmath::atan2(rh * fmath::sin(rad), rw * fmath::cos(rad)).to_degrees() * 60000.0
 }
 
 fn gear_point(frame: Frame, rw: f64, rh: f64, b_ang: f64) -> (f64, f64) {
-    let (sin, cos) = ooxml_angle(b_ang).sin_cos();
-    let m = f64::hypot(rh * cos, rw * sin);
+    let (sin, cos) = fmath::sin_cos(ooxml_angle(b_ang));
+    let m = fmath::hypot(rh * cos, rw * sin);
     let n = divide(rw * rh, m);
     (frame.w / 2.0 + n * cos, frame.h / 2.0 + n * sin)
 }
@@ -2593,8 +2594,8 @@ fn gear_tooth(
     let b_d = gear_angle(rw, rh, center_ang + ha);
     let (x_a, y_a) = gear_point(frame, rw, rh, b_a);
     let (x_d, y_d) = gear_point(frame, rw, rh, b_d);
-    let a = f64::atan2(x_a - x_d, y_a - y_d);
-    let (sin_a, cos_a) = a.sin_cos();
+    let a = fmath::atan2(x_a - x_d, y_a - y_d);
+    let (sin_a, cos_a) = fmath::sin_cos(a);
     let (dx_f, dy_f) = (l_fd * sin_a, l_fd * cos_a);
     let (x_f, y_f) = (x_d + dx_f, y_d + dy_f);
     let (x_e, y_e) = (x_a - dx_f, y_a - dy_f);
@@ -2621,7 +2622,7 @@ fn gear6(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCo
     let rh = h / 2.0 - th;
     let rw = w / 2.0 - th;
     let maxr = if rw - rh > 0.0 { rh } else { rw };
-    let ha = f64::atan2(l3, maxr).to_degrees() * 60000.0;
+    let ha = fmath::atan2(l3, maxr).to_degrees() * 60000.0;
     let t1 = gear_tooth(frame, rw, rh, th, l_fd, 19800000.0, ha);
     let b_d6 = gear_angle(rw, rh, 16200000.0 + ha);
     let (x_d6, y_d6) = gear_point(frame, rw, rh, b_d6);
@@ -2686,7 +2687,7 @@ fn gear9(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCo
     let rh = h / 2.0 - th;
     let rw = w / 2.0 - th;
     let maxr = if rw - rh > 0.0 { rh } else { rw };
-    let ha = f64::atan2(l3, maxr).to_degrees() * 60000.0;
+    let ha = fmath::atan2(l3, maxr).to_degrees() * 60000.0;
     let t1 = gear_tooth(frame, rw, rh, th, l_fd, 18600000.0, ha);
     let t2 = gear_tooth(frame, rw, rh, th, l_fd, 21000000.0, ha);
     let t3 = gear_tooth(frame, rw, rh, th, l_fd, 1800000.0, ha);
@@ -2823,8 +2824,8 @@ fn moon(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCom
     let g18w = (g6w - g0w) / 2.0;
     let dx2 = -(g0w + g18w - w);
     let dy2 = -(h / 2.0);
-    let st_ang1 = f64::atan2(dy2, dx2).to_degrees() * 60000.0;
-    let en_angp1 = f64::atan2(h / 2.0, dx2).to_degrees() * 60000.0;
+    let st_ang1 = fmath::atan2(dy2, dx2).to_degrees() * 60000.0;
+    let en_angp1 = fmath::atan2(h / 2.0, dx2).to_degrees() * 60000.0;
     let en_ang1 = en_angp1 - 21600000.0;
     let sw_ang1 = en_ang1 - st_ang1;
     Outline::new(frame)
@@ -3082,7 +3083,7 @@ fn chart_marks(_frame: Frame, segments: &[(f64, f64, f64, f64)]) -> Vec<PresetGe
 }
 
 fn tab_dx(frame: Frame) -> f64 {
-    frame.w.hypot(frame.h) / 20.0
+    fmath::hypot(frame.w, frame.h) / 20.0
 }
 
 fn corner_tabs(frame: Frame) -> Vec<GeometryPathCommand> {
@@ -4552,9 +4553,9 @@ fn funnel(frame: Frame) -> Vec<GeometryPathCommand> {
     let rw2 = wd2 - d;
     let rh2 = hd4 - d;
     let ang = ooxml_angle(480000.0);
-    let t1 = wd2 * ang.cos();
-    let t2 = hd4 * ang.sin();
-    let da = t2.atan2(t1);
+    let t1 = wd2 * fmath::cos(ang);
+    let t2 = hd4 * fmath::sin(ang);
+    let da = fmath::atan2(t2, t1);
     let st1 = PI - da;
     let (dx1, dy1) = elliptical_point(st1, wd2, hd4, frame);
     let (x1, y1) = (w / 2.0 + dx1, hd4 + dy1);
@@ -4787,8 +4788,8 @@ fn math_not_equal(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Geome
     let y1 = y2 - dy1;
     let y4 = y3 + dy1;
     let cadj2 = cr_ang - 5400000.0;
-    let xadj2 = hd2 * ooxml_angle(cadj2).tan();
-    let len = xadj2.hypot(hd2);
+    let xadj2 = hd2 * fmath::tan(ooxml_angle(cadj2));
+    let len = fmath::hypot(xadj2, hd2);
     let bhw = len * dy1 / hd2;
     let x7 = hc + xadj2 - bhw / 2.0;
     let at = |y: f64| x7 - xadj2 * y / hd2;
@@ -5327,7 +5328,7 @@ fn left_right_circular_arrow(
     let u10 = divide(u4, dx_h);
     let u11 = divide(u10, dy_h);
     let u12 = divide(1.0 + u9, u11);
-    let u13 = u12.atan2(1.0).to_degrees() * 60000.0;
+    let u13 = fmath::atan2(u12, 1.0).to_degrees() * 60000.0;
     let u15 = if u13 > 0.0 { u13 } else { u13 + 21600000.0 };
     let u16 = u15 - en_ang;
     let u18 = if u16 > 0.0 { u16 } else { u16 + 21600000.0 };
@@ -5342,8 +5343,8 @@ fn left_right_circular_arrow(
     let (dx_a, dy_a) = elliptical_point(ooxml_angle(pt_ang), rw3, rh3, frame);
     let (x_a, y_a) = (hc + dx_a, vc + dy_a);
     let (dx_g, dy_g) = (
-        thh * ooxml_angle(pt_ang).cos(),
-        thh * ooxml_angle(pt_ang).sin(),
+        thh * fmath::cos(ooxml_angle(pt_ang)),
+        thh * fmath::sin(ooxml_angle(pt_ang)),
     );
     let (x_g, y_g) = (x_h + dx_g, y_h + dy_g);
     let (x_b, y_b) = (x_h - dx_g, y_h - dy_g);
@@ -5353,7 +5354,7 @@ fn left_right_circular_arrow(
         let (x1o, y1o) = (divide(sx1 * r_min, rw), divide(sy1 * r_min, rh));
         let (x2o, y2o) = (divide(sx2 * r_min, rw), divide(sy2 * r_min, rh));
         let (dxo, dyo) = (x2o - x1o, y2o - y1o);
-        let d_o = dxo.hypot(dyo);
+        let d_o = fmath::hypot(dxo, dyo);
         let det = x1o * y2o - x2o * y1o;
         let q4 = d_o * d_o;
         let sdel = (r_min * r_min * q4 - det * det).max(0.0).sqrt();
@@ -5363,8 +5364,8 @@ fn left_right_circular_arrow(
         let dyf1 = divide(-det * dxo + dyo.abs() * sdel, q4);
         let dyf2 = divide(-det * dxo - dyo.abs() * sdel, q4);
         let (bx, by) = if from_second { (x2o, y2o) } else { (x1o, y1o) };
-        let q20 = (bx - dxf1).hypot(by - dyf1);
-        let q21 = (bx - dxf2).hypot(by - dyf2);
+        let q20 = fmath::hypot(bx - dxf1, by - dyf1);
+        let q21 = fmath::hypot(bx - dxf2, by - dyf2);
         let (dxf, dyf) = if q21 - q20 > 0.0 {
             (dxf1, dyf1)
         } else {
@@ -5381,16 +5382,16 @@ fn left_right_circular_arrow(
     let (dx_l, dy_l) = elliptical_point(ooxml_angle(lpt_ang), rw3, rh3, frame);
     let (x_l, y_l) = (hc + dx_l, vc + dy_l);
     let (dx_k, dy_k) = (
-        thh * ooxml_angle(lpt_ang).cos(),
-        thh * ooxml_angle(lpt_ang).sin(),
+        thh * fmath::cos(ooxml_angle(lpt_ang)),
+        thh * fmath::sin(ooxml_angle(lpt_ang)),
     );
     let (x_k, y_k) = (x_i + dx_k, y_i + dy_k);
     let (x_j, y_j) = (x_i - dx_k, y_i - dy_k);
-    let p5 = (x_f - x_c).hypot(y_f - y_c) / 2.0 - thh;
+    let p5 = fmath::hypot(x_f - x_c, y_f - y_c) / 2.0 - thh;
     let (x_gp, y_gp) = if p5 > 0.0 { (x_f, y_f) } else { (x_g, y_g) };
     let (x_bp, y_bp) = if p5 > 0.0 { (x_c, y_c) } else { (x_b, y_b) };
     let to_units = |x: f64, y: f64| {
-        let v = y.atan2(x).to_degrees() * 60000.0;
+        let v = fmath::atan2(y, x).to_degrees() * 60000.0;
         if v > 0.0 { v } else { v + 21600000.0 }
     };
     let (sdx_f, sdy_f) = (x_f - hc, y_f - vc);

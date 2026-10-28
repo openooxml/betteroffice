@@ -31,6 +31,12 @@ export const peerlessPainterFactories = {
   frame: createCommandFramePainter,
   echo: createLocalEchoPainter,
 };
+export const peerlessCheckpointTimer = {
+  start(callback: () => void): () => void {
+    const id = setTimeout(callback, 1000);
+    return () => clearTimeout(id);
+  },
+};
 
 function idle(callback: () => void): () => void {
   if (typeof window.requestIdleCallback === 'function') {
@@ -130,7 +136,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onDocumentChange?.({ version }); }
       catch (error) { console.error('documentChange listener threw:', error); }
     };
-    let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelCheckpoint: (() => void) | undefined;
     const fileView = props.file instanceof Uint8Array ? props.file : new Uint8Array(props.file);
     let recoveryBase: Blob | undefined = new Blob([fileView.buffer instanceof ArrayBuffer &&
       !(fileView.buffer as ArrayBuffer & { resizable?: boolean }).resizable ? fileView as Uint8Array<ArrayBuffer> : new Uint8Array(fileView)]);
@@ -185,7 +191,7 @@ export function usePeerlessPresentation(
         notifyDocumentVersion(event?.version ?? modeClient.state.version);
       }
       cancelIdle?.(); cancelIdle = undefined;
-      clearTimeout(checkpointTimer); checkpointTimer = undefined;
+      cancelCheckpoint?.(); cancelCheckpoint = undefined;
       framePainter?.freeze();
       if (framePainter !== displayedPainter) framePainter?.dispose();
       echoPainter?.dispose(); echoPainter = undefined;
@@ -295,8 +301,8 @@ export function usePeerlessPresentation(
     }
 
     function scheduleCheckpoint(client: PresentationCommandClient): void {
-      if (checkpointTimer) return;
-      checkpointTimer = setTimeout(() => { checkpointTimer = undefined; void saveCheckpoint(client).catch(report); }, 1000);
+      if (cancelCheckpoint) return;
+      cancelCheckpoint = peerlessCheckpointTimer.start(() => { cancelCheckpoint = undefined; void saveCheckpoint(client).catch(report); });
     }
 
     async function drain(client: PresentationCommandClient): Promise<void> {
@@ -667,7 +673,7 @@ export function usePeerlessPresentation(
       images.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
-      clearTimeout(checkpointTimer);
+      cancelCheckpoint?.();
       visualListeners.clear(); failureListeners.clear();
       if (!fatal) void session?.dispose().catch(() => {});
     };
