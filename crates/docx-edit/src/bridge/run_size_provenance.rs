@@ -88,6 +88,7 @@ pub(crate) fn paragraph_sizes(
         direct_cs: bool,
         outside_text: bool,
         closed: bool,
+        floor: usize,
     }
 
     impl Scan {
@@ -156,11 +157,13 @@ pub(crate) fn paragraph_sizes(
             }
             let depth = scan.fields.len();
             scan.fields.push(field);
+            let floor = std::mem::replace(&mut scan.floor, depth + 1);
             if !node.child_elements().all(|child| visit(child, scan))
                 || scan.fields.len() != depth + 1
             {
                 return false;
             }
+            scan.floor = floor;
             scan.close();
             return true;
         }
@@ -172,6 +175,11 @@ pub(crate) fn paragraph_sizes(
                     control = true;
                     match child.attribute(Some("w"), "fldCharType") {
                         Some("begin") => scan.fields.push(Field::default()),
+                        Some("separate" | "end")
+                            if scan.floor > 0 && scan.fields.len() <= scan.floor =>
+                        {
+                            return false;
+                        }
                         Some("separate") => {
                             if scan.fields.is_empty() {
                                 scan.fields.push(Field::default());
@@ -604,6 +612,21 @@ mod tests {
                 format!(
                     concat!(
                         r#"<w:fldSimple w:instr=" PAGEREF x "><w:r><w:fldChar w:fldCharType="end"/></w:r></w:fldSimple>{entry}"#,
+                    ),
+                    entry = entry,
+                ),
+                false,
+            ),
+            (
+                format!(
+                    concat!(
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF a </w:instrText></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr=" REF b ">"#,
+                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGEREF c </w:instrText></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF d </w:instrText></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:fldSimple>{entry}"#,
                     ),
                     entry = entry,
                 ),
