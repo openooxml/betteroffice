@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 
 import { generateKeyPair } from "../proof";
 import { startServer } from "../server";
@@ -519,6 +519,106 @@ describe("collab relay", () => {
     expect(gappedPayloadsAtB.some((p) => [...p].join(",") === [...second].join(","))).toBe(false);
     await expectNoTokens(s);
   });
+
+  for (const { reason, closeCode } of [
+    { reason: "causalGap", closeCode: null },
+    { reason: "engine rejected update (Error)", closeCode: 4400 },
+    { reason: "user is read only", closeCode: 4403 },
+  ]) {
+    test(`rejected docx follow-ups reach every socket before ${reason} recovery`, async () => {
+      const h = makeHarness({ format: "docx" });
+      addToken(h, TOKENS[0]!, "user-a");
+      addToken(h, TOKENS[1]!, "user-b");
+      const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
+      const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[1]!, accessTokenTtl: 0, mode: "edit" });
+      const author = await openTestClient(a.joinPayload, a.session.sourceBytes!, 934501);
+      const peer = await openTestClient(b.joinPayload, b.session.sourceBytes!, 934601);
+      const relay = new CollabRelay(h.registry);
+      const authorFrames: Uint8Array[] = [];
+      const peerFrames: Uint8Array[] = [];
+      const authorClosed: number[] = [];
+      const peerClosed: number[] = [];
+      const events: string[] = [];
+      const authorSocket: RelaySocket = {
+        send: (frame) => { authorFrames.push(frame); events.push("author frame"); return frame.length; },
+        close: (code) => { authorClosed.push(code!); events.push("author close"); },
+      };
+      const peerSocket: RelaySocket = {
+        send: (frame) => { peerFrames.push(frame); events.push("peer frame"); return frame.length; },
+        close: (code) => { peerClosed.push(code!); },
+      };
+      relay.attach(authorSocket, relay.resolve(a.user.id)!);
+      relay.attach(peerSocket, relay.resolve(b.user.id)!);
+      const applyUpdate = a.session.applyUpdate.bind(a.session);
+      const mockedApply = spyOn(a.session, "applyUpdate");
+      try {
+        const initialVector = a.session.replica!.encodeStateVector();
+        author.edit("integrated-first ");
+        const first = author.encodeStateAsUpdate(initialVector);
+        const afterFirst = author.encodeStateVector();
+        author.edit("integrated-second ");
+        const second = author.encodeStateAsUpdate(afterFirst);
+        author.edit("unintegrated-tail ");
+        const rejected = author.encodeStateAsUpdate(initialVector);
+        const followUps = [first, second];
+        mockedApply.mockImplementationOnce((userId, update) => {
+          expect(userId).toBe(a.user.id);
+          expect(update).toEqual(rejected);
+          for (const followUp of followUps) expect(applyUpdate(userId, followUp).accepted).toBe(true);
+          return { accepted: false, reason, followUps };
+        });
+
+        relay.handleMessage(authorSocket, encodeUpdateFrame(rejected));
+        mockedApply.mockRestore();
+        expect(authorFrames.slice(0, 2)).toEqual(followUps.map(encodeUpdateFrame));
+        expect(peerFrames).toEqual(followUps.map(encodeUpdateFrame));
+        expect(events).toEqual([
+          "author frame", "peer frame", "author frame", "peer frame",
+          closeCode === null ? "author frame" : "author close",
+        ]);
+        expect(authorClosed).toEqual(closeCode === null ? [] : [closeCode]);
+        expect(peerClosed).toEqual([]);
+        expect(a.session.dirty).toBe(true);
+        for (const [client, frames] of [[author, authorFrames.slice(0, 2)], [peer, peerFrames]] as const) {
+          for (const frame of frames) {
+            for (const message of decodeMessages(frame)) {
+              if (message.type === "update") client.applyUpdate(message.update);
+            }
+          }
+        }
+        expect(peer.contains("integrated-first")).toBe(true);
+        expect(peer.contains("integrated-second")).toBe(true);
+        expect(peer.contains("unintegrated-tail")).toBe(false);
+        expect(peer.encodeStateVector()).toEqual(a.session.replica!.encodeStateVector());
+
+        if (closeCode === null) {
+          expect(authorFrames).toHaveLength(3);
+          expect(authorFrames[2]).toEqual(encodeSyncStep1(a.session.replica!.encodeStateVector()));
+          const [resync] = decodeMessages(authorFrames[2]!);
+          if (resync?.type !== "sync-step-1") throw new Error("missing sender resync");
+          relay.handleMessage(authorSocket, encodeSyncStep2(author.encodeStateAsUpdate(resync.stateVector)));
+          for (const frame of peerFrames.slice(2)) {
+            for (const message of decodeMessages(frame)) {
+              if (message.type === "update") peer.applyUpdate(message.update);
+            }
+          }
+          expect(peer.contains("unintegrated-tail")).toBe(true);
+          expect(author.encodeStateVector()).toEqual(a.session.replica!.encodeStateVector());
+          expect(peer.encodeStateVector()).toEqual(a.session.replica!.encodeStateVector());
+          expect(authorClosed).toEqual([]);
+          expect(peerClosed).toEqual([]);
+        } else {
+          expect(authorFrames).toHaveLength(2);
+        }
+        for (const token of TOKENS) expect(h.logs.join("\n")).not.toContain(token);
+      } finally {
+        mockedApply.mockRestore();
+        a.session.abandon();
+        author.destroy();
+        peer.destroy();
+      }
+    });
+  }
 
   test("oversize frame closes with 1009", async () => {
     const s = setup("xlsx");

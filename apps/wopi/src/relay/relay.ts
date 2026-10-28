@@ -305,12 +305,18 @@ export class CollabRelay {
           return;
         }
         const before = replica?.version;
-        let result: { accepted: true } | { accepted: false; reason: string };
+        let result: ReturnType<FileSession["applyUpdate"]>;
         try {
           result = state.session.applyUpdate(state.user.id, message.update.slice());
         } catch {
           this.#close(state, 4400, "update rejected, resync");
           return;
+        }
+        if (result.accepted && replica && replica.version !== before) {
+          this.#broadcast(state, encodeUpdateFrame(message.update));
+        }
+        for (const followUp of result.followUps ?? []) {
+          this.#broadcastAll(state.session, encodeUpdateFrame(followUp));
         }
         if (!result.accepted) {
           if (result.reason === "causalGap") {
@@ -324,13 +330,6 @@ export class CollabRelay {
           const readOnly = /read only|token expired|not connected|not open/i.test(result.reason);
           this.#close(state, readOnly ? 4403 : 4400, result.reason || "update rejected, resync");
           return;
-        }
-        if (replica && replica.version !== before) {
-          this.#broadcast(state, encodeUpdateFrame(message.update));
-        }
-        const followUps = (result as { followUps?: Uint8Array[] }).followUps ?? [];
-        for (const followUp of followUps) {
-          this.#broadcastAll(state.session, encodeUpdateFrame(followUp));
         }
       } else if (message.type === "awareness") {
         const room = this.#rooms.get(state.session.fileKey);
