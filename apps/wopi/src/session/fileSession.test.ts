@@ -1067,6 +1067,34 @@ describe("session safety regressions", () => {
     }
   });
 
+  test("a 401 from a later host call during a relaunch also invalidates handles sharing the token", async () => {
+    let session: FileSession | null = null;
+    let revokedUnderLock = false;
+    const h = makeHarness({
+      beforeCheckFileInfo: async () => {
+        if (session?.lockHeld && !revokedUnderLock) {
+          revokedUnderLock = true;
+          h.host.tokens.delete("tok-shared");
+        }
+      },
+    });
+    addToken(h, "tok-shared", "shared-user");
+    const viewer = await joinEditor(h, "tok-shared", "view");
+    session = viewer.session;
+    const invalidated: unknown[] = [];
+    session.on("userInvalidated", (event) => invalidated.push(event));
+    try {
+      expect(session.lockHeld).toBe(false);
+      await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
+      expect(revokedUnderLock).toBe(true);
+      expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
+      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
+    } finally {
+      await session.close();
+    }
+  });
+
   test("a reconnect relock validates the source before accepting more updates", async () => {
     let releaseUnlock: () => void = () => {};
     const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });

@@ -315,7 +315,13 @@ export class FileSession {
   /** Joins a user to this file session. */
   join(input: JoinInput): Promise<JoinResult> {
     this.#pendingJoins += 1;
-    return this.#enqueue(() => this.#joinInternal(input)).finally(() => {
+    return this.#enqueue(() => this.#joinInternal(input).catch((err: unknown) => {
+      if (err instanceof WopiHostError && err.kind === "unauthorized") {
+        const user = this.#history.find((candidate) => candidate.accessToken === input.accessToken);
+        if (user) this.#markTokenDead(user);
+      }
+      throw err;
+    })).finally(() => {
       this.#pendingJoins -= 1;
     });
   }
@@ -329,16 +335,7 @@ export class FileSession {
     if (connectedCount >= max) {
       throw new SessionError("tooManyEditors", "max editors per file reached");
     }
-    let info: CheckFileInfo;
-    try {
-      info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
-    } catch (err) {
-      if (err instanceof WopiHostError && err.kind === "unauthorized") {
-        const user = this.#history.find((candidate) => candidate.accessToken === input.accessToken);
-        if (user) this.#markTokenDead(user);
-      }
-      throw err;
-    }
+    const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
     const wantsWrite = input.mode === "edit" && info.UserCanWrite === true && info.ReadOnly !== true;
     const first = this.#replica === null;
     if (first) {
