@@ -136,6 +136,14 @@ describe("chart SVGs", () => {
     }
   });
 
+  test("SSIM is the first row of every format that reports it", () => {
+    const rows = tableRows(FORMATS);
+    for (const format of FORMATS) {
+      const labels = rows.filter((row) => row.format === format.format).map((row) => row.label);
+      if (labels.includes("SSIM")) expect(labels[0]).toBe("SSIM");
+    }
+  });
+
   test("lower-is-better rows are marked and sized against the larger value", () => {
     const rows = tableRows(FORMATS);
     const error = rows.find((row) => row.label === "Absolute page error");

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellValue, DateSystem, ErrorValue};
 
 use crate::eval::{
     EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, text, text_unmetered,
@@ -511,8 +511,62 @@ pub(crate) fn text_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if format.is_empty() {
         return text(ctx, "");
     }
+    let value = match value {
+        v @ CellValue::Text { .. } => convert_text_value(v, &format, ctx),
+        v => v,
+    };
     let formatted = numfmt::format_value(&value, &format, ctx.date_system);
     limited_text(ctx, formatted.text)
+}
+
+/// a text value excel would read as a number, formatted as that number,
+/// but only when the format section selected for the number renders a
+/// number or a date/time. general, text (`@`), and literal-only sections
+/// keep the text exactly, as do texts that do not convert. a failed or
+/// unused conversion restores the unsupported-function checkpoint, so it
+/// leaves no trace.
+fn convert_text_value(value: CellValue, format: &str, ctx: &EvalContext<'_>) -> CellValue {
+    let raw = match &value {
+        CellValue::Text { value: raw } => raw.clone(),
+        _ => return value,
+    };
+    let checkpoint = ctx.unsupported_checkpoint();
+    match text_number(&raw, ctx) {
+        Some(n) if numfmt::format_renders_number(format, n) => CellValue::Number { value: n },
+        _ => {
+            ctx.handle_unsupported_since(checkpoint);
+            value
+        }
+    }
+}
+
+/// the number a text value stands for, if any: the plain number, percent,
+/// time, or workbook-currency reading `ctx.parse_number` (what `VALUE`
+/// uses) accepts, a year-first date with its time of day, or a date the
+/// DATEVALUE parser reads in full. a date parse the parser would only
+/// make by ignoring a time chunk (anything with a `:` it did not use)
+/// does not count.
+fn text_number(raw: &str, ctx: &EvalContext<'_>) -> Option<f64> {
+    if let Some(n) = ctx.parse_number(raw) {
+        return Some(n);
+    }
+    if let Some(n) = super::datetime::year_first_date_text(raw, ctx.date_system) {
+        return Some(n);
+    }
+    if raw.contains(':') {
+        return None;
+    }
+    let serial = super::datetime::parse_date_text(raw, ctx)?;
+    match ctx.date_system {
+        DateSystem::V1900 => Some(serial as f64),
+        DateSystem::V1904 => {
+            // the same epoch shift `parse_entry_date` applies to a parsed
+            // date: through unix days, so the phantom 1900-02-29 has none.
+            let unix = DateSystem::V1900.serial_to_unix_days(serial as f64)?;
+            let epoch = DateSystem::V1904.serial_to_unix_days(0.0)?;
+            (unix >= epoch).then_some((unix - epoch) as f64)
+        }
+    }
 }
 
 /// FIXED(number, [decimals], [no_commas]): round half away from zero to

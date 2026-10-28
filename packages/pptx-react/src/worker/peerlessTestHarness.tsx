@@ -25,6 +25,7 @@ if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
+let recoveryUpdate: ArrayBuffer | undefined;
 let commands: PresentationCommandEnvelope[];
 let owner: PptxWorkerSession | undefined;
 let holding = false;
@@ -81,6 +82,7 @@ beforeEach(() => {
   holding = false; unknownNext = false; held = []; suspensions = 0;
 
   owner = undefined;
+  recoveryUpdate = undefined;
   const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
   Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {} });
   restorers.push(() => {
@@ -129,7 +131,8 @@ beforeEach(() => {
     crashWorker = () => { endpoint.dispatchEvent(Object.assign(new Event('error'), { message: 'Worker stopped' })); };
     releaseReplies = () => { holding = false; for (const message of held.splice(0)) (message as () => void)(); };
     const off = pair.client.listen((message) => {
-      const reply = message as { kind: string; id: number };
+      const reply = message as { kind: string; id: number; value?: { recoveryUpdate?: ArrayBuffer } };
+      if (reply.value?.recoveryUpdate) recoveryUpdate = reply.value.recoveryUpdate;
       if (unknownNext && reply.kind === 'reply' && commandIds.has(reply.id)) {
         unknownNext = false;
         deliver({ ...reply, ok: false, error: { name: 'CommandOutcomeUnknown', message: 'Edit outcome is unknown', refusal: { seq: client.state.throughSeq + 1 } } });
@@ -197,7 +200,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
     await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
     await waitFor(() => expect(view.getAllByTestId(/pptx-resize-/)).toHaveLength(8));
   };
-  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands };
+  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands, recoveryUpdate };
 }
 
 

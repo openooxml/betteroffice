@@ -565,18 +565,18 @@ function openPresentationInternal(
     ...(options.fallbackFonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: true })),
   ] : [];
   const peerUpdate = peer && options.initialUpdate !== undefined
-    ? new Uint8Array(options.initialUpdate) : undefined;
+    ? options.initialUpdate : undefined;
   const collaborationClientId = peer ? options.clientId : options.clientId ?? clientId();
   const doc = construct(() => peer
     ? peer.kind === 'baseline'
-      ? PptxDocument.openReplayBaseline(new Uint8Array(bytes), collaborationClientId, peerUpdate)
-      : PptxDocument.openPeerDeckJson(new Uint8Array(bytes), peer.identity, peerUpdate)
+      ? PptxDocument.openReplayBaseline(bytes, collaborationClientId, peerUpdate)
+      : PptxDocument.openPeerDeckJson(bytes, peer.identity, peerUpdate)
     : options.initialUpdate === undefined
       ? PptxDocument.openCollaborative(bytes, collaborationClientId!)
       : PptxDocument.openCollaborativeFromUpdate(
-          options.initialUpdate.slice(),
+          options.initialUpdate,
           collaborationClientId!,
-          bytes.slice()
+          bytes
         )
   );
   let renderer: PptxRenderer;

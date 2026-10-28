@@ -527,7 +527,7 @@ impl Document {
         let session = DeckSession::open_from_update(update, client_id).map_err(message_error)?;
         let session = match source {
             Some(source) if session.seeded_from(&source).map_err(message_error)? => {
-                session.attach_source(&source).map_err(message_error)?
+                session.attach_source_owned(source).map_err(message_error)?
             }
             _ => session,
         };
