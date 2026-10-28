@@ -1714,6 +1714,8 @@ fn measure_paragraph_with_context(
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
+        let measured = crate::leading_inline_box::measurement_paragraph(paragraph);
+        let paragraph = measured.as_ref();
         let measure = |paragraph: &ParagraphBlock| {
             if !content_width.is_finite() || content_width <= 0.0 {
                 synthetic_paragraph_extent(paragraph, content_width)
@@ -1771,6 +1773,7 @@ fn measure_paragraph_with_context(
         extent
     });
     let mut extent = extent;
+    crate::leading_inline_box::restore_extent(paragraph, &mut extent);
     measure_horizontal_rules(paragraph, &mut extent);
     measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
