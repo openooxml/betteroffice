@@ -15,6 +15,7 @@ pub struct PackageFacts {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SheetFacts {
+    pub(crate) header_footer: Option<Option<Vec<u8>>>,
     pub(crate) path: String,
     pub(crate) kind: SourceSheetKind,
     pub(crate) visibility: SheetVisibility,
@@ -58,6 +59,9 @@ impl PackageFacts {
 
 pub(crate) fn sheet_facts(package: &PreservedPackage, index: usize) -> SheetFacts {
     SheetFacts {
+        header_footer: package
+            .source_sheet_header_footer(index)
+            .map(|bytes| bytes.map(<[u8]>::to_vec)),
         path: package
             .source_sheet_part(index)
             .unwrap_or_default()
@@ -165,6 +169,16 @@ impl<'a> PackageFactsView<'a> {
         match self.0 {
             FactsSource::Package(package) => package.source_sheet_kind(index),
             FactsSource::Facts(facts) => facts.sheets.get(index).map(|sheet| sheet.kind),
+        }
+    }
+
+    pub fn source_sheet_header_footer(&self, index: usize) -> Option<Option<&'a [u8]>> {
+        match self.0 {
+            FactsSource::Package(package) => package.source_sheet_header_footer(index),
+            FactsSource::Facts(facts) => facts
+                .sheets
+                .get(index)
+                .and_then(|sheet| sheet.header_footer.as_ref().map(|bytes| bytes.as_deref())),
         }
     }
 

@@ -77,6 +77,8 @@ pub struct ReadRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_footer: Option<Option<xlsx_parse::SheetHeaderFooter>>,
     pub visibility: XlsxSheetVisibility,
     pub sheet_id: String,
     pub name: String,
@@ -262,6 +264,22 @@ pub(crate) fn parse_range(address: &RangeAddress) -> std::result::Result<CellRan
         return Err("a range must run from its top-left to its bottom-right corner".to_owned());
     }
     Ok(CellRange { start, end })
+}
+
+fn sheet_header_footer(
+    origin: Option<usize>,
+    facts: Option<&xlsx_parse::PackageFactsView<'_>>,
+    created: bool,
+) -> Option<Option<xlsx_parse::SheetHeaderFooter>> {
+    if created {
+        return Some(None);
+    }
+    let (origin, facts) = origin.zip(facts)?;
+    match facts.source_sheet_header_footer(origin) {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(bytes)) => Some(xlsx_parse::parse_header_footer(bytes)),
+    }
 }
 
 impl Workbook {
@@ -450,6 +468,11 @@ impl Workbook {
             .iter()
             .enumerate()
             .map(|(index, sheet)| SheetEntry {
+                header_footer: sheet_header_footer(
+                    self.preserved.origins.get(index).copied().flatten(),
+                    facts.as_ref(),
+                    self.preserved.created.get(index).copied().unwrap_or(false),
+                ),
                 sheet_id: keys[index].clone(),
                 name: sheet.name.clone(),
                 visibility: crate::structured::sheet_visibility(

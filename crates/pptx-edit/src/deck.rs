@@ -2346,6 +2346,7 @@ pub(crate) fn slide_parts<T: ReadTxn>(
     Ok(SlideParts {
         shape_ids: live_shape_order(&shape_order, txn)?,
         snapshot: SlideSnapshot {
+            header_footer: None,
             title: None,
             hidden: None,
             layout: None,
@@ -2837,6 +2838,7 @@ fn baseline_slide(
         ),
     );
     Ok(SlideSnapshot {
+        header_footer: None,
         title: None,
         hidden: None,
         layout: None,

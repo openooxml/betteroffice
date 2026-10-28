@@ -196,12 +196,42 @@ export interface InheritedGeometry {
   flipV: boolean;
 }
 
+/** Stored layout or master settings; omitted boolean attributes default to true and do not gate slide placeholders. */
+export interface HeaderFooterSettings {
+  slideNumber: boolean;
+  footer: boolean;
+  date: boolean;
+  header: boolean;
+}
+
+/** Session shape id and text of the first visible slide placeholder in shape order, including groups; text joins stories with newlines and preserves empty text.
+ * Slide number fields use firstSlideNum (default 1) plus deck index, counting hidden slides; fixed text stays unchanged. */
+export interface SlideHeaderFooterText {
+  shapeId: string;
+  text: string;
+}
+
+/** Stored date text; field is the first datetime* field type (updates on display), or null for fixed text. */
+export interface SlideDateText extends SlideHeaderFooterText {
+  field: string | null;
+}
+
+/** Visible placeholders from the slide itself, independent of stored settings; missing placeholders are null. */
+export interface SlideHeaderFooter {
+  footer: SlideHeaderFooterText | null;
+  slideNumber: SlideHeaderFooterText | null;
+  date: SlideDateText | null;
+}
+
 export interface SlideLayoutSnapshot {
+  /** Layout settings, falling back to the master; null when neither stores p:hf. */
+  headerFooter?: HeaderFooterSettings | null;
   name: string | null;
   type: string | null;
 }
 
 export interface SlideSnapshot {
+  headerFooter?: SlideHeaderFooter | null;
   title?: string | null;
   hidden?: boolean | null;
   layout?: SlideLayoutSnapshot | null;

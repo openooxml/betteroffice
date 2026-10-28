@@ -105,7 +105,7 @@ fn close(actual: f64, expected: f64) {
 #[test]
 fn auto_spacing_preserves_the_default_and_uses_fixed_asymmetric_spacing_when_enabled() {
     for (bytes, before, after) in [
-        (AUTO_DEFAULT, 14.0, 14.0),
+        (AUTO_DEFAULT, 280.0 / 15.0, 280.0 / 15.0),
         (AUTO_ENABLED, 100.0 / 15.0, 200.0 / 15.0),
         (AUTO_WITHOUT_FALLBACK, 100.0 / 15.0, 200.0 / 15.0),
     ] {

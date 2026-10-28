@@ -3,6 +3,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -416,7 +417,47 @@ describe('workbook plugin binding', () => {
   });
 });
 
+async function headerFooterFixture(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Header" sheetId="1" r:id="rId1"/><sheet name="Plain" sheetId="2" r:id="rId2"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/><headerFooter><oddHeader>&amp;LTitle&amp;C&amp;P</oddHeader><oddFooter>Bare footer</oddFooter></headerFooter></worksheet>');
+  zip.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+const headerFooterSheets = [
+  { headerFooter: {
+    differentFirst: false, differentOddEven: false, scaleWithDoc: true, alignWithMargins: true,
+    odd: {
+      header: { raw: '&LTitle&C&P', left: 'Title', center: '&[Page]', right: '' },
+      footer: { raw: 'Bare footer', left: '', center: 'Bare footer', right: '' },
+    }, even: null, first: null,
+  } },
+  { headerFooter: null },
+];
+
 describe('peer-less plugins', () => {
+  test('plugin reads preserve header footer facts through the worker route', async () => {
+    const workbook = openWorkbook(await headerFooterFixture());
+    const host = pluginWorker();
+    const plugin = recorder('reader');
+    const request = { ranges: [] };
+    try {
+      await host.mount({ plugins: [plugin.plugin] });
+      await until(() => plugin.log.includes('load:loaded'));
+      host.calls.readCells.mockImplementation(async () => workbook.readCells(request));
+      const read = await act(() => last(plugin.contexts).read.readCells(request));
+      expect(read).toEqual(workbook.readCells(request));
+      expect(read).toMatchObject({ ok: true, sheets: headerFooterSheets });
+    } finally {
+      host.restore();
+      workbook.dispose();
+    }
+  });
+
   test('plugin reads preserve engine sheet visibility through the worker route', async () => {
     const workbook = openWorkbook(fixture.slice());
     const host = pluginWorker();
@@ -874,6 +915,16 @@ describe('peer-less plugins', () => {
 });
 
 describe('XlsxEditor plugins', () => {
+  editorTest('plugin reads preserve header footer facts in thread', async () => {
+    const { plugin, log, contexts } = recorder('reader');
+    const { api } = await mount({ plugins: [plugin], file: await headerFooterFixture() });
+    await until(() => log.includes('load:loaded'));
+    const request = { ranges: [] };
+    const read = await act(() => last(contexts).read.readCells(request));
+    expect(read).toEqual(api().handle.readCells(request));
+    expect(read).toMatchObject({ ok: true, sheets: headerFooterSheets });
+  });
+
   editorTest('plugin reads preserve engine sheet visibility in thread', async () => {
     const { plugin, log, contexts } = recorder('reader');
     const { api } = await mount({ plugins: [plugin] });
