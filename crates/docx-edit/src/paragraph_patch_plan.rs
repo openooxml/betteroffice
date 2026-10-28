@@ -1967,7 +1967,7 @@ mod tests {
         assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (17, 23));
         assert_eq!(patch.text_edits[0].insert[0].text, "ahead of");
         assert!(patch.run_edits.is_empty());
-        let mut changed = after;
+        let mut changed = before.clone();
         changed[1]
             .attributes
             .insert("bold".to_owned(), Any::Bool(true));
