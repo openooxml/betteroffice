@@ -364,6 +364,34 @@ fn justified_text_compresses_spaces_before_wrapping() {
     }
 }
 
+#[test]
+fn default_space_shrink_limit_preserves_non_docx_measurement() {
+    let width = 12.0 * W0 + (1.0 - 0.22) * 3.0 * SP;
+    let mut input = json!({
+        "block": {"kind": "paragraph", "runs": [{"kind": "text", "text": "000 000 000 000"}],
+                  "attrs": {"alignment": "justify"}},
+        "maxWidth": width, "fontChains": {"liberation sans|0|0": [0]},
+        "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12},
+        "authoritativeShaping": true
+    });
+    for limit in [None, Some(0.25), Some(0.0)] {
+        input["compat"] = json!({"spaceShrinkLimit": limit});
+        let out = measure_paragraph_json(&store(), &input.to_string()).unwrap();
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            out["lines"].as_array().unwrap().len(),
+            if limit == Some(0.0) { 2 } else { 1 }
+        );
+        if limit != Some(0.0) {
+            approx(
+                out["lines"][0]["width"].as_f64().unwrap(),
+                width,
+                "line width",
+            );
+        }
+    }
+}
+
 // 3. overlong unbreakable word hard-breaks mid-word, minimum 1 char/line
 #[test]
 fn overlong_word_hard_breaks() {
