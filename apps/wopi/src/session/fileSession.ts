@@ -170,7 +170,7 @@ export class FileSession {
   #openedClientId: number | null = null;
   #openedInitialState: Uint8Array | null = null;
   #replayStats: { accepted: number; rejected: number } | null = null;
-  #collectingFollowUps: Uint8Array[] | null = null;
+  #applyingUpdate = false;
   #checkingSource = false;
 
   constructor(deps: FileSessionDeps) {
@@ -431,10 +431,7 @@ export class FileSession {
   #attachReplica(replica: ServerReplica): void {
     this.#replica = replica;
     this.#offLocalUpdate = replica.onLocalUpdate((update) => {
-      if (this.#collectingFollowUps !== null) {
-        this.#collectingFollowUps.push(update);
-        return;
-      }
+      if (this.#applyingUpdate) return;
       try {
         if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
       } catch {
@@ -864,7 +861,7 @@ export class FileSession {
   }
 
   /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
-  applyUpdate(userId: string, update: Uint8Array): { accepted: true; followUps: Uint8Array[] } | { accepted: false; reason: string } {
+  applyUpdate(userId: string, update: Uint8Array): { accepted: true; followUps: Uint8Array[] } | { accepted: false; reason: string; followUps?: Uint8Array[] } {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (this.#state !== "open" || !this.#replica) return { accepted: false, reason: "session is not open" };
@@ -873,22 +870,22 @@ export class FileSession {
     if (this.#checkingSource || !this.#lockHeld || !user.canWrite || this.#viewOnlyReason !== null) return { accepted: false, reason: "user is read only" };
     if (!user.isTokenValidAt(this.#now())) return { accepted: false, reason: "token expired" };
     const before = this.#replica.version;
-    const followUps: Uint8Array[] = [];
-    this.#collectingFollowUps = followUps;
+    this.#applyingUpdate = true;
     let result: ReturnType<ServerReplica["applyUpdate"]>;
     try {
       result = this.#replica.applyUpdate(update);
     } finally {
-      this.#collectingFollowUps = null;
+      this.#applyingUpdate = false;
     }
-    if (!result.accepted) return result;
-    user.lastSeen = this.#now();
+    const followUps = result.followUps ?? [];
+    if (!result.accepted && followUps.length === 0) return result;
+    if (result.accepted) user.lastSeen = this.#now();
     if (this.#replica.version !== before || followUps.length > 0) {
       if (this.#firstDirtyAt === null) this.#firstDirtyAt = this.#now();
       this.#lastUpdateAt = this.#now();
       try {
         if (this.#journalActive) {
-          this.#deps.journal?.appendUpdate(update);
+          if (result.accepted) this.#deps.journal?.appendUpdate(update);
           for (const followUp of followUps) this.#deps.journal?.appendUpdate(followUp);
         }
       } catch {
@@ -896,7 +893,7 @@ export class FileSession {
       }
       this.#scheduleAutosave();
     }
-    return { accepted: true, followUps };
+    return result.accepted ? { accepted: true, followUps } : result;
   }
 
   #scheduleAutosave(): void {

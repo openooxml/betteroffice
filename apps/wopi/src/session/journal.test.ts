@@ -117,6 +117,8 @@ describe("FileJournal", () => {
 
       author.insertPilcrowClaiming(savedId!);
       const authorUpdate = author.encodeStateAsUpdate(session.replica!.encodeStateVector());
+      const journalReader = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC));
+      const priorUpdates = journalReader.read()!.updates;
       emitted.length = 0;
       const result = session.applyUpdate(a.user.id, authorUpdate);
       expect(result.accepted).toBe(true);
@@ -124,13 +126,7 @@ describe("FileJournal", () => {
       expect(result.followUps.length).toBeGreaterThan(0);
       expect(emitted.length).toBe(0);
 
-      const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC)).read();
-      const authorIndex = journal!.updates.findIndex((u) => Buffer.from(u).equals(Buffer.from(authorUpdate)));
-      expect(authorIndex).toBeGreaterThanOrEqual(0);
-      for (const followUp of result.followUps) {
-        const followIndex = journal!.updates.findIndex((u) => Buffer.from(u).equals(Buffer.from(followUp)));
-        expect(followIndex).toBeGreaterThan(authorIndex);
-      }
+      expect(journalReader.read()!.updates).toEqual([...priorUpdates, authorUpdate, ...result.followUps]);
 
       session.abandon();
       const registry2 = restartRegistry(h, dir);
@@ -147,6 +143,110 @@ describe("FileJournal", () => {
       author.destroy();
     }
   });
+
+  test("accepted updates journal returned follow-ups even without local callbacks", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness({ journalDir: dir, format: "docx" });
+    addToken(h, "tok-a", "user-a");
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+    const session = a.session;
+    const replica = session.replica!;
+    const applyUpdate = replica.applyUpdate.bind(replica);
+    const client = await openTestClient(a.joinPayload, sourceBytes("docx"), 95021);
+    const emitted: Uint8Array[] = [];
+    session.on("replicaUpdate", (event) => emitted.push(event.update));
+    try {
+      client.edit("client-update ");
+      const update = client.encodeStateAsUpdate(replica.encodeStateVector());
+      const afterClient = client.encodeStateVector();
+      client.edit("first-follow-up ");
+      const first = client.encodeStateAsUpdate(afterClient);
+      const afterFirst = client.encodeStateVector();
+      client.edit("second-follow-up ");
+      const second = client.encodeStateAsUpdate(afterFirst);
+      const followUps = [first, second];
+      replica.applyUpdate = (incoming) => {
+        for (const part of [incoming, ...followUps]) expect(applyUpdate(part).accepted).toBe(true);
+        return { accepted: true, followUps };
+      };
+
+      expect(session.applyUpdate(a.user.id, update)).toEqual({ accepted: true, followUps });
+      expect(emitted).toEqual([]);
+      const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC)).read();
+      expect(journal!.updates).toEqual([update, first, second]);
+      expect(session.dirty).toBe(true);
+    } finally {
+      replica.applyUpdate = applyUpdate;
+      client.destroy();
+      session.abandon();
+    }
+  });
+
+  for (const crash of [false, true]) {
+    test(`rejected follow-ups are journaled and ${crash ? "replayed after a crash" : "autosaved"}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+      const h = makeHarness({ journalDir: dir, format: "docx" });
+      addToken(h, "tok-a", "user-a");
+      addToken(h, "tok-b", "user-b");
+      const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+      const session = a.session;
+      const replica = session.replica!;
+      const applyUpdate = replica.applyUpdate.bind(replica);
+      const client = await openTestClient(a.joinPayload, sourceBytes("docx"), 95031);
+      const emitted: Uint8Array[] = [];
+      session.on("replicaUpdate", (event) => emitted.push(event.update));
+      let recovered: FileSession | null = null;
+      try {
+        client.edit("integrated-prefix ");
+        const prefix = client.encodeStateAsUpdate(replica.encodeStateVector());
+        client.edit("rejected-suffix ");
+        const update = client.encodeStateAsUpdate(replica.encodeStateVector());
+        const rejection = { accepted: false as const, reason: "engine rejected update (Error)", followUps: [prefix] };
+        replica.applyUpdate = () => {
+          expect(applyUpdate(prefix).accepted).toBe(true);
+          return rejection;
+        };
+
+        expect(session.applyUpdate(a.user.id, update)).toEqual(rejection);
+        replica.applyUpdate = applyUpdate;
+        expect(replica.version).toBe(1);
+        expect(session.dirty).toBe(true);
+        expect(emitted).toEqual([]);
+        const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC)).read();
+        expect(journal!.updates).toEqual([prefix]);
+        expect(h.putCount()).toBe(0);
+
+        let active = session;
+        if (crash) {
+          session.abandon();
+          const registry = restartRegistry(h, dir);
+          const b = await registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+          recovered = b.session;
+          active = recovered;
+          expect(active.replayStats).toEqual({ accepted: 2, rejected: 0 });
+          expect(active.dirty).toBe(true);
+        }
+        await h.clock.advance(29000);
+        expect(h.putCount()).toBe(0);
+        await h.clock.advance(1000);
+        await h.clock.drain();
+        expect(h.putCount()).toBe(1);
+        expect(active.dirty).toBe(false);
+        const fresh = await openFreshClient("docx", h.host.files.get("file1")!.bytes, 95032);
+        try {
+          expect(fresh.contains("integrated-prefix")).toBe(true);
+          expect(fresh.contains("rejected-suffix")).toBe(false);
+        } finally {
+          fresh.destroy();
+        }
+      } finally {
+        replica.applyUpdate = applyUpdate;
+        client.destroy();
+        recovered?.abandon();
+        session.abandon();
+      }
+    });
+  }
 
   test("a viewer first after a crash does not replay or delete the journal", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
