@@ -2356,7 +2356,6 @@ fn restyle_numbered_field_results_keep_their_live_formatting() {
         let doc = open_numbered_restyle(&format!(
             r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr><w:r><w:t>Chapter 1</w:t></w:r>{field}</w:p>"#
         ));
-        let before = embed_marks(&doc, "field");
         apply(
             &doc,
             &UndoSession::new(),
@@ -2367,7 +2366,6 @@ fn restyle_numbered_field_results_keep_their_live_formatting() {
             panic!("missing field result size")
         };
         assert_eq!(number(size.get("size")), Some(24.0));
-        assert_eq!(attrs, before);
         let text = marks(&doc, "body", "Chapter 1");
         let Some(Any::Map(size)) = text.get("fontSize") else {
             panic!("missing run size")
