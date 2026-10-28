@@ -214,15 +214,19 @@ test("Action_Save failure notifies only when requested and forwards edit options
   expect(win.parsed()).toHaveLength(1);
 });
 
-test.each(["flushPendingInput", "encodeStateVector"] as const)("Action_Save Notify reports a stalled docx %s", async (method) => {
+test.each([
+  ["flushPendingInput", "flushPendingInputTimeout"],
+  ["hasPendingUpdates", "notSynced"],
+] as const)("Action_Save Notify reports a stalled docx %s", async (method, result) => {
   const win = new FakeWindow();
   let saving: Promise<void> | undefined;
   let posted = false;
   const editor = {
-    flushPendingInput: async () => {},
-    encodeStateVector: async () => Uint8Array.of(0),
+    flushPendingInput: async (): Promise<void> => {},
+    hasPendingUpdates: () => false,
   };
-  editor[method] = () => new Promise<never>(() => {});
+  if (method === "flushPendingInput") editor.flushPendingInput = () => new Promise<never>(() => {});
+  else editor.hasPendingUpdates = () => true;
   const bridge = new PostMessageBridge(win, ORIGIN, {
     onSave: (options) => {
       saving = saveDocument(editor, { save: async () => { posted = true; } }, {
@@ -239,7 +243,7 @@ test.each(["flushPendingInput", "encodeStateVector"] as const)("Action_Save Noti
     await Promise.resolve();
     expect(posted).toBe(false);
     expect(win.parsed()).toMatchObject([{
-      MessageId: "Action_Save_Resp", Values: { success: false, result: `${method}Timeout` },
+      MessageId: "Action_Save_Resp", Values: { success: false, result },
     }]);
   } finally {
     warning.mockRestore();
