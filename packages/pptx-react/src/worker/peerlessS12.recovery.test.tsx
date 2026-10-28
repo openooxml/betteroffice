@@ -66,13 +66,13 @@ for (const update of [false, true]) for (const edited of [false, true]) test(`re
   } finally { factory.mockRestore(); read.mockRestore(); globalThis.Blob = NativeBlob; }
 });
 
-test('recoverySave without edits returns the original bytes without reading the Blob', async () => {
+test('recoverySave without edits returns the live checkpoint without reading the Blob', async () => {
   const file = await deck();
   const read = spyOn(Blob.prototype, 'arrayBuffer');
   try {
     const value = await open({ file });
     const recovered = await value.api.recoverySave();
-    expect(recovered.bytes).toEqual(file);
+    await equalParts(recovered.bytes, new Uint8Array(await value.client.save()));
     expect(read).not.toHaveBeenCalled();
   } finally { read.mockRestore(); }
 });
