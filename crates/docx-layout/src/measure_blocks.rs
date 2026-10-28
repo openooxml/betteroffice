@@ -395,7 +395,7 @@ pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExt
 fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
     for block in blocks {
         match block {
-            LayoutBlock::Paragraph(paragraph) => visit(paragraph),
+            LayoutBlock::Paragraph(paragraph) => walk_paragraph_contents(paragraph, visit),
             LayoutBlock::Table(table) => {
                 for row in &table.rows {
                     for cell in &row.cells {
@@ -405,20 +405,22 @@ fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBloc
             }
             LayoutBlock::TextBox(text_box) => {
                 for paragraph in &text_box.content {
-                    visit(paragraph);
+                    walk_paragraph_contents(paragraph, visit);
                 }
             }
-            LayoutBlock::Shape(shape) => {
-                if let Some(paragraphs) = &shape.inner_text {
-                    for paragraph in paragraphs {
-                        visit(paragraph);
-                    }
-                }
-                for child in &shape.children {
-                    walk_shape_paragraphs(child, visit);
-                }
-            }
+            LayoutBlock::Shape(shape) => walk_shape_paragraphs(shape, visit),
             _ => {}
+        }
+    }
+}
+
+fn walk_paragraph_contents(paragraph: &ParagraphBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
+    visit(paragraph);
+    for run in &paragraph.runs {
+        if let Run::Image(image) = run
+            && let Some(shape) = &image.inline_shape
+        {
+            walk_shape_paragraphs(shape, visit);
         }
     }
 }
@@ -426,7 +428,7 @@ fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBloc
 fn walk_shape_paragraphs(shape: &ShapeBlock, visit: &mut impl FnMut(&ParagraphBlock)) {
     if let Some(paragraphs) = &shape.inner_text {
         for paragraph in paragraphs {
-            visit(paragraph);
+            walk_paragraph_contents(paragraph, visit);
         }
     }
     for child in &shape.children {
@@ -3861,6 +3863,15 @@ fn measure_table_with_compat_shift(
                 {
                     continue;
                 }
+                if let LayoutBlock::Chart(chart) = block
+                    && crate::cell_layout::cell_overlay_chart(
+                        chart.position.is_some(),
+                        chart.wrap_type.as_deref(),
+                        chart.behind_doc,
+                    )
+                {
+                    continue;
+                }
                 let visual = if has_table_floats {
                     extent_height(measure)
                 } else {
@@ -6647,6 +6658,85 @@ mod tests {
             requirement["key"] == "yu mincho|0|0"
                 && requirement["scripts"] == serde_json::json!(["cjk-jp"])
         }));
+    }
+
+    #[test]
+    fn collects_fonts_from_inline_shape_children_and_nested_carriers() {
+        let nested = json!({
+            "kind": "image", "src": "", "width": 100, "height": 40,
+            "inlineShape": {
+                "id": "nested", "shapeType": "rect", "width": 100, "height": 40,
+                "geometryPath": [], "children": [],
+                "innerText": [{"id": "nested-text", "runs": [{
+                    "kind": "text", "text": "日本語かな", "fontFamily": "Nested Font",
+                    "bold": true, "italic": true
+                }]}]
+            }
+        });
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 200, "height": 100,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 200, "height": 100,
+                    "geometryPath": [],
+                    "innerText": [{"id": "box-text", "runs": [{
+                        "kind": "text", "text": "Only in box", "fontFamily": "Box Font"
+                    }]}],
+                    "children": [{
+                        "id": "child", "shapeType": "rect", "width": 100, "height": 40,
+                        "geometryPath": [], "children": [],
+                        "innerText": [{"id": "child-text", "runs": [nested]}]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let mut ordinary = FontRequirementCollector::default();
+        ordinary.collect([&block], "Calibri");
+        let ordinary = ordinary.finish();
+        assert!(ordinary.contains_key("box font|0|0"));
+        assert_eq!(ordinary["nested font|1|1"].scripts, ["cjk-jp"]);
+        let mut preview = FontRequirementCollector::default();
+        preview.collect_preview([&block], "Calibri");
+        assert_eq!(
+            serde_json::to_value(preview.finish()).unwrap(),
+            serde_json::to_value(ordinary).unwrap()
+        );
+    }
+
+    #[test]
+    fn floating_charts_do_not_increase_table_cell_height() {
+        for (wrap_type, behind_doc) in [("none", false), ("square", true)] {
+            let mut cell_blocks = vec![json!({
+                "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
+                "position": {}, "wrapType": wrap_type, "behindDoc": behind_doc
+            })];
+            cell_blocks.extend((0..6).map(|index| {
+                json!({
+                    "kind": "paragraph", "id": index, "runs": [],
+                    "attrs": {"spacing": {"line": 20, "lineRule": "exact"}}
+                })
+            }));
+            let mut block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "table", "id": "table", "columnWidths": [200],
+                "rows": [{"id": "row", "cells": [{
+                    "id": "cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                    "blocks": cell_blocks
+                }]}]
+            }))
+            .unwrap();
+            let extent = measure_block(&mut block, 200.0, &MeasurementConfig::default()).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &extent) else {
+                panic!("table measure");
+            };
+            assert_eq!(extent.rows[0].height, 120.0, "{wrap_type}, {behind_doc}");
+            assert_eq!(extent.rows[0].cells[0].height, 120.0);
+            let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
+            assert_eq!(
+                breaks.break_offsets[0],
+                [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+            );
+        }
     }
 
     fn font_requirement_keys(run: Value) -> Vec<String> {

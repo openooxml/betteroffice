@@ -164,6 +164,34 @@ fn is_floating_drawing(block: &LayoutBlock) -> bool {
     }
 }
 
+fn chart_anchor_owner(measured: &[MeasuredBlock], index: usize) -> Option<usize> {
+    if !is_floating_drawing(&measured[index].block) {
+        return None;
+    }
+    let end =
+        (index..measured.len()).find(|&index| !is_floating_drawing(&measured[index].block))?;
+    let LayoutBlock::Paragraph(paragraph) = &measured[end].block else {
+        return None;
+    };
+    let (Some(start), Some(stop)) = (paragraph.pm_start, paragraph.pm_end) else {
+        return None;
+    };
+    if !measured[index]
+        .block
+        .pm_start()
+        .is_some_and(|position| position > start && position < stop)
+    {
+        return None;
+    }
+    measured[index..end]
+        .iter()
+        .any(|measured| {
+            matches!(&measured.block, LayoutBlock::Chart(chart)
+                if chart.pm_start.is_some_and(|position| position > start && position < stop))
+        })
+        .then_some(end)
+}
+
 fn is_anchored_image(image: &ImageBlock) -> bool {
     image
         .anchor
@@ -967,6 +995,7 @@ fn place<F: PartialEq>(
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
+    let mut prepared_paragraph = None;
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -1016,17 +1045,31 @@ fn place<F: PartialEq>(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
+        let decision_index = prepared_paragraph
+            .filter(|&owner| i <= owner)
+            .or_else(|| chart_anchor_owner(measured, i))
+            .unwrap_or(i);
+        let prepare = prepared_paragraph != Some(decision_index);
+        let decision = &measured[decision_index];
+        let decision_section_mark = plan.section_marks[decision_index];
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
-        if !section_mark && let Some(authored) = hooks::breaks_before_block(&mb.block)? {
+        if prepare
+            && !decision_section_mark
+            && let Some(authored) = hooks::breaks_before_block(&decision.block)?
+        {
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
-        if !section_mark
-            && let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
-            && !plan.keep_with_next.interior_members.contains(&i)
+        if prepare
+            && !decision_section_mark
+            && let Some(group) = plan.keep_with_next.groups_by_head.get(&decision_index)
+            && !plan
+                .keep_with_next
+                .interior_members
+                .contains(&decision_index)
         {
             let state_idx = paginator.get_current();
             let page_content_height =
@@ -1038,18 +1081,18 @@ fn place<F: PartialEq>(
             let every_cell_starts = split_first_row && !paginator.next_page_may_be_shorter();
             let droppable = can_drop_lead_skip(paginator);
             let fresh_top = at_fresh_page_top(paginator, page_index_offset);
-            let (lead_skip, fresh_lead_skip) = match (&mb.block, &mb.measure) {
+            let (lead_skip, fresh_lead_skip) = match (&decision.block, &decision.measure) {
                 (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) if droppable => {
                     let kept = paginator
                         .leading_spacing(get_spacing_before(block))
                         .max(paginator.state(state_idx).deferred_spacing);
                     (
                         if fresh_top {
-                            removable_lead_skip(&measured[..i], block, measure, kept)
+                            removable_lead_skip(&measured[..decision_index], block, measure, kept)
                         } else {
                             0.0
                         },
-                        removable_lead_skip(&measured[..i], block, measure, 0.0),
+                        removable_lead_skip(&measured[..decision_index], block, measure, 0.0),
                     )
                 }
                 _ => (0.0, 0.0),
@@ -1094,6 +1137,30 @@ fn place<F: PartialEq>(
                     }
                 }
             }
+        }
+
+        if prepare && decision_index != i {
+            if !decision_section_mark
+                && let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+                    (&decision.block, &decision.measure)
+            {
+                let skip = stale_lead_skip(
+                    &measured[..decision_index],
+                    block,
+                    measure,
+                    paginator,
+                    page_index_offset,
+                );
+                let slice = paragraph_min_leading_slice(block, measure) - skip;
+                let state_index = paginator.get_current();
+                let before = paginator
+                    .leading_spacing(get_spacing_before(block))
+                    .max(paginator.state(state_index).deferred_spacing);
+                if slice <= paginator.get_column_capacity() {
+                    paginator.ensure_fits(before + slice);
+                }
+            }
+            prepared_paragraph = Some(decision_index);
         }
 
         match &mb.block {
@@ -2379,6 +2446,55 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn anchored_chart_pairs_follow_their_paragraph_pagination() {
+        for attrs in [
+            json!({"pageBreakBefore": true}),
+            json!({"keepLines": true}),
+            json!({"keepNext": true}),
+        ] {
+            let mut owner = paragraph(1, 2, 20.0, attrs.clone());
+            owner["block"]["pmStart"] = json!(10);
+            owner["block"]["pmEnd"] = json!(30);
+            let chart = |id: &str, start: usize| {
+                json!({
+                    "block": {
+                        "kind": "chart", "id": id, "chart": {}, "width": 40, "height": 30,
+                        "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}},
+                        "wrapType": "none", "pmStart": start, "pmEnd": start + 1
+                    },
+                    "measure": {"kind": "chart", "width": 40, "height": 30}
+                })
+            };
+            let result = layout(vec![
+                paragraph(0, 1, 80.0, json!({})),
+                chart("first", 12),
+                chart("second", 13),
+                owner,
+                paragraph(2, 1, 20.0, json!({})),
+            ]);
+            assert_eq!(result.pages.len(), 2, "{attrs}");
+            assert!(
+                result.pages[0]
+                    .fragments
+                    .iter()
+                    .all(|fragment| !matches!(fragment, Fragment::Chart(_))),
+                "{attrs}"
+            );
+            let charts: Vec<_> = result.pages[1]
+                .fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    Fragment::Chart(chart) => Some(chart),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(charts.len(), 2, "{attrs}");
+            assert_eq!(charts[0].y, charts[1].y, "{attrs}");
+            assert_eq!(charts[0].y, 10.0, "{attrs}");
+        }
     }
 
     fn widow_rounding_input(

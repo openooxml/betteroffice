@@ -105,6 +105,16 @@ fn cell_unbreakable_ranges(
         {
             continue;
         }
+        if let Some(LayoutBlock::Chart(chart)) = block
+            && crate::cell_layout::cell_overlay_chart(
+                chart.position.is_some(),
+                chart.wrap_type.as_deref(),
+                chart.behind_doc,
+            )
+        {
+            keep_next_top = preceding_keep_top;
+            continue;
+        }
         if let Some(height) = height {
             y += previous_after;
             if let Some(LayoutBlock::Table(table)) = block
@@ -921,6 +931,27 @@ mod tests {
         }))
         .unwrap();
         (block, measure)
+    }
+
+    #[test]
+    fn floating_chart_preserves_every_text_line_break() {
+        let chart = json!({
+            "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
+            "position": {}, "wrapType": "none"
+        });
+        let chart_measure = json!({"kind": "chart", "width": 50, "height": 101});
+        let (block, measure) = single_cell_table(
+            vec![chart, para()],
+            vec![chart_measure, para_measure(6)],
+            120.0,
+        );
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(
+            info.break_offsets[0],
+            [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+        );
+        assert_eq!(snap_row_break(&info, 0, 0.0, 75.0), 60.0);
+        assert_eq!(snap_row_break(&info, 0, 60.0, 60.0), 60.0);
     }
 
     #[test]

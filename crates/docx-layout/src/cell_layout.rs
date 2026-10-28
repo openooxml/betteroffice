@@ -38,6 +38,14 @@ pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) ->
         )
 }
 
+pub(crate) fn cell_overlay_chart(
+    positioned: bool,
+    wrap_type: Option<&str>,
+    behind_doc: Option<bool>,
+) -> bool {
+    behind_doc == Some(true) || cell_overlay_drawing(positioned, wrap_type)
+}
+
 /// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
 ///
 /// Word 2013 changed what `w:tblInd` is measured to: in compatibilityMode <= 14
@@ -190,7 +198,11 @@ pub fn layout_cell_content(
         {
             line_tops.push(Vec::new());
         } else if let Some(LayoutBlock::Chart(chart)) = block
-            && cell_overlay_drawing(chart.position.is_some(), chart.wrap_type.as_deref())
+            && cell_overlay_chart(
+                chart.position.is_some(),
+                chart.wrap_type.as_deref(),
+                chart.behind_doc,
+            )
         {
             line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {

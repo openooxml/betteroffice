@@ -766,3 +766,301 @@ fn text_box_text_paints_inside_the_side_by_side_box() {
         );
     }
 }
+
+fn document_with_picture(body: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&document(body, 20160, 12240, 1080)).unwrap();
+    for (name, bytes) in &mut parts {
+        let (end, entry) = match name.as_str() {
+            "word/_rels/document.xml.rels" => (
+                "</Relationships>",
+                r#"<Relationship Id="rIdPicture" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/>"#,
+            ),
+            "[Content_Types].xml" => (
+                "</Types>",
+                r#"<Default Extension="png" ContentType="image/png"/>"#,
+            ),
+            _ => continue,
+        };
+        let xml = String::from_utf8(std::mem::take(bytes)).unwrap();
+        *bytes = xml.replace(end, &format!("{entry}{end}")).into_bytes();
+    }
+    parts.push((
+        "word/media/picture.png".to_owned(),
+        vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2,
+            0, 0, 5, 0, 1, 169, 245, 232, 39, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ],
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn ordinary_picture() -> &'static str {
+    concat!(
+        r#"<w:pict><v:shape id="ordinary-picture" style="width:444.75pt;height:240pt">"#,
+        r#"<v:imagedata r:id="rIdPicture"/></v:shape></w:pict>"#
+    )
+}
+
+fn text_box_with_opaque_picture_fallback(fallback: &str) -> String {
+    let unsupported = concat!(
+        r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>"#,
+        r#"<wp:docPr id="99" name="Unsupported chart"/><a:graphic><a:graphicData "#,
+        r#"uri="http://schemas.microsoft.com/office/drawing/2014/chartex">"#,
+        r#"<cx:chart xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" "#,
+        r#"r:id="rIdUnknown"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+    );
+    text_box_drawing_fb(
+        EXTENT,
+        "<w:p><w:r><w:t>Selected Choice text</w:t></w:r></w:p>",
+        fallback,
+    )
+    .replace("</mc:Choice>", &format!("{unsupported}</mc:Choice>"))
+}
+
+#[test]
+fn ordinary_picture_before_matching_inline_chart_survives() {
+    let body = paragraph(
+        "40000001",
+        &format!("{}{}", run(ordinary_picture()), run(&chart_drawing())),
+    );
+    let (layout, display) = render(&document_with_picture(&body), 78219);
+    let pictures: Vec<_> = primitives(&display)
+        .iter()
+        .filter(|primitive| primitive["kind"] == "image")
+        .collect();
+    assert_eq!(pictures.len(), 1, "ordinary picture survives: {display}");
+    let chart = chart_canvas(&display);
+    near(
+        num(&chart, "x"),
+        num(pictures[0], "x") + BOX_W,
+        2.0,
+        "chart follows the ordinary picture",
+    );
+    assert_eq!(page_count(&layout), 1);
+}
+
+#[test]
+fn converted_choice_drops_only_its_own_differently_sized_picture_fallback() {
+    let fallback = ordinary_picture()
+        .replace("444.75pt", "100pt")
+        .replace("240pt", "50pt");
+    let text_box = text_box_with_opaque_picture_fallback(&fallback);
+    let body = paragraph(
+        "40000006",
+        &format!("{}{}", run(ordinary_picture()), run(&text_box)),
+    );
+    let (_, display) = render(&document_with_picture(&body), 78226);
+    assert_eq!(
+        primitives(&display)
+            .iter()
+            .filter(|primitive| primitive["kind"] == "image")
+            .count(),
+        1,
+        "only the ordinary picture paints: {display}"
+    );
+    let boxed = box_shape(&display);
+    near(
+        num(&boxed, "x"),
+        72.0 + BOX_W,
+        2.0,
+        "Choice follows the picture",
+    );
+    let _ = text_origin(&display, "Selected Choice text");
+}
+
+#[test]
+fn matching_choice_doc_pr_drops_its_picture_twin() {
+    let text_box = text_box_with_opaque_picture_fallback(ordinary_picture());
+    let body = paragraph(
+        "40000007",
+        &format!("{}{}", run(&text_box), text_run("After the Choice")),
+    );
+    let bytes = document_with_picture(&body);
+    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let package = serde_json::to_value(package).unwrap();
+    let mut pending = vec![&package];
+    let mut sources = Vec::new();
+    while let Some(value) = pending.pop() {
+        if value["type"] == "opaqueDrawing" && value["kind"] == "alternateContent" {
+            sources.push(value["xml"].as_str().unwrap());
+        }
+        match value {
+            Value::Array(values) => pending.extend(values),
+            Value::Object(values) => pending.extend(values.values()),
+            _ => {}
+        }
+    }
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].contains(r#"<wp:docPr id="4" name="Text Box 4"/>"#));
+    let (_, display) = render(&bytes, 78227);
+    assert!(
+        primitives(&display)
+            .iter()
+            .all(|primitive| primitive["kind"] != "image"),
+        "the real picture twin is omitted: {display}"
+    );
+    let _ = box_shape(&display);
+    let _ = text_origin(&display, "Selected Choice text");
+    let _ = text_origin(&display, "After the Choice");
+}
+
+#[test]
+fn unrelated_vml_box_before_matching_inline_box_survives() {
+    let unrelated = vml_fallback("444.75", "240", "Independent VML box");
+    let body = paragraph(
+        "40000002",
+        &format!(
+            "{}{}{}",
+            run(&unrelated),
+            run(&text_box_drawing()),
+            run(&chart_drawing()),
+        ),
+    );
+    let (_, display) = render(&document(&body, 20160, 12240, 1080), 78220);
+    let _ = text_origin(&display, "Independent VML box");
+    let _ = text_origin(&display, BOX_TITLE);
+}
+
+#[test]
+fn shared_text_box_keeps_text_after_section_width_remeasurement() {
+    let bytes = pair_document(20160);
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let engine = EngineSession::new(78221);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let mut request = json!({
+        "bodyStory": "body",
+        "renderEnv": {},
+        "regions": {"sections": [{
+            "pageSize": {"w": 1344, "h": 816},
+            "margins": {"top": 72, "right": 72, "bottom": 72, "left": 72}
+        }]},
+        "measurement": {
+            "fontChains": {"calibri|0|0": [font], "calibri|1|0": [font]},
+            "defaults": {"fontFamily": "Calibri", "fontSize": 11}
+        }
+    });
+    for width in [1344, 1280, 1344] {
+        request["regions"]["sections"][0]["pageSize"]["w"] = json!(width);
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let layout: Value = serde_json::from_str(&output).unwrap();
+        let shape = layout["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["block"]["runs"].as_array().into_iter().flatten())
+            .find_map(|run| run.get("inlineShape"))
+            .expect("inline text box");
+        assert!(shape["innerMeasures"].is_array(), "width {width}: {layout}");
+        let display: Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        let _ = text_origin(&display, BOX_TITLE);
+        let _ = text_origin(&display, BOX_BODY);
+    }
+}
+
+#[test]
+fn shared_text_box_requests_its_unique_font_and_script() {
+    let text_box = text_box_drawing_with(
+        EXTENT,
+        concat!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Box Font" w:hAnsi="Box Font" "#,
+            r#"w:eastAsia="Box Font"/><w:b/><w:i/></w:rPr><w:t>日本語かな</w:t></w:r></w:p>"#
+        ),
+    );
+    let body = paragraph(
+        "40000003",
+        &format!("{}{}", run(&chart_drawing()), run(&text_box)),
+    );
+    let engine = EngineSession::new(78222);
+    seed_from_docx(engine.doc(), &document(&body, 20160, 12240, 1080)).unwrap();
+    let requirements: Vec<Value> = serde_json::from_str(
+        &engine
+            .layout_font_requirements_json(&json!({"bodyStory": "body"}).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        requirements.iter().any(|requirement| {
+            requirement["key"] == "box font|1|1" && requirement["scripts"] == json!(["cjk-jp"])
+        }),
+        "text box font and script: {requirements:?}"
+    );
+}
+
+#[test]
+fn page_break_before_moves_the_paragraph_and_its_trailing_anchored_chart() {
+    let body = format!(
+        r#"{}<w:p w14:paraId="40000005"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}</w:p>"#,
+        paragraph("40000004", &text_run("Previous page")),
+        text_run("Chart owner"),
+        run(&anchored_chart_drawing()),
+    );
+    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78223);
+    let pages = layout["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2, "one authored page break: {layout}");
+    assert!(
+        !pages[0]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|fragment| fragment["kind"] == "chart"),
+        "chart leaves the preceding page: {layout}"
+    );
+    let chart = pages[1]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "chart")
+        .expect("chart on its owner's page");
+    let owner = paragraph_fragment(&layout, "40000005").unwrap();
+    near(num(chart, "y"), num(owner, "y"), 2.0, "chart owner origin");
+}
+
+#[test]
+fn floating_chart_in_a_cell_preserves_text_height_and_paint_offsets() {
+    let extent = r#"cx="952500" cy="962025""#;
+    let chart = anchored_chart_drawing_with("<wp:wrapNone/>", extent, 0);
+    let table = |drawing: &str| {
+        let lines: String = (0..6)
+            .map(|index| {
+                format!(
+                    r#"<w:p w14:paraId="5000000{index}"><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/><w:widowControl w:val="0"/></w:pPr>{}</w:p>"#,
+                    text_run(&format!("Cell line {index}")),
+                )
+            })
+            .collect();
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="6000" w:type="dxa"/></w:tcPr><w:p>{drawing}</w:p>{lines}</w:tc></w:tr></w:tbl>"#
+        )
+    };
+    let (layout, display) = render(&document(&table(&run(&chart)), 12240, 15840, 1440), 78224);
+    let (plain, plain_display) = render(&document(&table(""), 12240, 15840, 1440), 78225);
+    let table_height = |layout: &Value| {
+        layout["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["block"]["kind"] == "table")
+            .unwrap()["measure"]["rows"][0]["height"]
+            .as_f64()
+            .unwrap()
+    };
+    near(
+        table_height(&layout),
+        table_height(&plain),
+        0.01,
+        "row height",
+    );
+    for index in 0..6 {
+        let needle = format!("Cell line {index}");
+        let (_, baseline) = text_origin(&display, &needle);
+        let (_, plain_baseline) = text_origin(&plain_display, &needle);
+        near(baseline, plain_baseline, 0.01, "cell text baseline");
+    }
+}

@@ -3414,11 +3414,37 @@ fn retain_shape_measurements(next: &mut LayoutBlock, previous: &LayoutBlock) {
     }
     fn shape(next: &mut docx_layout::types::ShapeBlock, previous: &docx_layout::types::ShapeBlock) {
         next.inner_measures.clone_from(&previous.inner_measures);
+        if let (Some(next), Some(previous)) = (&mut next.inner_text, &previous.inner_text) {
+            for (next, previous) in next.iter_mut().zip(previous) {
+                paragraph(next, previous);
+            }
+        }
         for (next, previous) in next.children.iter_mut().zip(&previous.children) {
             shape(next, previous);
         }
     }
+    fn paragraph(
+        next: &mut docx_layout::types::ParagraphBlock,
+        previous: &docx_layout::types::ParagraphBlock,
+    ) {
+        for (next, previous) in next.runs.iter_mut().zip(&previous.runs) {
+            if let (Run::Image(next), Run::Image(previous)) = (next, previous)
+                && let (Some(next), Some(previous)) =
+                    (&mut next.inline_shape, &previous.inline_shape)
+            {
+                shape(next, previous);
+            }
+        }
+    }
     match (next, previous) {
+        (LayoutBlock::Paragraph(next), LayoutBlock::Paragraph(previous)) => {
+            paragraph(next, previous);
+        }
+        (LayoutBlock::TextBox(next), LayoutBlock::TextBox(previous)) => {
+            for (next, previous) in next.content.iter_mut().zip(&previous.content) {
+                paragraph(next, previous);
+            }
+        }
         (LayoutBlock::Shape(next), LayoutBlock::Shape(previous)) => shape(next, previous),
         (LayoutBlock::Table(next), LayoutBlock::Table(previous)) => {
             for (next, previous) in next.rows.iter_mut().zip(&previous.rows) {
@@ -3439,6 +3465,12 @@ fn shape_measurement_counts_match(next: &LayoutBlock, previous: &LayoutBlock) ->
         previous: &docx_layout::types::ShapeBlock,
     ) -> bool {
         next.inner_text.as_ref().map(Vec::len) == previous.inner_text.as_ref().map(Vec::len)
+            && next
+                .inner_text
+                .iter()
+                .flatten()
+                .zip(previous.inner_text.iter().flatten())
+                .all(|(next, previous)| paragraph(next, previous))
             && next.children.len() == previous.children.len()
             && next
                 .children
@@ -3446,7 +3478,38 @@ fn shape_measurement_counts_match(next: &LayoutBlock, previous: &LayoutBlock) ->
                 .zip(&previous.children)
                 .all(|(next, previous)| shape(next, previous))
     }
+    fn paragraph(
+        next: &docx_layout::types::ParagraphBlock,
+        previous: &docx_layout::types::ParagraphBlock,
+    ) -> bool {
+        next.runs.len() == previous.runs.len()
+            && next
+                .runs
+                .iter()
+                .zip(&previous.runs)
+                .all(|(next, previous)| match (next, previous) {
+                    (Run::Image(next), Run::Image(previous)) => {
+                        match (&next.inline_shape, &previous.inline_shape) {
+                            (Some(next), Some(previous)) => shape(next, previous),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                    }
+                    _ => std::mem::discriminant(next) == std::mem::discriminant(previous),
+                })
+    }
     match (next, previous) {
+        (LayoutBlock::Paragraph(next), LayoutBlock::Paragraph(previous)) => {
+            paragraph(next, previous)
+        }
+        (LayoutBlock::TextBox(next), LayoutBlock::TextBox(previous)) => {
+            next.content.len() == previous.content.len()
+                && next
+                    .content
+                    .iter()
+                    .zip(&previous.content)
+                    .all(|(next, previous)| paragraph(next, previous))
+        }
         (LayoutBlock::Shape(next), LayoutBlock::Shape(previous)) => shape(next, previous),
         (LayoutBlock::Table(next), LayoutBlock::Table(previous)) => {
             next.rows.len() == previous.rows.len()
@@ -3475,8 +3538,13 @@ fn shape_measurement_counts_match(next: &LayoutBlock, previous: &LayoutBlock) ->
 }
 
 fn retained_shape_block_matches(next: &LayoutBlock, previous: &LayoutBlock) -> bool {
-    if !matches!(next, LayoutBlock::Shape(_) | LayoutBlock::Table(_))
-        || !shape_measurement_counts_match(next, previous)
+    if !matches!(
+        next,
+        LayoutBlock::Paragraph(_)
+            | LayoutBlock::TextBox(_)
+            | LayoutBlock::Shape(_)
+            | LayoutBlock::Table(_)
+    ) || !shape_measurement_counts_match(next, previous)
     {
         return false;
     }

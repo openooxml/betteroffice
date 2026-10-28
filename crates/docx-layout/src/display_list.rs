@@ -2471,6 +2471,12 @@ pub(crate) struct ChartBlockIn {
     #[serde(default)]
     chart: ChartIn,
     #[serde(default)]
+    position: Option<crate::types::ImageRunPosition>,
+    #[serde(default)]
+    wrap_type: Option<String>,
+    #[serde(default)]
+    behind_doc: Option<bool>,
+    #[serde(default)]
     width: f64,
     #[serde(default)]
     height: f64,
@@ -10890,6 +10896,15 @@ fn cell_content_frame<'m>(
             {
                 block_tops.push(stack_cursor);
             }
+            (BlockIn::Chart(chart), Some(MeasureIn::Chart(_)))
+                if crate::cell_layout::cell_overlay_chart(
+                    chart.position.is_some(),
+                    chart.wrap_type.as_deref(),
+                    chart.behind_doc,
+                ) =>
+            {
+                block_tops.push(stack_cursor);
+            }
             (BlockIn::Shape(_), Some(MeasureIn::Shape(sm)))
             | (BlockIn::Chart(_), Some(MeasureIn::Chart(sm))) => {
                 stack_cursor += prev_after;
@@ -10993,6 +11008,16 @@ fn emit_cell_content(
             && crate::cell_layout::cell_overlay_drawing(
                 shape.position.is_some(),
                 shape.wrap_type.as_deref(),
+            )
+            && !frame.shows_anchor(cell, cell_measure, i, split_row)
+        {
+            continue;
+        }
+        if let BlockIn::Chart(chart) = cell_block
+            && crate::cell_layout::cell_overlay_chart(
+                chart.position.is_some(),
+                chart.wrap_type.as_deref(),
+                chart.behind_doc,
             )
             && !frame.shows_anchor(cell, cell_measure, i, split_row)
         {
@@ -11528,6 +11553,15 @@ fn emit_cell_floating_images(
     let mut paragraph_y = 0.0_f64;
     for (i, blk) in cell.blocks.iter().enumerate() {
         let BlockIn::Paragraph(pb) = blk else {
+            if let BlockIn::Chart(chart) = blk
+                && crate::cell_layout::cell_overlay_chart(
+                    chart.position.is_some(),
+                    chart.wrap_type.as_deref(),
+                    chart.behind_doc,
+                )
+            {
+                continue;
+            }
             // Nested tables advance the anchor cursor by their measured height.
             match cell_measure.blocks.get(i) {
                 Some(MeasureIn::Table(tm)) => paragraph_y += tm.total_height,
