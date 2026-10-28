@@ -8,6 +8,7 @@ import { DocxSourceWorkerClient as ResidentEngineWorkerClient } from './resident
 import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';
+import { commandMayNeedNewFonts } from './residentFontEnvironment';
 
 const TIMEOUT = 20_000;
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -116,3 +117,18 @@ test('decoded worker fonts stay in their owning measurement session', async () =
     second.destroy();
   }
 }, TIMEOUT);
+
+test('commands that may need new fonts: fallback script text, merges and reformatting, never bytes alone', () => {
+  expect(commandMayNeedNewFonts('insertText', { text: 'plain caf\u00e9' })).toBe(false);
+  expect(commandMayNeedNewFonts('deleteBackward', {})).toBe(false);
+  for (const text of ['\u65e5\u672c', '\u304b', '\ud55c', '\u05d0', '\u0627', '\u{20000}']) {
+    expect(commandMayNeedNewFonts('insertText', { text })).toBe(true);
+  }
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: '\u4e2d' }] } })).toBe(true);
+  for (const kind of ['pasteFragment', 'undo', 'redo', 'formatRange', 'applyRemoteUpdate', 'applyRemoteUpdateChunks', 'collabPipe']) {
+    expect(commandMayNeedNewFonts(kind, {})).toBe(true);
+  }
+  const bytes = new TextEncoder().encode('\u65e5\u672c');
+  expect(commandMayNeedNewFonts('insertImage', { image: { data: bytes, buffer: bytes.buffer } })).toBe(false);
+  expect(commandMayNeedNewFonts('setFontEnvironment', { families: ['\u6e38\u660e\u671d'] })).toBe(false);
+});

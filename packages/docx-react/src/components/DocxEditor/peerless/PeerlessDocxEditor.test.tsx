@@ -1182,6 +1182,48 @@ test('a script typed after open loads its fallback face once and a covered scrip
   expect(environments()).toHaveLength(opened + 1);
 });
 
+test('a requirements hint during a toolbar font pick waits for the pick instead of aborting it', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  let release = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let picking = false;
+  const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
+    let chains: Record<string, number[]> = {};
+    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+      async prepareFontRequirements(requirements) {
+        if (requirements.some(({ key }) => key === 'picked|0|0')) { picking = true; await held; }
+        chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
+          .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
+        return true;
+      },
+      measurementConfigForRequirements: () => ({ fontChains: chains, defaults: { fontFamily: 'Calibri', fontSize: 11 },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }) };
+  });
+  restorers.push(() => measure.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  binding!.viewStore.getSnapshot().workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
+  let picked: Promise<unknown> | undefined;
+  await act(async () => { picked = ref.current!.commands.execute('fontFamily', { family: 'Picked' }); });
+  await waitFor(() => expect(picking).toBe(true));
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false, scripts: ['cjk-jp'] }];
+  const asked = requests.filter(request => request.type === 'fontRequirements').length;
+  await act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+    await new Promise(resolve => setTimeout(resolve, 300));
+  });
+  expect(requests.filter(request => request.type === 'fontRequirements')).toHaveLength(asked);
+  release();
+  await act(async () => { expect(await picked).toMatchObject({ ok: true }); });
+  const kinds = () => requests.flatMap(request => request.type === 'edit' ? [request.command.kind] : []);
+  expect(kinds()).toContain('formatRange');
+  await waitFor(() => expect(requests.filter(request => request.type === 'fontRequirements')).toHaveLength(asked + 1));
+  await waitFor(() => expect(kinds().filter(kind => kind === 'setFontEnvironment')).toHaveLength(2));
+});
+
 test('peerless shell ref and plugin readiness use worker state', async () => {
   const ref = createRef<DocxEditorRef>();
   const setup = mock(() => {});

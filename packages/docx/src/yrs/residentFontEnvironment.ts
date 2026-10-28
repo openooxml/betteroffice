@@ -49,22 +49,22 @@ export function validFontEnvironment(value: unknown): value is DocxFontEnvironme
 
 /** The characters docx-layout's `paragraph_scripts` gives a script fallback face. */
 const FALLBACK_SCRIPT_TEXT = /[\u0590-\u06ff\u0750-\u077f\u0870-\u08ff\u1100-\u11ff\u3000-\u30ff\u3130-\u318f\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufb1d-\ufdff\ufe30-\ufe4f\ufe70-\ufeff\uff00-\uffdc\u{20000}-\u{3ffff}]/u;
-/** Commands that can bring back text or change the fonts runs use without naming either. */
-const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'undo', 'redo', 'formatSelection', 'formatRange', 'clearFormatting', 'applyParagraphStyle']);
-const updateText = new TextDecoder();
-
+/**
+ * Commands that can bring back text or change the fonts runs use without naming either. A remote
+ * update can also integrate earlier updates it was the missing dependency of.
+ */
+const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'undo', 'redo', 'formatSelection', 'formatRange', 'clearFormatting',
+  'applyParagraphStyle', 'applyRemoteUpdate', 'applyRemoteUpdateChunks', 'collabPipe']);
 function carriesFallbackScript(value: unknown, depth = 0): boolean {
   if (typeof value === 'string') return FALLBACK_SCRIPT_TEXT.test(value);
-  if (value instanceof ArrayBuffer) return FALLBACK_SCRIPT_TEXT.test(updateText.decode(value));
-  if (ArrayBuffer.isView(value)) return FALLBACK_SCRIPT_TEXT.test(updateText.decode(value));
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return false;
   if (!value || typeof value !== 'object' || depth > 8) return false;
   return (Array.isArray(value) ? value : Object.values(value)).some(item => carriesFallbackScript(item, depth + 1));
 }
 
 /**
  * Whether an applied command may need fonts the open-time requirements lacked: text in a script
- * with its own fallback face, or a change the payload does not spell out. Remote updates are
- * scanned as UTF-8, which is how they carry text.
+ * with its own fallback face, or a change the payload does not spell out.
  */
 export function commandMayNeedNewFonts(kind: string, payload: unknown): boolean {
   return FONT_RESHAPING_COMMANDS.has(kind) || (kind !== 'setFontEnvironment' && carriesFallbackScript(payload));

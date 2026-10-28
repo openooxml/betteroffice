@@ -381,7 +381,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
-  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean }>({ pending: false });
+  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; picking: number }>({ pending: false, picking: 0 });
   const refreshFonts = useRef(() => {});
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
     theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
@@ -717,7 +717,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const current = active.current;
     const client = worker.current;
     const opened = fontSource.current;
-    if (!current || !client || !opened || (requirementsChanged && fontJob.current)) {
+    if (!current || !client || !opened || (requirementsChanged && (fontJob.current || fontRefresh.current.picking))) {
       if (requirementsChanged) fontRefresh.current.pending = true;
       return;
     }
@@ -794,22 +794,29 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     fontJob.current = null;
     const abort = new AbortController();
     fontAbort.current = abort;
-    await current.binding.admission.whenCompositionSettled?.();
-    await current.binding.session.flush();
-    abort.signal.throwIfAborted();
-    const requirements = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
-    for (const bold of [false, true]) for (const italic of [false, true]) {
-      const key = `${family.toLowerCase()}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
-      if (!requirements.some(entry => entry.key === key)) requirements.push({ key, family, bold, italic });
+    const refresh = fontRefresh.current;
+    refresh.picking += 1;
+    try {
+      await current.binding.admission.whenCompositionSettled?.();
+      await current.binding.session.flush();
+      abort.signal.throwIfAborted();
+      const requirements = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        const key = `${family.toLowerCase()}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
+        if (!requirements.some(entry => entry.key === key)) requirements.push({ key, family, bold, italic });
+      }
+      const embedded = await extractEmbeddedFontFaces(opened.document);
+      const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
+        provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
+        compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
+      if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
+      abort.signal.throwIfAborted();
+      opened.requirements = requirements;
+      return payload;
+    } finally {
+      refresh.picking -= 1;
+      if (!refresh.picking && refresh.pending && !fontJob.current) { refresh.pending = false; refreshFonts.current(); }
     }
-    const embedded = await extractEmbeddedFontFaces(opened.document);
-    const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
-      provider: settings.current.measurementFontProvider, embedded, requirements, families: [...opened.families, family],
-      compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
-    if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
-    abort.signal.throwIfAborted();
-    opened.requirements = requirements;
-    return payload;
   };
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
     controller.attach(binding);
