@@ -51,7 +51,7 @@ describe('editor save keeps untouched paragraphs byte for byte', () => {
     const xml = await save('main-thread (hybrid and in-thread)', fixture(`${first}${TABLE}${second}${third}${bodyEnd}${fourth}`), (engine) => {
       const read = engine.readParagraphs({ story: 'body', view: 'accepted' });
       if (!read.ok) throw new Error(JSON.stringify(read));
-      const target = read.paragraphs.find(({ text }) => text === 'after table')!;
+      const target = read.paragraphs.find(({ text }) => text.startsWith('after table'))!;
       const result = engine.applyEdits({
         expectVersion: engine.version(),
         steps: [{ op: 'insertParagraphs', target: { story: 'body', paraId: target.paraId }, at: 'end', paragraphs: [{ text: 'inserted' }] }],
