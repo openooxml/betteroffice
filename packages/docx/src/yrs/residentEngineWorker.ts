@@ -45,7 +45,7 @@ import type {
 } from './residentCommandProtocol';
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsLoc, YrsRegionLayoutProgress, YrsRenderEnv, YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
-import { createDisplayListQueries } from '../layout/render/displayListQueries';
+import { createDisplayListQueries, onDisplayListQuerySourceFailure } from '../layout/render/displayListQueries';
 import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
 import {
   createResidentEngineSession,
@@ -1351,6 +1351,10 @@ const BACKGROUND_SLICE_PAGES = 4;
 // The request being handled, and the requests answered with a trap.
 let handlingId = 0;
 const trappedIds = new Set<number>();
+
+onDisplayListQuerySourceFailure((error) => {
+  if (error instanceof WebAssembly.RuntimeError) trapped(handlingId, error);
+});
 
 /** Least time between two progress notices. */
 const PROGRESS_INTERVAL_MS = 1_000;

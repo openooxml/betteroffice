@@ -43,7 +43,7 @@ const PAGE_GAP = 24;
 const HOST = { left: 10, top: 48 };
 const destroy: { destroy(): void }[] = [];
 beforeAll(async () => {
-  await preloadLayoutWasm(wasm('layout/docx_layout'));
+  await preloadLayoutWasm(wasm('edit/docx_edit'));
   await preloadEditWasm(wasm('edit/docx_edit'));
 });
 afterEach(() => { for (const session of destroy.splice(0)) session.destroy(); });

@@ -1650,6 +1650,13 @@ export function render_docx_markdown_with_pages_json(content: string, options: s
 export function reset_wasm_peak_bytes(): void;
 
 /**
+ * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
+ */
+export function rezip_docx(entries: any): Uint8Array;
+
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1669,6 +1676,11 @@ export function serialize_docx_s12(request_json: string): string;
  * non-finite or negative value removes the cap.
  */
 export function set_wasm_heap_limit(bytes: number): void;
+
+/**
+ * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
+ */
+export function unzip_docx(data: Uint8Array): any;
 
 /**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
@@ -1997,13 +2009,16 @@ export interface InitOutput {
     readonly retainedlayoutmeta_page_sizes: (a: number) => [number, number];
     readonly retainedlayoutmeta_partial: (a: number) => number;
     readonly retainedlayoutmeta_provisional: (a: number) => number;
+    readonly rezip_docx: (a: any) => [number, number, number, number];
     readonly runinheritance_attributes: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly runinheritance_paragraph_formatting: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly runinheritance_table_attributes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly set_wasm_heap_limit: (a: number) => void;
+    readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

@@ -1689,7 +1689,7 @@ impl EditSession {
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
         let _fonts = self.fonts.enter();
-        docx_layout::register_measure_font(bytes)
+        docx_layout::register_measure_font_bytes(bytes).map_err(js_err)
     }
 
     pub fn decode_font(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
@@ -1706,7 +1706,7 @@ impl EditSession {
         requested_family: &str,
     ) -> Result<u32, JsValue> {
         let _fonts = self.fonts.enter();
-        docx_layout::register_substitute_measure_font(base, requested_family)
+        docx_layout::register_substitute_measure_font_id(base, requested_family).map_err(js_err)
     }
 
     /// Drops every registered measurement font (ids restart at zero) and
@@ -2397,7 +2397,7 @@ impl EditSession {
     /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
         let _fonts = self.fonts.enter();
-        docx_layout::outline_glyph_json(font_id, glyph_id)
+        docx_layout::outline_glyph_json_resident(font_id, glyph_id).map_err(js_err)
     }
 
     /// Typing echo model of one font at one shaping size from this session's

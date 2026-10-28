@@ -1,6 +1,6 @@
 /**
- * Loader for the docx-layout wasm (the Rust display-list builder and the
- * ooxml-text measure surface). External-asset pattern — see ./loadWasmAsset.ts
+ * Layout and measurement bindings for the docx-edit engine wasm.
+ * External-asset pattern: see ./loadWasmAsset.ts
  * for the init contract and URL-geometry invariant.
  *
  * IMPORTANT: reach this module only via dynamic `import()` — its consumers are
@@ -10,9 +10,7 @@
  * Requires a CSP that permits wasm compilation (`wasm-unsafe-eval`).
  */
 
-// vendored wasm-bindgen glue (typed by ./docx_layout.d.ts)
-import wasmInit, {
-  initSync,
+import {
   build_display_list_json,
   clear_measure_fonts,
   hit_test_regions_json,
@@ -21,22 +19,15 @@ import wasmInit, {
   range_rects_json,
   register_measure_font,
   register_substitute_measure_font,
-} from './generated/layout/docx_layout.js';
+} from './generated/edit/docx_edit.js';
 // Namespace view of the same glue. Exports the generated .d.ts does not
 // declare are resolved by name through this, since a named import of an
 // undeclared export would not typecheck.
-import * as layoutGlue from './generated/layout/docx_layout.js';
-import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
+import * as layoutGlue from './generated/edit/docx_edit.js';
+import { editWasmState as state } from './edit';
+import type { WasmAsyncInput } from './loadWasmAsset';
 
-const state = createWasmModuleState({
-  label: 'docx-layout',
-  preloadName: 'preloadLayoutWasm',
-  assetUrl: () => new URL('./generated/layout/docx_layout_bg.wasm', import.meta.url),
-  initAsync: wasmInit,
-  initSync,
-});
-
-/** Load + instantiate the layout wasm (browser path). Idempotent. */
+/** Load + instantiate the engine wasm (browser path). Idempotent. */
 export function preloadLayoutWasm(input?: WasmAsyncInput): Promise<void> {
   return state.preload(input);
 }

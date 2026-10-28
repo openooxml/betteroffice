@@ -1,4 +1,4 @@
-// Builds the four docx wasm cores (container / layout / edit / parse) and
+// Builds the three docx wasm cores (container / edit / parse) and
 // vendors the wasm-pack output into packages/docx/src/wasm/generated/. The glue
 // .js and the *_bg.wasm binaries are gitignored and rebuilt on demand
 // (predev/prebuild hooks) so the repo never carries multi-MB binaries.
@@ -12,11 +12,6 @@ const MODULES: WasmModule[] = [
     name: 'ooxml_opc',
     generated: 'packages/docx/src/wasm/generated/opc',
     cargoArgs: ['--locked', '--features', 'wasm'],
-  },
-  {
-    crate: 'docx-layout',
-    name: 'docx_layout',
-    generated: 'packages/docx/src/wasm/generated/layout',
   },
   {
     crate: 'docx-edit',
