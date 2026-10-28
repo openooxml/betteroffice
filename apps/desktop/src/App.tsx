@@ -585,7 +585,7 @@ export function App() {
       {session || pending ? (
         <main className="editor-stage" inert={busy && !openingDocx}>
           {[session, pending?.session].filter((current): current is Session => !!current).map((current) => (
-            <div key={current.key} className="editor-layer"
+            <div key={current.key} className="editor-layer" dir="ltr"
               style={{ visibility: current === session ? "visible" : "hidden" }}
               inert={current !== session} aria-hidden={current !== session}>
               <Suspense fallback={<p className="loading">{t("editor.opening")}</p>}>
