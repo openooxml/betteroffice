@@ -3488,7 +3488,6 @@ fn table_content_widths(
     ) {
         return None;
     }
-    // Painting places each row's cells from column zero.
     if table.rows.iter().any(|row| {
         row.grid_before.is_some_and(|before| before > 0)
             || row.cells.iter().any(|cell| cell.grid_start.is_some())

@@ -2170,6 +2170,24 @@ fn lower_table<T: ReadTxn>(
                 format!("row {row_index} is missing trPr"),
             )
         })?;
+        let row_formatting = tr_pr.get("_originalFormatting").and_then(any_map);
+        let grid_count = |key| {
+            row_formatting
+                .and_then(|value| map_number(value, key))
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.min(16_384.0) as u64)
+        };
+        let grid_before = grid_count("gridBefore");
+        let grid_after = grid_count("gridAfter");
+        let row_width = |key| {
+            row_formatting
+                .and_then(|value| value.get(key))
+                .and_then(any_map)
+                .map(|value| docx_layout::types::PreferredWidth {
+                    value: map_number(value, "value"),
+                    r#type: map_string(value, "type"),
+                })
+        };
         let cell_values = match row.get("cells") {
             Some(Any::Array(values)) => values,
             _ => {
@@ -2183,7 +2201,7 @@ fn lower_table<T: ReadTxn>(
 
         let mut cells = Vec::with_capacity(cell_values.len());
         let mut cell_pm_start = row_pm_start + 1;
-        let mut column = 0usize;
+        let mut column = grid_before.unwrap_or(0) as usize;
         for (cell_index, cell_value) in cell_values.iter().enumerate() {
             let cell = any_map(cell_value).ok_or_else(|| {
                 malformed_table(
@@ -2255,7 +2273,12 @@ fn lower_table<T: ReadTxn>(
                 && width_type.as_deref() == Some("pct")
                 && width_value.is_some()
                 && width_value
-                    == synthesized_cell_width(&grid_widths, total_grid_width, column, colspan);
+                    == synthesized_cell_width(
+                        &grid_widths,
+                        total_grid_width,
+                        column.saturating_sub(grid_before.unwrap_or(0) as usize),
+                        colspan,
+                    );
             let width_value =
                 width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);
             let width =
@@ -2302,7 +2325,6 @@ fn lower_table<T: ReadTxn>(
         }
 
         let row_node_size = cell_pm_start + 1 - row_pm_start;
-        let original = tr_pr.get("_originalFormatting").and_then(any_map);
         rows.push(TableRow {
             id: BlockId::Str(format!("{table_id}:r{row_index}")),
             cells,
@@ -2311,13 +2333,17 @@ fn lower_table<T: ReadTxn>(
                 .map(twips_to_pixels),
             height_rule: map_string(tr_pr, "heightRule"),
             is_header: map_bool(tr_pr, "isHeader"),
-            cant_split: original
+            cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
-            grid_before: None,
-            grid_after: None,
-            width_before: None,
-            width_after: None,
+            grid_before,
+            grid_after,
+            width_before: grid_before
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthBefore")),
+            width_after: grid_after
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthAfter")),
             tracked_ins: tr_pr
                 .get("trIns")
                 .and_then(|value| paragraph_revision_value(value, env)),
