@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export class SessionRevision {
   private revision = 0;
   private saved = 0;
@@ -22,8 +24,5 @@ export function savedBytes(
   failure: Error | null
 ): Uint8Array {
   if (bytes) return new Uint8Array(bytes);
-  throw (
-    failure ??
-    new Error("The editor is still opening the file. Try again in a moment.")
-  );
+  throw failure ?? new Error(t("editor.stillOpening"));
 }
