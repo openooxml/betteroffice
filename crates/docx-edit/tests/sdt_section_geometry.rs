@@ -1205,9 +1205,11 @@ fn a_host_batch_moving_a_wrapped_section_break_remeasures_the_document_float_pol
         .layout_document_with_regions_retained(&request)
         .unwrap();
     engine.build_display_list_frame(&extras, 0).unwrap();
-    let warm: Value =
-        serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
-    assert_eq!(retained_float_width_policy(&warm), FloatWidthPolicy::PerBlock);
+    let warm: Value = serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+    assert_eq!(
+        retained_float_width_policy(&warm),
+        FloatWidthPolicy::PerBlock
+    );
     assert_wrapped_float_measurements(&warm, false);
     let owner = peer.paragraph_mark_position("00000006").unwrap().story;
     let properties = peer
@@ -1244,7 +1246,10 @@ fn a_host_batch_moving_a_wrapped_section_break_remeasures_the_document_float_pol
                 .layout_document_with_regions_retained(&request)
                 .unwrap();
         }
-        assert_eq!(engine.stats().resident_reused_blocks, before.resident_reused_blocks);
+        assert_eq!(
+            engine.stats().resident_reused_blocks,
+            before.resident_reused_blocks
+        );
         let incremental: Value =
             serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
         assert_eq!(retained_float_width_policy(&incremental), policy);
