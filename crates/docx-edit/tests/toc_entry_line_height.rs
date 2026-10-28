@@ -780,6 +780,113 @@ fn toc_hyperlink_sizes_are_derived_from_the_render_environment() {
 }
 
 #[test]
+fn a_direct_toc_size_equal_to_the_hyperlink_style_stays_direct() {
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+        r#"<w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/></w:rPr>"#,
+        r#"<w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs[0]["fontSize"], 14.0);
+    assert_height(line_heights(&bytes)[0], 14.0);
+}
+
+#[test]
+fn a_proven_inherited_toc_size_takes_the_entry_chain_size() {
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+        r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
+        r#"<w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs[0]["fontSize"], 10.0);
+    assert_height(line_heights(&bytes)[0], 10.0);
+}
+
+#[test]
+fn an_edited_toc_paragraph_keeps_unknown_sizes_and_matches_cold_lowering() {
+    for direct in ["", r#"<w:sz w:val="28"/>"#] {
+        let body = format!(
+            concat!(
+                r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="TOC1"/>"#,
+                r#"</w:pPr><w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+                r#"<w:rStyle w:val="Hyperlink"/>{direct}</w:rPr>"#,
+                r#"<w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
+            ),
+            direct = direct,
+        );
+        let bytes = document(&body, &styles(Some(20), Some(28)));
+        let engine = EngineSession::new(77110);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        let env = serde_json::from_value(chain_env(&bytes)).unwrap();
+        let before = engine
+            .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
+            .unwrap();
+        let expected = if direct.is_empty() { 10.0 } else { 14.0 };
+        assert_eq!(before[0]["runs"][0]["fontSize"], expected);
+        engine
+            .doc()
+            .insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 5),
+                " typed",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let resident = engine
+            .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
+            .unwrap();
+        let cold = docx_edit::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env)
+            .unwrap();
+        assert_eq!(resident, serde_json::to_value(cold).unwrap());
+        let runs = resident[0]["runs"].as_array().unwrap();
+        assert_eq!(
+            runs.iter()
+                .filter_map(|run| run["text"].as_str())
+                .collect::<String>(),
+            "Entry typed one",
+        );
+        for run in runs {
+            assert_eq!(run["fontSize"], 14.0, "{run}");
+        }
+    }
+}
+
+#[test]
+fn a_toc_run_merged_from_direct_and_inherited_sizes_keeps_its_size() {
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+        r#"<w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/></w:rPr>"#,
+        r#"<w:t>Direct</w:t></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>"#,
+        r#"</w:rPr><w:t>Inherited</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["text"], "DirectInherited");
+    assert_eq!(runs[0]["fontSize"], 14.0);
+}
+
+#[test]
+fn a_direct_rtl_size_equal_to_the_hyperlink_style_stays_direct() {
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+        r#"<w:rStyle w:val="Hyperlink"/><w:rtl/><w:szCs w:val="28"/></w:rPr>"#,
+        r#"<w:t>אב</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let bytes = document(body, &styles(Some(20), Some(28)));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs[0]["fontSize"], 14.0);
+    assert_eq!(runs[0]["fontSizeCs"], 14.0);
+}
+
+#[test]
 fn a_direct_size_matching_another_hyperlink_style_stays_direct() {
     let styles = styles(Some(20), Some(28)).replace(
         "</w:styles>",

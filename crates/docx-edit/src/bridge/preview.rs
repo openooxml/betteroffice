@@ -946,6 +946,9 @@ pub(crate) fn replay(
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
         let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         replay_local.source.clone_from(&local.source);
+        if !env.hyperlink_style_font_sizes.is_empty() {
+            replay_local.run_size_sources = run_size_provenance::Sources::new(doc);
+        }
         let _reads = ReadGuard::new();
         let (replacement, position, hidden_field_blocks) = walk_story_chunks(
             &txn,

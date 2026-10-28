@@ -38,6 +38,7 @@ use yrs::{
     TextRef, Transact, Transaction, TransactionMut,
 };
 
+use crate::bridge::run_size_provenance::ParagraphSizes;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -431,6 +432,10 @@ pub(crate) struct SourceIndex {
     own_digest: OnceLock<bool>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+    #[serde(skip)]
+    run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
+    #[serde(skip)]
+    run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
 }
 
 #[derive(Default)]
@@ -519,6 +524,72 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    pub(crate) fn run_size_source(
+        &self,
+        key: &str,
+        story: &str,
+        metadata: &crate::seed::SourceMetadata,
+    ) -> Option<Arc<ParagraphSizes>> {
+        if self.seeded.get(key)?.root != crate::structured::source::story_root(story) {
+            return None;
+        }
+        let mut cache = self.run_size_sources.lock().unwrap();
+        cache
+            .entry(key.to_owned())
+            .or_insert_with(|| self.collect_run_sizes(key, metadata).map(Arc::new))
+            .clone()
+    }
+
+    fn collect_run_sizes(
+        &self,
+        key: &str,
+        metadata: &crate::seed::SourceMetadata,
+    ) -> Option<ParagraphSizes> {
+        use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
+
+        fn paragraphs(node: &XmlElement, output: &mut BTreeMap<u32, XmlElement>) {
+            if node.local_name() == "p"
+                && let Some(ordinal) = node.paragraph_ordinal
+            {
+                output.insert(ordinal, node.clone());
+            }
+            for child in node.child_elements() {
+                paragraphs(child, output);
+            }
+        }
+
+        let ((part_index, ordinal), _) = self.view_of(key)?;
+        let path = self.parts.get(part_index)?.path();
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.record_source_ordinals();
+        let mut cache = self.run_size_paragraphs.lock().unwrap();
+        let nodes = cache.entry(part_index).or_insert_with(|| {
+            #[cfg(test)]
+            RUN_SIZE_SOURCE_PARTS.with(|count| count.set(count.get() + 1));
+            let mut nodes = BTreeMap::new();
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(self.bytes()) else {
+                return nodes;
+            };
+            let Some(index) = package.parts().position(|(name, _)| name == path) else {
+                return nodes;
+            };
+            if let Ok(bytes) = package.read(index)
+                && let Ok(document) = parse_xml(&bytes, path, &mut budget)
+                && let Some(root) = document.root()
+            {
+                paragraphs(root, &mut nodes);
+            }
+            nodes
+        });
+        crate::bridge::run_size_provenance::paragraph_sizes(
+            nodes.get(&ordinal)?,
+            path,
+            &mut budget,
+            metadata,
+        )
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: PackageBytes,
@@ -588,6 +659,8 @@ impl SourceIndex {
             seed_states: OnceLock::new(),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            run_size_sources: Mutex::new(BTreeMap::new()),
+            run_size_paragraphs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1061,6 +1134,46 @@ fn story_fingerprint(
     story_fingerprint_in(doc, &txn, story, comments)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STORY_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_SOURCE_PARTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+pub(crate) fn run_size_fingerprint(
+    segments: impl Iterator<Item = crate::StorySegment>,
+) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    #[cfg(test)]
+    RUN_SIZE_FINGERPRINTS.with(|count| count.set(count.get() + 1));
+    let mut digest = Sha256::new();
+    let mut bytes = Vec::new();
+    let mut section = Vec::new();
+    let mut closed = false;
+    for segment in segments {
+        if closed {
+            return None;
+        }
+        match &segment.content {
+            crate::SegmentContent::Pilcrow(_) => closed = true,
+            crate::SegmentContent::OtherEmbed { kind, .. } if kind != "field" => return None,
+            _ => {}
+        }
+        segment_canonical(&segment, &mut bytes, &mut section);
+        digest.update(&bytes);
+        digest.update(b"\n");
+    }
+    closed.then(|| digest.finalize().into())
+}
+
 fn story_fingerprint_in(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
@@ -1068,6 +1181,8 @@ fn story_fingerprint_in(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
+    #[cfg(test)]
+    STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {

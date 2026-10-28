@@ -220,6 +220,7 @@ pub(super) fn place(
                 }),
                 formatting: RunFormatting::default(),
                 inherited_hyperlink: (false, false, false),
+                hyperlink_size_inherited: false,
                 story_start: at,
                 story_end: at,
                 pm_start: reservation.start,

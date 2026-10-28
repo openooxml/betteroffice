@@ -64,6 +64,7 @@ pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 mod shapes;
+pub(crate) mod run_size_provenance;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -421,6 +422,11 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     let env = &with_sources;
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
+    local.run_size_sources = if env.hyperlink_style_font_sizes.is_empty() {
+        run_size_provenance::Sources::default()
+    } else {
+        run_size_provenance::Sources::new(doc)
+    };
     local.block(source.as_ref().is_some_and(|source| {
         source
             .run_revision_stories()
@@ -741,7 +747,15 @@ fn walk_story_chunks<T: ReadTxn>(
         };
     }
     let mut plain = local::ParagraphSeed::default();
+    let mut paragraph_chunk_start = 0;
+    let mut paragraph_has_hyperlink_size = false;
+    let mut paragraph_has_toc_field = false;
     for (chunk_index, diff) in chunks.iter().enumerate() {
+        if at_block_boundary && paragraph_start == story_index {
+            paragraph_chunk_start = chunk_index;
+            paragraph_has_hyperlink_size = false;
+            paragraph_has_toc_field = false;
+        }
         let local_safe = !local.legacy
             && !local.blocked
             && pending_hidden_field_blocks.is_empty()
@@ -778,7 +792,7 @@ fn walk_story_chunks<T: ReadTxn>(
         match &diff.insert {
             Out::Any(Any::String(text)) => {
                 let text = text.as_ref();
-                push_text_chunks(
+                paragraph_has_hyperlink_size |= push_text_chunks(
                     &mut paragraph_runs,
                     text,
                     story_index,
@@ -794,6 +808,31 @@ fn walk_story_chunks<T: ReadTxn>(
             Out::YMap(pilcrow) if is_pilcrow(pilcrow, txn) => {
                 let values = pilcrow_values(pilcrow, txn);
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                let proof = (paragraph_has_hyperlink_size
+                    && (paragraph_has_toc_field
+                        || paragraph_style_id(&values).is_some_and(|id| {
+                            is_toc_style(&id) || env.toc_style_ids.contains(&id)
+                        })))
+                .then(|| {
+                    local.run_size_sources.unchanged(
+                        &para_id,
+                        story_id,
+                        &local.source,
+                        txn,
+                        &chunks[paragraph_chunk_start..=chunk_index],
+                    )
+                })
+                .flatten();
+                if let Some(proof) = proof {
+                    for run in &mut paragraph_runs {
+                        run.hyperlink_size_inherited = run.inherited_hyperlink.2
+                            && !run.atom
+                            && proof.inherited(
+                                run.story_start - paragraph_start..run.story_end - paragraph_start,
+                                run.formatting.rtl == Some(true),
+                            );
+                    }
+                }
                 let reserved = env.reservations.paragraph(story_id, &para_id);
                 local.observe_pilcrow(
                     &mut plain,
@@ -1267,6 +1306,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1280,6 +1320,12 @@ fn walk_story_chunks<T: ReadTxn>(
             {
                 let instruction =
                     shared_map_string(field, txn, "instruction").filter(|value| !value.is_empty());
+                paragraph_has_toc_field |= instruction.as_deref().is_some_and(|instruction| {
+                    instruction
+                        .split_whitespace()
+                        .next()
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
+                });
                 let hidden = instruction
                     .as_deref()
                     .is_some_and(super::seed::numeric_field_instruction);
@@ -1331,6 +1377,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1350,6 +1397,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1370,6 +1418,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1416,6 +1465,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1444,6 +1494,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     pm_start: paragraph_pm_units,
                     pm_end: paragraph_pm_units + 1,
                     inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(attributes),
@@ -1543,6 +1594,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         pm_start: pm_offset,
                         pm_end: pm_offset + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -1590,6 +1642,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
                         inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(attributes),
@@ -3024,6 +3077,7 @@ fn lower_inline_sdt_values(
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + child_size,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3039,6 +3093,7 @@ fn lower_inline_sdt_values(
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3053,6 +3108,7 @@ fn lower_inline_sdt_values(
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3073,6 +3129,7 @@ fn lower_inline_sdt_values(
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: None,
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3116,6 +3173,7 @@ fn lower_inline_sdt_values(
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3144,6 +3202,7 @@ fn lower_inline_sdt_values(
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
                     inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                    hyperlink_size_inherited: false,
                     inline_sdt_widget: None,
                     atom: true,
                     revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3172,6 +3231,7 @@ fn lower_inline_sdt_values(
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
                         inherited_hyperlink: inherited_hyperlink_style(Some(&attrs), env),
+                        hyperlink_size_inherited: false,
                         inline_sdt_widget: widget.clone(),
                         atom: true,
                         revision_hidden: env.revision_hidden(Some(&attrs)),
@@ -3347,6 +3407,7 @@ struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
     inherited_hyperlink: (bool, bool, bool),
+    hyperlink_size_inherited: bool,
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -3490,7 +3551,7 @@ fn push_text_chunks(
     comments: &[CommentInterval],
     env: &RenderEnv,
     chunk_pm_start: u32,
-) {
+) -> bool {
     let chunk_end = chunk_start + utf16_len(text);
     let mut cuts = BTreeSet::from([chunk_start, chunk_end]);
     for interval in comments {
@@ -3512,6 +3573,7 @@ fn push_text_chunks(
     }
 
     let cuts: Vec<u32> = cuts.into_iter().collect();
+    let inherited_hyperlink = inherited_hyperlink_style(attributes, env);
     for pair in cuts.windows(2) {
         let start = pair[0];
         let end = pair[1];
@@ -3542,12 +3604,14 @@ fn push_text_chunks(
             story_end: end,
             pm_start: chunk_pm_start + start - chunk_start,
             pm_end: chunk_pm_start + end - chunk_start,
-            inherited_hyperlink: inherited_hyperlink_style(attributes, env),
+            inherited_hyperlink,
+            hyperlink_size_inherited: false,
             inline_sdt_widget: None,
             atom: false,
             revision_hidden: env.revision_hidden(attributes),
         });
     }
+    inherited_hyperlink.2 && cuts.len() > 1
 }
 
 /// Drops the drawings the view hides, keeping the sequences a hidden shape holds opaque.
@@ -3862,7 +3926,14 @@ fn flush_paragraph<T: ReadTxn>(
         semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
     for run in &mut raw_runs {
         if toc_entry {
-            strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
+            strip_toc_hyperlink_style(
+                &mut run.formatting,
+                (
+                    run.inherited_hyperlink.0,
+                    run.inherited_hyperlink.1,
+                    run.hyperlink_size_inherited,
+                ),
+            );
         }
         apply_run_defaults(&mut run.formatting, &defaults);
     }
