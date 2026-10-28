@@ -386,6 +386,84 @@ describe("FileJournal", () => {
 });
 
 describe("journal durability regressions", () => {
+  test("a fresh writer flushes a broken journal from hold without accepting new updates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness();
+    const expiresAt = h.clock.t + 1000;
+    addToken(h, "tok-a", "user-a", { expiresAt });
+    addToken(h, "tok-b", "user-b");
+    let unavailable = true;
+    const fetch = h.host.fetch.bind(h.host);
+    h.host.fetch = async (request) => {
+      if (unavailable && request.headers.get("X-WOPI-Override") === "PUT") return new Response(null, { status: 500 });
+      return fetch(request);
+    };
+    let failing = false;
+    const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC), {
+      write: (fd, buffer, offset, length) => failing ? 0 : writeSync(fd, buffer, offset, length),
+    });
+    const session = new FileSession({
+      hostClient: h.hostClient, hostId: "testhost", wopiSrc: SRC,
+      fileKey: SessionRegistry.fileKey("testhost", SRC), instanceId: "journal-return-test",
+      journal, logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await session.join({ wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: expiresAt, mode: "edit" });
+    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 96041);
+    const failures: unknown[] = [];
+    const writable: unknown[] = [];
+    session.on("saveFailed", (event) => failures.push(event));
+    session.on("writable", (event) => writable.push(event));
+    try {
+      failing = true;
+      client.edit("unjournaled-held-edit ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+      expect(journal.read()?.updates).toEqual([]);
+      await h.clock.drain();
+      expect(h.putCount()).toBe(1);
+      expect(failures).toEqual([{ kind: "server" }]);
+      expect(session.dirty).toBe(true);
+      await h.clock.advance(1000);
+      expect(a.user.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(session.awaitingFlushToken).toBe(true);
+      expect(session.state).toBe("open");
+
+      unavailable = false;
+      const b = await session.join({ wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(b.user.canWrite).toBe(true);
+      expect(b.file.canWrite).toBe(false);
+      expect(b.file.readOnly).toBe(true);
+      expect(b.viewOnlyReason).toBe("journalBroken");
+      expect(session.journalBroken).toBe(true);
+      expect(session.viewOnlyReason).toBe("journalBroken");
+      expect(writable).toEqual([]);
+      expect(session.awaitingFlushToken).toBe(false);
+      expect(session.dirty).toBe(false);
+      expect(h.callsFor("REFRESH_LOCK").map((call) => call.token)).toEqual(["tok-b"]);
+      expect(h.callsFor("PUT").map((call) => call.token)).toEqual(["tok-a", "tok-b"]);
+      const returning = await openTestClient(b.joinPayload, sourceBytes("xlsx"), 96042);
+      try {
+        returning.edit("blocked-returning-edit ", 1);
+        expect(session.applyUpdate(b.user.id, returning.encodeStateAsUpdate(session.replica!.encodeStateVector()))).toEqual({ accepted: false, reason: "user is read only" });
+        expect(session.dirty).toBe(false);
+      } finally {
+        returning.destroy();
+      }
+      const fresh = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 96043);
+      try {
+        expect(fresh.contains("unjournaled-held-edit")).toBe(true);
+        expect(fresh.contains("blocked-returning-edit")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+      await session.leave(b.user.id);
+      expect(h.callsFor("UNLOCK").map((call) => call.token)).toEqual(["tok-b"]);
+      expect(session.state).toBe("closed");
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+
   test("a broken journal retains update refusal while a save crossing lease expiry recovers", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const h = makeHarness({ refreshStatus: () => 500 });

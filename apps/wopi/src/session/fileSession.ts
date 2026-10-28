@@ -411,7 +411,7 @@ export class FileSession {
       accessTokenTtl: input.accessTokenTtl,
       userId: info.UserId,
       friendlyName: info.UserFriendlyName ?? info.UserId,
-      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost"),
+      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "journalBroken"),
       joinedAt: now,
     });
     this.#users.set(user.id, user);
@@ -420,8 +420,8 @@ export class FileSession {
     this.#scheduleUserTimers(user);
     await this.#refreshLeader(lockJustAcquired);
     canWrite = user.canWrite && this.#viewOnlyReason === null;
-    if (canWrite && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
-    if (this.#holdPending && canWrite) {
+    if (this.#isConnectedEditor(user) && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
+    if (this.#holdPending && this.#isConnectedEditor(user)) {
       this.#holdPending = false;
       this.#clearTimer("hold");
       if (this.dirty) {
