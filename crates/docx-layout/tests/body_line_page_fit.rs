@@ -258,6 +258,136 @@ fn footnote_reservation_uses_the_same_font_box_boundary() {
 }
 
 #[test]
+fn text_effects_and_emphasis_require_full_pitch_above_footnotes() {
+    for (key, effect) in [
+        ("modernEffects", json!({"reflection": {"distance": 2}})),
+        ("modernEffects", json!({"glow": {"radius": 4}})),
+        ("modernEffects", json!({"shadow": {"distance": 4}})),
+        ("modernEffects", json!({"textOutline": {"width": 2}})),
+        ("emphasisMark", json!("underDot")),
+        ("textShadow", json!(true)),
+        ("textOutline", json!(true)),
+        ("emboss", json!(true)),
+        ("imprint", json!(true)),
+        ("textEffect", json!("sparkle")),
+    ] {
+        let mut target = text(
+            1,
+            60.0,
+            json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"][0][key] = effect;
+        let mut value = footnote_boundary_input(target);
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(1, 0, 1)], "{key}");
+    }
+}
+
+#[test]
+fn independently_sized_list_markers_require_full_pitch_above_footnotes() {
+    for (hidden, page) in [(false, 1), (true, 0)] {
+        let target = text(
+            1,
+            60.0,
+            json!({
+                "spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"},
+                "listMarker": "g", "listMarkerFontSize": 72,
+                "listMarkerFontFamily": "Independent Marker Face", "listMarkerHidden": hidden,
+            }),
+        );
+        let mut value = footnote_boundary_input(target);
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(page, 0, 1)]);
+    }
+}
+
+#[test]
+fn underline_and_tab_leader_bounds_extend_the_fit_above_footnotes() {
+    for decoration in ["underline", "underscore", "heavy"] {
+        let mut target = paragraph(
+            "text",
+            1,
+            120.0,
+            76.8,
+            19.2,
+            json!({"spacing": {"line": 1.25, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        if decoration == "underline" {
+            target["block"]["runs"][0]["fontSize"] = json!(72);
+            target["block"]["runs"][0]["underline"] = json!(true);
+        } else {
+            target["block"]["runs"] = json!([{"kind": "tab", "width": 10, "fontSize": 72}]);
+            target["block"]["attrs"]["tabs"] =
+                json!([{"val": "left", "pos": 300, "leader": decoration}]);
+        }
+        for (available, page) in [(96.0, 1), (101.0, 0)] {
+            let mut value = input(vec![prefix(180.0 - available), target.clone()], 200.0);
+            value.options.footnote_reserved_heights =
+                Some([("1".to_owned(), 20.0)].into_iter().collect());
+            let result = docx_layout::compute_layout_input(&mut value).unwrap();
+            assert_eq!(slices(&result, "text"), vec![(page, 0, 1)], "{decoration}");
+            let display = docx_layout::build_display_list(&value, &result).unwrap();
+            let mut decoration_count = 0;
+            for (index, painted_page) in display.pages.iter().enumerate() {
+                let layout_page = &result.pages[index];
+                let reserved = if index == 0 { 20.0 } else { 0.0 };
+                let bottom = layout_page.size.h - layout_page.margins.bottom - reserved;
+                for primitive in &painted_page.primitives {
+                    if let Primitive::Decoration(rule) = primitive
+                        && rule.attrs.block_key.as_deref() == Some("text")
+                    {
+                        decoration_count += 1;
+                        assert_eq!(rule.h.as_f64(), Some(6.0));
+                        assert!(rule.y.as_f64().unwrap() + rule.h.as_f64().unwrap() <= bottom);
+                    }
+                }
+            }
+            assert!(decoration_count > 0);
+        }
+    }
+}
+
+#[test]
+fn normally_underlined_links_keep_font_box_fit_above_footnotes() {
+    let mut target = text(
+        1,
+        60.0,
+        json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+    );
+    target["block"]["runs"][0]["fontSize"] = json!(12);
+    target["block"]["runs"][0]["underline"] = json!(true);
+    target["block"]["runs"][0]["hyperlink"] = json!({"href": "https://example.test"});
+    let mut value = footnote_boundary_input(target);
+    let result = docx_layout::compute_layout_input(&mut value).unwrap();
+    assert_eq!(slices(&result, "text"), vec![(0, 0, 1)]);
+    let display = docx_layout::build_display_list(&value, &result).unwrap();
+    let rule = display.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Decoration(rule) if rule.attrs.block_key.as_deref() == Some("text") => {
+                Some(rule)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(rule.y.as_f64().unwrap() + rule.h.as_f64().unwrap() <= 90.0);
+}
+
+#[test]
+fn independently_sized_tab_leader_glyphs_require_full_pitch() {
+    let mut target = text(1, 60.0, json!({}));
+    target["block"]["runs"] = json!([{
+        "kind": "tab", "width": 10,
+        "leaderGlyphs": {"glyph": "g", "advance": 10, "count": 1,
+            "font": "Independent Leader Face", "fontSize": 72},
+    }]);
+    let mut value = footnote_boundary_input(target);
+    let result = docx_layout::compute_layout_input(&mut value).unwrap();
+    assert_eq!(slices(&result, "text"), vec![(1, 0, 1)]);
+}
+
+#[test]
 fn comment_highlights_require_full_pitch_above_footnotes() {
     for run in [
         json!({"kind": "text", "text": "x", "commentIds": [1]}),
