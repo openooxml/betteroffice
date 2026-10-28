@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate original geometric test faces and their WOFF2 companions."""
+"""Generate geometric test faces, WOFF2 companions and source hashes."""
 
 import runpy
 from pathlib import Path

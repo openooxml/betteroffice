@@ -2,6 +2,7 @@
 """Generate standard and identity-stream WOFF2 companions for TTF faces."""
 
 import argparse
+import hashlib
 import io
 from importlib.metadata import version
 from pathlib import Path
@@ -22,12 +23,12 @@ class IdentityCompressor:
         return data
 
 
-def encode(path, identity):
+def encode(path, source, identity):
     original = woff2.brotli
     try:
         if identity:
             woff2.brotli = IdentityCompressor()
-        with TTFont(path, recalcTimestamp=False) as font:
+        with TTFont(io.BytesIO(source), recalcTimestamp=False) as font:
             if font.sfntVersion != "\0\1\0\0" or not {"glyf", "loca"} <= set(font.keys()):
                 raise ValueError(f"Expected a TTF glyf/loca face: {path.name}")
             if "CFF " in font or "CFF2" in font:
@@ -53,10 +54,14 @@ def transform_directory(directory):
     if not paths:
         raise ValueError("Directory has no TTF faces")
     for path in paths:
-        standard = encode(path, identity=False)
-        transformed = encode(path, identity=True)
+        source = path.read_bytes()
+        standard = encode(path, source, identity=False)
+        transformed = encode(path, source, identity=True)
         path.with_suffix(".woff2").write_bytes(standard)
         path.with_suffix(".uw2").write_bytes(transformed)
+        path.with_suffix(".source.sha256").write_text(
+            hashlib.sha256(source).hexdigest() + "\n", encoding="ascii"
+        )
 
 
 def main():

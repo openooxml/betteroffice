@@ -97,7 +97,7 @@ fn copy_fixtures(src: &std::path::Path) {
     fs::create_dir(src).unwrap();
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     for style in ["Regular", "Bold"] {
-        for extension in ["ttf", "uw2", "woff2"] {
+        for extension in ["ttf", "uw2", "woff2", "source.sha256"] {
             let name = format!("Synthetic-{style}.{extension}");
             fs::copy(fixtures.join(&name), src.join(name)).unwrap();
         }
@@ -183,6 +183,39 @@ fn builder_rejects_non_ttf_and_missing_companions_for_woff2t() {
 }
 
 #[test]
+fn builder_rejects_stale_woff2t_companions_with_unchanged_glyph_count() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    let out = temp.path().join("out");
+    copy_fixtures(&src);
+    let path = src.join("Synthetic-Bold.ttf");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend_from_slice(&[0; 4]);
+    fs::write(path, bytes).unwrap();
+    let result = woff2t_build(&src, &out);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("source SHA-256 mismatch for Synthetic-Bold.ttf"));
+    assert!(stderr.contains("regenerate companions with scripts/fonts/woff2-transform.py"));
+    assert!(!out.exists());
+}
+
+#[test]
+fn builder_rejects_missing_woff2t_source_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    let out = temp.path().join("out");
+    copy_fixtures(&src);
+    fs::remove_file(src.join("Synthetic-Regular.source.sha256")).unwrap();
+    let result = woff2t_build(&src, &out);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("cannot read source SHA-256 for Synthetic-Regular.ttf"));
+    assert!(stderr.contains("regenerate companions with scripts/fonts/woff2-transform.py"));
+    assert!(!out.exists());
+}
+
+#[test]
 fn builder_rejects_reference_and_glyph_count_mismatches() {
     let temp = tempfile::tempdir().unwrap();
     let src = temp.path().join("src");
@@ -209,7 +242,12 @@ fn builder_rejects_reference_and_glyph_count_mismatches() {
             bytes[offset + 4..offset + 6].copy_from_slice(&6u16.to_be_bytes());
         }
     }
-    fs::write(path, bytes).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    fs::write(
+        path.with_extension("source.sha256"),
+        format!("{:x}\n", Sha256::digest(&bytes)),
+    )
+    .unwrap();
     let result = woff2t_build(&src, &out);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("glyph count mismatch"));

@@ -170,6 +170,19 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
                 return Err(invalid(format!("woff2t requires TTF glyf/loca faces: {file}")).into());
             }
             glyph_count(&bytes)?;
+            let regenerate = "regenerate companions with scripts/fonts/woff2-transform.py";
+            let hash_path = path.with_extension("source.sha256");
+            let source_hash = fs::read_to_string(hash_path).map_err(|error| {
+                invalid(format!(
+                    "cannot read source SHA-256 for {file}: {error}; {regenerate}"
+                ))
+            })?;
+            if source_hash.trim() != format!("{:x}", Sha256::digest(&bytes)) {
+                return Err(invalid(format!(
+                    "source SHA-256 mismatch for {file}; {regenerate}"
+                ))
+                .into());
+            }
             let payload = fs::read(path.with_extension("uw2"))?;
             let standard = fs::read(path.with_extension("woff2"))?;
             let reference = wuff::decompress_woff2(&standard)
