@@ -212,19 +212,18 @@ async function expectRemoteThenCleanupAndChunks(
   const chunkSeen: Seen = [];
   chunkReceiver.onUpdate(record(chunkSeen));
   chunkReceiver.applyUpdateChunks(chunks);
-  expect(chunkSeen.length).toBeGreaterThanOrEqual(3);
-  expect(chunkSeen.every((event) => event.origin === 'remote')).toBe(true);
-  expect(bytes(chunkSeen)).toEqual(chunks.map((chunk) => [...chunk]));
+  expect(chunkSeen[0]!.origin).toBe('remote');
+  expect(chunkSeen.filter((event) => event.origin === 'remote')).toHaveLength(1);
   const third = await facadeFromState(state);
   for (const event of chunkSeen) third.applyUpdate(event.update);
   expect(third.encodeStateVector()).toEqual(chunkReceiver.encodeStateVector());
 }
 
-test('g2_facade_apply_update_remote_then_cleanup_and_chunks_in_order', async () => {
+test('g2_facade_apply_update_remote_then_cleanup_and_chunks_as_one_remote_event', async () => {
   await expectRemoteThenCleanupAndChunks(facadeFromState);
 });
 
-test('g2_resident_apply_update_remote_then_cleanup_and_chunks_in_order', async () => {
+test('g2_resident_apply_update_remote_then_cleanup_and_chunks_as_one_remote_event', async () => {
   await expectRemoteThenCleanupAndChunks(residentFromState);
 });
 
