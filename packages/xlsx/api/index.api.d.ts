@@ -725,7 +725,31 @@ export interface XlsxReadRequest {
     /** Empty reads only the sheet catalog. */
     ranges: readonly XlsxRangeTarget[];
 }
+/** Stored text with xstring escapes decoded; printable sections use dialog field tokens and normalized line breaks. */
+export interface XlsxHeaderFooterText {
+    raw: string;
+    left: string;
+    center: string;
+    right: string;
+}
+/** Absent or empty header and footer parts are null. */
+export interface XlsxHeaderFooterPair {
+    header: XlsxHeaderFooterText | null;
+    footer: XlsxHeaderFooterText | null;
+}
+/** Printable variants; even and first are null unless their respective flags are enabled. */
+export interface XlsxSheetHeaderFooter {
+    differentFirst: boolean;
+    differentOddEven: boolean;
+    scaleWithDoc: boolean;
+    alignWithMargins: boolean;
+    odd: XlsxHeaderFooterPair;
+    even: XlsxHeaderFooterPair | null;
+    first: XlsxHeaderFooterPair | null;
+}
 export interface XlsxSheetEntry {
+    /** Null means known absent or empty; omitted means source facts are unknown. */
+    headerFooter?: XlsxSheetHeaderFooter | null;
     visibility?: XlsxSheetVisibility;
     sheetId: string;
     name: string;
@@ -1005,6 +1029,7 @@ export type XlsxExportResult<T> = {
     version: string;
     content: T;
 } | OperationRefusal<XlsxExportFailure>;
+export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
 // ---- hittest/index.d.ts ----
 /**
@@ -1081,7 +1106,7 @@ export { buildA11yGrid } from './a11y/index';
 export { paintDisplayList } from './render/canvas2d';
 export { initWasm, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
 export type { WasmInitInput, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
-export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReadResult, XlsxSheetEntry, XlsxValidationResult, } from './edits';
+export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
