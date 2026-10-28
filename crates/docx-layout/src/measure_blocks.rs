@@ -3214,10 +3214,7 @@ fn cell_content_widths(
     Some((minimum + padding, maximum + padding))
 }
 
-/// Whether painting places the paragraph's lines where intrinsic sizing does:
-/// painting clamps negative indents and moves a hanging paragraph's text by
-/// the hang when its leading indent (the right one when right-to-left) doesn't
-/// cover it.
+/// Whether painting and intrinsic sizing agree for the paragraph's indents.
 fn painted_indent_matches(paragraph: &crate::types::ParagraphBlock) -> bool {
     let Some(attrs) = paragraph.attrs.as_ref() else {
         return true;

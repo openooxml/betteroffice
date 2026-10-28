@@ -71,6 +71,16 @@ describe("buildDiscovery", () => {
     }
   });
 
+  test("MIME-named apps list edit first, because Nextcloud richdocuments takes the first action", () => {
+    const xml = buildDiscovery({ publicUrl, currentKey: generateKeyPair().publicKey });
+    const { apps } = parseDiscovery(xml);
+    for (const format of formats) {
+      const collaboraApp = apps.find((app) => app.name === format.mime)!;
+      expect(collaboraApp.actions[0]!.name).toBe("edit");
+      expect(collaboraApp.actions[0]!.urlsrc).toContain("/wopi/edit?");
+    }
+  });
+
   test("builds urlsrc placeholders and requires attributes", () => {
     const xml = buildDiscovery({ publicUrl, currentKey: generateKeyPair().publicKey });
     const { apps } = parseDiscovery(xml);

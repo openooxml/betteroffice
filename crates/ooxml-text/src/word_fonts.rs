@@ -8,11 +8,11 @@
 //! counter-example — its span is 1.382 em against the last-resort face's
 //! 1.150, and correcting it alone lands one corpus document on an extra page.
 //!
-//! `advance_scale` is the horizontal twin, and stays `1.0` unless the ratio
-//! has been measured against the substitute the host actually supplies: a face
-//! much wider or narrower than its substitute paginates past Word rather than
-//! onto it, and a scale that is right on average is still wrong per glyph, so
-//! it buys line and page counts, not line breaks.
+//! [`crate::family_metrics`] width tables take precedence over `advance_scale`.
+//! Their outline and fallback scale is computed against the supplied face over
+//! a-z weighted by English letter frequency plus one space per 5.1 letters.
+//! Without a table, `advance_scale` stays `1.0` unless that ratio was measured
+//! against the substitute the host supplies.
 //!
 //! A family Word has no face for carries its substitute's metrics, taken from
 //! the document's `w:altName` or identified against Word's reference render.
@@ -240,27 +240,24 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (
         &[
             "segoe ui",
+            "segoe ui light",
+            "segoe ui semilight",
             "segoe ui semibold",
             "segoe ui symbol",
             "segoe ui emoji",
         ],
         SEGOE_UI_2048,
     ),
-    // Light and Semilight fall back to regular Liberation Sans whatever the
-    // run's weight, and run 0.949x and 0.976x its advances: a-z weighted by
-    // English letter frequency plus one space per 5.1 letters, off the
-    // subsets Word embeds in its exports of the visual-fidelity corpus. With
-    // the substitute's own advances their lines wrap early and documents set
-    // in them paginate past Word.
     (
-        &["segoe ui light"],
-        latin_scaled(2048, 2210, -514, 0, 0.949),
+        &[
+            "aptos",
+            "aptos display",
+            "aptos narrow",
+            "aptos light",
+            "aptos semibold",
+        ],
+        latin(2048, 1923, -577, 0),
     ),
-    (
-        &["segoe ui semilight"],
-        latin_scaled(2048, 2210, -514, 0, 0.976),
-    ),
-    (&["aptos", "aptos display"], latin(2048, 1923, -577, 0)),
     (&["tahoma"], latin(2048, 2049, -423, 0)),
     (&["verdana"], latin(2048, 2059, -430, 0)),
     (&["trebuchet ms"], latin(2048, 1923, -455, 0)),
@@ -273,7 +270,16 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["century gothic"], latin(2048, 1989, -451, 0)),
     (&["century schoolbook"], latin(2048, 2018, -443, 0)),
     (&["arial narrow"], latin(2048, 1888, -431, 0)),
+    (&["arial black"], latin(2048, 2254, -634, 0)),
+    (&["consolas"], latin(2048, 1521, -527, 350)),
+    (&["franklin gothic book"], latin(2048, 1877, -445, 0)),
+    (&["garamond"], latin(2048, 1765, -539, 0)),
+    (&["gill sans mt"], latin(2048, 1903, -472, 0)),
+    (&["palatino linotype"], latin(2048, 2150, -613, 0)),
+    (&["tw cen mt"], latin(2048, 1753, -477, 0)),
+    (&["tw cen mt condensed"], latin(2048, 1694, -494, 0)),
     (&["agency fb"], latin(2048, 1889, -410, 0)),
+    (&["cambria"], latin(2048, 1946, -455, 0)),
     (&["cambria math"], latin(2048, 1595, -455, 353)),
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
@@ -387,7 +393,6 @@ mod tests {
             "Arial",
             "Times New Roman",
             "Calibri",
-            "Cambria",
             "Courier New",
             "Helvetica",
             "Times",
@@ -398,18 +403,13 @@ mod tests {
         }
     }
 
-    /// Lucida Bright, Segoe UI Light and Segoe UI Semilight are the families
-    /// whose advances are corrected, each measured against the Liberation Sans
-    /// the last-resort chain supplies: per-glyph Lucida Bright and Liberation
-    /// Sans run 0.813x (`S`) to 1.558x (`j`) apart, and 1.113x is where that
-    /// lands over a-z weighted by English letter frequency plus one space per
-    /// 5.1 letters.
+    /// Static ratios apply only to families without width tables.
     #[test]
     fn measured_families_carry_the_advance_ratio_word_embeds() {
         for (family, ratio) in [
             ("Lucida Bright", 1.113),
-            ("Segoe UI Light", 0.949),
-            ("Segoe UI Semilight", 0.976),
+            ("Segoe UI Light", 1.0),
+            ("Segoe UI Semilight", 1.0),
         ] {
             let metrics = requested_line_metrics(family).expect(family);
             assert!(
@@ -426,7 +426,7 @@ mod tests {
             .collect();
         assert_eq!(
             scaled,
-            ["segoe ui light", "segoe ui semilight", "lucida bright"],
+            ["lucida bright"],
             "an unmeasured family must keep its substitute's advances"
         );
     }
@@ -446,6 +446,7 @@ mod tests {
             ("Century Schoolbook", 2048, 2018, -443, 0, false),
             ("Arial Narrow", 2048, 1888, -431, 0, false),
             ("Agency FB", 2048, 1889, -410, 0, false),
+            ("Cambria", 2048, 1946, -455, 0, false),
             ("Cambria Math", 2048, 1595, -455, 353, false),
             ("Calibri Light", 2048, 1536, -512, 452, false),
             ("Roboto", 2048, 1900, -500, 0, false),
@@ -526,6 +527,9 @@ mod tests {
             ("Segoe UI Semibold", 2724.0 / 2048.0),
             ("Segoe UI Symbol", 2724.0 / 2048.0),
             ("Aptos", 2500.0 / 2048.0),
+            ("Aptos Narrow", 2500.0 / 2048.0),
+            ("Aptos Light", 2500.0 / 2048.0),
+            ("Aptos SemiBold", 2500.0 / 2048.0),
             ("Tahoma", 2472.0 / 2048.0),
             ("Verdana", 2489.0 / 2048.0),
             ("Trebuchet MS", 2378.0 / 2048.0),
@@ -534,6 +538,15 @@ mod tests {
             ("Lucida Sans Unicode", 3147.0 / 2048.0),
             ("Georgia", 2327.0 / 2048.0),
             ("Comic Sans MS", 2854.0 / 2048.0),
+            ("Arial Black", 2888.0 / 2048.0),
+            ("Consolas", 2398.0 / 2048.0),
+            ("Franklin Gothic Book", 2322.0 / 2048.0),
+            ("Garamond", 2304.0 / 2048.0),
+            ("Gill Sans MT", 2375.0 / 2048.0),
+            ("Palatino Linotype", 2763.0 / 2048.0),
+            ("Tw Cen MT", 2230.0 / 2048.0),
+            ("Tw Cen MT Condensed", 2188.0 / 2048.0),
+            ("Cambria", 2401.0 / 2048.0),
         ] {
             let metrics = requested_line_metrics(family).expect(family);
             let measured = (f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender)

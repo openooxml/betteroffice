@@ -103,6 +103,9 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      - name: Check UI strings and locale parity
+        run: bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
+
       - name: Type check
         run: |
           bun run typecheck:shared
