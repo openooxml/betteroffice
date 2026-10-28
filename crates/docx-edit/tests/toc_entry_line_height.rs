@@ -786,6 +786,78 @@ fn a_toc_field_sizes_all_three_custom_style_entries_and_stops_at_its_end() {
 }
 
 #[test]
+fn a_toc_field_end_only_changes_the_runs_before_it() {
+    for with_ids in [true, false] {
+        for prefix in ["", "Last 😀"] {
+            let link = |text: &str| {
+                format!(
+                    concat!(
+                        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+                        r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
+                        r#"<w:t>{text}</w:t></w:r></w:hyperlink>"#,
+                    ),
+                    text = text,
+                )
+            };
+            let paragraph = |index: usize, content: &str| {
+                let id = if with_ids {
+                    format!(r#" w14:paraId="{index:08X}""#)
+                } else {
+                    String::new()
+                };
+                format!(r#"<w:p{id}><w:pPr><w:pStyle w:val="Normal"/></w:pPr>{content}</w:p>"#)
+            };
+            let first = format!(
+                concat!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                    r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
+                    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{}"#,
+                ),
+                link("First entry"),
+            );
+            let last = format!(
+                r#"{}<w:r><w:fldChar w:fldCharType="end"/></w:r>{}"#,
+                link(prefix),
+                link("Body link"),
+            );
+            let body = [
+                paragraph(1, &first),
+                paragraph(2, &link("Middle entry")),
+                paragraph(3, &last),
+            ]
+            .concat();
+            let bytes = document(&body, &styles(Some(20), Some(28)));
+            let doc = docx_edit::EditingDoc::new(77110);
+            seed_from_docx(&doc, &bytes).unwrap();
+            let env = serde_json::from_value(chain_env(&bytes)).unwrap();
+            for edited in [false, true] {
+                if edited {
+                    doc.insert_text(
+                        &EditCtx::local("", ""),
+                        Position::new("body", 0),
+                        "😀",
+                        FormatPolicy::Plain,
+                    )
+                    .unwrap();
+                }
+                let blocks =
+                    docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+                let blocks = serde_json::to_value(blocks).unwrap();
+                let runs = blocks[2]["runs"].as_array().unwrap();
+                let body = runs.iter().find(|run| run["text"] == "Body link").unwrap();
+                assert_eq!(body["fontSize"], 14.0, "{body}");
+                assert_ne!(body["hyperlink"]["noDefaultStyle"], true);
+                if !prefix.is_empty() {
+                    let entry = runs.iter().find(|run| run["text"] == prefix).unwrap();
+                    assert_eq!(entry["fontSize"], 10.0, "{entry}");
+                }
+            }
+            assert_height(line_heights(&bytes)[2], 14.0);
+        }
+    }
+}
+
+#[test]
 fn an_opaque_toc_field_keeps_its_14pt_cached_entry_text() {
     let body = concat!(
         r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,

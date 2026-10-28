@@ -16,6 +16,7 @@ pub(crate) struct LocalLowering {
     pub(super) chunks: Option<Rc<SeedChunks>>,
     validation_epoch: u64,
     dependent: BTreeSet<String>,
+    pub(super) toc_ends: Arc<BTreeMap<String, u32>>,
     pub(crate) edit: Option<TextEdit>,
     #[cfg(test)]
     pub(crate) materialized_text_units: u32,
@@ -410,6 +411,10 @@ impl LocalLowering {
     pub(super) fn block(&mut self, blocked: bool) {
         self.blocked |= blocked;
         self.preview_blocked |= blocked;
+    }
+
+    pub(super) fn depend_on(&mut self, paragraphs: impl IntoIterator<Item = String>) {
+        self.dependent.extend(paragraphs);
     }
 
     pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
@@ -832,7 +837,7 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut output, seed.source),
             Vec::new(),
-            false,
+            None,
         );
         if current
             .attrs
@@ -924,7 +929,7 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut replacement, source),
             Vec::new(),
-            false,
+            None,
         );
         let LayoutBlock::Paragraph(old) = blocks.get(slot)?.as_ref() else {
             return None;

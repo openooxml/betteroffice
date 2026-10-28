@@ -17570,6 +17570,94 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn resident_paragraphs_after_a_multi_paragraph_toc_patch_locally() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let entry = |text: &str| {
+            format!(
+                concat!(
+                    r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+                    r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
+                    r#"<w:t>{text}</w:t></w:r></w:hyperlink>"#,
+                ),
+                text = text,
+            )
+        };
+        let first = format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{}"#,
+            ),
+            entry("First entry"),
+        );
+        let last = format!(
+            r#"{}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            entry("Last entry"),
+        );
+        let body = [
+            para("10000001", &run("Before")),
+            para(
+                "10000002",
+                &format!(r#"<w:pPr><w:pStyle w:val="ContentsEntry"/></w:pPr>{first}"#),
+            ),
+            para(
+                "10000003",
+                &format!(
+                    r#"<w:pPr><w:pStyle w:val="ContentsEntry"/></w:pPr>{}"#,
+                    entry("Middle entry"),
+                ),
+            ),
+            para(
+                "10000004",
+                &format!(r#"<w:pPr><w:pStyle w:val="ContentsEntry"/></w:pPr>{last}"#),
+            ),
+            para("10000005", &run("After")),
+        ]
+        .concat();
+        let styles = format!(
+            concat!(
+                r#"<w:styles {}><w:style w:type="paragraph" w:default="1" "#,
+                r#"w:styleId="Normal"><w:name w:val="Normal"/>"#,
+                r#"<w:rPr><w:sz w:val="20"/></w:rPr></w:style>"#,
+                r#"<w:style w:type="paragraph" w:styleId="ContentsEntry">"#,
+                r#"<w:name w:val="Contents Entry"/><w:basedOn w:val="Normal"/>"#,
+                r#"</w:style><w:style w:type="character" w:styleId="Hyperlink">"#,
+                r#"<w:name w:val="Hyperlink"/><w:rPr><w:sz w:val="28"/>"#,
+                r#"</w:rPr></w:style></w:styles>"#,
+            ),
+            lowering_fixture::NS,
+        );
+        let bytes = Package::new(&body).styles(&styles).bytes();
+        for enabled in [false, true] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9649, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            request["renderEnv"]["paragraphStyleFontSizes"] =
+                json!({"Normal": 10.0, "ContentsEntry": 10.0});
+            request["renderEnv"]["hyperlinkStyleFontSizes"] = json!({"Hyperlink": 14.0});
+            let request = request.to_string();
+            engine.render.replace(Default::default());
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            {
+                let render = engine.render.borrow();
+                let local = &render.stories["body"].local;
+                assert_eq!(local.blocked, !enabled);
+                assert_eq!(local.has_seed("10000001"), enabled);
+                assert_eq!(local.has_seed("10000005"), enabled);
+                for id in ["10000002", "10000003", "10000004"] {
+                    assert!(!local.has_seed(id), "{id}");
+                }
+            }
+            local_patch_paragraph_edits(&engine, &request, 4, true);
+            local_patch_paragraph_edits(&engine, &request, 0, true);
+            local_patch_paragraph_edits(&engine, &request, 2, false);
+        }
+    }
+
+    #[test]
     fn resident_plain_text_patch_matches_cold_full() {
         for enabled in [false, true] {
             resident_plain_text_patch_matches_cold_full_in(enabled);

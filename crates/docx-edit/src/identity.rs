@@ -431,6 +431,8 @@ pub(crate) struct SourceIndex {
     own_digest: OnceLock<bool>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+    #[serde(skip)]
+    toc_field_ends: OnceLock<Arc<BTreeMap<String, u32>>>,
 }
 
 #[derive(Default)]
@@ -519,6 +521,31 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    pub(crate) fn toc_field_ends(&self) -> Arc<BTreeMap<String, u32>> {
+        Arc::clone(self.toc_field_ends.get_or_init(|| {
+            let mut ends = BTreeMap::new();
+            if let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(self.bytes()) {
+                for (index, (path, _)) in package.parts().enumerate() {
+                    let Some(part) = self.parts.iter().find(|part| part.path() == path) else {
+                        continue;
+                    };
+                    let Ok(bytes) = package.read(index) else {
+                        continue;
+                    };
+                    if !bytes.windows(7).any(|window| window == b"fldChar") {
+                        continue;
+                    }
+                    for (ordinal, suffix) in crate::bridge::toc_fields::end_suffixes(&bytes, path) {
+                        for key in part.backed.get(&ordinal).into_iter().flatten() {
+                            ends.insert(key.clone(), suffix);
+                        }
+                    }
+                }
+            }
+            Arc::new(ends)
+        }))
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: PackageBytes,
@@ -588,6 +615,7 @@ impl SourceIndex {
             seed_states: OnceLock::new(),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            toc_field_ends: OnceLock::new(),
         }
     }
 
