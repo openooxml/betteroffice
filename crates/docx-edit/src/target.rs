@@ -153,7 +153,11 @@ fn drawing_properties<T: ReadTxn>(
     } else {
         (text("title"), text("descr"))
     };
-    let wrap = (kind == "image").then(|| live("wrapType")).flatten();
+    let wrap = if kind == "image" {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
     let placement = match (wrap.as_deref(), text("placement").as_deref()) {
         (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,

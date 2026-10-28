@@ -126,7 +126,11 @@ fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::Drawing
     } else {
         (text("title"), text("descr"))
     };
-    let wrap = image.then(|| live("wrapType")).flatten();
+    let wrap = if image {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
     Some(crate::DrawingProperties {
         doc_pr_id: text("docPrId"),
