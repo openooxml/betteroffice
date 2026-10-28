@@ -795,7 +795,6 @@ fn inline_control_alternate_content_keeps_selected_picture_identity() {
             story: Some("body".to_owned()),
             para_ids: Some(vec!["60000001".to_owned()]),
             view: EditTextView::Accepted,
-            expect_version: None,
         })
         .unwrap();
     let drawings = &read.paragraphs[0].atoms[0].drawings;
@@ -867,7 +866,6 @@ fn inline_control_multi_drawing_choice_matches_base_branch_parsing() {
                 story: Some("body".to_owned()),
                 para_ids: Some(vec!["60000002".to_owned()]),
                 view: EditTextView::Accepted,
-                expect_version: None,
             })
             .unwrap();
         assert_eq!(read.paragraphs[0].atoms[0].drawings, expected);
