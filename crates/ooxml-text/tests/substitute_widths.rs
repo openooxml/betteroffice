@@ -228,7 +228,7 @@ fn lucida_bright_preserves_its_static_advance_ratio() {
 #[test]
 fn width_tables_without_vertical_entries_keep_all_base_vertical_metrics() {
     let (mut store, base) = store_with_font();
-    for family in ["Book Antiqua", "Garamond", "Tw Cen MT Condensed"] {
+    for family in ["Book Antiqua", "Corbel", "Helvetica Neue"] {
         assert!(ooxml_text::word_fonts::requested_line_metrics(family).is_none());
         let view = store.register_named_substitute(base, family).unwrap();
         assert_ne!(view, base, "{family}");
