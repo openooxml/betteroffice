@@ -1000,6 +1000,60 @@ fn run_style_only_change_replaces() {
 }
 
 #[test]
+fn numbered_restyle_after_repeated_prefix_insertion_keeps_run_xml() {
+    for direct in [false, true] {
+        let formatting = if direct {
+            r#"<w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#
+        } else {
+            ""
+        };
+        let content = format!(
+            r#"<w:pPr><w:pStyle w:val="Normal"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr><w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:pPr><w:r w:rsidRPr="0092171E">{formatting}<w:t>Some heading</w:t></w:r>"#
+        );
+        let doc = open(&content);
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "Some ",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        doc.apply_edits(
+            &EditRequest {
+                expect_version: doc.version(),
+                source: EditSource::Host,
+                history: EditHistory::Separate,
+                steps: vec![EditStep::new(EditOperation::SetParagraphStyle {
+                    target: ParagraphTarget {
+                        story: "body".to_owned(),
+                        para_id: "00000001".to_owned(),
+                    },
+                    style_id: "Strong".to_owned(),
+                })],
+            },
+            &UndoSession::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let plan = patch(&doc);
+        assert_eq!(plan.text_edits.len(), 1);
+        assert_eq!((plan.text_edits[0].from, plan.text_edits[0].to), (0, 0));
+        let (xml, warnings) = save_paragraph(&doc, &content, |paragraph| {
+            paragraph["formatting"]["styleId"] = json!("Strong");
+            paragraph["content"][0]["content"][0]["text"] = json!("Some Some heading");
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            xml.contains(
+                &content
+                    .replace("Some heading", "Some Some heading")
+                    .replace("w:val=\"Normal\"", "w:val=\"Strong\"")
+            )
+        );
+    }
+}
+
+#[test]
 fn paragraph_style_change_replaces() {
     let doc = open(
         r#"<w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>abc</w:t></w:r>"#,

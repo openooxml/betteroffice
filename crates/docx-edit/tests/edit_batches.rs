@@ -1829,6 +1829,40 @@ fn restyle_numbered_runs_keep_provenance_after_in_run_text_replacement() {
 }
 
 #[test]
+fn restyle_numbered_runs_keep_a_patch_after_repeated_prefix_insertion() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr>"#,
+        r#"<w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:pPr>"#,
+        r#"<w:r w:rsidRPr="0092171E"><w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#,
+        "<w:t>Some heading</w:t></w:r></w:p>",
+    ));
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Some ",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    assert_eq!(accepted(&doc), ["Some Some heading"]);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert!(part.legacy_paragraphs.is_empty(), "{part:?}");
+    assert_eq!(part.paragraph_patches.len(), 1);
+    assert_eq!(part.paragraph_patches[0].ordinal, 0);
+    assert!(!part.paragraph_patches[0].text_edits.is_empty());
+}
+
+#[test]
 fn restyle_numbered_runs_refuse_ambiguous_complex_script_after_text_edits() {
     for property in ["bCs", "iCs"] {
         for linked in [false, true] {

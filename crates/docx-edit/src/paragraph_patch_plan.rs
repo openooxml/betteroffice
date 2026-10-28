@@ -503,6 +503,38 @@ impl Alignment {
     }
 }
 
+fn single_run_insertion_alignment(
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Option<Vec<(usize, usize)>> {
+    let ([UnitV1::Text { text, .. }], [UnitV1::Text { text: target, .. }]) =
+        (before.units.as_slice(), after.units.as_slice())
+    else {
+        return None;
+    };
+    let boundaries = before.carriers.get("_originalRunBoundaries")?.as_array()?;
+    let [boundary] = boundaries.as_slice() else {
+        return None;
+    };
+    if boundary.get("text").and_then(Value::as_str) != Some(text.as_str())
+        || boundary.get("breaks").is_some()
+        || boundary.get("noteMarks").is_some()
+        || target.len() <= text.len()
+    {
+        return None;
+    }
+    let offset = target
+        .strip_suffix(text.as_str())
+        .map(|prefix| prefix.chars().count())
+        .or_else(|| target.strip_prefix(text.as_str()).map(|_| 0))?;
+    Some(
+        text.chars()
+            .enumerate()
+            .map(|(at, _)| (at, at + offset))
+            .collect(),
+    )
+}
+
 fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
     const WORK_LIMIT: usize = 4_000_000;
     let prefix = before
@@ -1199,8 +1231,14 @@ pub(crate) fn diff_paragraph_v1(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = alignment(&old, &new)
-        .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
+    let retained = match alignment(&old, &new) {
+        Ok(retained) => retained,
+        Err(detail @ "ambiguous: nonunique content alignment") if patchable_restyle => {
+            single_run_insertion_alignment(&before, &after)
+                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
+        }
+        Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+    };
     let donors = DonorIndex::new(&old);
     let offsets = &donors.offsets;
     let mut text_edits = Vec::new();
@@ -1648,6 +1686,37 @@ mod tests {
         let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
         assert_eq!(patch.para_deltas.len(), 1);
         assert_eq!(patch.para_deltas[0].path, ["pStyle"]);
+    }
+
+    #[test]
+    fn numbered_restyle_refuses_repeated_alignment_without_one_source_run() {
+        for boundaries in [
+            Value::Null,
+            json!([{"text": "Some "}, {"text": "heading"}]),
+            json!([{"text": "other text"}]),
+        ] {
+            let paragraph = |text, style| {
+                paragraph(
+                    text,
+                    json!({
+                        "pStyle": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "_originalFormatting": {
+                            "styleId": style, "numPr": {"numId": 43, "ilvl": 0}
+                        },
+                        "_originalRunBoundaries": boundaries
+                    }),
+                )
+            };
+            let legacy = diff_paragraph_v1(
+                &paragraph("Some heading", "ListParagraph"),
+                &paragraph("Some Some heading", "Heading1"),
+                context(),
+            )
+            .unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
+            assert_eq!(legacy.detail, "ambiguous: nonunique content alignment");
+        }
     }
 
     #[test]
