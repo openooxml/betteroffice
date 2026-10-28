@@ -140,6 +140,38 @@ test('r3_resident_and_facade_over_one_raw_session_both_receive_every_edit', asyn
   }
 });
 
+test('g4_a_listener_that_mutates_its_update_leaves_other_subscribers_intact', async () => {
+  const state = await stateFor('alpha');
+  const nativeCreate = editWasm.createEditSession;
+  const raws: Array<ReturnType<typeof nativeCreate>> = [];
+  const create = spyOn(editWasm, 'createEditSession').mockImplementation((...args) => {
+    const raw = nativeCreate(...args);
+    raws.push(raw);
+    return raw;
+  });
+  try {
+    const engineClientId = clientId();
+    const engine = own(await createResidentEngineSession(undefined, engineClientId));
+    engine.loadState(state);
+    const facade = own(wrapSession(raws[0]!, engineClientId));
+    const pristine: Seen = [];
+    const facadeSeen: Seen = [];
+    engine.onUpdate((update, origin) => {
+      pristine.push({ update: update.slice(), origin });
+      update.fill(0);
+    });
+    facade.onUpdate(record(facadeSeen));
+    engine.applyRawOps('body', [{ op: 'insert', index: 0, text: 'R ' }]);
+    expect(facadeSeen).toHaveLength(1);
+    expect(bytes(facadeSeen)).toEqual(bytes(pristine));
+    const peer = await facadeFromState(state);
+    peer.applyUpdate(facadeSeen[0]!.update);
+    expect(bodyText(peer)).toBe(bodyText(engine));
+  } finally {
+    create.mockRestore();
+  }
+});
+
 test('r4_resident_throwing_listener_does_not_block_other_listeners_or_the_edit', async () => {
   const engine = await residentFromState(await stateFor('alpha'));
   const seen: Seen = [];

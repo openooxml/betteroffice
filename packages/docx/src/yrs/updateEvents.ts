@@ -46,13 +46,12 @@ export function editSessionUpdateEvents(session: EditSession): EditSessionUpdate
         if (event.length === 0) return;
         const flag = event[0];
         if (flag !== 0 && flag !== 1) continue;
-        const update = event.slice(1);
         const origin: CollaborationUpdateOrigin = flag === 1 ? 'remote' : 'local';
         for (const record of [...subscribers]) {
           if (dead || subscribers.size === 0) return;
           if (!subscribers.has(record)) continue;
           try {
-            record.sink(update, origin);
+            record.sink(event.slice(1), origin);
           } catch {}
         }
       }
