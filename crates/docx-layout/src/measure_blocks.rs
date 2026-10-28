@@ -2375,6 +2375,9 @@ fn extract_floating_zones_recorded(
     shape_offsets: &BTreeMap<usize, f64>,
     record_dependencies: bool,
 ) -> Result<(Vec<AnchoredFloatingZone>, Vec<FontChainDependencies>), String> {
+    let section_local_widths = blocks.iter().any(|block| {
+        matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
+    });
     let mut zones = Vec::new();
     let mut dependencies = if record_dependencies {
         Vec::with_capacity(blocks.len())
@@ -2382,6 +2385,11 @@ fn extract_floating_zones_recorded(
         Vec::new()
     };
     for (block_index, block) in blocks.iter().enumerate() {
+        let content_width = if section_local_widths {
+            widths.get(block_index).copied().unwrap_or(content_width)
+        } else {
+            content_width
+        };
         let mut extract = || -> Result<(), String> {
             match block {
                 LayoutBlock::Paragraph(paragraph) => {
@@ -4807,6 +4815,35 @@ mod tests {
             let zone = &flow.paragraph_zones[&0][0];
             assert_eq!((zone.left_margin, zone.right_margin), expected);
         }
+    }
+
+    #[test]
+    fn wrapped_sections_extract_image_zones_at_the_current_section_width() {
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "cover", "runs": []},
+            {"kind": "sectionBreak", "id": "cover-break", "type": "nextPage",
+             "sdtGroups": [{"id": "cover-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "contents", "runs": []},
+            {"kind": "sectionBreak", "id": "contents-break", "type": "nextPage",
+             "sdtGroups": [{"id": "contents-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "body-image",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "image", "src": "image", "width": 614.4, "height": 512,
+                       "wrapType": "square", "distLeft": 12, "distRight": 12,
+                       "position": {"horizontal": {"relativeTo": "margin", "align": "left"},
+                                    "vertical": {"relativeTo": "margin", "align": "top"}}}]}
+        ]))
+        .unwrap();
+        let widths = [690.0, 690.0, 624.0, 624.0, 624.0];
+        let config = MeasurementConfig::default();
+        let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
+        assert!(!flow.zones_by_anchor.contains_key(&4));
+        flow.measure_until(&mut blocks, &widths, &config, 5).unwrap();
+        let BlockExtent::Paragraph(image) = &flow.extents()[4] else {
+            panic!("paragraph extent expected");
+        };
+        assert_eq!(image.total_height, 20.0);
+        assert_eq!(image.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
     }
 
     #[test]

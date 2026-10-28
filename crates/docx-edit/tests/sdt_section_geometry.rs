@@ -64,7 +64,7 @@ fn wrapped_cover_reserves_shared_default_header_with_own_geometry() {
         let engine = EngineSession::new(75211 + index as u64);
         seed_from_docx(engine.doc(), &bytes).unwrap();
         let request = region_request(&engine, &bytes, font);
-        assert_eq!(request["regions"]["sections"].as_array().unwrap().len(), 1);
+        assert_eq!(request["regions"]["sections"].as_array().unwrap().len(), 2);
         let output: Value = serde_json::from_str(
             &engine
                 .layout_document_with_regions_json(&request.to_string())
@@ -187,7 +187,7 @@ fn consecutive_wrapped_sections_inherit_authored_margins_after_a_tall_header() {
         .document
         .package;
     let sections = request["regions"]["sections"].as_array_mut().unwrap();
-    assert_eq!(sections.len(), 2);
+    assert_eq!(sections.len(), 3);
     sections.last_mut().unwrap()["properties"] = json!(package.document.final_section_properties);
     let output: Value = serde_json::from_str(
         &engine
@@ -250,6 +250,10 @@ fn short_page_floating_footer_output(last: &str, client_id: u64) -> Value {
             "<w:footerReference w:type=\"default\" r:id=\"rIdFooter1\"/>"
         ),
     );
+    render_section_parts(floating_footer_parts(&body), client_id)
+}
+
+fn floating_footer_parts(body: &str) -> Vec<(String, Vec<u8>)> {
     let footer = concat!(
         "<w:ftr ",
         "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
@@ -322,10 +326,14 @@ fn short_page_floating_footer_output(last: &str, client_id: u64) -> Value {
         "word/media/footer.png".into(),
         vec![
             137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 252, 255,
-            31, 0, 3, 3, 2, 0, 239, 163, 133, 45, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+            8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 252, 255, 31,
+            0, 3, 3, 2, 0, 239, 163, 133, 45, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
         ],
     ));
+    parts
+}
+
+fn render_section_parts(parts: Vec<(String, Vec<u8>)>, client_id: u64) -> Value {
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let engine = EngineSession::new(client_id);
@@ -395,6 +403,167 @@ fn first_tall_page_after_wrapped_section_refreshes_its_footer_exclusion() {
         body_bottom = body_bottom.max(bottom);
     }
     assert_eq!(body_bottom, 800.0);
+}
+
+#[test]
+fn final_section_after_two_wrapped_sections_keeps_its_limits_after_a_split_table() {
+    let side_margins = |xml: String| {
+        xml.replace("w:right=\"720\"", "w:right=\"1440\"")
+            .replace("w:left=\"720\"", "w:left=\"1440\"")
+    };
+    let wrapped = |id, properties: String, text: &str| {
+        format!(
+            concat!(
+                "<w:sdt><w:sdtPr><w:id w:val=\"{id}\"/></w:sdtPr><w:sdtContent>",
+                "{paragraph}</w:sdtContent></w:sdt>"
+            ),
+            id = id,
+            paragraph = p(
+                &format!("{id:08X}"),
+                &format!("<w:pPr>{properties}</w:pPr>{}", r(text))
+            ),
+        )
+    };
+    let cover = wrapped(
+        7_u32,
+        side_margins(section(12240, 15840, 3600, 1440, ""))
+            .replace("w:right=\"1440\"", "w:right=\"450\""),
+        "Cover",
+    );
+    let contents = wrapped(
+        8_u32,
+        side_margins(section(12240, 15840, 1170, 1440, "")),
+        "Contents",
+    );
+    let rows = (0..20)
+        .map(|index| {
+            format!(
+                concat!(
+                    "<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val=\"1500\" ",
+                    "w:hRule=\"exact\"/></w:trPr><w:tc><w:tcPr>",
+                    "<w:tcW w:w=\"9360\" w:type=\"dxa\"/></w:tcPr>{paragraph}</w:tc></w:tr>"
+                ),
+                paragraph = p(&format!("{:08X}", 0x10000 + index), &r("Table row")),
+            )
+        })
+        .collect::<String>();
+    let table = format!(
+        concat!(
+            "<w:tbl><w:tblPr><w:tblW w:w=\"9360\" w:type=\"dxa\"/>",
+            "<w:tblLayout w:type=\"fixed\"/></w:tblPr>",
+            "<w:tblGrid><w:gridCol w:w=\"9360\"/></w:tblGrid>{rows}</w:tbl>"
+        ),
+        rows = rows,
+    );
+    let paragraph = |id, content: &str, keep| {
+        p(
+            &format!("{id:08X}"),
+            &format!(
+                concat!(
+                    "<w:pPr>{keep}<w:spacing w:before=\"0\" w:after=\"0\" ",
+                    "w:line=\"300\" w:lineRule=\"exact\"/></w:pPr>{content}"
+                ),
+                keep = if keep { "<w:keepNext/>" } else { "" },
+                content = content,
+            ),
+        )
+    };
+    let tails = (0..18)
+        .map(|index| paragraph(0x20000 + index, &r("Following body text"), false))
+        .collect::<String>();
+    let body = format!(
+        "{cover}{contents}{table}{anchor}{caption}{tails}{section}",
+        cover = cover,
+        contents = contents,
+        table = table,
+        anchor = paragraph(0xF001, "BODY_FLOAT_IMAGE", true),
+        caption = paragraph(0xF002, &r("Caption after the table"), false),
+        tails = tails,
+        section = side_margins(section(12240, 15840, 1440, 1440, "")),
+    );
+    let mut parts = floating_footer_parts(&body);
+    let (_, footer_bytes) = parts
+        .iter()
+        .find(|(name, _)| name == "word/footer1.xml")
+        .unwrap();
+    let footer = std::str::from_utf8(footer_bytes).unwrap();
+    let drawing = footer
+        .split_once("<w:drawing>")
+        .unwrap()
+        .1
+        .split_once("</w:drawing>")
+        .unwrap()
+        .0
+        .replace("<wp:align>bottom</wp:align>", "<wp:align>top</wp:align>")
+        .replace("<wp:wrapTopAndBottom/>", "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        .replace("cx=\"1143000\"", "cx=\"5852160\"")
+        .replace("cy=\"1143000\"", "cy=\"4876800\"")
+        .replace("distL=\"0\"", "distL=\"114300\"")
+        .replace("distR=\"0\"", "distR=\"114300\"");
+    let image = format!(
+        concat!(
+            "<w:r ",
+            "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" ",
+            "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" ",
+            "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">",
+            "<w:drawing>{drawing}</w:drawing></w:r>"
+        ),
+        drawing = drawing,
+    );
+    for (name, bytes) in &mut parts {
+        let xml = std::str::from_utf8(bytes).ok();
+        let replacement = match name.as_str() {
+            "word/document.xml" => Some(xml.unwrap().replace("BODY_FLOAT_IMAGE", &image)),
+            "word/_rels/document.xml.rels" => Some(xml.unwrap().replace(
+                "</Relationships>",
+                concat!(
+                    "<Relationship Id=\"rIdImage\" ",
+                    "Type=\"",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" ",
+                    "Target=\"media/footer.png\"/></Relationships>"
+                ),
+            )),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *bytes = replacement.into_bytes();
+        }
+    }
+    let output = render_section_parts(parts, 75216);
+    let pages = output["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 5);
+    for page in &pages[2..] {
+        assert_eq!(page["size"], json!({"w": 816.0, "h": 1056.0}));
+        let margins = page
+            .get("bodyMargins")
+            .filter(|margins| !margins.is_null())
+            .unwrap_or(&page["margins"]);
+        assert_eq!(margins["top"], 96.0);
+        assert_eq!(margins["bottom"], 96.0);
+        for fragment in page["fragments"].as_array().unwrap() {
+            let bottom = fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap();
+            assert!(bottom <= 960.0, "body exceeds final-section limits: {fragment}");
+        }
+    }
+    assert_eq!(pages[4]["fragments"][0]["kind"], "table");
+    assert_eq!(pages[4]["fragments"][0]["carriedFromPrev"], true);
+    let measured = output["measured"].as_array().unwrap();
+    let anchor = measured
+        .iter()
+        .find(|measured| {
+            measured["block"]["runs"]
+                .as_array()
+                .is_some_and(|runs| runs.iter().any(|run| run["kind"] == "image"))
+        })
+        .unwrap();
+    assert_eq!(anchor["measure"]["totalHeight"], 20.0);
+    assert!(
+        pages[4]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|fragment| fragment["blockId"] == anchor["block"]["id"])
+    );
 }
 
 fn section(width: u32, height: u32, top: u32, bottom: u32, extra: &str) -> String {
@@ -467,7 +636,7 @@ fn resident_sdt_cover_section_preserves_each_sections_geometry() {
         .document
         .package;
     let sections = request["regions"]["sections"].as_array_mut().unwrap();
-    assert_eq!(sections.len(), 2);
+    assert_eq!(sections.len(), 3);
     sections.last_mut().unwrap()["properties"] = json!(package.document.final_section_properties);
     let request = request.to_string();
     for output in [

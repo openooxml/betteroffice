@@ -1879,7 +1879,8 @@ fn extend_input_for_header_footer(
                         .is_some_and(|section| section.title_pg)
                         .then(|| bands(HeaderFooterType::First)),
                     even: (regions.even_and_odd_headers
-                        || section.is_some_and(|section| section.even_and_odd_headers == Some(true)))
+                        || section
+                            .is_some_and(|section| section.even_and_odd_headers == Some(true)))
                     .then(|| bands(HeaderFooterType::Even)),
                     anchor_margins: Some(margins.clone()),
                 });

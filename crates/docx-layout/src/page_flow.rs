@@ -1620,10 +1620,20 @@ mod tests {
         let first = paginator.get_current();
         paginator.set_pen_y(first, 200.0);
         paginator
-            .update_page_layout(Some(Size { w: 600.0, h: 1000.0 }), Some(next), true)
+            .update_page_layout(
+                Some(Size {
+                    w: 600.0,
+                    h: 1000.0,
+                }),
+                Some(next),
+                true,
+            )
             .unwrap();
         let following = paginator.force_authored_page_break(false);
-        assert_eq!(paginator.pages[following].float_bands, vec![band(400.0, 520.0)]);
+        assert_eq!(
+            paginator.pages[following].float_bands,
+            vec![band(400.0, 520.0)]
+        );
         let parity = paginator.displayed_parity_offset;
 
         paginator.set_section_index(1);
