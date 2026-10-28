@@ -1788,7 +1788,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   return <XlsxCommandContext.Provider value={commands.store}>
     <EditorChromeContext.Provider value={true}>
       <FormulaBarContext.Provider value={formulaBar}>
-        <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
+        <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
           style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
             minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
           {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}

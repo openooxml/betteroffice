@@ -69,7 +69,7 @@ test('a cold chunk commits the surface without advancing reveal timers', async (
   const view = render(<Profiler id="cold" onRender={() => {
     commits.push(container.querySelector('[data-testid="loaded-worker-surface"]') ? 'surface' : 'loading');
   }}><PptxEditor {...props} className="cold-editor" /></Profiler>, { container });
-  expect(view.getByRole('status').outerHTML).toBe('<div class="cold-editor" role="status">Preparing test editor</div>');
+  expect(view.getByRole('status').outerHTML).toBe('<div dir="ltr" class="cold-editor" role="status">Preparing test editor</div>');
   expect(commits.every((commit) => commit === 'loading')).toBe(true);
   const loadingCommits = commits.length;
   pending.resolve(surface('Cold editor'));
