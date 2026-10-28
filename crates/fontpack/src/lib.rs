@@ -30,6 +30,39 @@ mod wasm;
 
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Codec {
+    Zstd,
+    Woff2tZstd,
+}
+
+impl Codec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Zstd => "zstd",
+            Self::Woff2tZstd => "woff2t+zstd",
+        }
+    }
+}
+
+impl core::str::FromStr for Codec {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "zstd" => Ok(Self::Zstd),
+            "woff2t+zstd" => Ok(Self::Woff2tZstd),
+            _ => Err("unsupported font face codec"),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Decoded {
+    pub font: Vec<u8>,
+    pub payload: Option<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodeError {
     NotZstd,
@@ -42,6 +75,7 @@ pub enum DecodeError {
     Truncated,
     TrailingData,
     AllocationFailed,
+    Woff2Reconstruction,
 }
 
 #[cfg(any(
@@ -70,6 +104,7 @@ impl fmt::Display for DecodeError {
             Self::Truncated => f.write_str("font face is truncated"),
             Self::TrailingData => f.write_str("font face must contain exactly one zstd frame"),
             Self::AllocationFailed => f.write_str("cannot allocate memory for font face"),
+            Self::Woff2Reconstruction => f.write_str("font face WOFF2 reconstruction failed"),
         }
     }
 }
@@ -199,6 +234,82 @@ pub fn decode_or_passthrough<'a>(
     } else {
         Ok(Cow::Borrowed(bytes))
     }
+}
+
+pub fn decode_face(
+    frame: &[u8],
+    dict: Option<&[u8]>,
+    codec: Codec,
+    max_output: usize,
+) -> Result<Decoded, DecodeError> {
+    let payload = decode(frame, dict, max_output)?;
+    match codec {
+        Codec::Zstd => Ok(Decoded {
+            font: payload,
+            payload: None,
+        }),
+        Codec::Woff2tZstd => {
+            let font = reconstruct_woff2t(&payload, max_output)?;
+            Ok(Decoded {
+                font,
+                payload: Some(payload),
+            })
+        }
+    }
+}
+
+fn reconstruct_woff2t(payload: &[u8], max_output: usize) -> Result<Vec<u8>, DecodeError> {
+    if payload.len() < 48 || !payload.starts_with(b"wOF2\0\x01\0\0") {
+        return Err(DecodeError::Woff2Reconstruction);
+    }
+    let read_u32 = |offset: usize| {
+        u32::from_be_bytes([
+            payload[offset],
+            payload[offset + 1],
+            payload[offset + 2],
+            payload[offset + 3],
+        ])
+    };
+    let tables = u16::from_be_bytes([payload[12], payload[13]]);
+    if !(1..=4095).contains(&tables)
+        || read_u32(8) as u64 != payload.len() as u64
+        || read_u32(20) as u64 > payload.len() as u64
+    {
+        return Err(DecodeError::Woff2Reconstruction);
+    }
+    for (offset, length) in [(28, 32), (40, 44)] {
+        if read_u32(offset) as u64 + read_u32(length) as u64 > payload.len() as u64 {
+            return Err(DecodeError::Woff2Reconstruction);
+        }
+    }
+    let size = read_u32(16);
+    if size as u64 > max_output as u64 {
+        return Err(DecodeError::TooLarge {
+            size: size as u64,
+            max: max_output,
+        });
+    }
+    let mut identity_error = None;
+    let result = wuff::decompress_woff2_with_custom_brotli(payload, &mut |data, expected| {
+        if data.len() != expected || expected > max_output {
+            return Err(wuff::WuffErr::GenericError.into());
+        }
+        let mut bytes = Vec::new();
+        if bytes.try_reserve_exact(data.len()).is_err() {
+            identity_error = Some(DecodeError::AllocationFailed);
+            return Err(wuff::WuffErr::GenericError.into());
+        }
+        bytes.extend_from_slice(data);
+        Ok(bytes)
+    });
+    let font = result.map_err(|_| identity_error.unwrap_or(DecodeError::Woff2Reconstruction))?;
+    if font.len() > max_output {
+        return Err(DecodeError::TooLarge {
+            size: font.len() as u64,
+            max: max_output,
+        });
+    }
+    Ok(font)
 }
 
 #[cfg(test)]
