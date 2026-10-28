@@ -33,6 +33,25 @@ describe("SessionApi default fetch", () => {
 });
 
 describe("SessionApi events", () => {
+  test("delivers rejoinRequired once and leaves stream replacement to the page", async () => {
+    let calls = 0;
+    const api = new SessionApi("handle-1", async () => {
+      calls += 1;
+      return sseResponse('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\nevent: saved\ndata: {}\n\n');
+    });
+    const controller = new AbortController();
+    const seen: SessionEvent[] = [];
+    const timeout = setTimeout(() => controller.abort(), 50);
+    try {
+      await api.events(controller.signal, (event) => { seen.push(event); }, { retryMs: 1 });
+      expect(calls).toBe(1);
+      expect(seen).toEqual([{ type: "rejoinRequired", reason: "sourceChanged" }]);
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+    }
+  });
+
   test("reconnects after a dropped stream until aborted", async () => {
     let calls = 0;
     const fetchFn = (async () => {

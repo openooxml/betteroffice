@@ -10,7 +10,7 @@ class FakeSocket implements WebSocketLike {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
-  onclose: ((event: { reason?: string }) => void) | null = null;
+  onclose: ((event: { code?: number; reason?: string }) => void) | null = null;
   sent: ArrayBuffer[] = [];
   closedWith: Array<[number | undefined, string | undefined]> = [];
 
@@ -32,6 +32,59 @@ describe("collabUrl", () => {
 });
 
 describe("createWopiTransport", () => {
+  test("reports 4409 and never reconnects a replaced baseline", async () => {
+    const sockets: FakeSocket[] = [];
+    const transport = createWopiTransport({ handle: "h", createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    } });
+    const events: unknown[] = [];
+    transport.onEvent((event) => { events.push(event); });
+    try {
+      transport.connect();
+      const socket = sockets[0]!;
+      socket.readyState = 1;
+      socket.onopen?.();
+      socket.readyState = 3;
+      socket.onclose?.({ code: 4409, reason: "rejoin from source" });
+      expect(events.at(-1)).toEqual({ type: "close", code: 4409, reason: "rejoin from source" });
+      expect(transport.captureSaveBarrier()).toBeNull();
+      transport.connect();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(sockets).toHaveLength(1);
+    } finally {
+      transport.disconnect();
+    }
+  });
+
+  test.each([1006, 4401])("close code %i keeps the existing reconnect behavior", async (code) => {
+    const sockets: FakeSocket[] = [];
+    const transport = createWopiTransport({ handle: "h", createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    } });
+    try {
+      transport.connect();
+      const first = sockets[0]!;
+      first.readyState = 1;
+      first.onopen?.();
+      const barrier = transport.captureSaveBarrier()!;
+      first.readyState = 3;
+      first.onclose?.({ code });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(sockets).toHaveLength(2);
+      const second = sockets[1]!;
+      second.readyState = 1;
+      second.onopen?.();
+      expect(transport.captureSaveBarrier()?.connectionId).not.toBe(barrier.connectionId);
+      expect(transport.captureSaveBarrier()?.seq).toBe(0);
+    } finally {
+      transport.disconnect();
+    }
+  });
+
   test("connects to /collab with the handle as the second subprotocol", () => {
     const sockets: FakeSocket[] = [];
     const seen: Array<{ url: string; protocols: string[] }> = [];

@@ -99,6 +99,7 @@ export class PostMessageBridge {
   }
 
   frameReady(): void {
+    this.#loading = "opening";
     this.send("App_LoadingStatus", { Status: "Frame_Ready" });
   }
 

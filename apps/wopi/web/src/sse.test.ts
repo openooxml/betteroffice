@@ -12,6 +12,12 @@ describe("SseParser", () => {
 });
 
 describe("toSessionEvent", () => {
+  test("recognizes a replacement baseline event", () => {
+    expect(toSessionEvent({ event: "rejoinRequired", data: '{"reason":"sourceChanged"}' })).toEqual({
+      type: "rejoinRequired", reason: "sourceChanged",
+    });
+  });
+
   test("maps the session event kinds", () => {
     expect(toSessionEvent({ event: "saved", data: '{"itemVersion":"3"}' })).toEqual({ type: "saved", itemVersion: "3" });
     expect(toSessionEvent({ event: "conflict", data: '{"copyName":"book (conflict).xlsx","name":"book.xlsx"}' })).toEqual({ type: "conflict", copyName: "book (conflict).xlsx" });

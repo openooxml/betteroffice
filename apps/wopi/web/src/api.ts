@@ -97,10 +97,14 @@ export class SessionApi {
             const chunk = await reader.read();
             if (chunk.done) break;
             for (const raw of parser.feed(decoder.decode(chunk.value, { stream: true }))) {
+              if (signal.aborted) return;
               const event = toSessionEvent(raw);
               if (!event) continue;
               onEvent(event);
-              if (event.type === "closed") closed = true;
+              if (event.type === "closed" || event.type === "rejoinRequired") {
+                closed = true;
+                break;
+              }
             }
             if (closed) break;
           }

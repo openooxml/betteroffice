@@ -2,6 +2,46 @@ import { expect, spyOn, test } from "bun:test";
 import { closeDocument, finishClose, saveDocument } from "./documentActions";
 import type { SaveBarrier } from "../../src/relay/sequence";
 
+test.each(["flush", "vector", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
+  const h = setup();
+  const controller = new AbortController();
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const stalled = new Promise<void>((resolve) => { release = resolve; });
+  if (stage === "flush") h.editor.flushPendingInput = () => { entered(); return stalled; };
+  if (stage === "vector") h.editor.encodeStateVector = async () => { entered(); await stalled; return Uint8Array.of(9); };
+  let requestSignal: AbortSignal | undefined;
+  const api = {
+    save: async (barrier: SaveBarrier, signal?: AbortSignal) => {
+      requestSignal = signal;
+      if (stage === "save") { entered(); await stalled; }
+      return h.api.save(barrier);
+    },
+  };
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  const pending = saveDocument(h.editor, api, { isModified: h.isModified, signal: controller.signal });
+  const outcome = pending.then(() => "saved", (error: Error) => error.message);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await started;
+    controller.abort(new Error("rejoinRequired"));
+    expect(await Promise.race([
+      outcome,
+      new Promise<string>((resolve) => { timeout = setTimeout(() => resolve("still pending"), 50); }),
+    ])).toBe("rejoinRequired");
+    if (stage === "save") expect(requestSignal?.aborted).toBe(true);
+    release();
+    await pending.catch(() => {});
+    if (stage !== "save") expect(h.calls).not.toContain("save");
+  } finally {
+    clearTimeout(timeout);
+    release();
+    await pending.catch(() => {});
+    warning.mockRestore();
+  }
+});
+
 function setup() {
   const calls: string[] = [];
   let dirty = false;

@@ -9,7 +9,7 @@ export interface WebSocketLike {
   onopen: (() => void) | null;
   onmessage: ((event: { data: unknown }) => void) | null;
   onerror: ((event: unknown) => void) | null;
-  onclose: ((event: { reason?: string }) => void) | null;
+  onclose: ((event: { code?: number; reason?: string }) => void) | null;
   send(data: ArrayBuffer): void;
   close(code?: number, reason?: string): void;
 }
@@ -51,6 +51,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
   let connectionId: string | null = null;
   let seq = 0;
   let wantsConnection = false;
+  let rejoinRequired = false;
   let retryMs = INITIAL_RETRY_MS;
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -114,13 +115,18 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
       socket = null;
       connectionId = null;
       seq = 0;
-      emit({ type: "close", reason: event.reason });
+      if (event.code === 4409) {
+        rejoinRequired = true;
+        wantsConnection = false;
+      }
+      emit({ type: "close", code: event.code, reason: event.reason });
       scheduleReconnect();
     };
   };
 
   return {
     connect() {
+      if (rejoinRequired) return;
       wantsConnection = true;
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);

@@ -7,6 +7,7 @@ interface InputEditor {
 }
 
 interface SaveDocumentOptions extends SaveOptions {
+  signal?: AbortSignal;
   isModified(): boolean;
   captureBarrier?(): SocketSaveBarrier | null;
   onFlushed?(): void;
@@ -24,17 +25,27 @@ interface CloseDocumentOptions extends SaveDocumentOptions {
   onFailure?(error: unknown): void;
 }
 
-async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason: string): Promise<T> {
+async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason: string, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   try {
+    signal?.throwIfAborted();
     return await Promise.race([
-      Promise.resolve().then(operation),
+      Promise.resolve().then(() => {
+        signal?.throwIfAborted();
+        return operation();
+      }),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error(reason)), timeoutMs);
+      }),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(signal?.reason);
+        signal?.addEventListener("abort", onAbort, { once: true });
       }),
     ]);
   } finally {
     clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -52,11 +63,13 @@ export async function saveDocument(
     saveConnectionId: null, saveSequence: null,
   });
   try {
+    options.signal?.throwIfAborted();
     if (!editor) throw new Error("editorNotReady");
     step = "flush";
     if (!options.DontTerminateEdit) {
-      await bounded(() => editor.flushPendingInput(), options.inputTimeoutMs ?? 3000, "flushPendingInputTimeout");
+      await bounded(() => editor.flushPendingInput(), options.inputTimeoutMs ?? 3000, "flushPendingInputTimeout", options.signal);
     }
+    options.signal?.throwIfAborted();
     options.onFlushed?.();
     step = "flushed";
     progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
@@ -72,7 +85,7 @@ export async function saveDocument(
       progress({ saveConnectionId: barrier.connectionId, saveSequence: barrier.seq });
     } else {
       step = "stateVector";
-      barrier = await bounded(() => editor.encodeStateVector(), options.inputTimeoutMs ?? 3000, "encodeStateVectorTimeout");
+      barrier = await bounded(() => editor.encodeStateVector(), options.inputTimeoutMs ?? 3000, "encodeStateVectorTimeout", options.signal);
       progress({ saveStateVectorBytes: barrier.byteLength });
     }
     const capturedBarrier = barrier;
@@ -81,7 +94,8 @@ export async function saveDocument(
       const saving = api.save(capturedBarrier, controller.signal);
       progress({ savePostedAt: Date.now() });
       return saving;
-    }, options.saveTimeoutMs ?? 10_000, "saveTimeout");
+    }, options.saveTimeoutMs ?? 10_000, "saveTimeout", options.signal);
+    options.signal?.throwIfAborted();
     step = "result";
     progress({ saveResult: "saved" });
   } catch (error) {
@@ -102,7 +116,9 @@ export async function closeDocument(
   options.setInputBlocked(true);
   try {
     await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+    options.signal?.throwIfAborted();
     await api.close();
+    options.signal?.throwIfAborted();
     finish();
   } catch (error) {
     options.setInputBlocked(false);
