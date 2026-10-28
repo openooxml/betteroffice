@@ -4,6 +4,7 @@ import { cellPosition, commentBody, commentRanges, commentRoot, commentText, con
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
+  unknownMatchError,
   type DocumentOptions,
   type ExactTextEdit,
   type GrepMatch,
@@ -345,7 +346,7 @@ export class DocxAgentDocument {
       if ('oldText' in inputEdit) edit = inputEdit;
       else {
         const target = this.matches.get(inputEdit.match);
-        if (!target) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+        if (!target) throw unknownMatchError(inputEdit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
         edit = { ...target, newText: inputEdit.newText };
       }
       const p = this.get(edit.ref);
@@ -398,14 +399,14 @@ export class DocxAgentDocument {
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     const held = this.pending(id);
-    if (options.tracked && (!options.date || !Number.isFinite(Date.parse(options.date)))) {
+    if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const draft = await this.fork();
     try {
       this.checkPending(held);
       const vector = draft.encodeStateVector();
-      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date! } : undefined);
+      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined);
       this.checkPending(held);
       this.session.addUndoBoundary();
       try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
@@ -704,7 +705,7 @@ export class DocxAgentDocument {
     }
     if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
-      if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+      if (!held) throw unknownMatchError(edit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const start = held.start ?? 0;
