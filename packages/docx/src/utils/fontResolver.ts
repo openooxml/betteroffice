@@ -541,28 +541,6 @@ export function resolveThemeFont(themeRef: string, fontScheme?: ThemeFontScheme)
   return themeFont.latin ?? null;
 }
 
-/** Resolves an rFonts theme reference only when its theme slot names a font. */
-export function resolveRFontsThemeFont(themeRef: string, fontScheme?: ThemeFontScheme): string | null {
-  switch (themeRef.toLowerCase()) {
-    case 'majorascii':
-    case 'majorhansi':
-      return fontScheme?.majorFont?.latin || null;
-    case 'minorascii':
-    case 'minorhansi':
-      return fontScheme?.minorFont?.latin || null;
-    case 'majoreastasia':
-      return fontScheme?.majorFont?.ea || null;
-    case 'minoreastasia':
-      return fontScheme?.minorFont?.ea || null;
-    case 'majorbidi':
-      return fontScheme?.majorFont?.cs || null;
-    case 'minorbidi':
-      return fontScheme?.minorFont?.cs || null;
-    default:
-      return null;
-  }
-}
-
 /**
  * Get all Google Font names needed for a list of DOCX fonts
  *
