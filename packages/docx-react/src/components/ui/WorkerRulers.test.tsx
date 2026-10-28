@@ -51,3 +51,9 @@ test('vertical margin drag announces its release after its last authored value',
   fireEvent.mouseUp(document);
   expect(values).toEqual(['start', 2160, 'end']);
 });
+
+test('clear and list tab stops are named by their own type', () => {
+  const { getByTitle } = render(<HorizontalRuler tabStops={[{ position: 720, alignment: 'clear' }, { position: 1440, alignment: 'num' }]} />);
+  expect(getByTitle('Clear tab at 0.50"')).toBeTruthy();
+  expect(getByTitle('List tab at 1.00"')).toBeTruthy();
+});

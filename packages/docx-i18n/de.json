@@ -743,7 +743,9 @@
       "center": "Zentriert",
       "right": "Rechts",
       "decimal": "Dezimal",
-      "bar": "Vertikalstrich"
+      "bar": "Vertikalstrich",
+      "clear": "Gelöscht",
+      "num": "Liste"
     },
     "horizontal": "Horizontales Lineal",
     "vertical": "Vertikales Lineal",

@@ -743,7 +743,9 @@
       "center": "Centro",
       "right": "Direita",
       "decimal": "Decimal",
-      "bar": "Barra"
+      "bar": "Barra",
+      "clear": "Removida",
+      "num": "Lista"
     },
     "horizontal": "Régua horizontal",
     "vertical": "Régua vertical",

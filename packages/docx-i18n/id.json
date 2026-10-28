@@ -743,7 +743,9 @@
       "center": "Tengah",
       "right": "Kanan",
       "decimal": "Desimal",
-      "bar": "Bilah"
+      "bar": "Bilah",
+      "clear": "Dihapus",
+      "num": "Daftar"
     },
     "horizontal": "Penggaris Horizontal",
     "vertical": "Penggaris Vertikal",

@@ -743,7 +743,9 @@
       "center": "中央揃え",
       "right": "右揃え",
       "decimal": "小数点揃え",
-      "bar": "縦棒"
+      "bar": "縦棒",
+      "clear": "クリア",
+      "num": "リスト"
     },
     "horizontal": "水平ルーラー",
     "vertical": "垂直ルーラー",

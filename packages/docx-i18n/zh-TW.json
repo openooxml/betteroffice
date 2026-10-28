@@ -743,7 +743,9 @@
       "center": "置中",
       "right": "靠右",
       "decimal": "小數點",
-      "bar": "直線"
+      "bar": "直線",
+      "clear": "已清除",
+      "num": "清單"
     },
     "horizontal": "水平尺規",
     "vertical": "垂直尺規",

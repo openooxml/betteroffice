@@ -743,7 +743,9 @@
       "center": "가운데",
       "right": "오른쪽",
       "decimal": "소수점",
-      "bar": "세로 막대"
+      "bar": "세로 막대",
+      "clear": "지움",
+      "num": "목록"
     },
     "horizontal": "가로 눈금자",
     "vertical": "세로 눈금자",

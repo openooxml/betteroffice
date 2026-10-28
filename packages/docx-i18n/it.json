@@ -743,7 +743,9 @@
       "center": "Al centro",
       "right": "A destra",
       "decimal": "Decimale",
-      "bar": "Barra"
+      "bar": "Barra",
+      "clear": "Cancellata",
+      "num": "Elenco"
     },
     "horizontal": "Righello orizzontale",
     "vertical": "Righello verticale",

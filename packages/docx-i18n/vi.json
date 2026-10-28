@@ -743,7 +743,9 @@
       "center": "Giữa",
       "right": "Phải",
       "decimal": "Thập phân",
-      "bar": "Vạch"
+      "bar": "Vạch",
+      "clear": "Đã xóa",
+      "num": "Danh sách"
     },
     "horizontal": "Thước ngang",
     "vertical": "Thước dọc",

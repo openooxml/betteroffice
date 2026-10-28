@@ -743,7 +743,9 @@
       "center": "居中",
       "right": "右对齐",
       "decimal": "小数点对齐",
-      "bar": "竖线对齐"
+      "bar": "竖线对齐",
+      "clear": "已清除",
+      "num": "列表"
     },
     "horizontal": "水平标尺",
     "vertical": "垂直标尺",

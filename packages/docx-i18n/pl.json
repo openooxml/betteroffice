@@ -743,7 +743,9 @@
       "center": "Do środka",
       "right": "Do prawej",
       "decimal": "Dziesiętne",
-      "bar": "Pionowy"
+      "bar": "Pionowy",
+      "clear": "Usunięty",
+      "num": "Listy"
     },
     "horizontal": "Linijka pozioma",
     "vertical": "Linijka pionowa",

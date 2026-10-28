@@ -743,7 +743,9 @@
       "center": "Gecentreerd",
       "right": "Rechts",
       "decimal": "Decimaal",
-      "bar": "Balk"
+      "bar": "Balk",
+      "clear": "Gewist",
+      "num": "Lijst"
     },
     "horizontal": "Horizontale liniaal",
     "vertical": "Verticale liniaal",

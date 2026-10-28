@@ -743,7 +743,9 @@
       "center": "Orta",
       "right": "Sağ",
       "decimal": "Ondalık",
-      "bar": "Çubuk"
+      "bar": "Çubuk",
+      "clear": "Temizlenmiş",
+      "num": "Liste"
     },
     "horizontal": "Yatay cetvel",
     "vertical": "Dikey cetvel",
