@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
-use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
+use ooxml_text::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
