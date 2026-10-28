@@ -24,10 +24,17 @@ export interface PeerlessEchoIntent {
   contextFrameEpoch: number;
 }
 
+/** @internal Page local caret predicted for the last painted pending entry. */
+export interface PeerlessPredictedCaret {
+  readonly throughSeq: number | undefined;
+  pageIndex: number;
+  rect: DocxEchoRect;
+}
+
 /** @internal */
 export interface PeerlessEchoPainterOptions {
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
-  onPaint?(): void;
+  onPaint?(predicted?: PeerlessPredictedCaret): void;
   /** Asks the worker to send everything again, here the glyph sets a context names but never arrived. */
   requestFullFrame?(): void;
 }
@@ -77,6 +84,35 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       } }) });
       requested.delete(set.key);
     }
+  }
+
+  function clearPainted(): void {
+    options.onPaint?.(undefined);
+  }
+
+  function predictedCaret(pending: readonly EchoEntry<PeerlessEchoIntent>[], placed: EchoLayout): PeerlessPredictedCaret | undefined {
+    if (!context || !draft || draft.anchor !== draft.focus) return undefined;
+    const last = pending.at(-1);
+    const template = context.boundaries[0]?.caret;
+    const damage = context.damage[0];
+    const line = context.glyphs;
+    if (!last || !template || !damage || !line) return undefined;
+    let utf16 = 0;
+    let x: number | undefined;
+    const chars = [...draft.text];
+    for (let index = 0; index < chars.length; index += 1) {
+      if (utf16 === draft.focus) { x = placed.placement.xs[index]!; break; }
+      utf16 += chars[index]!.length;
+      if (utf16 > draft.focus) return undefined;
+    }
+    if (x === undefined) {
+      if (utf16 !== draft.focus) return undefined;
+      x = placed.placement.end;
+    }
+    if (x < damage.rect.x || x > damage.rect.x + damage.rect.width || x > line.right) return undefined;
+    const ticket = last.ticket;
+    return { get throughSeq() { return last.seq ?? ticket.seq; }, pageIndex: context.page.pageIndex,
+      rect: { x, y: template.y, width: template.width, height: template.height } };
   }
 
   function contextGlyphSet(next: DocxCommandEchoContext) {
@@ -183,7 +219,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     disabled = !next || next.shaping !== 'simple-ltr' || next.serializedBytes > 16 * 1024 ||
       echoEncoder.encode(JSON.stringify(next)).byteLength > 16 * 1024 || !contextGlyphSet(next);
     originalIntents = 0;
-    if (disabled) restorePages();
+    if (disabled) { restorePages(); clearPainted(); }
     else if (next) currentEnd(next, contextGlyphSet(next)!);
   }
 
@@ -223,6 +259,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     prunePages();
     restorePages();
     disabled = true;
+    clearPainted();
   }
 
   function preview(intent: PeerlessTextIntent): PeerlessEchoIntent | undefined {
@@ -251,7 +288,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
 
   function paint(pending: readonly EchoEntry<PeerlessEchoIntent>[]): void {
     if (!disposed) prunePages();
-    if (disposed || disabled || !context) return;
+    if (disposed) return;
+    if (disabled || !context) { clearPainted(); return; }
     originalIntents = Math.max(originalIntents,
       pending.reduce((sum, entry) => sum + entry.value.originalIntentCount, 0));
     if (!Number.isSafeInteger(originalIntents) || originalIntents > 256 || pending.some(({ value }) =>
@@ -296,7 +334,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
         drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.cache });
       }
     } finally { ctx.restore(); }
-    options.onPaint?.();
+    const predicted = predictedCaret(pending, placed);
+    options.onPaint?.(predicted);
   }
 
   return {
@@ -355,6 +394,7 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       if (disposed) return;
       restorePages();
       closeStaged();
+      clearPainted();
       context = undefined;
       baseline = undefined;
       prepared = undefined;

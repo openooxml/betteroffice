@@ -21,6 +21,9 @@ import type {
   DocxHeadingInfo,
   DocxStorySelection,
 } from './readTypes';
+import type { DocxDrawing } from '../types/content/run';
+
+export type { DocxDrawing } from '../types/content/run';
 
 export type DocxRevisionView = 'accepted' | 'original' | 'markup';
 
@@ -158,13 +161,15 @@ export type DocxExportInline = {
     }
   | {
       kind: 'image';
+      /** The drawing's `descr`, falling back to its `title`. */
       altText: string | null;
       relationshipId: string | null;
       part: string | null;
       externalTarget: string | null;
+      drawing: DocxDrawing | null;
     }
   | { kind: 'contentControl'; control: DocxControlMetadata; inlines: DocxExportInline[] }
-  | { kind: 'unsupported'; element: string; altText: string | null }
+  | { kind: 'unsupported'; element: string; altText: string | null; drawing: DocxDrawing | null }
 );
 
 export type DocxCachedResult =

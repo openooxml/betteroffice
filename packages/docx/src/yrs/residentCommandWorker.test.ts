@@ -1872,7 +1872,7 @@ test('worker moveEmbed save and reopen retain one drawing and its relationship',
   const reopened = new ResidentEngineWorkerClient(startWorker(8302));
   try {
     const original = engine.storySegments('body').filter(s => s.kind === 'embed');
-    expect(original.every(s => s.kind === 'embed' && s.payload.docPr === undefined)).toBe(true);
+    expect(original.map(s => s.kind === 'embed' && s.payload.docPr)).toEqual([expect.objectContaining({ docPrId: '9', name: 'Picture' })]);
     const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
     const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
     const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);

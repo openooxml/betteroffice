@@ -715,6 +715,7 @@ fn walk_story_chunks<T: ReadTxn>(
     let mut blocks = Vec::new();
     let mut paragraph_runs = Vec::new();
     let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
+    let mut alternate_content_sources = HashMap::<u64, Vec<AlternateContentSource>>::new();
     let mut pending_hidden_field_blocks = BTreeSet::new();
     let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
     let mut field_join: Option<FieldJoin> = None;
@@ -1528,7 +1529,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(shape, txn, "_kind").as_deref() == Some("shape") =>
             {
                 let pm_offset = paragraph_pm_units;
-                let Some(block) = lower_shape_block(
+                let Some((block, text_box, provenance)) = lower_shape_block(
                     shape,
                     txn,
                     paragraph_pm_start + 1 + u64::from(pm_offset),
@@ -1608,6 +1609,15 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: formatting.clone(),
+                        inline_text_box: text_box,
+                        from_opaque: false,
+                        fallback_twin: alternate_content_fallback(
+                            alternate_content_sources
+                                .get(&paragraph_pm_start)
+                                .map(Vec::as_slice),
+                            provenance.as_ref(),
+                        ),
                     });
                 }
                 story_index += 1;
@@ -1618,6 +1628,15 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(opaque, txn, "_kind").as_deref() == Some("opaqueDrawing") =>
             {
                 let values = shared_values(opaque, txn);
+                if map_string(&values, "kind").as_deref() == Some("alternateContent")
+                    && let Some(source) = map_string(&values, "xml")
+                    && let Some(source) = alternate_content_source(&source, paragraph_pm_units)
+                {
+                    alternate_content_sources
+                        .entry(paragraph_pm_start)
+                        .or_default()
+                        .push(source);
+                }
                 if let Some(block) = opaque_text_box(
                     &values,
                     paragraph_pm_start + 1 + u64::from(paragraph_pm_units),
@@ -1631,6 +1650,10 @@ fn walk_story_chunks<T: ReadTxn>(
                         block: LayoutBlock::Shape(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         revision_hidden: env.revision_hidden(attributes),
+                        formatting: lower_run_formatting(attributes, env),
+                        inline_text_box: false,
+                        from_opaque: true,
+                        fallback_twin: None,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1657,8 +1680,9 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shared_map_string(chart, txn, "_kind").as_deref() == Some("chart") =>
             {
                 let pm_offset = paragraph_pm_units;
+                let values = shared_values(chart, txn);
                 let Some(block) = lower_chart_block(
-                    &shared_values(chart, txn),
+                    &values,
                     Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                     env,
                 ) else {
@@ -1667,6 +1691,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         index: story_index,
                     });
                 };
+                let provenance = chart_drawing_provenance(&block.chart);
                 paragraph_drawings.push(DrawingMarker {
                     pm_offset,
                     story_index,
@@ -1674,6 +1699,15 @@ fn walk_story_chunks<T: ReadTxn>(
                     hidden: mark_bool(attributes, "hidden") == Some(true),
                     revision_hidden: env.revision_hidden(attributes),
                     anchored: false,
+                    formatting: lower_run_formatting(attributes, env),
+                    inline_text_box: false,
+                    from_opaque: false,
+                    fallback_twin: alternate_content_fallback(
+                        alternate_content_sources
+                            .get(&paragraph_pm_start)
+                            .map(Vec::as_slice),
+                        provenance.as_ref(),
+                    ),
                 });
                 story_index += 1;
                 paragraph_pm_units += 1;
@@ -2762,9 +2796,9 @@ fn lower_shape_block<T: ReadTxn>(
     pm_start: u64,
     env: &RenderEnv,
     story_id: &str,
-) -> Option<ShapeBlock> {
+) -> Option<(ShapeBlock, bool, Option<DrawingProvenance>)> {
     let values = shared_values(shape, txn);
-    if let Some(block) = values
+    if let Some((block, text_box, provenance)) = values
         .get("shapeJson")
         .and_then(|value| match value {
             Any::String(source) => Some(env.media.tokenized_json(source)),
@@ -2772,13 +2806,17 @@ fn lower_shape_block<T: ReadTxn>(
         })
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
         .and_then(|value| {
+            let provenance = shape_drawing_provenance(&value);
             let projected =
                 group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
             let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
+            let text_box = rendered.get("textBox").and_then(Value::as_bool) == Some(true)
+                || rendered.get("shapeType").and_then(Value::as_str) == Some("textBox");
             shapes::lower_shape_json(&rendered, pm_start, env)
+                .map(|block| (block, text_box, provenance))
         })
     {
-        return Some(block);
+        return Some((block, text_box, provenance));
     }
     let shape_type = map_string(&values, "shapeType").unwrap_or_else(|| "rect".to_owned());
     let geometry_path = values
@@ -2796,39 +2834,211 @@ fn lower_shape_block<T: ReadTxn>(
             .unwrap_or(80.0),
         env,
     );
-    Some(ShapeBlock {
-        sdt_groups: None,
-        id: BlockId::Str(format!("shape:{pm_start}")),
-        shape_type,
-        geometry_path,
-        fill: shape_fill(&values),
-        stroke: shape_stroke(&values),
-        transform: shape_transform(&values),
-        width,
-        height,
-        x: None,
-        y: None,
-        inner_text: None,
-        nested_sequences: Vec::new(),
-        inner_measures: None,
-        children: Vec::new(),
-        scene: None,
-        effects: None,
-        text_body_properties: None,
-        wrap_distances: None,
-        position: None,
-        wrap_type: None,
-        wrap_text: None,
-        relative_height: None,
-        behind_doc: None,
-        decorative: None,
-        title: None,
-        description: None,
-        doc_start: Some(pm_start as f64),
-        doc_end: Some((pm_start + 1) as f64),
-        pm_start: Some(pm_start as f64),
-        pm_end: Some((pm_start + 1) as f64),
+    let text_box = map_bool(&values, "textBox") == Some(true) || shape_type == "textBox";
+    Some((
+        ShapeBlock {
+            sdt_groups: None,
+            id: BlockId::Str(format!("shape:{pm_start}")),
+            shape_type,
+            geometry_path,
+            fill: shape_fill(&values),
+            stroke: shape_stroke(&values),
+            transform: shape_transform(&values),
+            width,
+            height,
+            x: None,
+            y: None,
+            inner_text: None,
+            nested_sequences: Vec::new(),
+            inner_measures: None,
+            children: Vec::new(),
+            scene: None,
+            effects: None,
+            text_body_properties: None,
+            wrap_distances: None,
+            position: None,
+            wrap_type: None,
+            wrap_text: None,
+            relative_height: None,
+            behind_doc: None,
+            decorative: None,
+            title: None,
+            description: None,
+            doc_start: Some(pm_start as f64),
+            doc_end: Some((pm_start + 1) as f64),
+            pm_start: Some(pm_start as f64),
+            pm_end: Some((pm_start + 1) as f64),
+        },
+        text_box,
+        None,
+    ))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DrawingProvenance {
+    id: String,
+    name: Option<String>,
+    content: DrawingContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DrawingContent {
+    Shape {
+        shape_type: String,
+        text_box: bool,
+        text: Vec<String>,
+    },
+    Chart(String),
+}
+
+struct AlternateContentSource {
+    offset: u32,
+    choices: Vec<Option<DrawingProvenance>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FallbackTwin {
+    offset: u32,
+    choice: usize,
+    required: usize,
+}
+
+fn shape_drawing_provenance(shape: &Value) -> Option<DrawingProvenance> {
+    fn collect(value: &Value, text: &mut Vec<String>) {
+        if value.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(value) = value.get("text").and_then(Value::as_str)
+        {
+            text.push(value.to_owned());
+        } else {
+            match value {
+                Value::Array(values) => values.iter().for_each(|value| collect(value, text)),
+                Value::Object(values) => values.values().for_each(|value| collect(value, text)),
+                _ => {}
+            }
+        }
+    }
+    let mut text = Vec::new();
+    if let Some(body) = shape.get("textBody").and_then(|body| body.get("content")) {
+        collect(body, &mut text);
+    }
+    Some(DrawingProvenance {
+        id: shape.get("id")?.as_str()?.to_owned(),
+        name: shape.get("name").and_then(Value::as_str).map(str::to_owned),
+        content: DrawingContent::Shape {
+            shape_type: shape.get("shapeType")?.as_str()?.to_owned(),
+            text_box: shape.get("textBox").and_then(Value::as_bool) == Some(true),
+            text,
+        },
     })
+}
+
+fn xml_drawing_provenance(drawing: &docx_parse::xml::XmlElement) -> Option<DrawingProvenance> {
+    fn collect(node: &docx_parse::xml::XmlElement, text: &mut Vec<String>) {
+        if node.name == "w:t" {
+            text.push(node.text_content());
+        } else {
+            for child in node.child_elements() {
+                collect(child, text);
+            }
+        }
+    }
+    let container = drawing
+        .child_elements()
+        .find(|child| matches!(child.name.as_str(), "wp:inline" | "wp:anchor"))?;
+    let properties = container.child_by_full_name("wp:docPr")?;
+    let data = container
+        .child_by_full_name("a:graphic")?
+        .child_by_full_name("a:graphicData")?;
+    let content = if let Some(chart) = data.child_by_full_name("c:chart") {
+        DrawingContent::Chart(chart.attribute(Some("r"), "id")?.to_owned())
+    } else {
+        let wsp = data.child_by_full_name("wps:wsp")?;
+        let shape = docx_parse::shape::parse_shape_from_drawing(drawing)?;
+        let mut text = Vec::new();
+        if let Some(body) = wsp.child_by_full_name("wps:txbx") {
+            collect(body, &mut text);
+        }
+        DrawingContent::Shape {
+            shape_type: shape.shape_type,
+            text_box: shape.text_box == Some(true),
+            text,
+        }
+    };
+    Some(DrawingProvenance {
+        id: properties.attribute(None, "id")?.to_owned(),
+        name: properties.attribute(None, "name").map(str::to_owned),
+        content,
+    })
+}
+
+fn chart_drawing_provenance(chart: &Value) -> Option<DrawingProvenance> {
+    let source = chart.get("drawingXml")?.as_str()?;
+    let limits = docx_parse::xml::ParseLimits::default();
+    let document = docx_parse::xml::parse_xml(
+        source.as_bytes(),
+        "drawing.xml",
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .ok()?;
+    let provenance = xml_drawing_provenance(document.root()?)?;
+    (provenance.content == DrawingContent::Chart(chart.get("rId")?.as_str()?.to_owned()))
+        .then_some(provenance)
+}
+
+fn alternate_content_source(source: &str, offset: u32) -> Option<AlternateContentSource> {
+    let limits = docx_parse::xml::ParseLimits::default();
+    let document = docx_parse::xml::parse_xml(
+        source.as_bytes(),
+        "alternateContent.xml",
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .ok()?;
+    let root = document
+        .root()
+        .filter(|root| root.local_name() == "AlternateContent")?;
+    let choices = root
+        .child_elements()
+        .filter(|branch| branch.local_name() == "Choice")
+        .flat_map(|branch| branch.child_elements())
+        .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+        .map(xml_drawing_provenance)
+        .collect();
+    Some(AlternateContentSource { offset, choices })
+}
+
+fn alternate_content_fallback(
+    sources: Option<&[AlternateContentSource]>,
+    drawing: Option<&DrawingProvenance>,
+) -> Option<FallbackTwin> {
+    let drawing = drawing?;
+    let mut matches = sources?.iter().filter_map(|source| {
+        let choice = source.choices.iter().position(|choice| {
+            choice.as_ref().is_some_and(|choice| {
+                choice.id == drawing.id
+                    && choice
+                        .name
+                        .as_ref()
+                        .is_none_or(|name| drawing.name.as_ref() == Some(name))
+                    && choice.content == drawing.content
+            })
+        })?;
+        Some(FallbackTwin {
+            offset: source.offset,
+            choice,
+            required: source.choices.len(),
+        })
+    });
+    let twin = matches.next()?;
+    matches.next().is_none().then_some(twin)
+}
+
+fn chart_drawing_anchored(chart: &Value) -> bool {
+    chart.get("position").is_some_and(Value::is_object)
+        || chart
+            .get("wrap")
+            .and_then(|wrap| wrap.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
 fn lower_chart_block(
@@ -3483,6 +3693,16 @@ struct DrawingMarker {
     hidden: bool,
     revision_hidden: bool,
     anchored: bool,
+    formatting: RunFormatting,
+    /// The source drawing is a `wp:inline` text box (`txBox`) lowered as a
+    /// typed shape, not a plain text shape and not an opaque (VML) text
+    /// box, which keeps its block path.
+    inline_text_box: bool,
+    /// The marker came from an opaque drawing: for an `AlternateContent`
+    /// drawing this is the fallback representation of the same drawing
+    /// a neighbouring typed shape or chart embed also lowers.
+    from_opaque: bool,
+    fallback_twin: Option<FallbackTwin>,
 }
 
 impl DrawingMarker {
@@ -3677,18 +3897,25 @@ fn retain_visible_drawings(
 
 /// Keeps the sequences a field run holds opaque when the view leaves it out.
 fn collect_run_sequences(run: &RawRun, opaque_sequences: &mut BTreeSet<String>) {
-    if let RawRunKind::Field {
-        instruction,
-        nested_sequences,
-        ..
-    } = &run.kind
-    {
-        opaque_sequences.extend(
-            instruction
-                .as_deref()
-                .and_then(docx_layout::sequence_fields::sequence_name),
-        );
-        opaque_sequences.extend(nested_sequences.iter().cloned());
+    match &run.kind {
+        RawRunKind::Field {
+            instruction,
+            nested_sequences,
+            ..
+        } => {
+            opaque_sequences.extend(
+                instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(nested_sequences.iter().cloned());
+        }
+        RawRunKind::Image(image) => {
+            if let Some(shape) = &image.inline_shape {
+                collect_shape_sequences(shape, opaque_sequences);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3700,14 +3927,22 @@ fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<S
         .flatten()
         .flat_map(|paragraph| &paragraph.runs)
     {
-        if let Run::Field(field) = run {
-            opaque_sequences.extend(
-                field
-                    .instruction
-                    .as_deref()
-                    .and_then(docx_layout::sequence_fields::sequence_name),
-            );
-            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        match run {
+            Run::Field(field) => {
+                opaque_sequences.extend(
+                    field
+                        .instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(field.nested_sequences.iter().cloned());
+            }
+            Run::Image(image) => {
+                if let Some(shape) = &image.inline_shape {
+                    collect_shape_sequences(shape, opaque_sequences);
+                }
+            }
+            _ => {}
         }
     }
     for child in &shape.children {
@@ -3724,6 +3959,222 @@ fn lower_nested_sequences(
         .and_then(docx_layout::sequence_fields::sequence_name)
         .into_iter()
         .collect()
+}
+
+/// Whether `run` paints content a shared inline drawing would sit beside
+/// on its line: visible text, an in-line picture or shape carrier, or a field
+/// with visible fallback text. Floating pictures take no room on the line.
+fn run_shares_line(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Image(_) => !run.anchored(),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// Whether `run` is visible text (not a picture or carrier): the content
+/// a following lone text box would have to wrap below.
+fn run_shares_line_text(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// The inline image carrier for a chart or shape block, mirroring the
+/// carrier the shape branch builds for a native inline shape.
+fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun {
+    let DrawingMarker {
+        pm_offset,
+        story_index,
+        block,
+        hidden,
+        revision_hidden,
+        formatting,
+        ..
+    } = drawing;
+    let mut formatting = formatting;
+    if show_hidden_text && formatting.hidden == Some(true) {
+        formatting.hidden = None;
+    } else if hidden && formatting.hidden.is_none() {
+        formatting.hidden = Some(true);
+    }
+    let (width, height, alt, shape_type, decorative, inline_shape, inline_chart) = match block {
+        LayoutBlock::Chart(chart) => {
+            let (width, height) = (chart.width, chart.height);
+            (width, height, None, None, None, None, Some(Box::new(chart)))
+        }
+        LayoutBlock::Shape(shape) => {
+            let (width, height) = (shape.width, shape.height);
+            let alt = shape.description.clone().or_else(|| shape.title.clone());
+            let shape_type = Some(shape.shape_type.clone());
+            let decorative = shape.decorative;
+            (
+                width,
+                height,
+                alt,
+                shape_type,
+                decorative,
+                Some(Box::new(shape)),
+                None,
+            )
+        }
+        _ => unreachable!("only chart and shape drawings convert to inline runs"),
+    };
+    let image = ImageRun {
+        src: String::new(),
+        width,
+        height,
+        alt,
+        shape_type,
+        transform: None,
+        position: None,
+        wrap_type: Some("inline".to_owned()),
+        display_mode: Some("inline".to_owned()),
+        css_float: Some("none".to_owned()),
+        dist_top: None,
+        dist_bottom: None,
+        dist_left: None,
+        dist_right: None,
+        crop_top: None,
+        crop_right: None,
+        crop_bottom: None,
+        crop_left: None,
+        opacity: None,
+        rotation_deg: None,
+        flip_h: None,
+        flip_v: None,
+        rotation_bounds: None,
+        wrap_text: None,
+        wrap_polygon: None,
+        allow_overlap: None,
+        layout_in_cell: None,
+        no_change_aspect: None,
+        effect_extent: None,
+        effects: None,
+        outline: None,
+        decorative,
+        hyperlink: formatting.hyperlink.clone(),
+        inline_shape,
+        inline_chart,
+        horizontal_rule: None,
+        is_insertion: formatting.is_insertion,
+        is_deletion: formatting.is_deletion,
+        change_author: formatting.change_author.clone(),
+        change_date: formatting.change_date.clone(),
+        change_revision_id: formatting.change_revision_id,
+        pm_start: None,
+        pm_end: None,
+    };
+    RawRun {
+        kind: RawRunKind::Image(image),
+        formatting,
+        story_start: story_index,
+        story_end: story_index + 1,
+        pm_start: pm_offset,
+        pm_end: pm_offset + 1,
+        inherited_hyperlink: (false, false, false),
+        hyperlink_size_inherited: false,
+        inline_sdt_widget: None,
+        atom: true,
+        revision_hidden,
+    }
+}
+
+/// Flows the in-flow chart and text box drawings of one paragraph as
+/// inline runs of its line when they share that line with another in-flow
+/// drawing or with visible inline content, as Word draws inline pictures.
+/// A lone chart or text box keeps the block lowering, anchored drawings
+/// never convert, a plain shape with text (no `txBox`) keeps splitting
+/// its paragraph, and an opaque (VML) text box keeps its block path: it
+/// has no `wp:inline` wrapper to flow. Converted drawings keep their
+/// block ids in the carriers.
+fn inline_shared_drawings(
+    raw_runs: &mut Vec<RawRun>,
+    carried: &[(u32, Vec<RawRun>)],
+    drawings: &mut Vec<DrawingMarker>,
+    show_hidden_text: bool,
+) {
+    let convertible = |drawing: &DrawingMarker| {
+        !drawing.anchored
+            && match &drawing.block {
+                LayoutBlock::Chart(chart) => !chart_drawing_anchored(&chart.chart),
+                LayoutBlock::Shape(_) => drawing.inline_text_box,
+                _ => false,
+            }
+    };
+    let count = drawings
+        .iter()
+        .filter(|drawing| convertible(drawing))
+        .count();
+    if count == 0 {
+        return;
+    }
+    let shares = count > 1
+        || raw_runs
+            .iter()
+            .chain(carried.iter().flat_map(|(_, runs)| runs.iter()))
+            .any(run_shares_line);
+    if !shares {
+        return;
+    }
+    if count == 1
+        && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
+        && matches!(drawing.block, LayoutBlock::Shape(_))
+    {
+        let preceded = carried
+            .iter()
+            .flat_map(|(_, runs)| runs.iter())
+            .any(run_shares_line_text)
+            || raw_runs
+                .iter()
+                .filter(|run| run.pm_end <= drawing.pm_offset)
+                .any(run_shares_line_text);
+        if preceded {
+            return;
+        }
+    }
+    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>)>::new();
+    let mut kept = Vec::new();
+    for drawing in drawings.drain(..) {
+        if convertible(&drawing) {
+            if let Some(twin) = drawing.fallback_twin {
+                let converted = converted_choices
+                    .entry(twin.offset)
+                    .or_insert_with(|| (twin.required, BTreeSet::new()));
+                converted.1.insert(twin.choice);
+            }
+            raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
+        } else {
+            kept.push(drawing);
+        }
+    }
+    let converted_fallbacks: BTreeSet<_> = converted_choices
+        .into_iter()
+        .filter_map(|(offset, (required, choices))| (choices.len() == required).then_some(offset))
+        .collect();
+    if !converted_fallbacks.is_empty() {
+        kept.retain(|drawing| {
+            !(drawing.from_opaque && converted_fallbacks.contains(&drawing.pm_offset))
+        });
+        raw_runs.retain(|run| {
+            let RawRunKind::Image(image) = &run.kind else {
+                return true;
+            };
+            !(image.inline_shape.is_none()
+                && image.inline_chart.is_none()
+                && !image.src.is_empty()
+                && converted_fallbacks.contains(&run.pm_start))
+        });
+    }
+    *drawings = kept;
+    raw_runs.sort_by_key(|run| run.pm_start);
 }
 
 /// Emits the blocks one paragraph contributes. Anchored children are lifted
@@ -3771,6 +4222,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
             }
         }
     }
+    let has_source_content = !drawings.is_empty();
+    inline_shared_drawings(&mut raw_runs, &carried, &mut drawings, env.show_hidden_text);
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
         map.spans.push(SourceSpan {
@@ -3782,7 +4235,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
             atom: true,
         });
     }
-    let has_source_content = !drawings.is_empty();
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
@@ -4008,7 +4460,9 @@ fn flush_paragraph<T: ReadTxn>(
         .flat_map(|(_, runs)| runs)
         .chain(raw_runs)
         .collect();
-    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    let can_start_page = story_id == "body" || story_id.starts_with("body:");
+    let mut attrs =
+        lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state, can_start_page);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();
@@ -4607,6 +5061,7 @@ fn lower_paragraph_attrs(
     pilcrow_attributes: Option<&Attrs>,
     env: &RenderEnv,
     list_state: &mut ListState,
+    can_start_page: bool,
 ) -> ParagraphAttrs {
     let alignment =
         value_string(values.get("alignment")).and_then(|alignment| match alignment.as_str() {
@@ -4631,7 +5086,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env);
+    lower_paragraph_spacing(values, &mut result, env, can_start_page);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -4858,13 +5313,18 @@ fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
     env: &RenderEnv,
+    can_start_page: bool,
 ) {
     let line_px = env
         .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
-    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
-        && true_property(values, "pageBreakBeforeRun") == Some(true);
+    let suppress_before = (env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true))
+        || (can_start_page
+            && env.compatibility_flags.compatibility_mode >= 15
+            && (true_property(values, "pageBreakBeforeRun") == Some(true)
+                || true_property(values, "pageBreakBefore") == Some(true)));
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
@@ -5610,10 +6070,10 @@ mod tests {
             ..RenderEnv::default()
         };
         let mut attrs = ParagraphAttrs::default();
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
         env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         let spacing = attrs.spacing.unwrap();
         assert_eq!(spacing.before, Some(0.0));
         assert_eq!(spacing.before_lines, None);
@@ -5708,7 +6168,7 @@ mod tests {
                 "shading".to_owned(),
                 Any::from_json(&shading.to_string()).unwrap(),
             )]);
-            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default());
+            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default(), true);
             assert_eq!(attrs.shading.as_deref(), expected, "{shading}");
         }
         assert_eq!(
@@ -5739,6 +6199,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
@@ -5770,6 +6231,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(false));
         assert_eq!(attrs.list_marker_italic, Some(false));
@@ -5800,6 +6262,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(true));
@@ -6495,6 +6958,52 @@ mod tests {
         )
         .unwrap();
         yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
+    }
+
+    #[test]
+    fn hidden_inline_shapes_collect_nested_sequence_metadata() {
+        let nested = json!({
+            "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+            "geometryPath": [], "children": [], "nestedSequences": ["figure"],
+            "innerText": [{"id": "nested-text", "runs": [{
+                "kind": "field", "fieldType": "OTHER", "rawType": "SEQ",
+                "instruction": "SEQ Table", "nestedSequences": ["listing"], "fallback": "7"
+            }]}]
+        });
+        let shape: ShapeBlock = serde_json::from_value(json!({
+            "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+            "geometryPath": [], "children": [],
+            "innerText": [{"id": "box-text", "runs": [{
+                "kind": "image", "src": "", "width": 20, "height": 20, "inlineShape": nested
+            }]}]
+        }))
+        .unwrap();
+        let expected = BTreeSet::from([
+            "figure".to_owned(),
+            "listing".to_owned(),
+            "table".to_owned(),
+        ]);
+        let mut sequences = BTreeSet::new();
+        collect_shape_sequences(&shape, &mut sequences);
+        assert_eq!(sequences, expected);
+        let carrier = inline_drawing_run(
+            DrawingMarker {
+                pm_offset: 0,
+                story_index: 0,
+                block: LayoutBlock::Shape(shape),
+                hidden: true,
+                revision_hidden: false,
+                anchored: false,
+                formatting: RunFormatting::default(),
+                inline_text_box: true,
+                from_opaque: false,
+                fallback_twin: None,
+            },
+            false,
+        );
+        let mut sequences = BTreeSet::new();
+        collect_run_sequences(&carrier, &mut sequences);
+        assert_eq!(sequences, expected);
     }
 
     #[test]
