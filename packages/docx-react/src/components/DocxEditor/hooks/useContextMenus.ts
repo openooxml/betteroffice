@@ -275,18 +275,18 @@ export function useContextMenus({
     if (contextMenu.hasSelection && !partEditOpen) {
       items.push({
         action: 'addComment',
-        label: 'Comment',
+        label: t('contextMenu.addComment'),
         dividerAfter: !contextMenu.cursorInTable,
       });
     }
     if (contextMenu.cursorInTable) {
       items.push(
-        { action: 'addRowAbove', label: 'Insert row above' },
-        { action: 'addRowBelow', label: 'Insert row below' },
-        { action: 'deleteRow', label: 'Delete row', dividerAfter: true },
-        { action: 'addColumnLeft', label: 'Insert column left' },
-        { action: 'addColumnRight', label: 'Insert column right' },
-        { action: 'deleteColumn', label: 'Delete column' },
+        { action: 'addRowAbove', label: t('table.insertRowAbove') },
+        { action: 'addRowBelow', label: t('table.insertRowBelow') },
+        { action: 'deleteRow', label: t('table.deleteRow'), dividerAfter: true },
+        { action: 'addColumnLeft', label: t('table.insertColumnLeft') },
+        { action: 'addColumnRight', label: t('table.insertColumnRight') },
+        { action: 'deleteColumn', label: t('table.deleteColumn') },
         {
           action: 'mergeCells',
           label: i18n?.table?.mergeCells ?? defaultLocale.table.mergeCells,

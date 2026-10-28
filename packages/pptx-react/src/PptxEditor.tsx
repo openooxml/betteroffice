@@ -3110,8 +3110,8 @@ export function PptxEditorContent({
               <span
                 role="listitem"
                 style={presenceChip('#64748b', true)}
-                title={`${toolbarPresence.overflow} more collaborators`}
-                aria-label={`${toolbarPresence.overflow} more collaborators`}
+                title={t('presence.moreCollaborators', { count: toolbarPresence.overflow })}
+                aria-label={t('presence.moreCollaborators', { count: toolbarPresence.overflow })}
               >
                 +{toolbarPresence.overflow}
               </span>
@@ -3297,7 +3297,7 @@ export function PptxEditorContent({
                   )}
                   {remoteShapePresence.overflow > 0 ? (
                     <span style={styles.remoteShapeOverflow} aria-hidden="true">
-                      +{remoteShapePresence.overflow} selections
+                      {t('presence.moreSelections', { count: remoteShapePresence.overflow })}
                     </span>
                   ) : null}
                   {selectionBox ? (

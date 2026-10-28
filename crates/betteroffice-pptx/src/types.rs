@@ -19,12 +19,13 @@ pub use pptx_edit::{
 };
 pub use pptx_edit::{
     CaretAnchor, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx,
-    EditError, EditOrigin, GradientFill, GradientStop as ModelGradientStop, InheritedGeometry,
-    ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
-    StorySnapshot, TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
+    EditError, EditOrigin, GradientFill, GradientStop as ModelGradientStop, HeaderFooterSettings,
+    InheritedGeometry, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
+    ShapeFill, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, SlideBackgroundReceipt, SlideDateText, SlideHeaderFooter,
+    SlideHeaderFooterText, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot, StorySnapshot,
+    TextReceipt, TextRunSnapshot, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateOrigin, UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,

@@ -122,6 +122,7 @@ async function createCommandClient(
     methods: { ...PRESENTATION_COMMAND_METHODS, edit: true, checkpoint: true },
   });
   let state: PresentationCommandOpenResult;
+  let recoveryUpdate: ArrayBuffer | undefined;
   let adapter: ReturnType<typeof createPresentationSharedAdapter> | undefined;
   let sharedInitial: PresentationSharedAck | undefined;
   try {
@@ -149,7 +150,8 @@ async function createCommandClient(
     }
     state = await rpc.callWithTransfer('openCommandEditor', [document, input], transfer);
     if (rpc.failure) throw rpc.failure;
-    const { shared: initial, ...opened } = state as PresentationSharedOpenResult;
+    const { shared: initial, recoveryUpdate: update, ...opened } = state as PresentationSharedOpenResult;
+    recoveryUpdate = update;
     if (shared) {
       adapter = createPresentationSharedAdapter(initial);
       sharedInitial = initial;
@@ -342,6 +344,7 @@ async function createCommandClient(
   };
   const client: PresentationCommandClient = {
     get state() { return state; },
+    takeRecoveryUpdate() { const update = recoveryUpdate; recoveryUpdate = undefined; return update; },
     dispatch(intent, basis) {
       const error = unavailable();
       if (error) return Promise.reject(error);
@@ -385,11 +388,11 @@ async function createCommandClient(
       if (retired) throw retired;
       return result as never;
     },
-    async checkpoint() {
+    async checkpoint(options) {
       const error = unavailable();
       if (error) throw error;
       if (editSession) await editSession.flush();
-      return rpc.call.checkpointCommandEditor(fence());
+      return rpc.call.checkpointCommandEditor(fence(), options);
     },
     async preparePicture(bytes) {
       const error = unavailable();
@@ -447,6 +450,7 @@ async function createCommandClient(
     dispose() {
       if (disposal) return disposal;
       disposed = true;
+      recoveryUpdate = undefined;
       pendingPipeOutputs.length = 0;
       pipe.lose('Collaboration replica is retired');
       presentationCollaborationPipes.delete(client);
