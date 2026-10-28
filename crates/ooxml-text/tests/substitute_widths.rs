@@ -333,3 +333,57 @@ fn substituted_echo_advances_equal_table_shaping() {
         }
     }
 }
+
+#[test]
+fn soft_hyphens_preserve_zero_advance_in_substituted_words() {
+    let (mut store, base) = store_with_font();
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    for direction in [ShapeDirection::Ltr, ShapeDirection::Rtl] {
+        let width = |text| {
+            shape_with_direction(&store, view, text, 32.0, &kern_features(false), direction)
+                .unwrap()
+                .iter()
+                .map(|glyph| glyph.x_advance)
+                .sum::<f32>()
+        };
+        assert!((width("co\u{00AD}operate") - width("cooperate")).abs() < 1e-4);
+        assert_eq!(width("\u{00AD}"), 0.0);
+        assert!((width("-") - table_width("arial narrow", "-", 32.0)).abs() < 1e-4);
+    }
+    let measure = |text: &str, max_width| {
+        let input = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{"kind": "text", "text": text, "fontFamily": "Arial Narrow"}]
+            },
+            "maxWidth": max_width,
+            "fontChains": {"arial narrow|0|0": [view.to_u32()]},
+            "defaults": {"fontSize": 24.0, "fontFamily": "Arial Narrow"}
+        }))
+        .unwrap();
+        ooxml_text::measure_paragraph(&store, &input).unwrap()
+    };
+    let plain = measure("cooperate", 1000.0);
+    let discretionary = measure("co\u{00AD}operate", 1000.0);
+    assert_eq!(plain.lines.len(), 1);
+    assert_eq!(discretionary.lines.len(), 1);
+    assert!((plain.lines[0].width - discretionary.lines[0].width).abs() < 1e-4);
+    assert_eq!(
+        measure("co\u{00AD}operate", plain.lines[0].width)
+            .lines
+            .len(),
+        1
+    );
+    let wrapped = measure("co\u{00AD}operate", plain.lines[0].width * 0.9);
+    assert!(wrapped.lines.len() > 1);
+    assert_eq!(wrapped.lines[0].tail_char, 3);
+    let echo = echo_glyph_set(&store, view, 32.0, false, &['c', '\u{00AD}', '-']).unwrap();
+    assert_eq!(echo.advances[1], 0);
+    assert_ne!(echo.glyph_ids[2], 0);
+    assert!(
+        (echo.advances[2] as f32 * echo.horizontal - table_width("arial narrow", "-", 32.0)).abs()
+            < 1e-4
+    );
+}

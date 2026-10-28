@@ -174,14 +174,20 @@ pub fn shape_with_properties(
 }
 
 fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths: &FamilyMetrics) {
-    let mut clusters: BTreeMap<u32, Option<f32>> =
-        glyphs.iter().map(|glyph| (glyph.cluster, None)).collect();
+    let mut clusters: BTreeMap<u32, (bool, Option<f32>)> = BTreeMap::new();
+    for glyph in glyphs.iter() {
+        let (has_advance, _) = clusters.entry(glyph.cluster).or_insert((false, None));
+        *has_advance |= glyph.x_advance != 0.0;
+    }
     let offsets: Vec<_> = clusters
         .keys()
         .map(|&offset| offset as usize)
         .chain(std::iter::once(text.len()))
         .collect();
     for bounds in offsets.windows(2) {
+        if !clusters[&(bounds[0] as u32)].0 {
+            continue;
+        }
         let advance = text.get(bounds[0]..bounds[1]).and_then(|cluster| {
             cluster.chars().try_fold(0.0, |total, ch| {
                 family_advance(widths, ch).map(|advance| total + (advance * 1000.0).round())
@@ -189,11 +195,11 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
         });
         clusters.insert(
             bounds[0] as u32,
-            advance.map(|advance| advance * (size / 1000.0)),
+            (true, advance.map(|advance| advance * (size / 1000.0))),
         );
     }
     for glyph in glyphs {
-        if let Some(Some(advance)) = clusters.get_mut(&glyph.cluster) {
+        if let Some((_, Some(advance))) = clusters.get_mut(&glyph.cluster) {
             glyph.x_advance = *advance;
             *advance = 0.0;
         }

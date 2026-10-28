@@ -493,6 +493,12 @@ impl FontStore {
         self.byte_entry(id).map(|e| &*e.data)
     }
 
+    /// The registered face owning this id's unscaled font bytes.
+    pub fn byte_owner(&self, id: FontId) -> Result<FontId, FontError> {
+        let entry = self.entry(id)?;
+        Ok(FontId(entry.bytes_of.unwrap_or(id.0 as usize) as u32))
+    }
+
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
     /// rejected bytes skrifa accepted.
     pub(crate) fn shaping_face(
