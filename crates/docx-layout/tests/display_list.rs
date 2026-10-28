@@ -1889,7 +1889,9 @@ fn inherited_list_indents_match_measured_text_and_marker_positions() {
 
     let mut fonts = ooxml_text::FontStore::new();
     let font = fonts
-        .register(include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec())
+        .register(
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
+        )
         .unwrap();
     for left_twips in [-720, 720] {
         let left = f64::from(left_twips) / 15.0;
@@ -2002,7 +2004,10 @@ fn signed_paragraph_indents_keep_first_and_continuation_line_positions() {
                 _ => None,
             })
             .collect();
-        assert_eq!(positions, expected, "{indent}, marker {marker}, hidden {hidden}");
+        assert_eq!(
+            positions, expected,
+            "{indent}, marker {marker}, hidden {hidden}"
+        );
     }
 }
 
@@ -3469,7 +3474,11 @@ fn paragraph_borders_enclose_a_hanging_first_line() {
                 _ => None,
             })
             .collect();
-        assert_eq!(verticals, vec![left_edge, 380.0], "left {left}, hanging {hanging}");
+        assert_eq!(
+            verticals,
+            vec![left_edge, 380.0],
+            "left {left}, hanging {hanging}"
+        );
     }
 }
 
