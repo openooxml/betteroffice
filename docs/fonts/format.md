@@ -19,9 +19,10 @@ identity-stream `.uw2` and a standard brotli `.woff2` companion; see
 [`scripts/fonts/README.md`](../../scripts/fonts/README.md). `fontpack build
 --codec woff2t` compresses the `.uw2`, verifies every reconstructed face against
 wuff's decode of the standard `.woff2`, and checks `maxp.numGlyphs` against the
-source TTF. For `woff2t`, the builder requires each `<face>.source.sha256` sidecar
-to match the current TTF's SHA-256; regenerate companions with
-`scripts/fonts/woff2-transform.py` if it is missing or mismatched.
+source TTF. For `woff2t`, each `<face>.source.sha256` sidecar lists the SHA-256
+of the `.ttf`, `.uw2` and `.woff2` in `sha256sum` format, one line each in that
+order; the builder rejects a face whose sidecar is missing or does not match all
+three current files. Regenerate companions with `scripts/fonts/woff2-transform.py`.
 The default `--codec zstd` preserves source bytes. File names stay
 `<face>.ttf.zst` for both codecs.
 

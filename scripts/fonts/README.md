@@ -10,10 +10,10 @@ python3 -m venv /tmp/fontpack-venv
 
 The transform writes `.uw2` (identity table stream) and standard `.woff2`
 companions beside each `.ttf`, with fixed head timestamps. Both transform only
-`glyf` and `loca`. It also writes `<face>.source.sha256`, containing the lowercase
-hexadecimal SHA-256 of the exact TTF bytes encoded followed by a newline.
+`glyf` and `loca`. It also writes `<face>.source.sha256`, which lists the SHA-256
+of the exact `.ttf` bytes encoded and of both companions, in `sha256sum` format.
 Use `fontpack build --codec woff2t` to compress and verify them; the builder
-requires a matching source hash for every face. Regenerate companions with
+requires a matching sidecar for every face. Regenerate companions with
 `scripts/fonts/woff2-transform.py` whenever a TTF changes.
 The default builder codec remains `zstd`; CFF/OTF faces use that codec.
 This tooling runs only during development or release preparation. It never

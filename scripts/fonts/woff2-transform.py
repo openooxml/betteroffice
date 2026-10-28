@@ -59,9 +59,15 @@ def transform_directory(directory):
         transformed = encode(path, source, identity=True)
         path.with_suffix(".woff2").write_bytes(standard)
         path.with_suffix(".uw2").write_bytes(transformed)
-        path.with_suffix(".source.sha256").write_text(
-            hashlib.sha256(source).hexdigest() + "\n", encoding="ascii"
-        )
+        lines = [
+            f"{hashlib.sha256(data).hexdigest()}  {name}"
+            for data, name in (
+                (source, path.name),
+                (transformed, path.with_suffix(".uw2").name),
+                (standard, path.with_suffix(".woff2").name),
+            )
+        ]
+        path.with_suffix(".source.sha256").write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
 def main():

@@ -182,6 +182,38 @@ fn builder_rejects_non_ttf_and_missing_companions_for_woff2t() {
     assert!(!woff2t_build(&src, &out).status.success());
 }
 
+fn refresh_source_hash(src: &std::path::Path, stem: &str) {
+    let lines: String = ["ttf", "uw2", "woff2"]
+        .iter()
+        .map(|extension| {
+            let name = format!("{stem}.{extension}");
+            let digest = Sha256::digest(fs::read(src.join(&name)).unwrap());
+            format!("{digest:x}  {name}\n")
+        })
+        .collect();
+    fs::write(src.join(format!("{stem}.source.sha256")), lines).unwrap();
+}
+
+#[test]
+fn builder_rejects_companions_swapped_from_another_face() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    let out = temp.path().join("out");
+    copy_fixtures(&src);
+    for extension in ["uw2", "woff2"] {
+        fs::copy(
+            src.join(format!("Synthetic-Regular.{extension}")),
+            src.join(format!("Synthetic-Bold.{extension}")),
+        )
+        .unwrap();
+    }
+    let result = woff2t_build(&src, &out);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("source SHA-256 mismatch for Synthetic-Bold.ttf"));
+    assert!(!out.exists());
+}
+
 #[test]
 fn builder_rejects_stale_woff2t_companions_with_unchanged_glyph_count() {
     let temp = tempfile::tempdir().unwrap();
@@ -227,6 +259,7 @@ fn builder_rejects_reference_and_glyph_count_mismatches() {
         src.join("Synthetic-Bold.woff2"),
     )
     .unwrap();
+    refresh_source_hash(&src, "Synthetic-Bold");
     let result = woff2t_build(&src, &out);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("round-trip mismatch"));
@@ -243,11 +276,7 @@ fn builder_rejects_reference_and_glyph_count_mismatches() {
         }
     }
     fs::write(&path, &bytes).unwrap();
-    fs::write(
-        path.with_extension("source.sha256"),
-        format!("{:x}\n", Sha256::digest(&bytes)),
-    )
-    .unwrap();
+    refresh_source_hash(&src, "Synthetic-Bold");
     let result = woff2t_build(&src, &out);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("glyph count mismatch"));

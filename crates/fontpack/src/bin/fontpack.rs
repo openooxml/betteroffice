@@ -170,21 +170,27 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
                 return Err(invalid(format!("woff2t requires TTF glyf/loca faces: {file}")).into());
             }
             glyph_count(&bytes)?;
+            let payload = fs::read(path.with_extension("uw2"))?;
+            let standard = fs::read(path.with_extension("woff2"))?;
             let regenerate = "regenerate companions with scripts/fonts/woff2-transform.py";
             let hash_path = path.with_extension("source.sha256");
-            let source_hash = fs::read_to_string(hash_path).map_err(|error| {
+            let recorded = fs::read_to_string(hash_path).map_err(|error| {
                 invalid(format!(
                     "cannot read source SHA-256 for {file}: {error}; {regenerate}"
                 ))
             })?;
-            if source_hash.trim() != format!("{:x}", Sha256::digest(&bytes)) {
+            let expected = [
+                (bytes.as_slice(), file.clone()),
+                (payload.as_slice(), format!("{stem}.uw2")),
+                (standard.as_slice(), format!("{stem}.woff2")),
+            ]
+            .map(|(data, name)| format!("{:x}  {name}", Sha256::digest(data)));
+            if !recorded.lines().map(str::trim_end).eq(expected.iter().map(String::as_str)) {
                 return Err(invalid(format!(
                     "source SHA-256 mismatch for {file}; {regenerate}"
                 ))
                 .into());
             }
-            let payload = fs::read(path.with_extension("uw2"))?;
-            let standard = fs::read(path.with_extension("woff2"))?;
             let reference = wuff::decompress_woff2(&standard)
                 .map_err(|error| invalid(format!("invalid reference WOFF2 for {file}: {error}")))?;
             (Some(payload), Some(reference))
