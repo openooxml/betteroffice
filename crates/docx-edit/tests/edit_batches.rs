@@ -2306,6 +2306,78 @@ fn restyle_numbered_runs_with_note_references_stay_patches() {
 }
 
 #[test]
+fn restyle_numbered_runs_with_comment_references_allow_in_run_corrections() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t>young People</w:t></w:r>",
+        r#"<w:r><w:commentReference w:id="9"/></w:r></w:p>"#,
+    ));
+    doc.replace_range(&EditCtx::local("", ""), StoryRange::new("body", 6, 7), "p")
+        .unwrap();
+    let before = embed_marks(&doc, "field");
+    assert!(before.is_empty());
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    assert_eq!(embed_marks(&doc, "field"), before);
+    let attrs = marks(&doc, "body", "young people");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing run size")
+    };
+    assert_eq!(number(size.get("size")), Some(32.0));
+    assert!(active(&attrs, "bold"));
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert!(part.legacy_paragraphs.is_empty(), "{part:?}");
+    assert_eq!(part.paragraph_patches.len(), 1);
+    assert_eq!(part.paragraph_patches[0].ordinal, 0);
+    assert!(!part.paragraph_patches[0].text_edits.is_empty());
+}
+
+#[test]
+fn restyle_numbered_field_results_keep_their_live_formatting() {
+    for field in [
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple>"#,
+        concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            "<w:r><w:instrText> PAGE </w:instrText></w:r>",
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>1</w:t></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ),
+    ] {
+        let doc = open_numbered_restyle(&format!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr><w:r><w:t>Chapter 1</w:t></w:r>{field}</w:p>"#
+        ));
+        let before = embed_marks(&doc, "field");
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        let attrs = embed_marks(&doc, "field");
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing field result size")
+        };
+        assert_eq!(number(size.get("size")), Some(24.0));
+        assert_eq!(attrs, before);
+        let text = marks(&doc, "body", "Chapter 1");
+        let Some(Any::Map(size)) = text.get("fontSize") else {
+            panic!("missing run size")
+        };
+        assert_eq!(number(size.get("size")), Some(32.0));
+        assert!(active(&text, "bold"));
+    }
+}
+
+#[test]
 fn restyle_numbered_note_references_follow_the_style_and_keep_direct_formatting() {
     for kind in ["footnote", "endnote"] {
         for edited in [false, true] {

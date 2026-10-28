@@ -1209,8 +1209,8 @@ fn edited_run_formatting<T: ReadTxn>(
     }
     let mut runs = Vec::new();
     for chunk in chunks {
-        if !carries_run_formatting(chunk, txn) || chunk.start < node_start || chunk.end() > pilcrow
-        {
+        let formats_run = matches!(chunk.kind, ChunkKind::Text(_)) || is_note_reference(chunk, txn);
+        if !formats_run || chunk.start < node_start || chunk.end() > pilcrow {
             continue;
         }
         let signature = run_signature(&chunk.attrs);
@@ -1335,6 +1335,11 @@ fn carries_run_formatting<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
         ),
         _ => false,
     }
+}
+
+fn is_note_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
+    matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+        if crate::map_string(map, txn, KIND_KEY).as_deref() == Some("noteRef"))
 }
 
 fn rebase_paragraph_runs(
@@ -1584,7 +1589,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     let mut formats = Vec::new();
     for chunk in chunks {
         let formats_run = matches!(chunk.kind, ChunkKind::Text(_))
-            || (direct_numbering && carries_run_formatting(chunk, txn));
+            || (direct_numbering && is_note_reference(chunk, txn));
         if !formats_run || chunk.start < node_start || chunk.end() > pilcrow {
             continue;
         }
