@@ -1,4 +1,5 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import * as fontManager from '@betteroffice/fonts';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
 import { configureDefaultFonts } from './defaultFontProvider';
 import {
@@ -7,6 +8,165 @@ import {
 } from './rustMeasureSource';
 
 afterEach(() => configureDefaultFonts({}));
+
+function providerFor(data: ArrayBuffer) {
+  const load = async () => data;
+  return {
+    resolve: mock(() => load),
+    resolveFamily: () => load,
+    resolveScriptFallback: () => undefined,
+    resolveLastResort: () => load,
+  };
+}
+
+const regular: ResidentFontRequirement = {
+  key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false,
+};
+
+test('unconfigured measurement lazily resolves faces through the fonts manager', async () => {
+  const data = new Uint8Array([1, 2, 3]).buffer;
+  const provider = providerFor(data);
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(provider);
+  const registerFont = mock(() => 7);
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont, clearFonts() {} } });
+    expect(create).not.toHaveBeenCalled();
+    expect(source.measurementConfigForRequirements([regular])).toBeUndefined();
+    await source.prepareFontRequirements([regular]);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(provider.resolve).toHaveBeenCalledWith('Calibri', false, false);
+    expect(registerFont).toHaveBeenCalledWith(new Uint8Array(data));
+    expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
+      [regular.key]: [7],
+    });
+  } finally { create.mockRestore(); }
+});
+
+for (const configured of ['module', 'loader', 'explicit'] as const) {
+  test(`${configured} font configuration wins over the fonts manager`, async () => {
+    const data = new Uint8Array([4, 5, 6]).buffer;
+    const provider = providerFor(data);
+    const module = { createFontProvider: mock(() => provider) };
+    const loader = mock(async () => module);
+    const create = spyOn(fontManager, 'createFontProvider').mockImplementation(() => {
+      throw new Error('unexpected manager default');
+    });
+    const registerFont = mock(() => 9);
+    try {
+      configureDefaultFonts(configured === 'module' ? { fonts: module, load: loader } : { load: loader });
+      const source = createRustMeasureSource({
+        engine: { registerFont, clearFonts() {} },
+        ...(configured === 'explicit' && { bundled: provider }),
+      });
+      await source.prepareFontRequirements([regular]);
+      expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
+        [regular.key]: [9],
+      });
+      expect(registerFont).toHaveBeenCalledWith(new Uint8Array(data));
+      expect(create).not.toHaveBeenCalled();
+      expect(loader).toHaveBeenCalledTimes(configured === 'loader' ? 1 : 0);
+      expect(module.createFontProvider).toHaveBeenCalledTimes(configured === 'explicit' ? 0 : 1);
+    } finally { create.mockRestore(); }
+  });
+}
+
+for (const configured of ['default', 'configured', 'explicit'] as const) {
+  test(`embedded faces precede the ${configured} font provider`, async () => {
+    const embedded = new Uint8Array([7, 8]).buffer;
+    const bundled = new Uint8Array([9, 10]).buffer;
+    const provider = providerFor(bundled);
+    const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(provider);
+    const registered: Uint8Array[] = [];
+    try {
+      if (configured === 'configured') configureDefaultFonts({ fonts: { createFontProvider: () => provider } });
+      const source = createRustMeasureSource({
+        engine: {
+          registerFont(bytes) { registered.push(bytes); return registered.length; },
+          clearFonts() {},
+        },
+        ...(configured === 'explicit' && { bundled: provider }),
+      });
+      source.setEmbeddedFaces([{
+        family: 'Calibri', weight: 'normal', style: 'normal', data: embedded, subsetted: false,
+      }]);
+      await source.prepareFontRequirements([regular]);
+      expect(registered).toEqual([new Uint8Array(embedded), new Uint8Array(bundled)]);
+      expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
+        [regular.key]: [1, 2],
+      });
+      expect(create).toHaveBeenCalledTimes(configured === 'default' ? 1 : 0);
+    } finally { create.mockRestore(); }
+  });
+}
+
+test('a failed default manager load settles to approximate metrics and retries', async () => {
+  const provider = providerFor(new ArrayBuffer(4));
+  const failure = new Error('manager unavailable');
+  const create = spyOn(fontManager, 'createFontProvider')
+    .mockImplementationOnce(() => { throw failure; })
+    .mockReturnValue(provider);
+  const registerFont = mock(() => 3);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont, clearFonts() {} } });
+    await source.prepareFontRequirements([regular]);
+    expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({});
+    expect(registerFont).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[configureDefaultFonts] the configured font source failed to load', failure,
+    );
+    expect(warn.mock.calls.some(([message]) => String(message).includes('approximate fallback metrics'))).toBe(true);
+    await Promise.resolve();
+    await source.prepareFontRequirements([regular]);
+    expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
+      [regular.key]: [3],
+    });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(2);
+  } finally { create.mockRestore(); warn.mockRestore(); }
+});
+
+test('a failed default manager face remains retryable', async () => {
+  let unavailable = true;
+  const data = new ArrayBuffer(4);
+  const load = mock(async () => {
+    if (unavailable) throw new Error('face unavailable');
+    return data;
+  });
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => load, resolveFamily: () => load,
+    resolveScriptFallback: () => undefined, resolveLastResort: () => load,
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const source = createRustMeasureSource({ engine: { registerFont: () => 5, clearFonts() {} } });
+    await source.prepareFontRequirements([regular]);
+    expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({});
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('falling back');
+    unavailable = false;
+    await Promise.resolve();
+    await source.prepareFontRequirements([regular]);
+    expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
+      [regular.key]: [5],
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally { create.mockRestore(); warn.mockRestore(); }
+});
+
+test('a base URL configures the default manager without a source warning', async () => {
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(providerFor(new ArrayBuffer(4)));
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    configureDefaultFonts({ baseUrl: 'https://example.test/fonts/' });
+    expect(create).not.toHaveBeenCalled();
+    const source = createRustMeasureSource({ engine: { registerFont: () => 1, clearFonts() {} } });
+    await source.prepareFontRequirements([regular]);
+    expect(create).toHaveBeenCalledWith({ baseUrl: new URL('https://example.test/fonts/') });
+    expect(warn).not.toHaveBeenCalled();
+  } finally { create.mockRestore(); warn.mockRestore(); }
+});
 
 test('a Japanese preflight settles atomically when font sources are unavailable', async () => {
   configureDefaultFonts({

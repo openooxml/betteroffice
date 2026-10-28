@@ -1,7 +1,7 @@
 /**
- * Google Fonts Loader
+ * Browser Font Loader
  *
- * Dynamically loads fonts from Google Fonts API with:
+ * Dynamically loads managed and app-configured fonts with:
  * - Loading state tracking
  * - Duplicate prevention
  * - Callback notifications
@@ -9,6 +9,7 @@
  */
 
 import {
+  hasConfiguredFontSource,
   hasDefaultFontSource,
   resolveDefaultFontProvider,
 } from '../layout/measure/defaultFontProvider';
@@ -484,7 +485,7 @@ function getGoogleFontsUrl(
 }
 
 /**
- * Load a font from Google Fonts
+ * Load a font from the default font provider
  *
  * @param fontFamily - The font family name to load
  * @param options - Optional configuration
@@ -611,15 +612,18 @@ async function loadFontFrom(
         );
         if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
         else bundledAbsentFamilies.delete(normalizedFamily);
-        if (registration === 'none' || registration === 'absent') return false;
-        if (registration === 'complete') {
-          partialBundledFamilies.delete(normalizedFamily);
-          markFamilyLoaded(normalizedFamily);
-        } else {
-          partialBundledFamilies.add(normalizedFamily);
+        const remoteFallback = registration === 'absent' && !hasConfiguredFontSource();
+        if (registration === 'none' || (registration === 'absent' && !remoteFallback)) return false;
+        if (registration !== 'absent') {
+          if (registration === 'complete') {
+            partialBundledFamilies.delete(normalizedFamily);
+            markFamilyLoaded(normalizedFamily);
+          } else {
+            partialBundledFamilies.add(normalizedFamily);
+          }
+          notifyCallbacks([normalizedFamily], requesters);
+          return true;
         }
-        notifyCallbacks([normalizedFamily], requesters);
-        return true;
       }
 
       // Remote fetch disabled (no-egress embedder). The font is not locally
@@ -693,7 +697,7 @@ async function loadFontFrom(
 }
 
 /**
- * Load multiple fonts from Google Fonts
+ * Load multiple fonts from the default font provider
  *
  * @param families - Array of font family names to load
  * @param options - Optional configuration
@@ -959,11 +963,9 @@ const cssStringEscape = (s: string) =>
  * Load a font from a raw buffer (e.g., embedded in DOCX)
  *
  * Call before loading the document when possible: registration marks the
- * family as ours, which is what keeps the metric-compatible Google fallback
+ * family as ours, which keeps the managed coverage fallback
  * in play for subsetted faces during the document's font resolution pass.
- * Late registration still self-heals on the next pass. Under
- * `setGoogleFontsEnabled(false)` that fallback fetch is suppressed and
- * glyphs missing from the registered faces render via the CSS stack.
+ * Late registration still self-heals on the next pass.
  *
  * @param fontFamily - The font family name
  * @param buffer - Font file buffer (TTF, OTF, WOFF, WOFF2)
@@ -1365,9 +1367,8 @@ function guessFontFormat(src: string): string {
  *
  * Injects an `@font-face` rule pointing at the URL. Multiple weights of the
  * same family can be registered independently. Families registered here are
- * treated as potentially subsetted: the editor still fetches their
- * metric-compatible Google equivalent as a glyph-coverage fallback, unless
- * disabled via `setGoogleFontsEnabled(false)`.
+ * treated as potentially subsetted: the editor also loads their managed
+ * equivalent as a glyph-coverage fallback.
  *
  * @param fontFamily - CSS font-family name to expose
  * @param src - URL to the font file
@@ -1460,7 +1461,7 @@ async function loadUrlFace(
  * Each entry injects one `@font-face` rule pointing at a URL. Multiple
  * entries can share `family` to register distinct weights as separate faces.
  *
- * For Google Fonts, call `loadFont(family)` directly — the `fonts` prop is
+ * For managed fonts, call `loadFont(family)` directly; the `fonts` prop is
  * for fonts the consumer hosts themselves. For raw bytes already in memory
  * (DOCX-embedded fonts, user uploads), call `loadFontFromBuffer(family, buf)`.
  *

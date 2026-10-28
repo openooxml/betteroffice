@@ -484,10 +484,10 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Font provider for this editor, overriding whatever `configureDefaultFonts`
-   * set globally. With neither, measurement falls back to the browser and may
-   * not paginate like Word. Call `configureDefaultFonts` before editors load;
-   * existing registries retain their provider, so it is not per editor or tenant.
+   * Font provider for this editor, overriding the `configureDefaultFonts`
+   * source and the default fonts manager. Call `configureDefaultFonts` before
+   * editors load; existing registries retain their provider, so it is not per
+   * editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }

@@ -1,9 +1,13 @@
-import { expect, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
 import JSZip from 'jszip';
 import { openDocx } from '../src';
 import { renderDocxPage } from '../src/render';
 import { fixture } from './fixture';
+
+afterEach(() => configureDefaultFonts({}));
 
 async function imageFixture(data: Uint8Array, extension: string, mimeType: string) {
   const zip = await JSZip.loadAsync(await fixture());
@@ -13,6 +17,33 @@ async function imageFixture(data: Uint8Array, extension: string, mimeType: strin
   const drawing = '<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="picture"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
   zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:body>', `<w:body>${drawing}`));
   return zip.generateAsync({ type: 'uint8array' });
+}
+
+for (const embedded of [false, true]) {
+  test(`DOCX preview uses configured defaults${embedded ? ' after document embeds' : ''}`, async () => {
+    const fallback = new Uint8Array(readFileSync(new URL('../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
+    const face = new Uint8Array(readFileSync(new URL('../../fonts/assets/LiberationMono-Regular.ttf', import.meta.url))).buffer;
+    const zip = await JSZip.loadAsync(await fixture());
+    if (embedded) {
+      zip.file('word/fonts/body.ttf', face);
+      zip.file('word/fontTable.xml', '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:font w:name="Calibri"><w:embedRegular r:id="body"/></w:font></w:fonts>');
+      zip.file('word/_rels/fontTable.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="body" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/font" Target="fonts/body.ttf"/></Relationships>');
+      zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Default Extension="ttf" ContentType="application/x-font-ttf"/><Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/></Types>'));
+      zip.file('word/_rels/document.xml.rels', (await zip.file('word/_rels/document.xml.rels')!.async('string')).replace('</Relationships>', '<Relationship Id="fontTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/></Relationships>'));
+    }
+    const resolve = mock(() => async () => fallback);
+    const module = { createFontProvider: () => ({ resolve }) };
+    configureDefaultFonts(embedded ? { load: async () => module } : { fonts: module });
+    const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }), { renderer: renderDocxPage });
+    const register = spyOn(doc.session, 'registerFont');
+    try {
+      const rendered = await renderDocxPage(doc.session, 1);
+      expect([...rendered.png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      expect(resolve).toHaveBeenCalledWith('Calibri', false, false);
+      expect(register.mock.calls[0]?.[0]).toEqual(new Uint8Array(embedded ? face : fallback));
+      expect(register.mock.calls.some(([bytes]) => bytes.byteLength === fallback.byteLength)).toBe(true);
+    } finally { register.mockRestore(); doc.close(); configureDefaultFonts({}); }
+  });
 }
 
 test('renders actual before/after pages without changing the live document', async () => {

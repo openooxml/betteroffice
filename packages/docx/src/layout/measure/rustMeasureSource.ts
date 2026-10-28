@@ -64,7 +64,7 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
   return enginePromise;
 }
 
-/** Builds a source with an explicit provider or the optional default package. */
+/** Builds a source with an explicit or default font provider. */
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
