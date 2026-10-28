@@ -249,6 +249,58 @@ pub(crate) fn attribute<'a>(tag: &Tag<'a>, name: &str) -> Option<Range<usize>> {
         .map(|(_, range)| range.clone())
 }
 
+pub(crate) fn ensure_ignorable(
+    xml: &str,
+    root: &Tag<'_>,
+    ignored: &str,
+    declarations: &mut String,
+    edits: &mut Vec<(Range<usize>, String)>,
+) -> Option<String> {
+    let bound: BTreeMap<&str, String> = root
+        .attributes
+        .iter()
+        .filter_map(|(name, range)| Some((name.strip_prefix("xmlns:")?, range)))
+        .map(|(prefix, range)| Some((prefix, unescaped(xml, range.clone())?)))
+        .collect::<Option<_>>()?;
+    if let Some((prefix, range)) = root.attributes.iter().find_map(|(name, range)| {
+        let (prefix, local) = name.split_once(':')?;
+        (local == "Ignorable" && bound.get(prefix).is_some_and(|uri| uri == MC_NAMESPACE))
+            .then(|| (prefix, range.clone()))
+    }) {
+        let value = unescaped(xml, range.clone())?;
+        if !value.split_whitespace().any(|prefix| prefix == ignored) {
+            let suffix = if value.is_empty() {
+                ignored.to_owned()
+            } else {
+                format!(" {ignored}")
+            };
+            edits.push((range.end..range.end, suffix));
+        }
+        return Some(prefix.to_owned());
+    }
+    let prefix = bound
+        .get_key_value("mc")
+        .filter(|(_, uri)| uri.as_str() == MC_NAMESPACE)
+        .or_else(|| bound.iter().find(|(_, uri)| uri.as_str() == MC_NAMESPACE))
+        .map(|(prefix, _)| (*prefix).to_owned())
+        .unwrap_or_else(|| {
+            let prefix = (0..)
+                .map(|index| {
+                    if index == 0 {
+                        "mc".to_owned()
+                    } else {
+                        format!("mc{index}")
+                    }
+                })
+                .find(|prefix| !bound.contains_key(prefix.as_str()))
+                .unwrap_or_default();
+            declarations.push_str(&format!(" xmlns:{prefix}=\"{MC_NAMESPACE}\""));
+            prefix
+        });
+    declarations.push_str(&format!(" {prefix}:Ignorable=\"{ignored}\""));
+    Some(prefix)
+}
+
 /// Which of a `w:p` element's attribute names is its Word 2010 `paraId`: one
 /// whose prefix `resolve` binds to that namespace, else a literal
 /// `w14:paraId` when `w14` is unbound.
@@ -448,33 +500,44 @@ pub fn patch_paragraph_ids(
             Some(_) => {}
             None => {
                 let mut declarations = format!(" xmlns:w14=\"{W14_NAMESPACE}\"");
-                match attribute(root, "mc:Ignorable") {
-                    Some(range) => {
-                        if !xml[range.clone()]
-                            .split_ascii_whitespace()
-                            .any(|prefix| prefix == "w14")
-                        {
-                            let at = range.end;
-                            edits.push((at..at, " w14".to_owned()));
-                        }
-                    }
-                    None => {
-                        match attribute(root, "xmlns:mc") {
-                            Some(range) if xml[range.clone()].trim() != MC_NAMESPACE => {
-                                return None;
-                            }
-                            Some(_) => {}
-                            None => declarations.push_str(&format!(" xmlns:mc=\"{MC_NAMESPACE}\"")),
-                        }
-                        declarations.push_str(" mc:Ignorable=\"w14\"");
-                    }
-                }
+                ensure_ignorable(xml, root, "w14", &mut declarations, &mut edits)?;
                 let at = root.range.end - if root.empty { 2 } else { 1 };
                 edits.push((at..at, declarations));
             }
         }
     }
     Some(apply(xml, edits))
+}
+
+pub(crate) fn patch_paragraph_id_in_scope(
+    xml: &str,
+    id: &str,
+    namespaces: &BTreeMap<String, String>,
+) -> Option<String> {
+    let scanned = tags(xml)?;
+    let tag = scanned.iter().find(|tag| !tag.end)?;
+    if tag.name != "w:p" {
+        return None;
+    }
+    let mut scopes = Scopes(vec![
+        namespaces
+            .iter()
+            .map(|(prefix, uri)| (prefix.as_str(), uri.as_str()))
+            .collect(),
+    ]);
+    scopes.enter(xml, tag);
+    let (mut edit, _) = paragraph_id_edit(tag, &scopes, id);
+    if edit.0.is_empty() && !edit.1.contains("xmlns:") {
+        let prefix = edit.1.trim_start().split_once(':')?.0;
+        if !tag
+            .attributes
+            .iter()
+            .any(|(name, _)| name.strip_prefix("xmlns:") == Some(prefix))
+        {
+            edit.1 = format!(" xmlns:{prefix}=\"{W14_NAMESPACE}\"{}", edit.1);
+        }
+    }
+    Some(apply(xml, vec![edit]))
 }
 
 /// The edit setting a `w:p` tag's Word 2010 paragraph ID under the namespace
@@ -810,6 +873,67 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn paragraph_id_root_patches_reuse_mc_aliases_in_every_story() {
+        for name in [
+            "document",
+            "hdr",
+            "ftr",
+            "footnotes",
+            "endnotes",
+            "comments",
+        ] {
+            for (metadata, written) in [
+                ("", " ve:Ignorable=\"w14\""),
+                (" ve:Ignorable='draw'", " ve:Ignorable='draw w14'"),
+                (" ve:Ignorable=''", " ve:Ignorable='w14'"),
+            ] {
+                let root = format!(
+                    "<w:{name} xmlns:w=\"{}\" xmlns:ve=\"{MC_NAMESPACE}\" xmlns:draw=\"{}\"{metadata}>",
+                    crate::xml::namespaces::W,
+                    crate::xml::namespaces::WP14
+                );
+                let source = format!("{root}<w:p w:rsidR='00112233'/></w:{name}>");
+                let patches = BTreeMap::from([(0, "00000001".to_owned())]);
+                let patched = patch_paragraph_ids(&source, &patches, true).unwrap();
+                let expected_root = if metadata.is_empty() {
+                    root.replace('>', &format!(" xmlns:w14=\"{W14_NAMESPACE}\"{written}>"))
+                } else {
+                    root.replace(metadata, written)
+                        .replace('>', &format!(" xmlns:w14=\"{W14_NAMESPACE}\">"))
+                };
+                assert_eq!(
+                    patched,
+                    source
+                        .replace(&root, &expected_root)
+                        .replace("<w:p w:rsidR=", "<w:p w14:paraId=\"00000001\" w:rsidR=")
+                );
+                assert_eq!(patch_paragraph_ids(&patched, &patches, true), Some(patched));
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_id_root_patches_preserve_an_unrelated_mc_binding() {
+        let source = format!(
+            "<w:hdr xmlns:w=\"{}\" xmlns:mc=\"urn:source\"><w:p/></w:hdr>",
+            crate::xml::namespaces::W
+        );
+        let patched =
+            patch_paragraph_ids(&source, &BTreeMap::from([(0, "00000001".to_owned())]), true)
+                .unwrap();
+        assert_eq!(
+            patched,
+            source.replace(
+                "><w:p/>",
+                &format!(
+                    " xmlns:w14=\"{W14_NAMESPACE}\" xmlns:mc1=\"{MC_NAMESPACE}\" mc1:Ignorable=\"w14\"><w:p w14:paraId=\"00000001\"/>"
+                )
+            )
+        );
+        assert!(crate::xml::reads_as_written(patched.as_bytes()));
     }
 
     #[test]

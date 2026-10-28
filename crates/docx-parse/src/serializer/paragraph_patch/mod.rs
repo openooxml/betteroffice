@@ -41,13 +41,11 @@ use crate::paragraph_patch::{
 pub(crate) struct PatchContext {
     pub part: String,
     pub namespaces: BTreeMap<String, String>,
-    pub in_sdt: bool,
 }
 
 impl PatchContext {
     pub(crate) fn at(part: &str, source: &str, offset: usize) -> Self {
         let mut scopes = vec![BTreeMap::new()];
-        let mut ancestors = Vec::new();
         if let Some(tags) = tags(source) {
             for tag in tags {
                 if tag.range.start >= offset {
@@ -55,11 +53,12 @@ impl PatchContext {
                 }
                 if tag.end {
                     scopes.pop();
-                    ancestors.pop();
                 } else {
                     let mut scope = scopes.last().cloned().unwrap_or_default();
                     for (name, range) in tag.attributes {
-                        if let Some(prefix) = name.strip_prefix("xmlns:")
+                        if let Some(prefix) = name
+                            .strip_prefix("xmlns:")
+                            .or_else(|| (name == "xmlns").then_some(""))
                             && let Ok(value) = lower::decode(&source[range])
                         {
                             scope.insert(prefix.to_owned(), value);
@@ -67,7 +66,6 @@ impl PatchContext {
                     }
                     if !tag.empty {
                         scopes.push(scope);
-                        ancestors.push(tag.name.to_owned());
                     }
                 }
             }
@@ -75,9 +73,6 @@ impl PatchContext {
         Self {
             part: part.to_owned(),
             namespaces: scopes.pop().unwrap_or_default(),
-            in_sdt: ancestors
-                .iter()
-                .any(|name| name == "w:sdt" || name == "w:sdtContent"),
         }
     }
 
@@ -86,7 +81,6 @@ impl PatchContext {
         Self {
             part: "word/document.xml".to_owned(),
             namespaces: BTreeMap::from([("w".to_owned(), lower::WORD.to_owned())]),
-            in_sdt: false,
         }
     }
 }
@@ -143,7 +137,7 @@ fn patch_inner(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, Failure> {
-    let mut lowered = lower::lower(source, context)?;
+    let mut lowered = lower::lower(source, context, &patch.seed.units)?;
     let source_units: Vec<_> = lowered.cells.iter().map(|cell| cell.unit.clone()).collect();
     if !same_content(&source_units, &patch.seed.units)
         || unit_sha256(&patch.seed.units) != patch.seed.unit_sha256
@@ -190,7 +184,7 @@ fn patch_inner(
             "result digest differs from plan",
         ));
     }
-    let verified = lower::lower(&output, context)?;
+    let verified = lower::lower(&output, context, &units)?;
     verify::markers(
         &output,
         &verified,

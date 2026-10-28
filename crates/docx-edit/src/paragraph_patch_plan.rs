@@ -501,23 +501,23 @@ impl Alignment {
 
 fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
     const WORK_LIMIT: usize = 4_000_000;
-    let prefix = before
+    let shared_prefix = before
         .iter()
         .zip(after)
         .take_while(|(old, new)| old.content == new.content)
         .count();
-    if prefix == before.len() && prefix == after.len() {
-        return Ok((0..prefix).map(|at| (at, at)).collect());
+    if shared_prefix == before.len() && shared_prefix == after.len() {
+        return Ok((0..shared_prefix).map(|at| (at, at)).collect());
     }
-    let suffix = before[prefix..]
+    let shared_suffix = before[shared_prefix..]
         .iter()
         .rev()
-        .zip(after[prefix..].iter().rev())
+        .zip(after[shared_prefix..].iter().rev())
         .take_while(|(old, new)| old.content == new.content)
         .count();
     // Keep one boundary token on each side to detect ambiguous edge matches.
-    let prefix = prefix.saturating_sub(1);
-    let suffix = suffix.saturating_sub(1);
+    let prefix = shared_prefix.saturating_sub(1);
+    let suffix = shared_suffix.saturating_sub(1);
     let old_end = before.len() - suffix;
     let new_end = after.len() - suffix;
     let old_middle = &before[prefix..old_end];
@@ -528,13 +528,54 @@ fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &
     {
         return Err("ambiguous: alignment too large");
     }
-    let middle =
-        middle_alignment(old_middle, new_middle).ok_or("ambiguous: nonunique content alignment")?;
+    let middle = match middle_alignment(old_middle, new_middle) {
+        Some(middle) => middle,
+        None => {
+            let old_end = before.len() - shared_suffix;
+            let new_end = after.len() - shared_suffix;
+            if !homogeneous_replacement(
+                &before[shared_prefix..old_end],
+                &after[shared_prefix..new_end],
+            ) {
+                return Err("ambiguous: nonunique content alignment");
+            }
+            return Ok((0..shared_prefix)
+                .map(|at| (at, at))
+                .chain((0..shared_suffix).map(|at| (old_end + at, new_end + at)))
+                .collect());
+        }
+    };
     Ok((0..prefix)
         .map(|at| (at, at))
         .chain(middle.into_iter().map(|(i, j)| (prefix + i, prefix + j)))
         .chain((0..suffix).map(|at| (old_end + at, new_end + at)))
         .collect())
+}
+
+fn homogeneous_replacement(before: &[Token], after: &[Token]) -> bool {
+    let homogeneous = |tokens: &[Token]| {
+        tokens.first().is_some_and(|first| {
+            tokens
+                .iter()
+                .all(|token| token.is_text() && same_attrs(&first.attrs, &token.attrs))
+        })
+    };
+    let subsequence = |short: &[Token], long: &[Token]| {
+        let mut at = 0;
+        for token in long {
+            if short
+                .get(at)
+                .is_some_and(|next| next.content == token.content)
+            {
+                at += 1;
+            }
+        }
+        at == short.len()
+    };
+    homogeneous(before)
+        && homogeneous(after)
+        && !subsequence(before, after)
+        && !subsequence(after, before)
 }
 
 fn middle_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
@@ -643,13 +684,22 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             } => {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
-                if !matches!(atom_kind.as_str(), "break" | "noteRef") && !comment {
+                if !matches!(
+                    atom_kind.as_str(),
+                    "break"
+                        | "noteRef"
+                        | "image"
+                        | "shape"
+                        | "shapeGroup"
+                        | "chart"
+                        | "opaqueDrawing"
+                        | "horizontalRule"
+                ) && !comment
+                {
                     let kind = match atom_kind.as_str() {
                         "field" => "field",
                         "sdt" | "blockSdt" => "sdt",
                         "math" => "math",
-                        "image" | "shape" | "shapeGroup" | "chart" | "opaqueDrawing"
-                        | "horizontalRule" => "drawing",
                         _ => return Some(format!("key:{atom_kind} unsupported atom")),
                     };
                     return Some(format!("{kind}: atom {atom_kind}"));
@@ -1168,7 +1218,7 @@ pub(crate) fn diff_paragraph_v1(
             {
                 return Err(context.restyle("run inheritance"));
             }
-            if marker_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
+            if retained_atom(&old[i]) && !same_attrs(&old[i].attrs, &new[j].attrs) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
                     "marker: formatting touches a marker atom",
@@ -1304,6 +1354,10 @@ fn marker_atom(token: &Token) -> bool {
     )
 }
 
+fn retained_atom(token: &Token) -> bool {
+    matches!(&token.content, Content::Atom(kind, _) if kind != "break" && kind != "noteRef")
+}
+
 fn shifted_marker(at: u32, edits: &[TextEditV1]) -> Option<u32> {
     let mut shifted = i64::from(at);
     for edit in edits {
@@ -1410,6 +1464,87 @@ mod tests {
             seeded_markers: &[],
             live_markers: &[],
         }
+    }
+
+    #[test]
+    fn retained_drawing_atoms_allow_neighbour_text_but_no_payload_or_format_changes() {
+        let mut before = paragraph("old", json!({}));
+        before.insert(
+            1,
+            StorySegment {
+                content: SegmentContent::OtherEmbed {
+                    kind: "shape".to_owned(),
+                    payload: BTreeMap::from([("id".to_owned(), Any::String("box".into()))]),
+                },
+                attributes: BTreeMap::new(),
+            },
+        );
+        let mut after = before.clone();
+        after[0].content = SegmentContent::Text("new".to_owned());
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert!(!patch.text_edits.is_empty());
+        assert!(patch.run_edits.is_empty());
+        for payload in [false, true] {
+            let mut changed = after.clone();
+            if payload {
+                let SegmentContent::OtherEmbed { payload, .. } = &mut changed[1].content else {
+                    unreachable!()
+                };
+                payload.insert("id".to_owned(), Any::String("other".into()));
+            } else {
+                changed[1]
+                    .attributes
+                    .insert("bold".to_owned(), Any::Bool(true));
+            }
+            let legacy = diff_paragraph_v1(&before, &changed, context()).unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+            assert!(legacy.detail.starts_with("marker:"));
+        }
+    }
+
+    #[test]
+    fn homogeneous_replacements_keep_retained_atoms_outside_the_edit() {
+        for drawing in [false, true] {
+            let mut before = paragraph("Caption ", json!({}));
+            if drawing {
+                before.insert(
+                    1,
+                    StorySegment {
+                        content: SegmentContent::OtherEmbed {
+                            kind: "shape".to_owned(),
+                            payload: BTreeMap::from([("id".to_owned(), Any::String("box".into()))]),
+                        },
+                        attributes: BTreeMap::new(),
+                    },
+                );
+            }
+            let mut after = before.clone();
+            after[0].content = SegmentContent::Text("Title ".to_owned());
+            let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+            assert_eq!(patch.text_edits.len(), 1);
+            let edit = &patch.text_edits[0];
+            assert_eq!((edit.from, edit.to), (0, 7));
+            assert_eq!(edit.insert.len(), 1);
+            assert_eq!(edit.insert[0].text, "Title");
+            assert!(patch.run_edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn ambiguous_replacements_across_different_run_properties_are_legacy() {
+        let mut before = paragraph("Cap", json!({}));
+        before.insert(
+            1,
+            StorySegment {
+                content: SegmentContent::Text("tion".to_owned()),
+                attributes: BTreeMap::from([("bold".to_owned(), Any::Bool(true))]),
+            },
+        );
+        let mut after = before.clone();
+        after[0].content = SegmentContent::Text("Tit".to_owned());
+        after[1].content = SegmentContent::Text("le".to_owned());
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
     }
 
     fn bookmarks(start: u32, end: u32) -> Value {

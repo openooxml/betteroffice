@@ -1662,10 +1662,6 @@ fn concrete_paragraph_property_change_still_patches() {
 fn unsupported_source_structures_have_typed_reason_prefixes() {
     for (content, prefix) in [
         (
-            r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>"#,
-            "drawing:",
-        ),
-        (
             r#"<w:sdt><w:sdtPr><w:id w:val="1"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>x</w:t></w:r></w:sdtContent></w:sdt>"#,
             "sdt:",
         ),
@@ -1686,4 +1682,20 @@ fn unsupported_source_structures_have_typed_reason_prefixes() {
         replace(&doc, 1, 2, "X");
         assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, prefix);
     }
+}
+
+#[test]
+fn text_beside_a_retained_drawing_has_a_precise_patch() {
+    let drawing = r#"<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>"#;
+    let content = format!("{}{drawing}", text("abc"));
+    let doc = open(&content);
+    replace(&doc, 1, 2, "X");
+    let plan = patch(&doc);
+    assert!(matches!(plan.seed.units.last(), Some(UnitV1::Atom { .. })));
+    let (xml, warnings) = save_paragraph(&doc, &content, |paragraph| {
+        paragraph["content"][0]["content"][0]["text"] = json!("aXc");
+    });
+    assert!(xml.contains(drawing));
+    assert!(xml.contains("aXc"));
+    assert!(warnings.is_empty());
 }
