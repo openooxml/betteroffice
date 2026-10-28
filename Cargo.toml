@@ -48,6 +48,13 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.5.1" }
 opt-level = "s"
 lto = true
 
+[profile.fonts-decoder]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
 [profile.release.package.betteroffice-docx-layout]
 opt-level = 3
 
