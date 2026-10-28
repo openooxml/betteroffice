@@ -246,7 +246,7 @@ pub(super) fn splice_comments(
     if !crate::xml::reads_as_written(spliced.as_bytes()) {
         return Err(error_xml("added comments require whole-part writing"));
     }
-    let companions = if thread_changed || !added.is_empty() {
+    let companions = if thread_changed || (!text_patches.is_empty() && !added.is_empty()) {
         Some(splice_companions(
             parts, &original, comments, infos, &added_ids,
         )?)
@@ -1365,6 +1365,62 @@ mod tests {
             comment_text_patch(&source, &written, FRAGMENT).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn top_level_additions_without_text_patches_keep_default_companion_writing() {
+        let source_comment = "<w:comment w:id=\"0\" w:author=\"Reviewer\"><w:p w14:paraId=\"1A2B3C4D\"><w:r><w:t>old</w:t></w:r></w:p></w:comment>";
+        let source = format!(
+            "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">{source_comment}</w:comments>"
+        );
+        for entry in [
+            None,
+            Some("<w15:commentEx w15:done='0' w15:paraId='1A2B3C4D'/>"),
+            Some("<w15:commentEx w15:paraId=\"1A2B3C4D\" w15:done=\"0\" extra=\"keep\"/>"),
+        ] {
+            let mut parts = vec![("word/comments.xml".to_owned(), source.as_bytes().to_vec())];
+            if let Some(entry) = entry {
+                parts.push((
+                    "word/commentsExtended.xml".to_owned(),
+                    format!(
+                        "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\">{entry}</w15:commentsEx>"
+                    )
+                    .into_bytes(),
+                ));
+            }
+            let seed = "0".repeat(64);
+            let original = source_comments(&parts, &seed).unwrap();
+            let mut comments = original.clone();
+            let mut added = original[0].clone();
+            added.id = 1.0;
+            added.para_id = Some("1A2B3C4E".to_owned());
+            added.content[0].para_id = added.para_id.clone();
+            added.content[0].content = vec![run("added", None)];
+            added.block_content.clear();
+            added.done = Some(true);
+            comments.push(added);
+            let context = SerializerContext::new(&super::super::s10::SerializerDeterminism {
+                seed: seed.clone(),
+                now: "2026-01-05T09:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+            let (serialized, mut infos) =
+                serialize_comments_with_info(&comments, &mut context.clone());
+            let spliced = splice_comments(
+                source.as_bytes(),
+                &parts,
+                &seed,
+                &comments,
+                &serialized,
+                &mut infos,
+                context,
+            )
+            .unwrap();
+            assert!(spliced.xml.contains(source_comment));
+            assert!(spliced.companions.is_none());
+            assert_eq!(infos.len(), 2);
+            assert_eq!(infos[1].done, Some(true));
+        }
     }
 
     #[test]
