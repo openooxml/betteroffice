@@ -1,7 +1,100 @@
+use docx_parse::serializer::run::serialize_text_formatting;
 use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 use docx_parse::{
-    FontFamily, RunProjection, parse_run, parse_style_definitions, parse_styles, parse_theme,
+    FontFamily, RunProjection, Theme, parse_run, parse_style_definitions, parse_styles, parse_theme,
 };
+
+const PAIRED_FONTS: &str = r#"w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi""#;
+
+fn parse_direct_fonts(fonts: &str, theme: Option<&Theme>) -> RunProjection {
+    let limits = ParseLimits::default();
+    let xml = format!(
+        r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:rPr><w:rFonts {fonts}/></w:rPr><w:t>Title</w:t></w:r>"#,
+    );
+    let parsed = parse_xml(
+        xml.as_bytes(),
+        "word/document.xml",
+        &mut ParseBudget::new(&limits),
+    )
+    .unwrap();
+    parse_run(parsed.root().unwrap(), theme, None, None)
+}
+
+fn calibri_theme() -> Theme {
+    let limits = ParseLimits::default();
+    parse_theme(
+        Some(br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/><a:ea typeface="Theme East Asia"/><a:cs typeface="Theme Bidi"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#),
+        "word/theme/theme1.xml",
+        &mut ParseBudget::new(&limits),
+    )
+    .unwrap()
+}
+
+#[test]
+fn theme_fonts_override_explicit_names_on_the_same_run() {
+    let projection = parse_direct_fonts(PAIRED_FONTS, Some(&calibri_theme()));
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Calibri"));
+    assert_eq!(resolved.h_ansi.as_deref(), Some("Calibri"));
+}
+
+#[test]
+fn theme_fonts_override_explicit_east_asia_and_cs_names_on_the_same_run() {
+    let projection = parse_direct_fonts(
+        r#"w:eastAsia="Explicit East Asia" w:cs="Explicit Bidi" w:eastAsiaTheme="majorEastAsia" w:cstheme="majorBidi""#,
+        Some(&calibri_theme()),
+    );
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.east_asia.as_deref(), Some("Theme East Asia"));
+    assert_eq!(resolved.cs.as_deref(), Some("Theme Bidi"));
+}
+
+#[test]
+fn default_theme_fonts_override_explicit_names_on_the_same_run() {
+    let limits = ParseLimits::default();
+    let theme = parse_theme(
+        None,
+        "word/theme/theme1.xml",
+        &mut ParseBudget::new(&limits),
+    )
+    .unwrap();
+    for (reference, expected) in [("majorHAnsi", "Calibri Light"), ("minorHAnsi", "Calibri")] {
+        let fonts = PAIRED_FONTS.replace("majorHAnsi", reference);
+        let projection = parse_direct_fonts(&fonts, Some(&theme));
+        let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+        assert_eq!(resolved.ascii.as_deref(), Some(expected));
+        assert_eq!(resolved.h_ansi.as_deref(), Some(expected));
+        assert_eq!(
+            serialize_text_formatting(projection.run.formatting.as_ref()),
+            format!(r#"<w:rPr><w:rFonts {fonts}/></w:rPr>"#)
+        );
+    }
+}
+
+#[test]
+fn unresolvable_theme_fonts_keep_explicit_names() {
+    let mut theme = calibri_theme();
+    theme.font_scheme.major_font.latin.clear();
+    let projection = parse_direct_fonts(PAIRED_FONTS, Some(&theme));
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Cambria"));
+    assert_eq!(resolved.h_ansi.as_deref(), Some("Cambria"));
+    let projection = parse_direct_fonts(
+        r#"w:ascii="Cambria" w:asciiTheme="unknown""#,
+        Some(&calibri_theme()),
+    );
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Cambria"));
+}
+
+#[test]
+fn paired_fonts_round_trip_with_authored_names_and_theme_references() {
+    let projection = parse_direct_fonts(PAIRED_FONTS, Some(&calibri_theme()));
+    assert_eq!(
+        serialize_text_formatting(projection.run.formatting.as_ref()),
+        format!(r#"<w:rPr><w:rFonts {PAIRED_FONTS}/></w:rPr>"#)
+    );
+}
 
 #[test]
 fn direct_run_fonts_remain_authored_while_the_projection_resolves_theme_fonts() {
@@ -160,4 +253,36 @@ fn direct_explicit_fonts_override_inherited_theme_fonts() {
     ] {
         assert_eq!(font.as_deref(), Some("Arial"));
     }
+}
+
+#[test]
+fn direct_ascii_name_replaces_a_character_style_theme_reference() {
+    let projection = parse_inherited_fonts(
+        "",
+        r#"w:asciiTheme="minorHAnsi""#,
+        r#"w:ascii="Arial""#,
+    );
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Arial"));
+    assert_eq!(resolved.ascii_theme, None);
+}
+
+#[test]
+fn direct_ascii_theme_replaces_a_character_style_name() {
+    let projection = parse_inherited_fonts(
+        "",
+        r#"w:ascii="Arial""#,
+        r#"w:asciiTheme="majorHAnsi""#,
+    );
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Theme Serif"));
+    assert_eq!(resolved.ascii_theme.as_deref(), Some("majorHAnsi"));
+}
+
+#[test]
+fn inherited_theme_fonts_override_names_on_the_same_style() {
+    let projection = parse_inherited_fonts("", PAIRED_FONTS, "");
+    let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
+    assert_eq!(resolved.ascii.as_deref(), Some("Theme Serif"));
+    assert_eq!(resolved.h_ansi.as_deref(), Some("Theme Serif"));
 }

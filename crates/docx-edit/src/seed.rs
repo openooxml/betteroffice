@@ -1384,7 +1384,7 @@ pub(crate) fn package_styles(
     )
     .map_err(failed)?;
     docx_parse::apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
-    let definitions = part("word/styles.xml")
+    let mut definitions = part("word/styles.xml")
         .filter(|xml| !xml.is_empty())
         .map(|xml| {
             docx_parse::parse_style_definitions(xml, Some(&theme), "word/styles.xml", &mut budget)
@@ -1392,6 +1392,9 @@ pub(crate) fn package_styles(
                 .and_then(|styles| serde_json::to_value(styles).map_err(|error| error.to_string()))
         })
         .transpose()?;
+    if let Some(definitions) = definitions.as_mut() {
+        resolve_seed_font_names(definitions, &theme);
+    }
     Ok((theme, definitions))
 }
 
@@ -6135,14 +6138,19 @@ fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
                     ("eastAsia", "eastAsiaTheme"),
                     ("cs", "csTheme"),
                 ] {
-                    if fonts
-                        .get(explicit)
-                        .and_then(Value::as_str)
-                        .is_none_or(str::is_empty)
-                        && let Some(reference) = fonts.get(reference).and_then(Value::as_str)
-                    {
-                        let name = docx_parse::resolve_theme_font_ref(Some(theme), reference);
-                        fonts.insert(explicit.to_owned(), Value::String(name));
+                    if let Some(reference) = fonts.get(reference).and_then(Value::as_str) {
+                        let resolved =
+                            docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference);
+                        if let Some(name) = resolved {
+                            fonts.insert(explicit.to_owned(), Value::String(name.to_owned()));
+                        } else if fonts
+                            .get(explicit)
+                            .and_then(Value::as_str)
+                            .is_none_or(str::is_empty)
+                        {
+                            let name = docx_parse::resolve_theme_font_ref(Some(theme), reference);
+                            fonts.insert(explicit.to_owned(), Value::String(name));
+                        }
                     }
                 }
             }
@@ -7087,6 +7095,77 @@ mod header_footer_alias_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn seed_theme_fonts_override_names_on_the_same_element() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Calibri".to_owned();
+        let mut value = json!({ "fontFamily": {
+            "ascii": "Cambria", "hAnsi": "Cambria",
+            "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi"
+        }});
+        resolve_seed_font_names(&mut value, &theme);
+        assert_eq!(value["fontFamily"]["ascii"], "Calibri");
+        assert_eq!(value["fontFamily"]["hAnsi"], "Calibri");
+        assert_eq!(value["fontFamily"]["asciiTheme"], "majorHAnsi");
+        assert_eq!(value["fontFamily"]["hAnsiTheme"], "majorHAnsi");
+    }
+
+    #[test]
+    fn seed_default_theme_fonts_override_names_on_the_same_element() {
+        let theme = docx_parse::Theme::default();
+        for (reference, expected) in [("majorHAnsi", "Calibri Light"), ("minorHAnsi", "Calibri")] {
+            let mut value = json!({ "fontFamily": {
+                "ascii": "Cambria", "hAnsi": "Cambria",
+                "asciiTheme": reference, "hAnsiTheme": reference
+            }});
+            resolve_seed_font_names(&mut value, &theme);
+            assert_eq!(value["fontFamily"]["ascii"], expected);
+            assert_eq!(value["fontFamily"]["hAnsi"], expected);
+            assert_eq!(value["fontFamily"]["asciiTheme"], reference);
+            assert_eq!(value["fontFamily"]["hAnsiTheme"], reference);
+        }
+    }
+
+    #[test]
+    fn seed_unresolved_theme_fonts_preserve_explicit_names() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin.clear();
+        let source = json!({ "fontFamily": {
+            "ascii": "Cambria", "asciiTheme": "majorHAnsi",
+            "hAnsi": "Cambria", "hAnsiTheme": "unknown",
+            "eastAsia": "Explicit East Asia", "eastAsiaTheme": "majorEastAsia",
+            "cs": "Explicit Bidi", "csTheme": "majorBidi"
+        }});
+        let mut value = source.clone();
+        resolve_seed_font_names(&mut value, &theme);
+        assert_eq!(value, source);
+    }
+
+    #[test]
+    fn package_style_theme_fonts_override_names_on_the_same_element() {
+        let mut parts = vec![
+            (
+                "word/styles.xml".to_owned(),
+                br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Title"><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr></w:style></w:styles>"#.to_vec(),
+            ),
+            (
+                "word/theme/theme1.xml".to_owned(),
+                br#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#.to_vec(),
+            ),
+        ];
+        let attrs = StyleResolver::from_parts(&parts)
+            .unwrap()
+            .run_attrs(Some("Title"), None);
+        assert_eq!(attrs["fontFamily"]["ascii"], "Calibri");
+        assert_eq!(attrs["fontFamily"]["hAnsi"], "Calibri");
+        parts.pop();
+        let attrs = StyleResolver::from_parts(&parts)
+            .unwrap()
+            .run_attrs(Some("Title"), None);
+        assert_eq!(attrs["fontFamily"]["ascii"], "Calibri Light");
+        assert_eq!(attrs["fontFamily"]["hAnsi"], "Calibri Light");
+    }
+
     fn assert_pins_match_story(doc: &EditingDoc, provenance: &Provenance) {
         let txn = doc.yrs_doc().transact();
         let pins = provenance

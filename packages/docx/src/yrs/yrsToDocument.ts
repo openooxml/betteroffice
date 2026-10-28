@@ -3,7 +3,7 @@ import { sectionPropertiesEqual } from './sections';
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
-import { resolveThemeFont } from '../utils/fontResolver';
+import { resolveRFontsThemeFont, resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
@@ -459,7 +459,7 @@ function canonicalFontPair(fonts: TextFormatting['fontFamily'], name: string, re
   const reference = asString(values?.[ref]);
   const explicit = asString(values?.[name]);
   const resolved = reference && resolveThemeFont(reference, theme);
-  return [reference ?? null, reference && explicit === resolved ? null : explicit ?? null];
+  return [reference ?? null, reference && (explicit === resolved || resolveRFontsThemeFont(reference, theme)) ? null : explicit ?? null];
 }
 
 function relativeFontFamily(

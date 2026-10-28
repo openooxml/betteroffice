@@ -35,7 +35,7 @@ import type {
   TrackedChangeInfo,
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
-import { resolveThemeFont } from '../utils/fontResolver';
+import { resolveRFontsThemeFont, resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
@@ -2138,9 +2138,13 @@ function seedFontNames(document: Document): () => void {
       const fonts = { ...original } as Record<string, unknown>;
       for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
         const referenceName = fonts[reference];
-        if (!fonts[explicit] && typeof referenceName === 'string') {
-          const name = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
+        if (typeof referenceName === 'string') {
+          const name = resolveRFontsThemeFont(referenceName, document.package.theme?.fontScheme);
           if (name !== null) fonts[explicit] = name;
+          else if (!fonts[explicit]) {
+            const fallback = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
+            if (fallback !== null) fonts[explicit] = fallback;
+          }
         }
       }
       const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
