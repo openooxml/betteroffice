@@ -22,6 +22,17 @@ interface RasterLayer {
   line?: PeerlessActiveLine['line'];
 }
 
+interface PooledRaster {
+  canvas: HTMLCanvasElement;
+  background: string;
+  layers: readonly RasterLayer[];
+}
+
+interface RasterPool {
+  canvases: PooledRaster[];
+  disposed: boolean;
+}
+
 export interface CommandFrameRaster {
   canvas: HTMLCanvasElement;
   factor: number;
@@ -65,6 +76,7 @@ interface PinnedAsset {
 
 export function createCommandFrameImages() {
   const images = browserFrameImages();
+  const pool: RasterPool = { canvases: [], disposed: false };
   const media = new Map<string, { bytes: Uint8Array; version: number }>();
   const assets = new Map<string, PinnedAsset>();
   const frames = new Map<PeerlessConfirmedFrame, { resolve: CanvasImageResolver;
@@ -76,7 +88,7 @@ export function createCommandFrameImages() {
   const releaseAsset = (key: string, asset: PinnedAsset) => {
     if (--asset.references === 0) { assets.delete(key); asset.resolve.release(); }
   };
-  return {
+  const result = {
     pin(frame: PeerlessConfirmedFrame, supplied: PresentationCommandFrame['media'] = []): MediaLease {
       if (disposed) throw new Error('Slide images are disposed');
       let entry = frames.get(frame);
@@ -140,8 +152,16 @@ export function createCommandFrameImages() {
       };
       return acquire();
     },
-    dispose() { if (!disposed) { disposed = true; images.dispose(); finish(); } },
+    dispose() {
+      if (disposed) return;
+      disposed = pool.disposed = true;
+      for (const entry of pool.canvases) zero(entry.canvas);
+      pool.canvases.length = 0;
+      images.dispose(); finish();
+    },
   };
+  rasterPools.set(result, pool);
+  return result;
 }
 
 export type CommandFrameImages = ReturnType<typeof createCommandFrameImages>;
@@ -159,6 +179,7 @@ export interface CommandFramePainterOptions {
 
 const rasters = new WeakMap<PeerlessConfirmedFrame, Map<number, RasterEntry>>();
 const tiles = new WeakMap<CommandFrameImages, Map<string, RasterTile>>();
+const rasterPools = new WeakMap<CommandFrameImages, RasterPool>();
 export { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 
 export function commandFrameRaster(frame: PeerlessConfirmedFrame, scale = 1,
@@ -276,7 +297,8 @@ export function createCommandFramePainter(
         try {
           let byKey = tiles.get(images);
           if (!byKey) { byKey = new Map(); tiles.set(images, byKey); }
-          entry = buildRaster(canvas.ownerDocument, frame.displayList, dpr, scale, heldMedia, byKey, jobs, () => {
+          entry = buildRaster(canvas.ownerDocument, frame.displayList, dpr, scale, heldMedia, byKey,
+            rasterPools.get(images)!, jobs, () => {
             byFactor!.delete(factor);
             if (!byFactor!.size) rasters.delete(frame);
           });
@@ -359,12 +381,18 @@ function zero(canvas: HTMLCanvasElement): void { canvas.width = 0; canvas.height
 
 function guardedContext(ctx: CanvasRenderingContext2D, current: () => boolean,
   transform?: () => void): CanvasRenderingContext2D {
+  const methods = new Map<PropertyKey, (...args: unknown[]) => unknown>();
   return new Proxy(ctx, {
     get(target, property) {
-      if (transform && property === 'clearRect') return () => {};
-      if (transform && property === 'setTransform') return () => { if (current()) transform(); };
+      const cached = methods.get(property);
+      if (cached) return cached;
       const value: unknown = Reflect.get(target, property, target);
-      return typeof value === 'function' ? (...args: unknown[]) => current() ? value.apply(target, args) : undefined : value;
+      if (typeof value !== 'function') return value;
+      const method = transform && property === 'clearRect' ? () => {}
+        : transform && property === 'setTransform' ? () => { if (current()) transform(); }
+        : (...args: unknown[]) => current() ? value.apply(target, args) : undefined;
+      methods.set(property, method);
+      return method;
     },
     set: (target, property, value: unknown) => !current() || Reflect.set(target, property, value, target),
   });
@@ -372,11 +400,16 @@ function guardedContext(ctx: CanvasRenderingContext2D, current: () => boolean,
 
 function buildRaster(
   owner: Document, list: SlideDisplayList, dpr: number, scale: number, media: MediaLease,
-  byKey: Map<string, RasterTile>, jobs: Promise<void>[], remove: () => void,
+  byKey: Map<string, RasterTile>, pool: RasterPool, jobs: Promise<void>[], remove: () => void,
 ): RasterEntry {
   const factor = dpr * scale;
-  const authoritative = owner.createElement('canvas');
-  sizeCanvasForSlide(authoritative, list, dpr, scale);
+  const width = Math.ceil(list.width * scale * dpr); const height = Math.ceil(list.height * scale * dpr);
+  const index = pool.canvases.findIndex(({ canvas }) => canvas.width === width && canvas.height === height);
+  const previous = pool.canvases.splice(index < 0 ? pool.canvases.length - 1 : index, 1)[0];
+  const authoritative = previous?.canvas ?? owner.createElement('canvas');
+  const sized = authoritative.width === width && authoritative.height === height;
+  if (!previous || !sized) sizeCanvasForSlide(authoritative, list, dpr, scale);
+  const background = JSON.stringify([list.width, list.height, factor, list.background]);
   const ctx = authoritative.getContext('2d');
   if (!ctx) { zero(authoritative); throw new Error('Slide canvas is unavailable'); }
   const ordered: RasterLayer[] = [];
@@ -392,7 +425,9 @@ function buildRaster(
     cancelled = true;
     remove();
     listeners.clear();
-    zero(authoritative);
+    if (ready && !pool.disposed && pool.canvases.length < 2) pool.canvases.push({ canvas: authoritative, background,
+      layers: ordered.map(({ tile, bounds }) => ({ tile, bounds })) });
+    else zero(authoritative);
     for (const [tile, key] of held) if (--tile.references === 0) {
       tile.cancelled = true;
       tile.releaseMedia?.();
@@ -403,13 +438,12 @@ function buildRaster(
     releaseMedia();
   };
 
-  function add(primitive: SlidePrimitive, parents: readonly SlidePrimitive[], box?: TextBoxPrimitive): void {
+  function add(primitive: SlidePrimitive, parents: readonly SlidePrimitive[], parentsKey: string, box?: TextBoxPrimitive): void {
     const bounds = layerBounds(primitive, parents, factor, list);
     if (!bounds) return;
     const content = primitive.kind === 'textBox' ? { ...primitive, paragraphs: [] } : primitive;
-    const key = JSON.stringify([content, parents.map((parent) => ({
-      x: parent.x, y: parent.y, w: parent.w, h: parent.h, transform: parent.transform,
-    })), factor, bounds, primitive.kind === 'image' && primitive.assetId ? media.version(primitive.assetId) : null]);
+    const key = `[${JSON.stringify(content)},${parentsKey},${JSON.stringify(factor)},${JSON.stringify(bounds)},${
+      JSON.stringify(primitive.kind === 'image' && primitive.assetId ? media.version(primitive.assetId) ?? null : null)}]`;
     let tile = byKey.get(key);
     if (!tile) {
       const canvas = owner.createElement('canvas');
@@ -447,11 +481,14 @@ function buildRaster(
   }
 
   function visit(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[]): void {
+    const parentsKey = JSON.stringify(parents.map((parent) => ({
+      x: parent.x, y: parent.y, w: parent.w, h: parent.h, transform: parent.transform,
+    })));
     for (const primitive of primitives) {
       if (primitive.kind === 'chart' || primitive.kind === 'table') visit(primitive.primitives, [...parents, primitive]);
       else if (primitive.kind === 'textBox') {
-        for (const line of primitive.lines) add({ ...primitive, lines: [line] }, parents, primitive);
-      } else add(primitive, parents);
+        for (const line of primitive.lines) add({ ...primitive, lines: [line] }, parents, parentsKey, primitive);
+      } else add(primitive, parents, parentsKey);
     }
   }
 
@@ -487,14 +524,52 @@ function buildRaster(
   const completion = Promise.allSettled(jobs).then(async (results) => {
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     if (!current()) return;
-    await paintSlide(guardedContext(ctx, current), { ...list, primitives: [] }, dpr, scale);
-    if (!current()) return;
-    for (const layer of ordered) ctx.drawImage(layer.tile.canvas, layer.bounds.x * factor, layer.bounds.y * factor);
+    const incremental = previous && sized && previous.background === background;
+    const damage = incremental ? rasterDamage(previous.layers, ordered, factor) : undefined;
+    if (!incremental || damage) {
+      ctx.save();
+      try {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (damage) { ctx.beginPath(); ctx.rect(damage.x, damage.y, damage.width, damage.height); ctx.clip(); }
+        if (previous) ctx.clearRect(0, 0, authoritative.width, authoritative.height);
+        await paintSlide(guardedContext(ctx, current), { ...list, primitives: [] }, dpr, scale);
+        if (!current()) return;
+        for (const layer of ordered) {
+          if (!damage || intersectsDamage(layer.bounds, damage, factor)) {
+            ctx.drawImage(layer.tile.canvas, layer.bounds.x * factor, layer.bounds.y * factor);
+          }
+        }
+      } finally { ctx.restore(); }
+    }
     ready = true;
     for (const listener of listeners) listener();
   }).finally(releaseMedia);
   return { raster, ready: completion, references: 0, cancelled: false,
     release() { this.cancelled = true; release(); } };
+}
+
+function rasterDamage(previous: readonly RasterLayer[], next: readonly RasterLayer[], factor: number): PeerlessRect | undefined {
+  let x = Infinity; let y = Infinity; let right = -Infinity; let bottom = -Infinity;
+  const include = (layer: RasterLayer | undefined) => {
+    if (!layer) return;
+    const bounds = layer.bounds;
+    x = Math.min(x, bounds.x); y = Math.min(y, bounds.y);
+    right = Math.max(right, bounds.x + bounds.width); bottom = Math.max(bottom, bounds.y + bounds.height);
+  };
+  for (let index = 0; index < Math.max(previous.length, next.length); index += 1) {
+    const a = previous[index]; const b = next[index];
+    if (a?.tile === b?.tile && a?.bounds.x === b?.bounds.x && a?.bounds.y === b?.bounds.y &&
+      a?.bounds.width === b?.bounds.width && a?.bounds.height === b?.bounds.height) continue;
+    include(a); include(b);
+  }
+  if (x === Infinity) return undefined;
+  x = Math.floor(x * factor); y = Math.floor(y * factor);
+  return { x, y, width: Math.ceil(right * factor) - x, height: Math.ceil(bottom * factor) - y };
+}
+
+function intersectsDamage(bounds: PeerlessRect, damage: PeerlessRect, factor: number): boolean {
+  return bounds.x * factor < damage.x + damage.width && (bounds.x + bounds.width) * factor > damage.x &&
+    bounds.y * factor < damage.y + damage.height && (bounds.y + bounds.height) * factor > damage.y;
 }
 
 export function applyPrimitiveTransform(ctx: CanvasRenderingContext2D, primitive: SlidePrimitive): void {
