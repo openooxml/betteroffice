@@ -36,9 +36,7 @@
     "open": "Aç",
     "openShortcut": "Ctrl+O",
     "save": "Kaydet",
-    "saveShortcut": "Ctrl+S",
     "print": "Yazdır",
-    "printShortcut": "Ctrl+P",
     "pageSetup": "Sayfa yapısı",
     "leftToRight": "Soldan sağa metin",
     "rightToLeft": "Sağdan sola metin",
@@ -49,7 +47,6 @@
     "sectionBreakNextPage": "Bölüm Sonu (Sonraki Sayfa)",
     "sectionBreakContinuous": "Bölüm Sonu (Sürekli)",
     "tableOfContents": "İçindekiler",
-    "symbol": "Simge",
     "watermark": "Filigran",
     "help": "Yardım",
     "reportIssue": "Sorun bildir",
@@ -71,29 +68,18 @@
       "table": "Tablo"
     },
     "undo": "Geri al",
-    "undoShortcut": "Geri al (Ctrl+Z)",
     "redo": "Yinele",
-    "redoShortcut": "Yinele (Ctrl+Y)",
     "bold": "Kalın",
-    "boldShortcut": "Kalın (Ctrl+B)",
     "italic": "İtalik",
-    "italicShortcut": "İtalik (Ctrl+I)",
     "underline": "Altı çizili",
-    "underlineShortcut": "Altı çizili (Ctrl+U)",
     "strikethrough": "Üstü çizili",
     "fontColor": "Yazı rengi",
     "highlightColor": "Metin Vurgu Rengi",
     "insertLink": "Bağlantı ekle",
-    "insertLinkShortcut": "Bağlantı ekle (Ctrl+K)",
     "superscript": "Üst simge",
-    "superscriptShortcut": "Üst simge (Ctrl+Shift+=)",
     "subscript": "Alt simge",
-    "subscriptShortcut": "Alt simge (Ctrl+=)",
     "imageProperties": "Resim özellikleri",
-    "imagePropertiesShortcut": "Resim özellikleri (alternatif metin, kenarlık)...",
-    "clearFormatting": "Tüm Biçimlendirmeyi Temizle",
-    "commentsAndChanges": "Yorumlar ve Değişiklikler",
-    "moreItems": "{count, plural, one {# öğe daha} other {# öğe daha}}"
+    "clearFormatting": "Tüm Biçimlendirmeyi Temizle"
   },
   "alignment": {
     "left": "Sol",
@@ -108,8 +94,6 @@
   },
   "lists": {
     "ariaLabel": "Liste biçimlendirme",
-    "typeAriaLabel": "Liste tipi",
-    "indentationAriaLabel": "Liste girintilemesi",
     "bulletList": "Madde İşaretleri",
     "numberedList": "Numaralandırma",
     "decreaseIndent": "Girintiyi azalt",
@@ -156,56 +140,22 @@
     "ariaLabel": "{type} renk seçici",
     "pickerLabel": "{title} seçici",
     "customHexColor": "Özel hex rengi",
-    "highlightColors": "Vurgu renkleri",
     "customColor": "Özel renk",
     "noColor": "Renk yok",
     "automatic": "Otomatik",
     "themeColors": "Tema renkleri",
     "standardColors": "Standart renkler",
     "colors": {
-      "black": "Siyah",
       "darkRed": "Koyu kırmızı",
       "red": "Kırmızı",
       "orange": "Turuncu",
       "yellow": "Sarı",
-      "darkYellow": "Koyu sarı",
       "green": "Yeşil",
-      "darkGreen": "Koyu yeşil",
-      "teal": "Deniz mavisi",
-      "darkTeal": "Koyu deniz mavisi",
       "blue": "Mavi",
       "darkBlue": "Koyu mavi",
       "purple": "Mor",
-      "darkPurple": "Koyu mor",
-      "brown": "Kahverengi",
-      "grey50": "Gri %50",
-      "grey25": "Gri %25",
-      "grey10": "Gri %10",
-      "white": "Beyaz",
-      "lightRed": "Açık kırmızı",
-      "lightOrange": "Açık turuncu",
-      "lightYellow": "Açık sarı",
       "lightGreen": "Açık yeşil",
-      "lightBlue": "Açık mavi",
-      "lightPurple": "Açık mor",
-      "pink": "Pembe",
-      "rose": "Gül rengi",
-      "gold": "Altın",
-      "aqua": "Su yeşili",
-      "lavender": "Lavanta",
-      "silver": "Gümüş",
-      "darkOrange": "Koyu turuncu",
-      "darkGray": "Koyu gri",
-      "gray": "Gri",
-      "cyan": "Camgöbeği",
-      "magenta": "Macenta",
-      "paleGreen": "Soluk yeşil",
-      "lightCyan": "Açık camgöbeği",
-      "skyBlue": "Gökyüzü mavisi",
-      "lightBlue2": "Açık mavi 2",
-      "lightMagenta": "Açık macenta",
-      "brightGreen": "Parlak yeşil",
-      "violet": "Eflatun"
+      "lightBlue": "Açık mavi"
     }
   },
   "dialogs": {
@@ -230,7 +180,6 @@
       "replaceAllTitle": "Tüm eşleşmeleri değiştir",
       "matchCase": "Büyük/küçük harf eşleştir",
       "wholeWords": "Tam sözcük",
-      "matchesFound": "{total} eşleşme",
       "toggleReplace": "+ Değiştir"
     },
     "hyperlink": {
@@ -254,18 +203,10 @@
     },
     "insertTable": {
       "title": "Tablo ekle",
-      "hoverToSelect": "Boyut seçmek için üstüne gel",
       "tableSize": "{cols} x {rows} Tablo",
-      "orSpecifySize": "veya boyut belirt",
       "rowsLabel": "Satır:",
       "columnsLabel": "Sütun:",
-      "insertButton": "Tablo ekle",
       "sizeSelector": "Tablo boyutu seçici",
-      "columnWidthLabel": "Sütun genişliği",
-      "fixedWidth": "Sabit",
-      "autofit": "İçeriğe göre otomatik sığdır",
-      "tableStyleLabel": "Tablo stili",
-      "validationHint": "Satır: {minRows}-{maxRows}, Sütun: {minCols}-{maxCols}",
       "selectSize": "Boyut seç",
       "cellSize": "{cols} sütun, {rows} satır"
     },
@@ -299,42 +240,9 @@
       "minValue": "En az {rows} satır ve {cols} sütun kullan.",
       "notOneByOne": "En az iki sonuç hücre seç."
     },
-    "insertImage": {
-      "title": "Resim ekle",
-      "uploadAriaLabel": "Resim yüklemek için tıkla veya sürükle",
-      "uploadText": "Resim seçmek için tıkla veya sürükle bırak",
-      "uploadSubtext": "PNG, JPG, GIF — 10MB'a kadar",
-      "dimensions": "Boyutlar",
-      "widthLabel": "Genişlik:",
-      "heightLabel": "Yükseklik:",
-      "aspectRatioLocked": "En boy oranı kilitli",
-      "aspectRatioUnlocked": "En boy oranı serbest",
-      "altTextLabel": "Alternatif metin (opsiyonel)",
-      "altTextPlaceholder": "Erişilebilirlik için resmi açıklayın",
-      "insertButton": "Resim ekle",
-      "invalidFile": "Lütfen geçerli bir resim dosyası seçin",
-      "fileTooLarge": "Resim çok büyük (en fazla 10MB)",
-      "readFailed": "Resim okunamadı",
-      "loadFailed": "Resim yüklenemedi",
-      "preview": "Önizleme"
-    },
     "insertSymbol": {
-      "title": "Simge ekle",
-      "searchPlaceholder": "Simge ara (karakter veya Unicode)...",
-      "noResultsEmpty": "Simge bulunamadı",
-      "noResults": "\"{query}\" için simge bulunamadı",
-      "decimal": "Onluk: {value}",
-      "recent": "Son kullanılanlar:",
       "categories": {
-        "common": "Sık kullanılan",
-        "arrows": "Oklar",
-        "math": "Matematik",
-        "greek": "Yunanca",
-        "shapes": "Şekiller",
-        "punctuation": "Noktalama",
-        "currency": "Para birimi",
-        "music": "Müzik",
-        "emoji": "Emoji"
+        "common": "Sık kullanılan"
       }
     },
     "imageProperties": {
@@ -346,19 +254,10 @@
       "style": "Stil",
       "color": "Renk",
       "preview": "Önizleme",
-      "textWrapping": "Metin Kaydırma",
       "dimensions": "Boyutlar",
       "widthLabel": "Genişlik:",
       "heightLabel": "Yükseklik:",
       "lockAspectRatio": "En boy oranını kilitle",
-      "wrapOptions": {
-        "inline": "Metinle aynı satırda",
-        "wrapRight": "Metni kaydır, sola hizala",
-        "wrapLeft": "Metni kaydır, sağa hizala",
-        "topAndBottom": "Üst ve alt",
-        "behind": "Metnin arkasında",
-        "inFront": "Metnin önünde"
-      },
       "borderStyles": {
         "solid": "Düz",
         "dashed": "Kesik çizgili",
@@ -439,19 +338,6 @@
         "center": "Orta",
         "right": "Sağ"
       }
-    },
-    "pasteSpecial": {
-      "title": "Özel yapıştır",
-      "keepFormatting": "Kaynak biçimlendirmeyi koru",
-      "keepFormattingDescription": "Orijinal biçimle yapıştır",
-      "keepFormattingShortcut": "Ctrl+V",
-      "plainText": "Düz metin olarak yapıştır",
-      "plainTextDescription": "Biçimlendirmeden yapıştır",
-      "plainTextShortcut": "Ctrl+Shift+V",
-      "readingClipboard": "Pano okunuyor...",
-      "preview": "Önizleme:",
-      "noContent": "Yapıştırılacak içerik yok",
-      "clipboardError": "Pano okunamadı. Lütfen Ctrl+V ile yapıştırın."
     },
     "footnoteProperties": {
       "title": "Dipnot ve son not özellikleri",
@@ -570,11 +456,7 @@
         "pageDown": "Bir sayfa aşağı",
         "pageDownDescription": "Bir sayfa aşağı kaydır",
         "zoomIn": "Yakınlaştır",
-        "zoomInDescription": "Yakınlaştırma seviyesini artır",
         "zoomOut": "Uzaklaştır",
-        "zoomOutDescription": "Yakınlaştırma seviyesini azalt",
-        "resetZoom": "Yakınlaştırmayı sıfırla",
-        "resetZoomDescription": "Yakınlaştırmayı %100'e döndür",
         "keyboardShortcuts": "Klavye kısayolları",
         "keyboardShortcutsDescription": "Bu yardım iletişim kutusunu göster",
         "insertLink": "Bağlantı ekle",
@@ -610,10 +492,7 @@
   },
   "trackedChanges": {
     "unknown": "Bilinmiyor",
-    "replaced": "Değiştirildi",
-    "with": "yerine",
     "added": "Eklendi",
-    "deleted": "Silindi",
     "agent": "aracı",
     "previousChange": "Önceki değişiklik",
     "nextChange": "Sonraki değişiklik",
@@ -640,7 +519,6 @@
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
     "textMenuAriaLabel": "Metin düzenleme menüsü",
-    "customPromptPlaceholder": "Özel komut gir...",
     "cut": "Kes",
     "cutShortcut": "Ctrl+X",
     "copy": "Kopyala",
@@ -654,18 +532,6 @@
     "selectAll": "Tümünü seç",
     "selectAllShortcut": "Ctrl+A",
     "selected": "Seçili:",
-    "aiActions": {
-      "askAi": "Yapay zekâya sor",
-      "rewrite": "Yeniden yaz",
-      "expand": "Genişlet",
-      "summarize": "Özetle",
-      "translate": "Çevir",
-      "explain": "Açıkla",
-      "fixGrammar": "Dilbilgisini düzelt",
-      "makeFormal": "Resmi yap",
-      "makeCasual": "Samimi yap",
-      "custom": "Özel"
-    },
     "addComment": "Yorum ekle",
     "resizeImage": "Resmi yeniden boyutlandır",
     "moveImage": "Resmi taşı",
@@ -706,7 +572,6 @@
     "tryAgain": "Tekrar dene",
     "showDetails": "Ayrıntıları göster",
     "hideDetails": "Ayrıntıları gizle",
-    "unsavedChanges": "Kaydedilmemiş değişiklikleriniz var. Çıkmak istediğinizden emin misiniz?",
     "canvasRendererFailed": "Canvas oluşturucu başarısız oldu.",
     "userFriendly": {
       "network": "Ağ hatası. Lütfen İnternet bağlantınızı denetleyip yeniden deneyin.",
@@ -777,21 +642,7 @@
     "top": "Üst",
     "middle": "Orta",
     "bottom": "Alt",
-    "cellMargins": "Hücre kenar boşlukları",
-    "textDirection": "Metin yönü",
-    "textDirections": {
-      "horizontal": "Yatay (soldan sağa)",
-      "verticalRL": "Dikey (üst-alt, sağdan sola)",
-      "verticalLR": "Dikey (alt-üst, soldan sağa)"
-    },
     "toggleNoWrap": "Sarmamayı aç/kapa",
-    "rowHeight": "Satır yüksekliği",
-    "heightRules": {
-      "auto": "Otomatik",
-      "atLeast": "En az",
-      "exact": "Tam"
-    },
-    "rule": "Kural",
     "height": "Yükseklik",
     "toggleHeaderRow": "Başlık satırını aç/kapa",
     "distributeColumns": "Sütunları eşit dağıt",
@@ -800,9 +651,7 @@
     "tableAlignment": "Tablo hizalaması",
     "alignTableLeft": "Tabloyu sola hizala",
     "alignTableCenter": "Tabloyu ortala",
-    "alignTableRight": "Tabloyu sağa hizala",
-    "tableOptionsMenu": "Tablo seçenekleri menüsü",
-    "tableOptions": "Tablo seçenekleri"
+    "alignTableRight": "Tabloyu sağa hizala"
   },
   "imageTransform": {
     "tooltip": "Dönüştür",
@@ -835,16 +684,6 @@
       "behindText": "Resim metnin arkasına yerleşir",
       "inFrontOfText": "Resim metnin üzerine yerleşir"
     }
-  },
-  "responsePreview": {
-    "loading": "{action}...",
-    "result": "{action} sonucu",
-    "closeEsc": "Kapat (Esc)",
-    "editPrompt": "Kabul etmeden önce sonucu düzenle:",
-    "changes": "Değişiklikler:",
-    "original": "Orijinal:",
-    "new": "Yeni:",
-    "cancelEdit": "Düzenlemeyi iptal et"
   },
   "commentMarkers": {
     "resolvedComment": "Çözülen yorum",
@@ -895,15 +734,7 @@
     "closeEditing": "{label} düzenlemesini kapat"
   },
   "image": {
-    "placeholder": "Resim yer tutucu",
-    "placeholderText": "[Resim]",
-    "editableAriaLabel": "Düzenlenebilir resim"
-  },
-  "imageOverlay": {
-    "rotate": "Döndür",
-    "imageProperties": "Resim özellikleri",
-    "deleteImage": "Resmi sil",
-    "replaceImage": "Resmi değiştir…"
+    "placeholder": "Resim yer tutucu"
   },
   "ruler": {
     "tabStop": "{alignment} sekme durağı: {position}",
@@ -928,30 +759,8 @@
     "singlePage": "Sayfa {start}",
     "pageRange": "Sayfa {start}-{end}"
   },
-  "unsaved": {
-    "unsaved": "Kaydedilmedi",
-    "saved": "Kaydedildi",
-    "unsavedTitle": "Belgede kaydedilmemiş değişiklikler var",
-    "savedTitle": "Tüm değişiklikler kaydedildi",
-    "unsavedAriaLabel": "Kaydedilmemiş değişiklikler",
-    "savedAriaLabel": "Tüm değişiklikler kaydedildi"
-  },
   "loading": {
     "label": "Yükleniyor"
-  },
-  "agentPanel": {
-    "defaultTitle": "Asistan",
-    "toggle": "Asistanı aç",
-    "close": "Paneli kapat",
-    "resizeHandle": "Asistan panelini yeniden boyutlandır",
-    "thinking": "Asistan düşünüyor",
-    "composerPlaceholder": "Asistana sor…",
-    "send": "Gönder",
-    "timeline": {
-      "working": "Çalışıyor… {count, plural, one {# adım} other {# adım}}",
-      "summary": "{count, plural, one {# adım} other {# adım}}",
-      "earlier": "+ {count, plural, one {# önceki adım} other {# önceki adım}}"
-    }
   },
   "a11y": {
     "pageLabel": "Sayfa {number}",

@@ -2,8 +2,6 @@
   "_lang": "zh-CN",
   "toolbar": {
     "actionsLabel": "电子表格操作",
-    "fileActionsLabel": "文件操作",
-    "historyLabel": "历史记录",
     "searchMenus": "搜索菜单",
     "print": "打印",
     "paintFormat": "格式刷",

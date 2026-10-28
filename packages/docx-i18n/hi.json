@@ -36,9 +36,7 @@
     "open": "खोलें",
     "openShortcut": "Ctrl+O",
     "save": "सहेजें",
-    "saveShortcut": "Ctrl+S",
     "print": "प्रिंट करें",
-    "printShortcut": "Ctrl+P",
     "pageSetup": "पेज सेटअप",
     "leftToRight": "बाएं से दाएं टेक्स्ट",
     "rightToLeft": "दाएं से बाएं टेक्स्ट",
@@ -49,7 +47,6 @@
     "sectionBreakNextPage": "अनुभाग विराम (अगला पेज)",
     "sectionBreakContinuous": "अनुभाग विराम (सतत)",
     "tableOfContents": "विषय-सूची",
-    "symbol": "प्रतीक",
     "watermark": "वॉटरमार्क",
     "help": "सहायता",
     "reportIssue": "समस्या की रिपोर्ट करें",
@@ -71,29 +68,18 @@
       "table": "तालिका"
     },
     "undo": "पूर्ववत करें",
-    "undoShortcut": "पूर्ववत करें (Ctrl+Z)",
     "redo": "पुनः करें",
-    "redoShortcut": "पुनः करें (Ctrl+Y)",
     "bold": "बोल्ड",
-    "boldShortcut": "बोल्ड (Ctrl+B)",
     "italic": "इटैलिक",
-    "italicShortcut": "इटैलिक (Ctrl+I)",
     "underline": "रेखांकित",
-    "underlineShortcut": "रेखांकित (Ctrl+U)",
     "strikethrough": "स्ट्राइकथ्रू",
     "fontColor": "फ़ॉन्ट का रंग",
     "highlightColor": "टेक्स्ट हाइलाइट का रंग",
     "insertLink": "लिंक डालें",
-    "insertLinkShortcut": "लिंक डालें (Ctrl+K)",
     "superscript": "सुपरस्क्रिप्ट",
-    "superscriptShortcut": "सुपरस्क्रिप्ट (Ctrl+Shift+=)",
     "subscript": "सबस्क्रिप्ट",
-    "subscriptShortcut": "सबस्क्रिप्ट (Ctrl+=)",
     "imageProperties": "चित्र की विशेषताएँ",
-    "imagePropertiesShortcut": "चित्र की विशेषताएँ (वैकल्पिक टेक्स्ट, बॉर्डर)...",
-    "clearFormatting": "प्रारूपण साफ करें",
-    "commentsAndChanges": "टिप्पणियाँ और बदलाव",
-    "moreItems": "{count, plural, one {# और आइटम} other {# और आइटम}}"
+    "clearFormatting": "प्रारूपण साफ करें"
   },
   "alignment": {
     "left": "बाएं संरेखित करें",
@@ -108,8 +94,6 @@
   },
   "lists": {
     "ariaLabel": "सूची प्रारूपण",
-    "typeAriaLabel": "सूची का प्रकार",
-    "indentationAriaLabel": "सूची इंडेंटेशन",
     "bulletList": "बुलेट सूची",
     "numberedList": "नंबर वाली सूची",
     "decreaseIndent": "इंडेंट कम करें",
@@ -156,56 +140,22 @@
     "ariaLabel": "{type} रंग पिकर",
     "pickerLabel": "{title} पिकर",
     "customHexColor": "कस्टम हेक्स रंग",
-    "highlightColors": "हाइलाइट रंग",
     "customColor": "कस्टम रंग",
     "noColor": "कोई रंग नहीं",
     "automatic": "स्वचालित",
     "themeColors": "थीम के रंग",
     "standardColors": "मानक रंग",
     "colors": {
-      "black": "काला",
       "darkRed": "गहरा लाल",
       "red": "लाल",
       "orange": "नारंगी",
       "yellow": "पीला",
-      "darkYellow": "गहरा पीला",
       "green": "हरा",
-      "darkGreen": "गहरा हरा",
-      "teal": "टील",
-      "darkTeal": "गहरा टील",
       "blue": "नीला",
       "darkBlue": "गहरा नीला",
       "purple": "बैंगनी",
-      "darkPurple": "गहरा बैंगनी",
-      "brown": "भूरा",
-      "grey50": "ग्रे 50%",
-      "grey25": "ग्रे 25%",
-      "grey10": "ग्रे 10%",
-      "white": "सफ़ेद",
-      "lightRed": "हल्का लाल",
-      "lightOrange": "हल्का नारंगी",
-      "lightYellow": "हल्का पीला",
       "lightGreen": "हल्का हरा",
-      "lightBlue": "हल्का नीला",
-      "lightPurple": "हल्का बैंगनी",
-      "pink": "गुलाबी",
-      "rose": "रोज़",
-      "gold": "सुनहरा",
-      "aqua": "एक्वा",
-      "lavender": "लैवेंडर",
-      "silver": "चांदी",
-      "darkOrange": "गहरा नारंगी",
-      "darkGray": "गहरा ग्रे",
-      "gray": "ग्रे",
-      "cyan": "स्यान",
-      "magenta": "मैजेंटा",
-      "paleGreen": "हल्का हरा",
-      "lightCyan": "हल्का स्यान",
-      "skyBlue": "आसमानी नीला",
-      "lightBlue2": "हल्का नीला 2",
-      "lightMagenta": "हल्का मैजेंटा",
-      "brightGreen": "चमकीला हरा",
-      "violet": "बैंगनी"
+      "lightBlue": "हल्का नीला"
     }
   },
   "dialogs": {
@@ -230,7 +180,6 @@
       "replaceAllTitle": "सभी मिलान बदलें",
       "matchCase": "केस का मिलान करें",
       "wholeWords": "पूरा शब्द",
-      "matchesFound": "{total} मिलान मिले",
       "toggleReplace": "+ बदलें"
     },
     "hyperlink": {
@@ -254,18 +203,10 @@
     },
     "insertTable": {
       "title": "तालिका डालें",
-      "hoverToSelect": "आकार चुनने के लिए होवर करें",
       "tableSize": "{cols} x {rows} तालिका",
-      "orSpecifySize": "या आकार निर्दिष्ट करें",
       "rowsLabel": "पंक्तियाँ:",
       "columnsLabel": "स्तंभ:",
-      "insertButton": "तालिका डालें",
       "sizeSelector": "तालिका आकार चयनकर्ता",
-      "columnWidthLabel": "स्तंभ की चौड़ाई",
-      "fixedWidth": "निश्चित",
-      "autofit": "सामग्री के अनुसार स्वतः फिट करें",
-      "tableStyleLabel": "तालिका शैली",
-      "validationHint": "पंक्तियाँ: {minRows}-{maxRows}, स्तंभ: {minCols}-{maxCols}",
       "selectSize": "आकार चुनें",
       "cellSize": "{cols} स्तंभ, {rows} पंक्तियाँ"
     },
@@ -299,42 +240,9 @@
       "minValue": "कम से कम {rows} पंक्ति और {cols} स्तंभ का उपयोग करें।",
       "notOneByOne": "कम से कम दो परिणामी सेल चुनें।"
     },
-    "insertImage": {
-      "title": "चित्र डालें",
-      "uploadAriaLabel": "चित्र अपलोड करने के लिए क्लिक करें या खींचें",
-      "uploadText": "चुनने के लिए क्लिक करें या चित्र को यहां खींचकर छोड़ें",
-      "uploadSubtext": "10MB तक PNG, JPG, GIF",
-      "dimensions": "आयाम",
-      "widthLabel": "चौड़ाई:",
-      "heightLabel": "ऊंचाई:",
-      "aspectRatioLocked": "पहलू अनुपात लॉक किया गया",
-      "aspectRatioUnlocked": "पहलू अनुपात अनलॉक किया गया",
-      "altTextLabel": "वैकल्पिक टेक्स्ट (वैकल्पिक)",
-      "altTextPlaceholder": "पहुंच-योग्यता के लिए चित्र का वर्णन करें",
-      "insertButton": "चित्र डालें",
-      "invalidFile": "कृपया एक वैध चित्र फ़ाइल चुनें",
-      "fileTooLarge": "चित्र फ़ाइल बहुत बड़ी है (अधिकतम 10MB)",
-      "readFailed": "चित्र फ़ाइल पढ़ने में विफल",
-      "loadFailed": "चित्र लोड करने में विफल",
-      "preview": "पूर्वावलोकन"
-    },
     "insertSymbol": {
-      "title": "प्रतीक डालें",
-      "searchPlaceholder": "प्रतीक खोजें (वर्ण या यूनिकोड)...",
-      "noResultsEmpty": "कोई प्रतीक नहीं मिला",
-      "noResults": "\"{query}\" के लिए कोई प्रतीक नहीं मिला",
-      "decimal": "दशमलव: {value}",
-      "recent": "हाल का:",
       "categories": {
-        "common": "सामान्य",
-        "arrows": "तीर",
-        "math": "गणित",
-        "greek": "ग्रीक",
-        "shapes": "आकृतियाँ",
-        "punctuation": "विराम चिह्न",
-        "currency": "मुद्रा",
-        "music": "संगीत",
-        "emoji": "इमोजी"
+        "common": "सामान्य"
       }
     },
     "imageProperties": {
@@ -346,19 +254,10 @@
       "style": "शैली",
       "color": "रंग",
       "preview": "पूर्वावलोकन",
-      "textWrapping": "टेक्स्ट रैपिंग",
       "dimensions": "आयाम",
       "widthLabel": "चौड़ाई:",
       "heightLabel": "ऊंचाई:",
       "lockAspectRatio": "पहलू अनुपात लॉक करें",
-      "wrapOptions": {
-        "inline": "टेक्स्ट के साथ इनलाइन",
-        "wrapRight": "टेक्स्ट रैप करें, चित्र बाईं ओर रखें",
-        "wrapLeft": "टेक्स्ट रैप करें, चित्र दाईं ओर रखें",
-        "topAndBottom": "ऊपर और नीचे",
-        "behind": "टेक्स्ट के पीछे",
-        "inFront": "टेक्स्ट के सामने"
-      },
       "borderStyles": {
         "solid": "ठोस",
         "dashed": "डैशयुक्त",
@@ -439,19 +338,6 @@
         "center": "केंद्र",
         "right": "दाएं"
       }
-    },
-    "pasteSpecial": {
-      "title": "विशेष रूप से पेस्ट करें",
-      "keepFormatting": "स्रोत प्रारूपण बनाए रखें",
-      "keepFormattingDescription": "मूल प्रारूपण के साथ पेस्ट करें",
-      "keepFormattingShortcut": "Ctrl+V",
-      "plainText": "सादे टेक्स्ट के रूप में पेस्ट करें",
-      "plainTextDescription": "बिना किसी प्रारूपण के पेस्ट करें",
-      "plainTextShortcut": "Ctrl+Shift+V",
-      "readingClipboard": "क्लिपबोर्ड पढ़ा जा रहा है...",
-      "preview": "पूर्वावलोकन:",
-      "noContent": "पेस्ट करने के लिए कोई सामग्री उपलब्ध नहीं है",
-      "clipboardError": "क्लिपबोर्ड पढ़ने में असमर्थ। कृपया पेस्ट करने के लिए Ctrl+V का उपयोग करें।"
     },
     "footnoteProperties": {
       "title": "पाद-टिप्पणी और अंत-टिप्पणी की विशेषताएँ",
@@ -570,11 +456,7 @@
         "pageDown": "पेज नीचे",
         "pageDownDescription": "एक पेज नीचे स्क्रॉल करें",
         "zoomIn": "ज़ूम इन",
-        "zoomInDescription": "ज़ूम स्तर बढ़ाएं",
         "zoomOut": "ज़ूम आउट",
-        "zoomOutDescription": "ज़ूम स्तर घटाएं",
-        "resetZoom": "ज़ूम रीसेट करें",
-        "resetZoomDescription": "ज़ूम को 100% पर रीसेट करें",
         "keyboardShortcuts": "कीबोर्ड शॉर्टकट",
         "keyboardShortcutsDescription": "यह सहायता संवाद दिखाएं",
         "insertLink": "लिंक डालें",
@@ -610,10 +492,7 @@
   },
   "trackedChanges": {
     "unknown": "अज्ञात",
-    "replaced": "प्रतिस्थापित किया गया",
-    "with": "के साथ",
     "added": "जोड़ा गया",
-    "deleted": "हटाया गया",
     "agent": "एजेंट",
     "previousChange": "पिछला बदलाव",
     "nextChange": "अगला बदलाव",
@@ -640,7 +519,6 @@
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
     "textMenuAriaLabel": "टेक्स्ट संपादन मेनू",
-    "customPromptPlaceholder": "कस्टम प्रॉम्प्ट दर्ज करें...",
     "cut": "काटें",
     "cutShortcut": "Ctrl+X",
     "copy": "कॉपी करें",
@@ -654,18 +532,6 @@
     "selectAll": "सभी चुनें",
     "selectAllShortcut": "Ctrl+A",
     "selected": "चयनित:",
-    "aiActions": {
-      "askAi": "AI से पूछें",
-      "rewrite": "फिर से लिखें",
-      "expand": "विस्तार करें",
-      "summarize": "संक्षेप करें",
-      "translate": "अनुवाद करें",
-      "explain": "समझाएं",
-      "fixGrammar": "व्याकरण ठीक करें",
-      "makeFormal": "औपचारिक बनाएं",
-      "makeCasual": "अनौपचारिक बनाएं",
-      "custom": "कस्टम"
-    },
     "addComment": "टिप्पणी करें",
     "resizeImage": "चित्र का आकार बदलें",
     "moveImage": "चित्र ले जाएं",
@@ -706,7 +572,6 @@
     "tryAgain": "पुनः प्रयास करें",
     "showDetails": "विवरण दिखाएं",
     "hideDetails": "विवरण छिपाएं",
-    "unsavedChanges": "आपके पास सहेजे न गए बदलाव हैं। क्या आप वाकई छोड़ना चाहते हैं?",
     "canvasRendererFailed": "कैनवास रेंडरर विफल रहा.",
     "userFriendly": {
       "network": "नेटवर्क त्रुटि. कृपया अपना इंटरनेट कनेक्शन जांचें और फिर से प्रयास करें.",
@@ -777,21 +642,7 @@
     "top": "ऊपर",
     "middle": "मध्य",
     "bottom": "नीचे",
-    "cellMargins": "सेल मार्जिन",
-    "textDirection": "टेक्स्ट की दिशा",
-    "textDirections": {
-      "horizontal": "क्षैतिज (LR)",
-      "verticalRL": "लंबवत (ऊपर से नीचे, RL)",
-      "verticalLR": "लंबवत (नीचे से ऊपर, LR)"
-    },
     "toggleNoWrap": "नो-रैप टॉगल करें",
-    "rowHeight": "पंक्ति की ऊंचाई",
-    "heightRules": {
-      "auto": "स्वतः",
-      "atLeast": "कम से कम",
-      "exact": "सटीक"
-    },
-    "rule": "नियम",
     "height": "ऊंचाई",
     "toggleHeaderRow": "हेडर पंक्ति टॉगल करें",
     "distributeColumns": "स्तंभों को समान रूप से वितरित करें",
@@ -800,9 +651,7 @@
     "tableAlignment": "तालिका संरेखण",
     "alignTableLeft": "तालिका को बाएं संरेखित करें",
     "alignTableCenter": "तालिका को केंद्रित करें",
-    "alignTableRight": "तालिका को दाएं संरेखित करें",
-    "tableOptionsMenu": "तालिका विकल्प मेनू",
-    "tableOptions": "तालिका विकल्प"
+    "alignTableRight": "तालिका को दाएं संरेखित करें"
   },
   "imageTransform": {
     "tooltip": "रूपांतरित करें",
@@ -835,16 +684,6 @@
       "behindText": "चित्र मुख्य टेक्स्ट के पीछे दिखता है",
       "inFrontOfText": "चित्र मुख्य टेक्स्ट के ऊपर दिखता है"
     }
-  },
-  "responsePreview": {
-    "loading": "{action}...",
-    "result": "{action} परिणाम",
-    "closeEsc": "बंद करें (Esc)",
-    "editPrompt": "स्वीकार करने से पहले परिणाम संपादित करें:",
-    "changes": "बदलाव:",
-    "original": "मूल:",
-    "new": "नया:",
-    "cancelEdit": "संपादन रद्द करें"
   },
   "commentMarkers": {
     "resolvedComment": "सुलझाई गई टिप्पणी",
@@ -895,15 +734,7 @@
     "closeEditing": "{label} संपादन बंद करें"
   },
   "image": {
-    "placeholder": "चित्र प्लेसहोल्डर",
-    "placeholderText": "[चित्र]",
-    "editableAriaLabel": "संपादित करने योग्य चित्र"
-  },
-  "imageOverlay": {
-    "rotate": "घुमाएं",
-    "imageProperties": "चित्र की विशेषताएँ",
-    "deleteImage": "चित्र हटाएं",
-    "replaceImage": "चित्र बदलें…"
+    "placeholder": "चित्र प्लेसहोल्डर"
   },
   "ruler": {
     "tabStop": "{position} पर {alignment} टैब",
@@ -928,30 +759,8 @@
     "singlePage": "पेज {start}",
     "pageRange": "पेज {start}-{end}"
   },
-  "unsaved": {
-    "unsaved": "सहेजा नहीं गया",
-    "saved": "सहेजा गया",
-    "unsavedTitle": "दस्तावेज़ में सहेजे न गए बदलाव हैं",
-    "savedTitle": "सभी बदलाव सहेजे गए",
-    "unsavedAriaLabel": "सहेजे न गए बदलाव",
-    "savedAriaLabel": "सभी बदलाव सहेजे गए"
-  },
   "loading": {
     "label": "लोड हो रहा है"
-  },
-  "agentPanel": {
-    "defaultTitle": "सहायक",
-    "toggle": "सहायक खोलें",
-    "close": "पैनल बंद करें",
-    "resizeHandle": "सहायक पैनल का आकार बदलें",
-    "thinking": "सहायक सोच रहा है...",
-    "composerPlaceholder": "सहायक से पूछें…",
-    "send": "भेजें",
-    "timeline": {
-      "working": "काम चल रहा है… {count, plural, one {# चरण} other {# चरण}}",
-      "summary": "{count, plural, one {# चरण} other {# चरण}}",
-      "earlier": "+ {count, plural, one {# पूर्व चरण} other {# पूर्व चरण}}"
-    }
   },
   "a11y": {
     "pageLabel": "पेज {number}",

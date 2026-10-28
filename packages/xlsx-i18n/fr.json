@@ -2,8 +2,6 @@
   "_lang": "fr",
   "toolbar": {
     "actionsLabel": "Actions du classeur",
-    "fileActionsLabel": "Actions sur le fichier",
-    "historyLabel": "Historique",
     "searchMenus": "Rechercher dans les menus",
     "print": "Imprimer",
     "paintFormat": "Reproduire la mise en forme",
