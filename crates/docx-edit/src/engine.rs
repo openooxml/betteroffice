@@ -6214,11 +6214,12 @@ impl EngineSession {
                 .note_separator_state()?
                 .map_or(0, |state| hash_bytes(&state));
             let fingerprint = hash_bytes(
-                &[
-                    font_requirements_fingerprint(request)?.to_le_bytes(),
-                    separators.to_le_bytes(),
-                ]
-                .concat(),
+                &serde_json::to_vec(&(
+                    font_requirements_fingerprint(request)?,
+                    separators,
+                    crate::bridge::source_font_theme(&self.doc).map(|theme| theme.font_scheme),
+                ))
+                .map_err(|error| format!("fingerprint font requirements: {error}"))?,
             );
             let epoch = self.doc_epoch();
             let cached = self
@@ -12455,6 +12456,66 @@ mod tests {
 
         assert_eq!(engine.stats().lower_cache_hits, 0);
         assert_eq!(engine.stats().lower_cache_misses, 2);
+    }
+
+    #[test]
+    fn retained_font_theme_participates_in_lowering_and_preflight_cache_identity() {
+        let package = |latin: &str| {
+            crate::seed::fixture::Package::new(
+                r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:t>Title</w:t></w:r></w:p>"#,
+            )
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                &format!(
+                    r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="{latin}"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#
+                ),
+            )
+            .bytes()
+        };
+        let engine = EngineSession::new(1371);
+        crate::seed_from_docx(engine.doc(), &package("Calibri")).unwrap();
+        let original = engine.doc().encode_state_as_update_v1();
+        let epoch = engine.doc_epoch();
+        let source = engine.doc().source_metadata().unwrap();
+        let env = RenderEnv::default();
+        let request = r#"{"bodyStory":"body","renderEnv":{"revisionPreview":{"1":"accepted"}}}"#;
+        let first = engine.lower_story_json("body", &env).unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(blocks[0]["runs"][0]["fontFamily"], "Calibri");
+        let first_requirements = engine.layout_font_requirements_json(request).unwrap();
+        let before = engine.stats();
+
+        engine.doc().retain_source_docx(package("Times New Roman"));
+        assert_eq!(engine.doc_epoch(), epoch);
+        assert!(Arc::ptr_eq(&engine.doc().source_metadata().unwrap(), &source));
+        let second = engine.lower_story_json("body", &env).unwrap();
+        let blocks: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(blocks[0]["runs"][0]["fontFamily"], "Times New Roman");
+        assert_ne!(second, first);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        let requirements = engine.layout_font_requirements_json(request).unwrap();
+        assert_ne!(requirements, first_requirements);
+        let fonts: Vec<serde_json::Value> = serde_json::from_str(&requirements).unwrap();
+        assert!(
+            fonts
+                .iter()
+                .any(|font| font["key"] == "times new roman|0|0")
+        );
+        let before = engine.stats();
+        assert_eq!(engine.lower_story_json("body", &env).unwrap(), second);
+        assert_eq!(
+            engine.layout_font_requirements_json(request).unwrap(),
+            requirements
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        assert_eq!(engine.stats().lower_cache_hits, before.lower_cache_hits + 1);
+        assert_eq!(engine.doc().encode_state_as_update_v1(), original);
     }
 
     #[test]

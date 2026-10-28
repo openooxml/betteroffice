@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use docx_layout::types::{
     BlockId, BorderStyle, BoxEdges, CellBorderSpec, CellBorders, ChartBlock, ColumnBreakBlock,
@@ -442,8 +442,10 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         return Err(BridgeError::WrongOffsetKind);
     }
 
+    let source_theme = source_font_theme(doc);
+    local.source_font_scheme = source_theme.as_ref().map(|theme| theme.font_scheme.clone());
     let with_sources = RenderEnv {
-        font_theme: env.font_theme.clone().or_else(|| source_font_theme(doc)),
+        font_theme: env.font_theme.clone().or(source_theme),
         media: if env.media_tokens && env.media.is_empty() {
             doc.media_sources()
         } else {
@@ -4347,8 +4349,9 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
 }
 
 fn resolve_font_slots(slots: &mut RunFontSlots, env: &RenderEnv) {
-    static DEFAULT_THEME: LazyLock<docx_parse::Theme> = LazyLock::new(docx_parse::Theme::default);
-    let theme = env.font_theme.as_ref().unwrap_or(&DEFAULT_THEME);
+    let Some(theme) = env.font_theme.as_ref() else {
+        return;
+    };
     for (explicit, reference) in [
         (&mut slots.ascii, &slots.ascii_theme),
         (&mut slots.h_ansi, &slots.h_ansi_theme),
@@ -5575,6 +5578,25 @@ mod tests {
                 formatting.font_slots.unwrap().h_ansi.as_deref(),
                 fonts["hAnsi"].as_str()
             );
+        }
+    }
+
+    #[test]
+    fn unknown_document_theme_keeps_seeded_font_names() {
+        for latin in ["Times New Roman", "Cambria"] {
+            let attrs = yrs_attrs(json!({"fontFamily": {
+                "ascii": latin, "hAnsi": latin,
+                "eastAsia": "SimSun", "cs": "Arial",
+                "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi",
+                "eastAsiaTheme": "majorEastAsia", "csTheme": "majorBidi"
+            }}));
+            let formatting = lower_run_formatting(Some(&attrs), &RenderEnv::default());
+            assert_eq!(formatting.font_family.as_deref(), Some(latin));
+            let slots = formatting.font_slots.unwrap();
+            assert_eq!(slots.ascii.as_deref(), Some(latin));
+            assert_eq!(slots.h_ansi.as_deref(), Some(latin));
+            assert_eq!(slots.east_asia.as_deref(), Some("SimSun"));
+            assert_eq!(slots.cs.as_deref(), Some("Arial"));
         }
     }
 

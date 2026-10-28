@@ -437,7 +437,11 @@ fn parse_level_run_properties(element: &XmlElement) -> TextFormatting {
         h_ansi: attribute_owned(fonts, "hAnsi"),
         east_asia: attribute_owned(fonts, "eastAsia"),
         cs: attribute_owned(fonts, "cs"),
-        ..FontFamily::default()
+        ascii_theme: attribute_owned(fonts, "asciiTheme"),
+        h_ansi_theme: attribute_owned(fonts, "hAnsiTheme"),
+        east_asia_theme: attribute_owned(fonts, "eastAsiaTheme"),
+        cs_theme: attribute_owned(fonts, "cstheme"),
+        hint: attribute_owned(fonts, "hint"),
     });
     value.font_size = numeric_child(element, "sz", "val");
     value.color = element.child("w", "color").and_then(|color| {
@@ -872,6 +876,31 @@ mod tests {
                 .as_ref()
                 .and_then(|color| color.rgb.as_deref()),
             Some("FF0000")
+        );
+    }
+
+    #[test]
+    fn marker_fonts_keep_authored_names_and_theme_references() {
+        let numbering = parse(
+            r#"<w:numbering><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:eastAsia="MS Mincho" w:cs="Arial" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi" w:hint="eastAsia"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+        );
+        let level = numbering.get_level(1.0, 0.0).unwrap();
+        let fonts = level.r_pr.unwrap().font_family.unwrap();
+        assert_eq!(fonts.ascii.as_deref(), Some("Cambria"));
+        assert_eq!(fonts.h_ansi.as_deref(), Some("Cambria"));
+        assert_eq!(fonts.east_asia.as_deref(), Some("MS Mincho"));
+        assert_eq!(fonts.cs.as_deref(), Some("Arial"));
+        assert_eq!(fonts.ascii_theme.as_deref(), Some("majorHAnsi"));
+        assert_eq!(fonts.h_ansi_theme.as_deref(), Some("majorHAnsi"));
+        assert_eq!(fonts.east_asia_theme.as_deref(), Some("minorEastAsia"));
+        assert_eq!(fonts.cs_theme.as_deref(), Some("minorBidi"));
+        assert_eq!(fonts.hint.as_deref(), Some("eastAsia"));
+        assert_eq!(
+            compute_list_rendering(Some(1.0), Some(0.0), &numbering)
+                .unwrap()
+                .marker_font_family
+                .as_deref(),
+            Some("Cambria")
         );
     }
 
