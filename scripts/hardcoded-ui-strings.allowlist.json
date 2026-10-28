@@ -1,0 +1,56 @@
+[
+  {
+    "text": "fx",
+    "reason": "Formula bar symbol; Office shows fx in every language"
+  },
+  {
+    "text": "FF0000",
+    "reason": "Hex color example in the custom color input"
+  },
+  {
+    "text": "Arial",
+    "reason": "Font name"
+  },
+  {
+    "text": "Courier New",
+    "reason": "Font name"
+  },
+  {
+    "text": "Open Sans",
+    "reason": "Font name"
+  },
+  {
+    "text": "Times New Roman",
+    "reason": "Font name"
+  },
+  {
+    "text": "Full frame responses did not satisfy requested coverage and revision",
+    "file": "packages/docx-react/src/components/DocxEditor/peerless/framePresentation.ts",
+    "reason": "Internal error message for a stalled frame request, never shown in the UI"
+  },
+  {
+    "text": "Unable to decode slide image",
+    "file": "packages/pptx-react/src/viewer/sessionPaint.ts",
+    "reason": "Internal image decode error passed to the media resolver, never shown in the UI"
+  },
+  {
+    "text": "Dynamic connector",
+    "file": "packages/vsdx-react/src/connector.ts",
+    "reason": "Shape name written into the saved file, matching the name Visio gives the connector master"
+  },
+  {
+    "text": "The shape-data row no longer exists.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
+  },
+  {
+    "text": "The value is not in the fixed list.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
+  },
+  {
+    "text": "The value is not a recognized boolean.",
+    "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
+    "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
+  }
+]

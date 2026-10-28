@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "declaration": true,
+    "declarationMap": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "types": ["bun", "node", "vite/client"]
+  },
+  "include": [
+    "Editor.tsx",
+    "Editor.test.tsx",
+    "session.ts",
+    "session.test.ts",
+    "collaboration/createRoomTransport.ts",
+    "collaboration/types.ts"
+  ]
+}

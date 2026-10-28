@@ -11,10 +11,11 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://betteroffice.dev/api/badge?label=license&amp;message=Apache-2.0&amp;color=4ade80" alt="license"></a>
-  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads"></a>
-  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads"></a>
-  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads"></a>
+  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 484,591/month (snapshot 2026-10-27)"></a>
+  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 203,294/month (snapshot 2026-10-27)"></a>
+  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 2,063/month (snapshot 2026-10-27)"></a>
   <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
+  <a href="https://betteroffice.dev/blog"><img src="https://betteroffice.dev/api/badge?label=&amp;message=blog&amp;color=0a0a0a" alt="BetterOffice blog"></a>
 </p>
 
 ## Features
@@ -46,66 +47,39 @@
 
 ## Packages
 
-### Documents (`.docx`)
+| | Rust | Core | Core (native) | React | Python |
+|---|---|---|---|---|---|
+| DOCX | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | [`docx`](https://www.npmjs.com/package/@betteroffice/docx) | [`docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | [`docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) |
+| XLSX | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | [`xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | [`xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [`xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) |
+| PPTX | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | [`pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | [`pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | [`pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) |
 
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | crates.io | typed Rust API for opening, editing, laying out, and saving DOCX documents |
-| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core: parsing, CRDT editing, and page layout in Rust through WebAssembly |
-| [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
-| [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
+**Rust:** typed engine API. **Core:** `@betteroffice/<format>`, the framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor. **Python:** read, edit, render, save.
 
-### Spreadsheets (`.xlsx`)
+More packages:
 
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | crates.io | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
-| [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | npm | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
-| [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
-| [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
-
-### Presentations (`.pptx`)
-
-| package | registry | what it does |
-|---|---|---|
-| [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core: slide model, masters, editing, and rendering in Rust through WebAssembly |
-| [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
-| [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
-
-### Diagrams (`.vsdx`, source preview)
-
-VSDX packages build from this repository; see the [VSDX guide](https://docs.betteroffice.dev/docs/vsdx).
-
-### Agent tools
-
-| package | registry | what it does |
-|---|---|---|
-| [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents) | npm | TypeScript SDK and `betteroffice-mcp` server for agents to search, read, edit and preview DOCX, XLSX and PPTX files |
-
-### Fonts and localization
-
-| package | registry | what it does |
-|---|---|---|
-| [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts) | npm | metric-compatible substitutes for common Office fonts, plus Hebrew and Arabic coverage |
-| [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) | npm | optional Chinese, Japanese and Korean faces |
-| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | npm | UI translations for the React DOCX editor |
-| [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n) | npm | UI translations for the React XLSX editor |
-| [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n) | npm | UI translations for the React PPTX editor |
+- **Agent tools:** [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents), the TypeScript SDK and `betteroffice-mcp` server.
+- **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
+- **i18n:** [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n), [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n).
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
-## Upgrading to 0.5
-
-In 0.5 the default editor in `@betteroffice/docx-react`, `@betteroffice/xlsx-react` and `@betteroffice/pptx-react` runs its engine in a worker, and the editor API is async. Apps that only mount an editor and use `onSave` need no code change. [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5) covers the opt-outs, the replacement for each synchronous call, and the hosting requirements.
+Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5).
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 
 *Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml); per-document results are on the [benchmarks site](https://benchmarks.betteroffice.dev).*
+
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/benchmarks.svg?theme=dark">
+<img src="https://betteroffice.dev/api/charts/benchmarks.svg" alt="Scored against Microsoft Office, BetterOffice vs LibreOffice: DOCX SSIM 0.8519 vs 0.7694, DOCX Exact page counts 63/63 vs 44/63, PPTX SSIM 0.9170 vs 0.9030, XLSX SSIM 0.7661 vs 0.6892, XLSX Recalc accuracy 99.60% vs 85.87%; average time per file, lower is better: DOCX Render time (avg) 430 ms vs 773 ms, PPTX Render time (avg) 159 ms vs 1351 ms, XLSX Recalc time (avg) 64 ms vs 405 ms." width="70%">
+</picture>
+
+<details>
+<summary>Data</summary>
 
 ### DOCX
 
@@ -143,13 +117,23 @@ Page agreement is reported separately from SSIM.
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 </table>
 
+</details>
+
 For how scores, timings and coverage are measured, see the [benchmark methodology](scripts/office-quality/README.md).
 
 <!-- END GENERATED VISUAL FIDELITY -->
 
 ## Evals
 
-`gpt-6-luna` via `codex exec`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+Model: `gpt-6-luna`, Harness: `codex`, three runs per task, on the v3 [format eval suite](eval/README.md): 96 basic and 33 complex editing tasks on pinned public real-world documents. A run passes only if the requested edit is correct, the rest of the file is untouched, and the input is unchanged.
+
+<picture>
+<source media="(prefers-color-scheme: dark)" srcset="https://betteroffice.dev/api/charts/evals.svg?theme=dark">
+<img src="https://betteroffice.dev/api/charts/evals.svg" alt="Agent edit pass rates with gpt-6-luna: basic 91% with BetterOffice MCP vs 61% with generic file tools; complex 82% with BetterOffice MCP vs 36% with generic file tools." width="70%">
+</picture>
+
+<details>
+<summary>Data</summary>
 
 Basic tier: 96 single edits, 32 per format.
 
@@ -172,6 +156,8 @@ Complex tier: 33 multi-step tasks, 11 per format.
 Complex: 81/99 for BetterOffice, 36/99 for generic file tools.
 
 Generic: shell and Python with python-docx, openpyxl and python-pptx, no network. BetterOffice: only the `@betteroffice/agents` MCP server.
+
+</details>
 
 [Per-task results and methodology](https://evals.betteroffice.dev).
 

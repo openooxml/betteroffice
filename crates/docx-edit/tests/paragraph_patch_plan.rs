@@ -727,8 +727,35 @@ fn assert_seed_format_replace(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatch
     }
 }
 
+fn assert_seed_format_splice(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatchV1)) {
+    let request = seed_format_request(bytes);
+    let part = &request.paragraph_ids.as_ref().unwrap().spliced_parts[0];
+    inspect(&part.paragraph_patches[0]);
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
+        let output = &saved_parts
+            .iter()
+            .find(|(path, _)| path == &name)
+            .unwrap()
+            .1;
+        if name == "word/document.xml" {
+            let original = std::str::from_utf8(&original).unwrap();
+            let output = std::str::from_utf8(output).unwrap();
+            assert_eq!(
+                output,
+                original.replace("<w:t>x</w:t>", "<w:t>y</w:t>"),
+                "{output}"
+            );
+        } else {
+            assert_eq!(output, &original, "{name}");
+        }
+    }
+}
+
 #[test]
-fn seed_format_inherited_color_with_direct_auto_uses_counted_replace() {
+fn seed_format_inherited_color_with_direct_auto_splices_the_text_edit() {
     let (_, bytes, _) = restyle_source(
         concat!(
             "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
@@ -737,7 +764,7 @@ fn seed_format_inherited_color_with_direct_auto_uses_counted_replace() {
         "<w:rPr><w:color w:val=\"FF0000\"/></w:rPr>",
         "",
     );
-    assert_seed_format_replace(&bytes, |patch| {
+    assert_seed_format_splice(&bytes, |patch| {
         let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
             panic!("expected text seed");
         };

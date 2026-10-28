@@ -346,7 +346,21 @@ impl Fonts {
     }
 
     fn substitute(&mut self, base: u32, family: &str, bold: bool, italic: bool) -> Result<u32> {
-        #[cfg(feature = "substitute-styles")]
+        #[cfg(feature = "substitute-widths")]
+        {
+            let raster = self
+                .store
+                .register_named_substitute(FontId::from_u32(base), family)?
+                .to_u32();
+            let engine = docx_layout::register_substitute_measure_font(base, family)
+                .map_err(|_| "substitute font registration failed")?;
+            if raster != engine {
+                return Err("substitute font IDs diverged".into());
+            }
+            let _ = (bold, italic);
+            Ok(engine)
+        }
+        #[cfg(all(feature = "substitute-styles", not(feature = "substitute-widths")))]
         {
             let Some(metrics) = ooxml_text::word_fonts::requested_line_metrics(family) else {
                 return Ok(base);
@@ -362,7 +376,10 @@ impl Fonts {
             }
             Ok(engine)
         }
-        #[cfg(all(feature = "substitute-metrics", not(feature = "substitute-styles")))]
+        #[cfg(all(
+            feature = "substitute-metrics",
+            not(any(feature = "substitute-styles", feature = "substitute-widths"))
+        ))]
         {
             let Some(metrics) = ooxml_text::word_fonts::requested_line_metrics(family) else {
                 return Ok(base);

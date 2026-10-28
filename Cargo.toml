@@ -30,6 +30,7 @@ docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", ver
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.5.1" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.5.1" }
+pptx-engine = { package = "betteroffice-pptx-engine", path = "crates/pptx-engine" }
 pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render", version = "0.5.1" }
 pptx-raster = { package = "betteroffice-pptx-raster", path = "crates/pptx-raster", version = "0.5.1" }
 betteroffice-pptx = { path = "crates/betteroffice-pptx", version = "0.5.1" }
@@ -46,6 +47,13 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.5.1" }
 [profile.release]
 opt-level = "s"
 lto = true
+
+[profile.fonts-decoder]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 [profile.release.package.betteroffice-docx-layout]
 opt-level = 3

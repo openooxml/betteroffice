@@ -516,6 +516,10 @@ impl Run {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_auto: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before_lines: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -601,6 +605,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justification_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_source_content: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2161,12 +2167,23 @@ pub struct Input {
 
 use crate::resolve_lines::ResolvedLine;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalFrame {
+    pub margin_left: f64,
+    pub content_width: f64,
+    pub column_x: f64,
+    pub column_width: f64,
+}
+
 /// One page's slice of a paragraph: the measured line window
 /// `[from_line, to_line)`, its own document range, and the run slices those
 /// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal_frame: Option<HorizontalFrame>,
     pub block_id: BlockId,
     pub x: f64,
     pub y: f64,

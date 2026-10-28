@@ -9,10 +9,10 @@
 //!   then forces a page.
 //! - `evenPage` / `oddPage` advance under the preceding section until reaching
 //!   the requested parity, then apply the next section's page geometry.
-//! - `continuous` keeps the current sheet and defers the new geometry to the
-//!   next natural page break — unless the page size changes, which Word and
-//!   LibreOffice promote to a page break because two page sizes cannot share
-//!   one physical sheet. Sizes are compared after rounding.
+//! - `continuous` keeps the current sheet: left/right margins and gutter apply
+//!   at once, top/bottom, header and footer wait for the next page. A page size
+//!   change is promoted to a page break, since two sizes cannot share one
+//!   sheet. Sizes are compared after rounding.
 //! - `nextColumn` advances in the current band and defers geometry until the
 //!   next page. A spent band falls through to a new page; page-size or
 //!   column-count changes are promoted because they cannot share the sheet.
@@ -114,6 +114,7 @@ pub trait SectionBreakPaginator {
         margins: Option<&PageMargins>,
         apply_immediately: bool,
     ) -> Result<(), LayoutError>;
+    fn update_horizontal_margins(&mut self, margins: &PageMargins);
     /// Forces a page break and returns the new page number.
     fn force_page_break(&mut self) -> u32;
     /// Moves to the next column, reporting whether placement now sits at the
@@ -421,6 +422,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
     paginator: &mut P,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
+    parity_restart: Option<u64>,
 ) -> Result<bool, LayoutError> {
     // ECMA-376 §17.6.22: w:type specifies how the NEXT section starts relative
     // to this one. Default is 'nextPage' when w:type is absent.
@@ -442,7 +444,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::EvenPage => {
             let page_number = paginator.force_page_break();
-            if page_number % 2 != 0 {
+            if parity_restart.unwrap_or(u64::from(page_number)) % 2 != 0 {
                 paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
@@ -451,7 +453,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::OddPage => {
             let page_number = paginator.force_page_break();
-            if page_number % 2 == 0 {
+            if parity_restart.unwrap_or(u64::from(page_number)) % 2 == 0 {
                 paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
@@ -459,12 +461,6 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
         }
 
         SectionBreakType::Continuous => {
-            // ECMA-376 §17.6.22: a `continuous` break normally keeps the current
-            // page geometry and defers the new size/margins to the next natural
-            // page break. BUT a continuous break that changes page size or
-            // orientation cannot share a physical sheet with the preceding
-            // section, so Word and LibreOffice promote it to a page break when
-            // the next section's page size differs from the current page's.
             let current_size = paginator.current_page_size();
             if page_size_differs(&current_size, &next_section_config.page_size) {
                 paginator.update_page_layout(page_size, margins, true)?;
@@ -472,6 +468,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
             } else {
                 paginator
                     .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
+                paginator.update_horizontal_margins(&next_section_config.margins);
             }
         }
 
@@ -956,6 +953,8 @@ mod tests {
             Ok(())
         }
 
+        fn update_horizontal_margins(&mut self, _margins: &PageMargins) {}
+
         fn force_page_break(&mut self) -> u32 {
             if !self.pristine {
                 self.open_page();
@@ -1047,6 +1046,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1077,6 +1077,7 @@ mod tests {
             &mut paginator,
             &config(LANDSCAPE, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 2);
@@ -1094,6 +1095,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1110,6 +1112,7 @@ mod tests {
             &mut paginator,
             &config(Size { w: 800.4, h: 999.6 }, None),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 1);
@@ -1130,6 +1133,7 @@ mod tests {
             &mut paginator,
             &config(LANDSCAPE, None),
             Some(SectionBreakType::NextPage),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1158,6 +1162,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -1176,6 +1181,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::EvenPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 4);
@@ -1187,6 +1193,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::EvenPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 2);
@@ -1201,6 +1208,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::OddPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1212,6 +1220,7 @@ mod tests {
             &mut paginator,
             &config(PORTRAIT, None),
             Some(SectionBreakType::OddPage),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
@@ -1229,6 +1238,7 @@ mod tests {
                 &mut paginator,
                 &config(PORTRAIT, None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, content);
@@ -1273,6 +1283,7 @@ mod tests {
                 &mut paginator,
                 &config(PORTRAIT, None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, landed);
@@ -1300,6 +1311,7 @@ mod tests {
                 }),
             ),
             Some(SectionBreakType::Continuous),
+            None,
         )
         .unwrap();
         assert_eq!(paginator.page_number, 1);
@@ -1331,6 +1343,7 @@ mod tests {
             paginator,
             &next,
             Some(SectionBreakType::NextColumn),
+            None,
         )
         .unwrap()
     }
@@ -1473,6 +1486,7 @@ mod tests {
                 &mut paginator,
                 &config(size.clone(), None),
                 Some(break_type),
+                None,
             )
             .unwrap();
             assert_eq!(paginator.page_number, 1);
@@ -1730,6 +1744,40 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn continuous_column_bands_apply_side_margins_on_the_start_page() {
+        let input = json!({
+            "measured": [
+                measured_paragraph_with_line_height(0, 1, 100.0),
+                {"block":{"kind":"sectionBreak","id":1},"measure":{"kind":"sectionBreak"}},
+                measured_paragraph_with_line_height(2, 1, 100.0),
+            ],
+            "options": {
+                "pageSize":{"w":800,"h":1000},
+                "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                "bodyBreakType":"continuous","columns":{"count":2,"gap":20},
+                "finalMargins":{"top":150,"right":50,"bottom":200,"left":50},
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            placements(&layout),
+            vec![(1, 100.0, 100.0), (1, 50.0, 200.0)]
+        );
+        let paragraph = layout.pages[0]
+            .fragments
+            .iter()
+            .rev()
+            .find_map(|fragment| match fragment {
+                crate::types::Fragment::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(paragraph.width, 700.0);
+        assert_eq!(layout.pages[0].margins.bottom, 100.0);
     }
 
     #[test]

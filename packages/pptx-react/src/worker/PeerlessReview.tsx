@@ -61,7 +61,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
   run: PeerlessPresentation; diffHost: RefObject<HTMLElement | null>; state: PeerlessReviewState; proposals: Proposal[]; commands: PptxCommandStore;
   onError(error: Error): void; exit(): void;
 }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Proposal | null>(null);
   const accepting = useRef(false);
@@ -160,7 +160,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
         <Suspense fallback={null}>
           {(state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id ? reviewed : proposal).changes.map((change, index) => <div key={index} style={styles.change}>
             <span style={location}>{target(change)}</span>
-            <ProposalChangeDetails change={change} t={t} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
+            <ProposalChangeDetails change={change} t={t} lang={lang} testId={change.shapeId === null ? 'pptx-proposal-notes-diff' : undefined} />
           </div>)}
           {proposal.staleTargets.length > 0 && state.diff && state.selectedId === proposal.id && reviewed?.id === proposal.id && <>
             <p style={styles.warning}>{t('proposals.stalePreview')}</p>

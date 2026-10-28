@@ -290,7 +290,12 @@ export function WatermarkDialog({
           {mode === 'picture' && (
             <div style={SUBFORM}>
               <div style={ROW}>
-                <input type="file" accept="image/*" onChange={handlePickFile} />
+                <input
+                  type="file"
+                  accept="image/*"
+                  aria-label={t('dialogs.watermark.selectPicture')}
+                  onChange={handlePickFile}
+                />
               </div>
               {pictureUrl && (
                 <div style={ROW}>
