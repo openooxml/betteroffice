@@ -3473,11 +3473,10 @@ fn spliced_part(
                     pending = 0;
                     anchor = Some(ordinal);
                 }
-                None
-                    if was.has_blocks()
-                        && !was.inline
-                        && !source.seeded.contains_key(key)
-                        && was.blocks == is.blocks =>
+                None if was.has_blocks()
+                    && !was.inline
+                    && !source.seeded.contains_key(key)
+                    && was.blocks == is.blocks =>
                 {
                     let ordinal = last_block_paragraph(was, &before, source, index)?;
                     if !synthetic(key) || is.inline {
@@ -3670,12 +3669,17 @@ mod tests {
             let doc = EditingDoc::new(41);
             crate::seed_from_docx(&doc, &bytes).unwrap();
             let target = doc.paragraphs("body").unwrap()[1].para_id.clone();
-            assert!(doc.paragraph_identities().paragraphs.iter().any(|identity| {
-                matches!(
-                    &identity.paragraph,
-                    ParagraphRef::Session { para_id, .. } if para_id == &target
-                ) && identity.origin == ParagraphOrigin::Synthetic
-            }));
+            assert!(
+                doc.paragraph_identities()
+                    .paragraphs
+                    .iter()
+                    .any(|identity| {
+                        matches!(
+                            &identity.paragraph,
+                            ParagraphRef::Session { para_id, .. } if para_id == &target
+                        ) && identity.origin == ParagraphOrigin::Synthetic
+                    })
+            );
             doc.apply_edits(
                 &EditRequest {
                     expect_version: doc.version(),

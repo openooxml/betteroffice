@@ -1402,7 +1402,14 @@ fn splice_story_part_inner(
         }
     }
     let structural = rows.inserted.union(&tables.inserted).copied().collect();
-    let offsets = insertion_offsets(&source, serialized, recorded, &inserted, &structural)?;
+    let offsets = insertion_offsets(
+        &source,
+        serialized,
+        recorded,
+        &inserted,
+        &structural,
+        Some(&layout),
+    )?;
     for (at, (anchor, xml)) in inserted.iter().enumerate() {
         if rows.inserted.contains(&at) || tables.inserted.contains(&at) {
             continue;
@@ -1483,6 +1490,7 @@ fn insertion_offsets(
     recorded: &RecordedParagraphs,
     inserted: &[(S13SpliceAnchor, &str)],
     structural: &BTreeSet<usize>,
+    source_layout: Option<&Layout<'_>>,
 ) -> Option<Vec<Option<usize>>> {
     if inserted.is_empty() {
         return Some(Vec::new());
@@ -1528,15 +1536,22 @@ fn insertion_offsets(
                 }
             }
             let source_parent = source.elements[original].2?;
-            if source.elements[source_parent].0 != target.elements[parent].0 {
-                return None;
-            }
             let span = &source.elements[original].1;
             let after = matches!(anchor, S13SpliceAnchor::After(_));
             let target_span = &target.elements[projected].1;
             let paragraph_span = &target.elements[paragraph].1;
             if (after && target_span.end > paragraph_span.start)
                 || (!after && target_span.start < paragraph_span.end)
+            {
+                return None;
+            }
+            if source.elements[source_parent].0 != target.elements[parent].0
+                && !(original == original_paragraph
+                    && source.elements[source_parent].0 == "w:tc"
+                    && target.elements[parent].0 == "w:body"
+                    && source_layout
+                        .and_then(|layout| layout.edges.get(&anchor.ordinal()))
+                        .is_some_and(|edges| edges.admit(*anchor)))
             {
                 return None;
             }
@@ -1858,7 +1873,14 @@ pub(crate) fn splice_source_direct(
     for &ordinal in &removed {
         edits.push((span(ordinal)?, 2, String::new()));
     }
-    let offsets = insertion_offsets(&source, serialized, recorded, &inserted, &BTreeSet::new())?;
+    let offsets = insertion_offsets(
+        &source,
+        serialized,
+        recorded,
+        &inserted,
+        &BTreeSet::new(),
+        None,
+    )?;
     for ((anchor, xml), at) in inserted.iter().zip(offsets) {
         let at = at?;
         let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
@@ -2207,6 +2229,69 @@ mod tests {
             ),
             Some(serialized)
         );
+    }
+
+    #[test]
+    fn cell_insertions_follow_the_serialized_cell_or_table_edge() {
+        let cell = "<w:p><w:r><w:t>Cell</w:t></w:r></w:p>";
+        let table = format!(
+            "<w:tbl><w:tr><w:tc><w:tcPr><w:tcW w:w=\"10\" w:type=\"dxa\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>"
+        );
+        let source = body(&format!("{table}{RETAINED}"));
+        for anchor in [S13SpliceAnchor::Before(0), S13SpliceAnchor::After(0)] {
+            let after = matches!(anchor, S13SpliceAnchor::After(_));
+            let recorded = RecordedParagraphs {
+                written: HashMap::from([(0, cell.to_owned()), (1, RETAINED.to_owned())]),
+                inserted: vec![INSERTED.to_owned()],
+                order: if after {
+                    vec![Some(0), None, Some(1)]
+                } else {
+                    vec![None, Some(0), Some(1)]
+                },
+                ..RecordedParagraphs::default()
+            };
+            let part = S13SplicedPart {
+                part: "word/document.xml".to_owned(),
+                sha256: String::new(),
+                paragraphs: vec![0, 1],
+                changed: Vec::new(),
+                inserted: vec![anchor],
+                removed: Vec::new(),
+                paragraph_patches: Vec::new(),
+                legacy_paragraphs: Vec::new(),
+                table_patches: Vec::new(),
+            };
+            for edge in [cell, table.as_str()] {
+                let added = if after {
+                    format!("{edge}{INSERTED}")
+                } else {
+                    format!("{INSERTED}{edge}")
+                };
+                let serialized = source.replace(edge, &added);
+                assert_eq!(
+                    splice_story_part(
+                        &source,
+                        &serialized,
+                        &recorded,
+                        &part,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        &mut Vec::new(),
+                    ),
+                    Some(serialized.clone())
+                );
+                assert_eq!(
+                    direct_insert(&source, &serialized, &[(0, cell), (1, RETAINED)], anchor),
+                    Some(serialized)
+                );
+            }
+            let flat = if after {
+                body(&format!("{cell}{INSERTED}{RETAINED}"))
+            } else {
+                body(&format!("{INSERTED}{cell}{RETAINED}"))
+            };
+            assert!(direct_insert(&source, &flat, &[(0, cell), (1, RETAINED)], anchor).is_none());
+        }
     }
 
     #[test]
