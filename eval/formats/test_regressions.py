@@ -560,7 +560,10 @@ class OfficeEquivalentTests(unittest.TestCase):
         boxed = ('<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>'
                  '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>'
                  + text_run('Body text.') + '</w:p>')
+        hyphen = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:noBreakHyphen/></w:r>' + text_run('plain rest.') + '</w:p>'
         for name, template, inserted, accepted in (
+                ('italic like an opening non-breaking hyphen', hyphen, italic, True),
+                ('plain after an italic opening non-breaking hyphen', hyphen, plain, False),
                 ('plain like the body text after a text box', boxed, plain, True),
                 ('italic like the text box inside the paragraph', boxed, italic, False),
                 ('italic like an opening hyperlink run', link, italic, True),

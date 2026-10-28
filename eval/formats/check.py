@@ -1254,10 +1254,11 @@ def accept_revisions(root):
 
 def opening_run_props(paragraph, prefix):
     runs = {q(prefix, 'r'), q(prefix, 'fld')} if prefix == 'a' else {w('r')}
+    characters = {w(name) for name in ('tab', 'ptab', 'sym', 'noBreakHyphen', 'softHyphen', 'br', 'cr')}
     def visible(node):
         for child in node:
             if child.tag in runs:
-                if any(text.text for text in child.findall(f'{prefix}:t', NS)):
+                if any(part.text if part.tag == q(prefix, 't') else part.tag in characters for part in child):
                     return child
             elif child.tag != q(prefix, 'p') and (found := visible(child)) is not None:
                 return found
