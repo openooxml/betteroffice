@@ -143,10 +143,17 @@ async function containsText(frame: FrameLocator, format: Format, marker: string)
   }
 }
 
-async function sendSave(page: Page): Promise<void> {
+async function sendSave(page: Page, format: Format): Promise<void> {
+  const before = await (await page.request.get(`/debug/puts?format=${format}`)).json() as unknown[];
   await page.evaluate(() => {
     (window as unknown as { __sendToFrames: (id: string) => void }).__sendToFrames("Action_Save");
   });
+  await expect.poll(async () => {
+    const puts = await (await page.request.get(`/debug/puts?format=${format}`)).json() as Array<{ autosave: string | null }>;
+    const saved = puts.slice(before.length);
+    expect(saved.every((put) => put.autosave === "false")).toBe(true);
+    return saved.length;
+  }, { timeout: 10_000 }).toBeGreaterThan(0);
 }
 
 async function savedText(page: Page, format: Format): Promise<string> {
@@ -172,12 +179,12 @@ for (const format of FORMATS) {
 
       if (format === "pptx") {
         await edit(frameA, page, format, markerA);
-        await sendSave(page);
-        await expect.poll(async () => savedText(page, format), { timeout: 60_000 }).toContain(markerA);
+        await sendSave(page, format);
+        await expect.poll(async () => savedText(page, format), { timeout: 10_000 }).toContain(markerA);
         await edit(frameB, page, format, markerB, 1);
-        await sendSave(page);
-        await expect.poll(async () => savedText(page, format), { timeout: 60_000 }).toContain(markerB);
-        await expect.poll(async () => savedText(page, format), { timeout: 60_000 }).toContain(markerA);
+        await sendSave(page, format);
+        await expect.poll(async () => savedText(page, format), { timeout: 10_000 }).toContain(markerB);
+        await expect.poll(async () => savedText(page, format), { timeout: 10_000 }).toContain(markerA);
         return;
       }
 
@@ -187,10 +194,10 @@ for (const format of FORMATS) {
       await edit(frameB, page, format, markerB, 1);
       await containsText(frameA, format, markerB);
 
-      await sendSave(page);
+      await sendSave(page, format);
 
-      await expect.poll(async () => savedText(page, format), { timeout: 60_000 }).toContain(markerA);
-      await expect.poll(async () => savedText(page, format), { timeout: 60_000 }).toContain(markerB);
+      await expect.poll(async () => savedText(page, format), { timeout: 10_000 }).toContain(markerA);
+      await expect.poll(async () => savedText(page, format), { timeout: 10_000 }).toContain(markerB);
     } catch (error) {
       await dumpDiagnostics(page, diagnostics, info);
       throw error;

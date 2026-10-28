@@ -115,7 +115,9 @@ export async function prepareFile(
 }
 
 export interface EditorApi {
-  flushPendingInput?(): Promise<void>;
+  flushPendingInput(): Promise<void>;
+  whenReady(): Promise<void>;
+  encodeStateVector(): Promise<Uint8Array>;
   serialize(): Promise<Uint8Array>;
   focus(): void;
   print(): void;
@@ -205,10 +207,10 @@ export default function Editor({
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
   >(null);
+  const replicas = useRef({ replica, presentationReplica });
+  replicas.current = { replica, presentationReplica };
   const [painted, setPainted] = useState(false);
-  const firstPainted = useCallback(() => {
-    if (!legacyDocx()) setPainted(true);
-  }, []);
+  const firstPainted = useCallback(() => setPainted(true), []);
   const presentationPresence = provider instanceof PptxProvider ? provider : undefined;
   const presentationCollaboration = useMemo(() => room ? {
     roomId: room.id,
@@ -309,18 +311,19 @@ export default function Editor({
   };
 
   useEffect(() => {
-    if (file.format === "docx" && !legacyDocx() && !painted) return;
+    if (file.format === "docx" && !painted) return;
     let active = true;
     const disposed = new Error(
       file.format === "xlsx" ? WORKBOOK_DISPOSED : PRESENTATION_DISPOSED
     );
+    let waiting: Promise<void> | null = null;
     const whenReady = async <Api,>(ref: { current: Api | null }): Promise<Api> => {
       if (!active) throw disposed;
       let api = ref.current;
       if (!api) {
         if (apiFailure.current) throw apiFailure.current;
         let timeout: ReturnType<typeof setTimeout> | undefined;
-        await new Promise<void>((resolve, reject) => {
+        if (!waiting) waiting = new Promise<void>((resolve, reject) => {
           const waiter = { resolve, reject };
           apiWaiter.current = waiter;
           timeout = setTimeout(() => {
@@ -329,19 +332,40 @@ export default function Editor({
               "The editor is still opening the file. Try again in a moment."
             ));
           }, EDITOR_READY_TIMEOUT_MS);
-        }).finally(() => clearTimeout(timeout));
+        }).finally(() => {
+          clearTimeout(timeout);
+          waiting = null;
+        });
+        await waiting;
         api = ref.current;
       }
       if (!active || !api || ref.current !== api) throw disposed;
       return api;
     };
     callbacks.current.onReady({
-      ...(file.format === "docx" ? {
-        async flushPendingInput() {
+      async flushPendingInput() {
+        if (file.format === "docx") {
           if (!active || !docx.current) throw new Error("The document editor was disposed.");
           await docx.current.flushPendingInput();
-        },
-      } : {}),
+        } else if (file.format === "xlsx") {
+          await (await whenReady(xlsx)).version();
+        } else {
+          await (await whenReady(pptx)).flushPendingInput();
+        }
+      },
+      async whenReady() {
+        if (file.format === "xlsx") await (await whenReady(xlsx)).whenHydrated();
+        else if (file.format === "pptx") await (await whenReady(pptx)).whenHydrated();
+        if (!active) throw disposed;
+      },
+      async encodeStateVector() {
+        if (!active) throw disposed;
+        const current = file.format === "xlsx"
+          ? (await whenReady(xlsx)).collaboration
+          : file.format === "pptx" ? replicas.current.presentationReplica : replicas.current.replica;
+        if (!current) throw new Error("The collaboration replica is not ready.");
+        return await current.encodeStateVector();
+      },
       print() {
         if (file.format === "docx") docx.current?.print();
         else window.print();

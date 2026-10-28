@@ -22,8 +22,13 @@ interface DocxProps {
   onDocumentChange?: () => void;
 }
 let docxProps: DocxProps;
+let deferDocxPaint = false;
 const parseDocx = mock(async () => ({}));
 const flushDocxInput = mock(async () => {});
+const flushWorkbookInput = mock(async () => "version");
+const flushPresentationInput = mock(async () => {});
+let hydrateWorkbook = async () => {};
+let hydratePresentation = async () => {};
 let save: (props: DocxProps) => Promise<ArrayBuffer | null> = async () =>
   null;
 const workerOpens: Uint8Array[] = [];
@@ -50,6 +55,9 @@ mock.module("@betteroffice/xlsx-react", () => ({
       readyWorkbook = () => {
         dispose = props.onReady?.({
           focus() {},
+          whenHydrated: () => hydrateWorkbook(),
+          version: flushWorkbookInput,
+          collaboration: { encodeStateVector: async () => Uint8Array.of(8) },
           commands: { execute: () => workbookSave(workbookProps) },
         } as unknown as XlsxAsyncEditorApi);
         disposeWorkbookApi = typeof dispose === "function" ? dispose : undefined;
@@ -85,7 +93,7 @@ mock.module("@betteroffice/pptx-react", () => ({
     useEffect(() => {
       let dispose: void | (() => void);
       readyPresentation = () => {
-        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {} } as PptxAsyncEditorApi);
+        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {}, flushPendingInput: flushPresentationInput, whenHydrated: () => hydratePresentation() } as PptxAsyncEditorApi);
         disposePresentation = typeof dispose === "function" ? dispose : undefined;
       };
       if (!deferPresentationReady) readyPresentation();
@@ -110,7 +118,8 @@ mock.module("@betteroffice/docx-react", () => ({
     docxProps = props;
     useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
     useEffect(() => {
-      if (props.legacySyncApi) return;
+      if (deferDocxPaint) return;
+      if (props.legacySyncApi) { props.onFirstPagePainted(); return; }
       const client = new ResidentEngineWorkerClient();
       let current = true;
       void client.openSource({ bytes: props.documentBuffer }).then(() => {
@@ -154,6 +163,9 @@ const { default: Editor, prepareFile } = await import("./Editor");
 
 afterEach(() => {
   cleanup();
+  deferDocxPaint = false;
+  hydrateWorkbook = async () => {};
+  hydratePresentation = async () => {};
   deferWorkbookReady = false;
   readyWorkbook = undefined;
   disposeWorkbookApi = undefined;
@@ -233,9 +245,39 @@ test("docx input flush reaches the mounted editor barrier", async () => {
   expect(flushDocxInput).toHaveBeenCalledTimes(1);
 });
 
-test.each(["xlsx", "pptx"] as const)("%s does not provide an input flush barrier", async (format) => {
+test.each(["xlsx", "pptx"] as const)("%s commits pending input through its public API", async (format) => {
+  const flush = format === "xlsx" ? flushWorkbookInput : flushPresentationInput;
+  flush.mockClear();
   const { api } = await mount(format);
-  expect(api.flushPendingInput).toBeUndefined();
+  await api.flushPendingInput();
+  expect(flush).toHaveBeenCalledTimes(1);
+});
+
+test.each(["xlsx", "pptx"] as const)("%s readiness waits for opening and hydration", async (format) => {
+  let hydrate!: () => void;
+  const pending = new Promise<void>((resolve) => { hydrate = resolve; });
+  if (format === "xlsx") { deferWorkbookReady = true; hydrateWorkbook = () => pending; }
+  else { deferPresentationReady = true; hydratePresentation = () => pending; }
+  const { api } = await mount(format);
+  let ready = false;
+  const waiting = api.whenReady().then(() => { ready = true; });
+  await act(async () => {});
+  expect(ready).toBe(false);
+  await act(async () => { if (format === "xlsx") readyWorkbook!(); else readyPresentation!(); });
+  expect(ready).toBe(false);
+  hydrate();
+  await waiting;
+  expect(ready).toBe(true);
+});
+
+test("xlsx state vector uses the asynchronous collaboration API", async () => {
+  const { api } = await mount("xlsx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(8));
+});
+
+test("pptx state vector comes from the live replica", async () => {
+  const { api } = await mount("pptx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(1));
 });
 
 test.each(["", "&peerless=1", "&peerless=0"])("docx %s reports dirty state through document events", async (query) => {
@@ -666,5 +708,25 @@ test.each([1, 4])("pptx preparation tolerates %i failed font faces", async (fail
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else Reflect.deleteProperty(globalThis, key);
     }
+  }
+});
+
+test.each(["", "&peerless=0"])("docx %s waits for its first painted page", async (query) => {
+  const browser = window as unknown as GlobalWindow;
+  const previous = location.href;
+  browser.happyDOM.setURL(`http://localhost/?format=docx${query}`);
+  deferDocxPaint = true;
+  try {
+    const ready: Array<EditorApi | null> = [];
+    await act(async () => {
+      render(<Editor file={{ bytes: Uint8Array.of(1), format: "docx" }} name="file.docx" room={null}
+        onSave={() => {}} onChange={() => {}} onError={() => {}} onReady={(api) => { ready.push(api); }}
+        onOpen={async () => {}} onStatus={() => {}} />);
+    });
+    expect(ready).toEqual([]);
+    await act(async () => { docxProps.onFirstPagePainted(); });
+    expect(ready.filter(Boolean)).toHaveLength(1);
+  } finally {
+    browser.happyDOM.setURL(previous);
   }
 });

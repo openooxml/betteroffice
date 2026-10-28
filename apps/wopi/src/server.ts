@@ -14,7 +14,7 @@ import { extname, resolve, sep } from "node:path";
 import { CollabRelay, findByHandle } from "./relay/relay";
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
-import { encodeJoinPayload, sourceContentType } from "./sessionApi";
+import { decodeSaveStateVector, encodeJoinPayload, requestOrderedSave, SaveSyncError, sourceContentType } from "./sessionApi";
 
 export interface WopiServerDeps {
   config: WopiConfig;
@@ -26,6 +26,8 @@ export interface WopiServerDeps {
   relay?: CollabRelay;
   webRoot?: string;
   fontRoots?: string[];
+  autosave?: boolean;
+  saveSyncTimeoutMs?: number;
 }
 
 const STATIC_CONTENT_TYPES: Record<string, string> = {
@@ -193,7 +195,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
           signer: createProofSigner(deps.currentKey, deps.oldKey),
           maxFileBytes: deps.config.maxFileBytes,
         });
-      registry = new SessionRegistry({ config: deps.config, hostClient });
+      registry = new SessionRegistry({ config: deps.config, hostClient, autosave: deps.autosave });
     }
     if (!relay) relay = new CollabRelay(registry);
     return { registry, relay };
@@ -261,6 +263,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       viewOnlyReason: joined.viewOnlyReason ?? session.viewOnlyReason ?? null,
       postMessageOrigin: joined.user.postMessageOrigin,
       closeUrl: joined.user.closeUrl,
+      closePostMessage: joined.user.closePostMessage,
       locale: url.searchParams.get("ui"),
       userFriendlyName: joined.user.friendlyName,
       tokenExpiresAt: joined.user.expiresAt,
@@ -340,10 +343,12 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
       try {
-        const result = await session.requestSave(user.id);
+        const stateVector = decodeSaveStateVector(body);
+        const result = await requestOrderedSave(session, user.id, stateVector, { timeoutMs: deps.saveSyncTimeoutMs, signal: request.signal });
         if (!result.saved && session.dirty) return typedError("saveFailed", 502);
         return json({ itemVersion: result.itemVersion }, 200, { "Cache-Control": "no-store" });
       } catch (err) {
+        if (err instanceof SaveSyncError) return typedError(err.kind, err.kind === "notSynced" ? 409 : 400);
         if (err instanceof SessionError) {
           return typedError(err.kind, err.kind === "closed" ? 409 : err.kind === "unknownUser" ? 401 : 502);
         }

@@ -5,7 +5,8 @@ import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import Editor, { prepareFile, type EditorApi, type EditorView, type PreparedFile } from "../../../../shared/editor-host/Editor";
 import { SessionApi, type JoinResponse } from "./api";
 import { displayUserName, randomClientId, readWopiConfig, showCloseButton, type WopiPageConfig } from "./config";
-import { PostMessageBridge, type WopiView } from "./postMessage";
+import { PostMessageBridge, type SaveOptions, type WopiView } from "./postMessage";
+import { closeDocument, finishClose, saveDocument } from "./documentActions";
 import { createWopiTransport } from "./transport";
 import "./styles.css";
 
@@ -25,7 +26,7 @@ interface Loaded {
   join: JoinResponse;
   clientId: number;
   actions: {
-    save?: () => Promise<boolean>;
+    save?: (options?: SaveOptions) => Promise<void>;
     close?: () => Promise<void>;
     grabFocus?: () => void;
     views: WopiView[];
@@ -48,36 +49,72 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
   const [banner, setBanner] = useState<string | null>(
     config.viewOnlyReason === "lockedElsewhere" ? "This file is being edited elsewhere. You are viewing a live read-only copy." : null,
   );
+  const [closed, setClosed] = useState(false);
   const [readOnly, setReadOnly] = useState(!config.canWrite);
   const editorApi = useRef<EditorApi | null>(null);
+  const editorContainer = useRef<HTMLElement | null>(null);
   const loadedSent = useRef(false);
   const modified = useRef(false);
+  const changeVersion = useRef(0);
+  const closing = useRef<Promise<void> | null>(null);
+  const mounted = useRef(true);
   const userName = displayUserName(config.userFriendlyName);
   const room = useMemo(() => ({ id: "wopi", name: userName }), [userName]);
   const views = useRef<WopiView[]>([{ ViewId: loaded.clientId, UserName: userName }]);
 
-  const requestSave = useCallback(async (): Promise<boolean> => {
+  const requestSave = useCallback(async (options: SaveOptions = {}): Promise<void> => {
     setSaveState("saving");
     try {
-      await editorApi.current?.flushPendingInput?.();
-      await api.save();
+      const editor = editorApi.current;
+      if (!editor) throw new Error("editorNotReady");
+      if (!options.DontTerminateEdit) await editor.flushPendingInput();
+      const version = changeVersion.current;
+      await saveDocument(editor, api, { ...options, DontTerminateEdit: true, isModified: () => modified.current });
       setSaveState("saved");
-      if (modified.current) {
+      if (modified.current && changeVersion.current === version) {
         modified.current = false;
         bridge.modified(false);
       }
-      return false;
-    } catch {
+    } catch (error) {
       setSaveState("failed");
-      return false;
+      throw error;
     }
   }, [api, bridge]);
 
-  const close = useCallback(async (): Promise<void> => {
-    await api.close();
-    if (bridge.enabled) bridge.uiClose();
-    else if (config.closeUrl !== "") window.location.href = config.closeUrl;
-  }, [api, bridge, config.closeUrl]);
+  const onSaveRequest = useCallback(async (): Promise<boolean> => {
+    await requestSave();
+    return false;
+  }, [requestSave]);
+
+  const close = useCallback((): Promise<void> => {
+    if (closing.current) return closing.current;
+    const attempt = async () => {
+      const editor = editorApi.current;
+      if (!editor) throw new Error("editorNotReady");
+      if (editorContainer.current) editorContainer.current.inert = true;
+      await closeDocument(editor, {
+        save: async () => {
+          do { await requestSave({ DontTerminateEdit: true }); } while (modified.current);
+        },
+        close: () => api.close(),
+      }, () => modified.current, () => {
+        setClosed(true);
+        finishClose(config, bridge, window, () => setClosed(true));
+      });
+    };
+    const pending = attempt().catch((error: unknown) => {
+      if (editorContainer.current) editorContainer.current.inert = false;
+      setSaveState("failed");
+      setBanner(error instanceof Error ? error.message : "Could not close the document.");
+    }).finally(() => { closing.current = null; });
+    closing.current = pending;
+    return pending;
+  }, [api, bridge, config, requestSave]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     loaded.actions.save = requestSave;
@@ -87,20 +124,18 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
   }, [loaded, requestSave, close]);
 
   useEffect(() => {
+    if (closed) return;
     wopiDebug({ editorMounted: true, bridgeStarted: true, bridgeOrigin: config.postMessageOrigin, bridgeEnabled: bridge.enabled });
     bridge.start();
     return () => bridge.dispose();
-  }, [bridge, config.postMessageOrigin]);
+  }, [bridge, config.postMessageOrigin, closed]);
 
   useEffect(() => {
+    if (closed) return;
     const controller = new AbortController();
     void api.events(controller.signal, (event) => {
       if (event.type === "saved") {
         setSaveState("saved");
-        if (modified.current) {
-          modified.current = false;
-          bridge.modified(false);
-        }
       } else if (event.type === "saveFailed") {
         setSaveState("failed");
       } else if (event.type === "conflict") {
@@ -116,7 +151,7 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
       }
     }).catch(() => undefined);
     return () => controller.abort();
-  }, [api, bridge]);
+  }, [api, bridge, closed]);
 
   useEffect(() => {
     if (config.tokenExpiresAt === null) return;
@@ -158,6 +193,8 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
     [bridge, userName, loaded],
   );
 
+  if (closed) return <div className="wopi-shell" role="status">Document closed.</div>;
+
   return (
     <div className="wopi-shell">
       <header className="wopi-bar">
@@ -173,7 +210,7 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
       </header>
       {banner ? <div className="wopi-banner" role="alert">{banner}</div> : null}
       {conflictName ? <div className="wopi-banner" role="alert">Saved as a conflict copy: {conflictName}</div> : null}
-      <main className="wopi-editor">
+      <main className="wopi-editor" ref={editorContainer}>
         <Editor
           file={loaded.file}
           name={config.fileName}
@@ -183,21 +220,32 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
           collaborationClientId={loaded.clientId}
           readOnly={readOnly}
           downloadOnSave={false}
-          onSaveRequest={requestSave}
+          onSaveRequest={onSaveRequest}
           onSave={() => undefined}
           onChange={() => {
+            changeVersion.current += 1;
             if (!modified.current) {
               modified.current = true;
               bridge.modified(true);
             }
           }}
-          onError={(error) => setBanner(error.message)}
+          onError={(error) => {
+            if (!loadedSent.current) bridge.bootFailed();
+            setBanner(error.message);
+          }}
           onReady={(ready) => {
             wopiDebug({ onReadyCalled: true, onReadyHasApi: ready !== null });
             editorApi.current = ready;
             if (ready && !loadedSent.current) {
-              loadedSent.current = true;
-              bridge.documentLoaded();
+              void ready.whenReady().then(() => {
+                if (!mounted.current || editorApi.current !== ready || loadedSent.current) return;
+                loadedSent.current = true;
+                bridge.documentLoaded();
+              }).catch((error: unknown) => {
+                if (!mounted.current || editorApi.current !== ready) return;
+                bridge.bootFailed();
+                setBanner(error instanceof Error ? error.message : "Could not open the document.");
+              });
             }
           }}
           onOpen={async () => undefined}
@@ -216,8 +264,9 @@ async function boot(): Promise<void> {
   const api = new SessionApi(config.sessionHandle);
   const actions: Loaded["actions"] = { views: [{ ViewId: 0, UserName: displayUserName(config.userFriendlyName) }] };
   const bridge = new PostMessageBridge(window, config.postMessageOrigin, {
-    onSave: () => {
-      void actions.save?.();
+    onSave: (options) => {
+      if (!actions.save) return Promise.reject(new Error("editorNotReady"));
+      return actions.save(options);
     },
     onClose: () => {
       void actions.close?.();
@@ -235,17 +284,16 @@ async function boot(): Promise<void> {
   bridge.frameReady();
   wopiDebug({ frameReadySent: true });
 
-  configureDefaultFonts({ load: () => import("@betteroffice/fonts"), baseUrl: "/fonts/" });
-
-  let rootElement = document.getElementById("root");
-  if (!rootElement) {
-    rootElement = document.createElement("div");
-    rootElement.id = "root";
-    document.body.appendChild(rootElement);
-  }
-  const root = createRoot(rootElement);
-
+  let root: ReturnType<typeof createRoot> | null = null;
   try {
+    configureDefaultFonts({ load: () => import("@betteroffice/fonts"), baseUrl: "/fonts/" });
+    let rootElement = document.getElementById("root");
+    if (!rootElement) {
+      rootElement = document.createElement("div");
+      rootElement.id = "root";
+      document.body.appendChild(rootElement);
+    }
+    root = createRoot(rootElement);
     const source = await api.source();
     wopiDebug({ step: "source", sourceBytes: source.byteLength });
     const join = await api.join();
@@ -261,7 +309,8 @@ async function boot(): Promise<void> {
     const message = error instanceof Error ? error.message : "Could not open the document.";
     wopiDebug({ step: "bootError", bootError: message });
     bridge.bootFailed();
-    root.render(<div className="wopi-error" role="alert">{message}</div>);
+    if (root) root.render(<div className="wopi-error" role="alert">{message}</div>);
+    else document.body.textContent = message;
   }
 }
 

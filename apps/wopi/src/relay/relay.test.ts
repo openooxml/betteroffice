@@ -339,6 +339,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleA}` },
+      body: JSON.stringify({ stateVector: Buffer.from(a.client.encodeStateVector()).toString("base64") }),
     });
     expect(save.status).toBe(200);
     await save.text();
@@ -371,6 +372,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleP}` },
+      body: JSON.stringify({ stateVector: Buffer.from(peer.client.encodeStateVector()).toString("base64") }),
     });
     expect(save.status).toBe(200);
     await save.text();

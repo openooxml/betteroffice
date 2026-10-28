@@ -29,7 +29,7 @@ const config = {
   hosts: [{ id: "e2e", wopiSrcOrigins: [origin], frameOrigins: [origin] }],
 };
 
-const wopi = createHandler({ config, currentKey: generateKeyPair() });
+const wopi = createHandler({ config, currentKey: generateKeyPair(), autosave: false });
 
 function hostPage(format: string): string {
   const src = `${origin}/wopi-host/files/file-${format}`;
@@ -64,6 +64,8 @@ for (const form of document.querySelectorAll("form")) form.submit();
 </body></html>`;
 }
 
+const puts: Array<{ format: string; autosave: string | null }> = [];
+
 const server = Bun.serve({
   port,
   idleTimeout: 120,
@@ -73,6 +75,10 @@ const server = Bun.serve({
       const format = url.searchParams.get("format") ?? "docx";
       return new Response(hostPage(format), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
+    if (url.pathname === "/debug/puts") {
+      const format = url.searchParams.get("format");
+      return Response.json(puts.filter((put) => put.format === format));
+    }
     if (url.pathname === "/debug/file") {
       const format = url.searchParams.get("format") ?? "docx";
       const file = host.files.get(`file-${format}`);
@@ -81,7 +87,11 @@ const server = Bun.serve({
     }
     if (url.pathname.startsWith("/wopi-host/")) {
       const rewritten = new Request(request.url.replace("/wopi-host/", "/"), request);
-      return host.fetch(rewritten);
+      const response = await host.fetch(rewritten);
+      if (request.headers.get("X-WOPI-Override") === "PUT" && response.ok) {
+        puts.push({ format: url.pathname.split("/").at(-2)!.replace("file-", ""), autosave: request.headers.get("X-COOL-WOPI-IsAutosave") });
+      }
+      return response;
     }
     return wopi(request, srv as never);
   },

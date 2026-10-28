@@ -67,3 +67,25 @@ describe("SessionApi events", () => {
     expect(calls).toBe(1);
   });
 });
+
+test("save posts the client state vector as base64 JSON", async () => {
+  let request: RequestInit | undefined;
+  const api = new SessionApi("handle-1", (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    request = init;
+    return Response.json({ itemVersion: "2" });
+  }) as unknown as typeof fetch);
+  expect(await api.save(Uint8Array.of(1, 2, 255))).toEqual({ itemVersion: "2" });
+  expect(request?.method).toBe("POST");
+  expect(new Headers(request?.headers).get("Content-Type")).toBe("application/json");
+  expect(JSON.parse(String(request?.body))).toEqual({ stateVector: "AQL/" });
+});
+
+test("save exposes a short typed synchronization failure", async () => {
+  const api = new SessionApi("handle-1", (async () => Response.json({ error: { kind: "notSynced" } }, { status: 409 })) as unknown as typeof fetch);
+  await expect(api.save(Uint8Array.of(0))).rejects.toThrow("notSynced");
+});
+
+test("close rejects unsuccessful responses", async () => {
+  const api = new SessionApi("handle-1", (async () => new Response(null, { status: 502 })) as unknown as typeof fetch);
+  await expect(api.close()).rejects.toThrow("Close failed");
+});

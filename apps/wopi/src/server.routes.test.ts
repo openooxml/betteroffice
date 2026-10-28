@@ -28,13 +28,13 @@ interface Setup {
   headersSeen: string[];
 }
 
-function setup(options: { fileName?: string; quirks?: { timestampConflict?: boolean } } = {}): Setup {
+function setup(options: { fileName?: string; saveSyncTimeoutMs?: number; quirks?: { timestampConflict?: boolean } } = {}): Setup {
   const h = makeHarness({ fileName: options.fileName, quirks: options.quirks });
   if (options.fileName) h.host.setFile("file1", sourceBytes("xlsx"), { name: options.fileName });
   addToken(h, TOKEN, "user-a", { name: "Alice A" });
   addToken(h, TOKEN_B, "user-b", { name: "Bob B", canWrite: true });
   const server = startServer(
-    { config: h.config, currentKey: generateKeyPair(), registry: h.registry },
+    { config: h.config, currentKey: generateKeyPair(), registry: h.registry, saveSyncTimeoutMs: options.saveSyncTimeoutMs },
     0,
   );
   servers.push(server);
@@ -74,6 +74,7 @@ interface PageConfig {
   viewOnlyReason: string | null;
   postMessageOrigin: string;
   closeUrl: string;
+  closePostMessage: boolean;
   locale: string | null;
   userFriendlyName: string;
   tokenExpiresAt: number | null;
@@ -173,7 +174,7 @@ describe("wopi edit and view routes", () => {
     expectNoToken(s);
   });
 
-  test("postMessageOrigin and closeUrl are kept per user", async () => {
+  test("postMessageOrigin, closeUrl and ClosePostMessage are kept per user", async () => {
     const h = makeHarness();
     addToken(h, TOKEN, "user-a", { name: "Alice A" });
     addToken(h, TOKEN_B, "user-b", { name: "Bob B" });
@@ -182,7 +183,7 @@ describe("wopi edit and view routes", () => {
       checkFileInfo: async (input: { wopiSrc: string; accessToken: string }) => {
         const info = await h.hostClient.checkFileInfo(input);
         const who = input.accessToken === TOKEN ? "alice" : "bob";
-        return { ...info, CloseUrl: `https://host.example/${who}`, PostMessageOrigin: `https://${who}.example.com` };
+        return { ...info, ClosePostMessage: who === "alice", CloseUrl: `https://host.example/${who}`, PostMessageOrigin: `https://${who}.example.com` };
       },
     };
     const registry = new SessionRegistry({ config: h.config, hostClient: hostClient as never, logger: h.logger, now: h.clock.now, scheduler: h.scheduler });
@@ -200,11 +201,15 @@ describe("wopi edit and view routes", () => {
     };
     const a = await post(TOKEN);
     const b = await post(TOKEN_B);
+    expect(a.closePostMessage).toBe(true);
+    expect(b.closePostMessage).toBe(false);
     expect(a.closeUrl).toBe("https://host.example/alice");
     expect(a.postMessageOrigin).toBe("https://alice.example.com");
     expect(b.closeUrl).toBe("https://host.example/bob");
     expect(b.postMessageOrigin).toBe("https://bob.example.com");
     const session = registry.list()[0]!;
+    expect(session.getUser(a.sessionHandle)?.closePostMessage).toBe(true);
+    expect(session.getUser(b.sessionHandle)?.closePostMessage).toBe(false);
     expect(session.getUser(a.sessionHandle)?.closeUrl).toBe("https://host.example/alice");
     expect(session.getUser(a.sessionHandle)?.postMessageOrigin).toBe("https://alice.example.com");
     expect(session.getUser(b.sessionHandle)?.closeUrl).toBe("https://host.example/bob");
@@ -280,7 +285,7 @@ describe("session API", () => {
         client.encodeStateAsUpdate(replica.encodeStateVector()),
       );
       expect(result.accepted).toBe(true);
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
       expect(save.status).toBe(200);
       const saved = (await save.json()) as { itemVersion: string | null };
       s.bodies.push(JSON.stringify(saved));
@@ -342,7 +347,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
       expect(save.status).toBe(200);
       await save.text();
       await readUntil("event: saved");
@@ -356,7 +361,7 @@ describe("session API", () => {
         config.sessionHandle,
         client.encodeStateAsUpdate(session.replica!.encodeStateVector()),
       );
-      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config) });
+      const save2 = await fetch(`${s.base}/api/session/save`, { method: "POST", headers: auth(config), body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
       expect(save2.status).toBe(200);
       await save2.text();
       await readUntil("event: conflict");
@@ -368,4 +373,59 @@ describe("session API", () => {
     expect(text).not.toContain(TOKEN);
     expectNoToken(s, [text]);
   });
+});
+
+test("ordered save waits for the requesting client's edits before PutFile", async () => {
+  const s = setup();
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995001);
+  try {
+    client.edit("ordered-save-marker", 0);
+    let completed = false;
+    const saving = fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }),
+    }).then((response) => { completed = true; return response; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+    expect(s.h.putCount()).toBe(0);
+    expect(session.applyUpdate(config.sessionHandle, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+    expect((await saving).status).toBe(200);
+    expect(s.h.putCount()).toBe(1);
+  } finally {
+    client.destroy();
+  }
+});
+
+test("ordered save returns 409 notSynced without writing when updates never arrive", async () => {
+  const s = setup({ saveSyncTimeoutMs: 1 });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995002);
+  try {
+    client.edit("missing-update", 0);
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { kind: "notSynced" } });
+    expect(s.h.putCount()).toBe(0);
+  } finally {
+    client.destroy();
+  }
+});
+
+test("save rejects a missing or malformed state vector", async () => {
+  const s = setup();
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  for (const body of ["", "{}", '{"stateVector":"!bad"}', '{"stateVector":"/w=="}']) {
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: { Authorization: `Bearer ${config.sessionHandle}` }, body,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidStateVector" } });
+  }
+  expect(s.h.putCount()).toBe(0);
 });

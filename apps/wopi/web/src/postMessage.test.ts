@@ -35,7 +35,7 @@ function setup(origin = ORIGIN) {
   const calls: string[] = [];
   const views: WopiView[] = [{ ViewId: 11, UserName: "Alice A" }, { ViewId: 22, UserName: "Bob B" }];
   const bridge = new PostMessageBridge(win, origin, {
-    onSave: () => calls.push("save"),
+    onSave: () => { calls.push("save"); },
     onClose: () => calls.push("close"),
     onBlurFocus: () => calls.push("blur"),
     onGrabFocus: () => calls.push("grab"),
@@ -115,7 +115,7 @@ describe("PostMessage bridge receiving", () => {
     win.emit({ origin: ORIGIN, data: hostMessage("Get_Views") });
     const replies = win.parsed().filter((message) => message.MessageId === "Get_Views_Resp");
     expect(replies).toHaveLength(1);
-    expect(replies[0]!.Values).toEqual({ Views: [{ ViewId: 11, UserName: "Alice A" }, { ViewId: 22, UserName: "Bob B" }] });
+    expect(replies[0]!.Values).toEqual([{ ViewId: 11, UserName: "Alice A" }, { ViewId: 22, UserName: "Bob B" }]);
   });
 
   test("rejects messages from other origins", () => {
@@ -172,4 +172,43 @@ describe("PostMessage bridge receiving", () => {
     win.emit({ origin: ORIGIN, data: hostMessage("Action_Save") });
     expect(calls).toEqual([]);
   });
+});
+
+test("opening failure is sent once and prevents a later loaded message", () => {
+  const { win, bridge } = setup();
+  bridge.bootFailed();
+  bridge.bootFailed();
+  bridge.documentLoaded();
+  expect(win.parsed().map((message) => message.Values)).toEqual([{ Status: "Failed" }]);
+});
+
+test("Action_Save Notify responds only after the ordered save succeeds", async () => {
+  const win = new FakeWindow();
+  let finish!: () => void;
+  const saving = new Promise<void>((resolve) => { finish = resolve; });
+  const bridge = new PostMessageBridge(win, ORIGIN, {
+    onSave: () => saving, onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
+  });
+  bridge.handleMessage({ origin: ORIGIN, data: hostMessage("Action_Save", { Notify: true }) });
+  expect(win.parsed()).toEqual([]);
+  finish();
+  await saving;
+  await Promise.resolve();
+  expect(win.parsed()).toMatchObject([{ MessageId: "Action_Save_Resp", Values: { success: true } }]);
+});
+
+test("Action_Save failure notifies only when requested and forwards edit options", async () => {
+  const win = new FakeWindow();
+  const options: unknown[] = [];
+  const bridge = new PostMessageBridge(win, ORIGIN, {
+    onSave: async (values) => { options.push(values); throw new Error("notSynced"); },
+    onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
+  });
+  bridge.handleMessage({ origin: ORIGIN, data: hostMessage("Action_Save", { Notify: true, DontTerminateEdit: true, DontSaveIfUnmodified: true }) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(win.parsed()).toMatchObject([{ MessageId: "Action_Save_Resp", Values: { success: false, result: "notSynced" } }]);
+  expect(options).toEqual([{ DontTerminateEdit: true, DontSaveIfUnmodified: true }]);
+  bridge.handleMessage({ origin: ORIGIN, data: hostMessage("Action_Save") });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(win.parsed()).toHaveLength(1);
 });

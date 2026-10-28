@@ -180,7 +180,7 @@ describe("editnew flow", () => {
       const session = h.registry.list()[0]!;
       const applied = session.applyUpdate(handle, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
       expect(applied.accepted).toBe(true);
-      const save = await fetch(`${base}/api/session/save`, { method: "POST", headers: auth });
+      const save = await fetch(`${base}/api/session/save`, { method: "POST", headers: auth, body: JSON.stringify({ stateVector: Buffer.from(client.encodeStateVector()).toString("base64") }) });
       expect(save.status).toBe(200);
       await save.text();
     } finally {

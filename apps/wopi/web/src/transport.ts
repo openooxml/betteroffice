@@ -45,10 +45,26 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
   let socket: WebSocketLike | null = null;
   let wantsConnection = false;
   let retryMs = INITIAL_RETRY_MS;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const emit = (event: CollaborationTransportEvent): void => {
     for (const listener of [...listeners]) listener(event);
+  };
+
+  const stopDrain = (): void => {
+    if (drainTimer !== null) clearTimeout(drainTimer);
+    drainTimer = null;
+  };
+
+  const watchDrain = (): void => {
+    if (drainTimer !== null) return;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      if (!wantsConnection || !socket || socket.readyState !== OPEN) return;
+      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) watchDrain();
+      else emit({ type: "drain" });
+    }, 50);
   };
 
   const scheduleReconnect = (): void => {
@@ -84,6 +100,7 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
     };
     next.onclose = (event) => {
       if (socket !== next) return;
+      stopDrain();
       socket = null;
       emit({ type: "close", reason: event.reason });
       scheduleReconnect();
@@ -101,6 +118,7 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
     },
     disconnect() {
       wantsConnection = false;
+      stopDrain();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -111,10 +129,14 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
     },
     send(data) {
       if (!socket || socket.readyState !== OPEN) return false;
-      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) return false;
+      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+        watchDrain();
+        return false;
+      }
       const owned = new ArrayBuffer(data.byteLength);
       new Uint8Array(owned).set(data);
       socket.send(owned);
+      if (socket.bufferedAmount > MAX_BUFFERED_BYTES) watchDrain();
       return true;
     },
     onEvent(listener) {

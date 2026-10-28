@@ -94,6 +94,7 @@ export interface FileSessionDeps {
   scheduler?: SessionScheduler;
   journal?: FileJournal | null;
   maxEditorsPerFile?: number;
+  autosave?: boolean;
   openReplica?: typeof openServerReplica;
   onClosed?: (session: FileSession) => void;
 }
@@ -391,6 +392,7 @@ export class FileSession {
       joinedAt: now,
       postMessageOrigin: info.PostMessageOrigin ?? "",
       closeUrl: info.CloseUrl ?? "",
+      closePostMessage: info.ClosePostMessage === true,
     });
     this.#users.set(user.id, user);
     this.#history.push(user);
@@ -740,7 +742,7 @@ export class FileSession {
 
   #scheduleAutosave(): void {
     this.#clearTimer("autosave");
-    if (!this.dirty || this.#state !== "open") return;
+    if (this.#deps.autosave === false || !this.dirty || this.#state !== "open") return;
     const first = this.#firstDirtyAt ?? this.#lastUpdateAt;
     const target = Math.min(this.#lastUpdateAt + AUTOSAVE_DEBOUNCE_MS, first + AUTOSAVE_MAX_MS);
     const delay = Math.max(0, target - this.#now());
@@ -751,7 +753,7 @@ export class FileSession {
 
   #scheduleAutosaveRetry(): void {
     this.#clearTimer("autosave");
-    if (!this.dirty || this.#state !== "open") return;
+    if (this.#deps.autosave === false || !this.dirty || this.#state !== "open") return;
     this.#autosaveTimer = this.#scheduler.setTimeout(() => {
       this.#enqueueTask(() => this.#runAutosave());
     }, AUTOSAVE_DEBOUNCE_MS);

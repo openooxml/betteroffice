@@ -54,15 +54,26 @@ export class SessionApi {
     return decodeJoinResponse(await response.json());
   }
 
-  async save(): Promise<{ itemVersion: string | null }> {
-    const response = await this.#fetch("/api/session/save", { method: "POST", headers: this.#headers() });
-    if (!response.ok) throw new Error(`Save failed (${response.status}).`);
+  async save(stateVector: Uint8Array): Promise<{ itemVersion: string | null }> {
+    let binary = "";
+    for (const byte of stateVector) binary += String.fromCharCode(byte);
+    const response = await this.#fetch("/api/session/save", {
+      method: "POST",
+      headers: { ...this.#headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({ stateVector: btoa(binary) }),
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => null) as { error?: { kind?: unknown } } | null;
+      const reason = failure?.error?.kind;
+      throw new Error(typeof reason === "string" ? reason : `Save failed (${response.status}).`);
+    }
     const body = (await response.json()) as { itemVersion?: unknown };
     return { itemVersion: typeof body.itemVersion === "string" ? body.itemVersion : null };
   }
 
   async close(): Promise<void> {
-    await this.#fetch("/api/session/close", { method: "POST", headers: this.#headers() }).catch(() => undefined);
+    const response = await this.#fetch("/api/session/close", { method: "POST", headers: this.#headers() });
+    if (!response.ok) throw new Error(`Close failed (${response.status}).`);
   }
 
   /** Streams session events, reconnecting until aborted or closed. */

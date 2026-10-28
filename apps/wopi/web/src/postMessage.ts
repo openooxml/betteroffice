@@ -5,9 +5,14 @@ export interface WopiView {
   ReadOnly?: boolean;
 }
 
+export interface SaveOptions {
+  DontTerminateEdit?: boolean;
+  DontSaveIfUnmodified?: boolean;
+}
+
 /** Host actions the page can be asked to perform. */
 export interface PostMessageHandlers {
-  onSave(): void;
+  onSave(options: SaveOptions): void | Promise<void>;
   onClose(): void;
   onBlurFocus(): void;
   onGrabFocus(): void;
@@ -51,6 +56,7 @@ export class PostMessageBridge {
   readonly #now: () => number;
   #listening = false;
   #hostReady = false;
+  #loading: "opening" | "loaded" | "failed" = "opening";
 
   readonly #listener = (event: MessageEvent): void => {
     this.handleMessage(event);
@@ -86,7 +92,7 @@ export class PostMessageBridge {
   }
 
   /** Sends one message as a JSON string to the host origin only. */
-  send(messageId: string, values: Record<string, unknown> = {}): void {
+  send(messageId: string, values: Record<string, unknown> | WopiView[] = {}): void {
     if (!this.enabled) return;
     const payload = JSON.stringify({ MessageId: messageId, SendTime: this.#now(), Values: values });
     this.#window.parent.postMessage(payload, this.#origin);
@@ -97,10 +103,14 @@ export class PostMessageBridge {
   }
 
   bootFailed(): void {
+    if (this.#loading !== "opening") return;
+    this.#loading = "failed";
     this.send("App_LoadingStatus", { Status: "Failed" });
   }
 
   documentLoaded(documentLoadedTime: number = this.#now()): void {
+    if (this.#loading !== "opening") return;
+    this.#loading = "loaded";
     this.send("App_LoadingStatus", { Status: "Document_Loaded", DocumentLoadedTime: documentLoadedTime });
   }
 
@@ -118,6 +128,18 @@ export class PostMessageBridge {
 
   viewRemoved(view: WopiView): void {
     this.send("View_Removed", { ...view });
+  }
+
+  async #save(options: SaveOptions, notify: boolean): Promise<void> {
+    try {
+      await this.#handlers.onSave(options);
+      if (notify) this.send("Action_Save_Resp", { success: true });
+    } catch (error) {
+      if (notify) this.send("Action_Save_Resp", {
+        success: false,
+        result: error instanceof Error ? error.message.slice(0, 100) : "saveFailed",
+      });
+    }
   }
 
   /** Validates and dispatches one incoming message event. */
@@ -142,9 +164,15 @@ export class PostMessageBridge {
         this.#hostReady = true;
         this.#handlers.onHostReady?.();
         return;
-      case "Action_Save":
-        this.#handlers.onSave();
+      case "Action_Save": {
+        const values = (message.Values ?? {}) as Record<string, unknown>;
+        const options: SaveOptions = {
+          ...(values.DontTerminateEdit === true ? { DontTerminateEdit: true } : {}),
+          ...(values.DontSaveIfUnmodified === true ? { DontSaveIfUnmodified: true } : {}),
+        };
+        void this.#save(options, values.Notify === true);
         return;
+      }
       case "Action_Close":
         this.#handlers.onClose();
         return;
@@ -155,7 +183,7 @@ export class PostMessageBridge {
         this.#handlers.onGrabFocus();
         return;
       case "Get_Views":
-        this.send("Get_Views_Resp", { Views: this.#handlers.onGetViews() });
+        this.send("Get_Views_Resp", this.#handlers.onGetViews());
         return;
     }
   }
