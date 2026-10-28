@@ -234,7 +234,9 @@ fn run_key(path: &[String]) -> bool {
 }
 
 fn para_key_or_style(path: &[String]) -> bool {
-    para_key(path) || (path.len() == 1 && path[0] == "pStyle")
+    para_key(path)
+        || (path.len() == 1 && path[0] == "pStyle")
+        || path.first().is_some_and(|key| key == "borders")
 }
 
 fn para_key(path: &[String]) -> bool {
@@ -1123,37 +1125,51 @@ pub(crate) fn diff_paragraph_v1(
     let mut after_direct = original_object(&after).cloned().unwrap_or_default();
     before_direct.remove("styleId");
     after_direct.remove("styleId");
-    let explained = deltas(&before.properties, &after.properties)
-        .iter()
-        .all(|delta| {
-            if delta.path.first().is_some_and(|key| key == "pStyle") {
-                return true;
-            }
-            let key = &delta.path[0];
-            let direct = [original_object(&before), original_object(&after)]
-                .iter()
-                .any(|object| {
-                    object
-                        .and_then(|object| object.get(key))
-                        .is_some_and(|value| !value.is_null())
-                });
-            let list_indent = matches!(
-                key.as_str(),
-                "indentLeft"
-                    | "indentFirstLine"
-                    | "hangingIndent"
-                    | "indentLeftChars"
-                    | "indentFirstLineChars"
-                    | "hangingIndentChars"
-            );
-            !direct
-                && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
-                && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
-                    || list_indent)
-        });
+    let para_deltas = deltas(&before.properties, &after.properties);
+    let explained = para_deltas.iter().all(|delta| {
+        if delta.path.first().is_some_and(|key| key == "pStyle") {
+            return true;
+        }
+        let key = &delta.path[0];
+        let direct = [original_object(&before), original_object(&after)]
+            .iter()
+            .any(|object| {
+                object
+                    .and_then(|object| object.get(key))
+                    .is_some_and(|value| !value.is_null())
+            });
+        let list_indent = matches!(
+            key.as_str(),
+            "indentLeft"
+                | "indentFirstLine"
+                | "hangingIndent"
+                | "indentLeftChars"
+                | "indentFirstLineChars"
+                | "hangingIndentChars"
+        );
+        !direct
+            && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
+            && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
+                || list_indent)
+    });
+    let plain_restyle = before.properties.get("numPr").is_none()
+        && before_direct.is_empty()
+        && (before.units.is_empty()
+            || before
+                .carriers
+                .get("_originalRunBoundaries")
+                .and_then(Value::as_array)
+                .is_some_and(|runs| {
+                    runs.iter().all(|run| {
+                        run.get("formatting")
+                            .and_then(Value::as_object)
+                            .is_none_or(|formatting| formatting.is_empty())
+                    })
+                }))
+        && para_deltas.iter().all(|delta| para_key_or_style(&delta.path));
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
         && before.properties.get("numPr") == after.properties.get("numPr")
-        && original_numpr(&before).is_some()
+        && (original_numpr(&before).is_some() || plain_restyle)
         && original_numpr(&before) == original_numpr(&after)
         && before_direct == after_direct
         && explained;
@@ -1201,7 +1217,6 @@ pub(crate) fn diff_paragraph_v1(
             "tc: run property revision",
         ));
     }
-    let para_deltas = deltas(&before.properties, &after.properties);
     validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
     validate_carriers(

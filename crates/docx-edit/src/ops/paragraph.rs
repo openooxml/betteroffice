@@ -1516,24 +1516,26 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     if present(properties.get("pStyle")) != Some(&Any::from(style_id)) {
         changes.push(("pStyle".to_owned(), Some(Any::from(style_id))));
     }
-    if let Some(Any::Map(original)) = properties.get("_originalFormatting") {
-        let mut direct = (**original).clone();
-        if !direct_numbering {
-            for key in crate::seed::style_resolved_keys() {
-                direct.remove(formatting_key(key));
-            }
-            if clears_numbering {
-                direct.remove("numPr");
-                direct.remove("numPrFromStyle");
-            }
+    let original = match properties.get("_originalFormatting") {
+        Some(Any::Map(original)) => Some(original),
+        _ => None,
+    };
+    let mut direct = original.map_or_else(HashMap::new, |original| (**original).clone());
+    if !direct_numbering {
+        for key in crate::seed::style_resolved_keys() {
+            direct.remove(formatting_key(key));
         }
-        direct.insert("styleId".to_owned(), Any::from(style_id));
-        if direct != **original {
-            changes.push((
-                "_originalFormatting".to_owned(),
-                Some(Any::Map(Arc::new(direct))),
-            ));
+        if clears_numbering {
+            direct.remove("numPr");
+            direct.remove("numPrFromStyle");
         }
+    }
+    direct.insert("styleId".to_owned(), Any::from(style_id));
+    if original.is_none_or(|original| direct != **original) {
+        changes.push((
+            "_originalFormatting".to_owned(),
+            Some(Any::Map(Arc::new(direct))),
+        ));
     }
     let old_run: HashMap<&str, &Any> = previous
         .run

@@ -924,6 +924,163 @@ fn assert_paragraph_restyle(content: &str, a: &str, b: &str) {
 }
 
 #[test]
+fn plain_restyle_saves_style_properties_as_inherited() {
+    let style = concat!(
+        "<w:pPr><w:keepNext/>",
+        "<w:pBdr><w:bottom w:val=\"single\" w:sz=\"8\" w:color=\"112233\"/></w:pBdr>",
+        "<w:spacing w:before=\"240\" w:after=\"80\" w:line=\"276\" w:lineRule=\"auto\"/>",
+        "<w:ind w:left=\"720\"/></w:pPr><w:rPr><w:b/><w:sz w:val=\"32\"/></w:rPr>",
+    );
+    for (properties, run_properties) in [
+        ("", ""),
+        ("<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>", ""),
+        (
+            concat!(
+                "<w:pPr><w:pStyle w:val=\"A\"/>",
+                "<w:spacing w:before=\"10\" w:after=\"160\" w:line=\"259\" w:lineRule=\"auto\"/>",
+                "<w:ind w:left=\"1440\"/></w:pPr>",
+            ),
+            "",
+        ),
+        ("", "<w:rPr><w:lang w:val=\"de-DE\"/></w:rPr>"),
+    ] {
+        let run = format!("<w:r>{run_properties}<w:t>Other</w:t></w:r>");
+        let content = format!("{properties}{run}");
+        let (doc, bytes, _) = restyle_source(&content, "", style);
+        doc.apply_edits(
+            &EditRequest {
+                expect_version: doc.version(),
+                source: EditSource::Host,
+                history: EditHistory::Separate,
+                steps: vec![EditStep::new(EditOperation::SetParagraphStyle {
+                    target: ParagraphTarget {
+                        story: "body".to_owned(),
+                        para_id: "00000001".to_owned(),
+                    },
+                    style_id: "B".to_owned(),
+                })],
+            },
+            &UndoSession::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let assert_inherited = |doc: &EditingDoc, color: &str, before: f64, left: f64, size: f64| {
+            let paragraphs = doc.paragraphs("body").unwrap();
+            let attrs = &paragraphs[1].properties;
+            assert_eq!(attrs.get("spaceBefore"), Some(&Any::Number(before)));
+            assert_eq!(attrs.get("spaceAfter"), Some(&Any::Number(80.0)));
+            assert_eq!(attrs.get("indentLeft"), Some(&Any::Number(left)));
+            let defaults =
+                serde_json::to_value(attrs.get("defaultTextFormatting").unwrap()).unwrap();
+            assert_eq!(defaults["fontSize"], json!(size));
+            let borders = serde_json::to_value(attrs.get("borders").unwrap()).unwrap();
+            assert_eq!(borders["bottom"]["color"]["rgb"], json!(color));
+            let Some(Any::Map(direct)) = attrs.get("_originalFormatting") else {
+                panic!("missing direct formatting");
+            };
+            assert_eq!(direct.get("styleId"), Some(&Any::from("B")));
+            for key in [
+                "borders",
+                "spaceBefore",
+                "spaceAfter",
+                "lineSpacing",
+                "indentLeft",
+                "keepNext",
+                "runProperties",
+            ] {
+                assert!(!direct.contains_key(key), "{key}");
+            }
+        };
+        assert_inherited(&doc, "112233", 240.0, 720.0, 32.0);
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap();
+        if !properties.contains("w:spacing") && run_properties.is_empty() {
+            assert!(part.legacy_paragraphs.is_empty());
+            assert_eq!(part.paragraph_patches.len(), 1);
+        } else {
+            assert!(part.paragraph_patches.is_empty());
+            assert_eq!(part.legacy_paragraphs.len(), 1);
+        }
+        let package = docx_parse::parse_docx_s9_wire(
+            &bytes,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .document
+        .package;
+        let document = save_document(&package.document, |document| {
+            document["content"][1]["formatting"] = json!({"styleId": "B"});
+        });
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": document,
+            "headerEntries": package.header_entries.unwrap_or_default(),
+            "relationshipEntries": package.relationship_entries,
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
+                "part": part.part, "sha256": part.sha256,
+                "paragraphs": [0, 1, 2, 3], "changed": [1],
+                "paragraphPatches": part.paragraph_patches,
+                "legacyParagraphs": part.legacy_paragraphs
+            }]}
+        }))
+        .unwrap();
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+        if !properties.contains("w:spacing") && run_properties.is_empty() {
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+        let mut saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        for (name, original) in ooxml_opc::unzip_parts(&bytes).unwrap() {
+            let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+            if name == "word/document.xml" {
+                let expected = std::str::from_utf8(&original).unwrap().replace(
+                    &content,
+                    &format!("<w:pPr><w:pStyle w:val=\"B\"/></w:pPr>{run}"),
+                );
+                assert_eq!(std::str::from_utf8(output).unwrap(), expected);
+            } else {
+                assert_eq!(output, &original, "{name}");
+            }
+        }
+        let reopened = EditingDoc::new(72);
+        seed_from_docx(&reopened, &saved).unwrap();
+        assert_inherited(&reopened, "112233", 240.0, 720.0, 32.0);
+        assert_eq!(
+            reopened.paragraphs("body").unwrap()[1]
+                .properties
+                .get("keepNext"),
+            Some(&Any::Bool(true))
+        );
+        let (_, styles) = saved_parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/styles.xml")
+            .unwrap();
+        *styles = std::str::from_utf8(styles)
+            .unwrap()
+            .replace("112233", "445566")
+            .replace("w:before=\"240\"", "w:before=\"480\"")
+            .replace("w:left=\"720\"", "w:left=\"1440\"")
+            .replace("<w:keepNext/>", "")
+            .replace("<w:sz w:val=\"32\"/>", "<w:sz w:val=\"40\"/>")
+            .into_bytes();
+        let updated = EditingDoc::new(73);
+        seed_from_docx(&updated, &ooxml_opc::rezip_parts(&saved_parts).unwrap()).unwrap();
+        assert_inherited(&updated, "445566", 480.0, 1440.0, 40.0);
+        assert_ne!(
+            updated.paragraphs("body").unwrap()[1].properties.get("keepNext"),
+            Some(&Any::Bool(true))
+        );
+    }
+}
+
+#[test]
 fn restyle_complex_script_toggles_replace() {
     for toggle in ["bCs", "iCs"] {
         assert_paragraph_restyle(
