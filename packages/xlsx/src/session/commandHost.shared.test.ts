@@ -4,15 +4,15 @@ import JSZip from 'jszip';
 import { createSessionClient } from '../../../../shared/office-session/client';
 import { isTransferResult } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
-import { initWasm } from '../wasm/loader';
-import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
+import { initWasm, openWorkbook } from '../wasm/loader';
+import { DEFAULT_MAX_FRAME_BYTES, encodeSyncStep2 } from '../collaboration/protocol';
 import type { WorkbookHandle } from '../wasm/loader';
-import { applyWorkbookCommandIntent, createWorkbookCommandState } from './commandHandlers';
+import { createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import type { WorkbookCommand, WorkbookSharedCommand } from './commandProtocol';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_METHODS, type WorkbookSessionEvents, type WorkbookSessionMethods } from './methods';
-import { batchRequests } from './testHelpers';
+import { batchRequests, numbersWorkbook } from './testHelpers';
 
 function pipeFrameHost(changes: boolean[] = []) {
   const identity = { session: 'book', incarnation: 'worker' };
@@ -286,34 +286,58 @@ test('large unchanged selection projections copy no edit state and changes stay 
   } finally { spy.mockRestore(); }
 });
 
-test('xlsx remote updates and pipe frames are not refused when their basis was evicted', () => {
-  let current = 'v0';
-  const applied: Uint8Array[] = [];
-  const piped: unknown[] = [];
-  const handle = {
-    version: () => current, sheetCount: () => 1,
-    sheetInfo: () => ({ sheetIds: ['sheet:0'], sheetNames: ['Data'], activeSheet: 0 }),
-    readCells: () => ({ ok: true, sheets: [{ editable: true }] }),
-    historyState: () => ({ canUndo: false, canRedo: false }), listProposals: () => [],
-    selectionFormatting: () => ({}), mergedRanges: () => [], calculationStatus: () => ({}),
-    applyUpdate: (update: Uint8Array) => { applied.push(update); current = 'v-remote'; },
-  } as unknown as WorkbookHandle;
-  const selected = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
-  const state = createWorkbookCommandState({ session: 'book', incarnation: 'worker' }, { epoch: 1, version: 'v0' }, selected, ['sheet:0']);
-  for (let seq = 1; seq <= 260; seq++) {
-    current = `v${seq}`;
-    const ack = applyWorkbookCommandIntent(handle, state, { seq, basis: { epoch: 1, version: `v${seq - 1}` }, kind: 'select', payload: { selection: selected } } as WorkbookCommand);
-    expect(ack.statuses[0]!.status).not.toBe('refused');
+test('xlsx remote updates and pipe frames are not refused when their basis was evicted', async () => {
+  await initWasm(await readFile(new URL('../wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
+  const bytes = await numbersWorkbook(0);
+  const pair = createInProcessPair();
+  createWorkbookSessionHost(pair.host);
+  const client = createSessionClient<WorkbookSessionMethods,
+    { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] }>(pair.client, {
+    methods: WORKBOOK_SESSION_METHODS,
+  });
+  const peer = openWorkbook(bytes, { collaborative: true, clientId: 8202 });
+  try {
+    const opened = await client.call.open(bytes.slice().buffer as ArrayBuffer, { collaborative: true, clientId: 8201 });
+    const identity = opened.commandContext!;
+    const basis = { epoch: identity.basis.epoch, version: 0 };
+    const selected = { sheetId: opened.sheets[0].id, range: { kind: 'a1' as const, a1: 'A1' } };
+    const command = (seq: number, kind: WorkbookSharedCommand['kind'], payload: WorkbookCommand['payload'],
+      version = basis.version): WorkbookSharedCommand => ({ session: identity.session, incarnation: 1, seq,
+      basis: { ...basis, version }, kind, payload: { payload } });
+    peer.editCell(0, 0, 1, 'remote update');
+    const remote = command(261, 'applyUpdate', { update: peer.encodeStateAsUpdate() });
+    const vector = peer.encodeStateVector();
+    peer.editCell(0, 0, 2, 'remote pipe');
+    const pipe = command(262, 'collabPipe', { provider: 1, ops: [
+      { op: 'create', seq: 1, options: {} }, { op: 'connect', seq: 2 },
+      { op: 'event', seq: 3, event: { type: 'open' } },
+      { op: 'event', seq: 4, event: { type: 'message',
+        data: encodeSyncStep2(peer.encodeStateAsUpdate(vector)).buffer as ArrayBuffer } },
+    ] });
+    for (let seq = 1; seq <= 260; seq++) {
+      const ack = await client.call.edit(command(seq, 'editCell', { args: [0, 0, 0, String(seq)], target: selected }, seq - 1));
+      expect(ack).toMatchObject({ version: seq, outcomes: [{ seq, status: 'applied', workbook: { committed: true } }] });
+    }
+    const updates: Uint8Array[] = [];
+    client.on('collaborationUpdate', ({ update, origin }) => { if (origin === 'remote') updates.push(update); });
+    for (const input of [remote, pipe]) {
+      const ack = await client.call.edit(input);
+      expect(ack).toMatchObject({ version: input.seq,
+        outcomes: [{ seq: input.seq, status: 'applied', workbook: { committed: true } }] });
+      const replay = await client.call.edit(input);
+      expect(replay).toMatchObject({ version: ack.version, engineVersion: ack.engineVersion,
+        outcomes: [{ seq: input.seq, status: 'applied' }] });
+    }
+    expect((await client.call.cellInputs(0, 'A1:C1')).cells[0].map((cell) => cell.input))
+      .toEqual(['260', 'remote update', 'remote pipe']);
+    expect(updates).toHaveLength(2);
+    const local = await client.call.edit(command(263, 'select', { selection: selected }));
+    expect(local).toMatchObject({ version: 262,
+      outcomes: [{ seq: 263, status: 'refused', reason: 'stale-basis', workbook: { committed: false } }] });
+    expect((await client.call.cellInputs(0, 'A1:C1')).cells[0].map((cell) => cell.input))
+      .toEqual(['260', 'remote update', 'remote pipe']);
+  } finally {
+    peer.dispose();
+    try { await client.call.dispose(); } finally { await client.dispose(); }
   }
-  expect(state.bases.has('v0')).toBe(false);
-  const remote = applyWorkbookCommandIntent(handle, state, { seq: 261, basis: { epoch: 1, version: 'v0' }, kind: 'applyUpdate', payload: { update: Uint8Array.of(1) } } as WorkbookCommand);
-  expect(remote.statuses).toMatchObject([{ seq: 261, status: 'applied', committed: true }]);
-  expect(applied).toHaveLength(1);
-  const pipe = applyWorkbookCommandIntent(handle, state, { seq: 262, basis: { epoch: 1, version: 'v0' }, kind: 'collabPipe',
-    payload: { provider: 1, ops: [{ op: 'connect', seq: 1 }] } } as WorkbookCommand, undefined, false,
-    (payload) => { piped.push(payload); current = 'v-pipe'; });
-  expect(pipe.statuses).toMatchObject([{ seq: 262, status: 'applied', committed: true }]);
-  expect(piped).toHaveLength(1);
-  const local = applyWorkbookCommandIntent(handle, state, { seq: 263, basis: { epoch: 1, version: 'v0' }, kind: 'select', payload: { selection: selected } } as WorkbookCommand);
-  expect(local.statuses).toMatchObject([{ seq: 263, status: 'refused', reason: 'stale-basis', committed: false }]);
-});
+}, 30000);
