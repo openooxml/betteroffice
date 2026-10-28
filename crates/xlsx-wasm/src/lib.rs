@@ -1,31 +1,21 @@
 //! the single wasm-bindgen boundary: coarse json-string calls over the pure
 //! `Session` methods in `core.rs`.
 
-mod core;
-
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-
-use betteroffice_xlsx::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, SnapshotBudget, UpdateEvent,
-    UpdateOrigin, UpdateSubscription, WorkbookSnapshotBuilder,
-};
 use wasm_bindgen::prelude::*;
-
-use crate::core::Session;
+use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
-const MAX_QUEUED_UPDATE_EVENTS: usize = 4_097;
-const MAX_QUEUED_UPDATE_BYTES: usize = MAX_COLLABORATION_BYTES * 2 + MAX_QUEUED_UPDATE_EVENTS;
 
 /// current local time as a 1900-system serial for volatile cells; computed only
 /// at the wasm boundary so the pure core stays deterministic and native-testable.
-fn now_serial() -> Option<f64> {
+fn now_serial() -> Result<Option<f64>, EngineError> {
     let ms = js_sys::Date::now();
     let offset = js_sys::Date::new(&ms.into()).get_timezone_offset();
-    Some((ms - offset * 60_000.0) / MS_PER_DAY + UNIX_EPOCH_SERIAL)
+    Ok(Some(
+        (ms - offset * 60_000.0) / MS_PER_DAY + UNIX_EPOCH_SERIAL,
+    ))
 }
 
 #[wasm_bindgen]
@@ -101,13 +91,6 @@ pub fn allocation_failure() -> f64 {
     allocator::FAILED.load(std::sync::atomic::Ordering::Relaxed) as f64
 }
 
-/// a workbook handle exposed to js; wraps the pure `Session`.
-#[wasm_bindgen]
-pub struct XlsxDocument {
-    session: Session,
-    update_observer: Option<UpdateObserver>,
-}
-
 /// tells the worker host that a long engine call is still running, through
 /// `globalThis.__betterofficeEngineProgress` when the host installed one.
 fn engine_progress() {
@@ -117,33 +100,33 @@ fn engine_progress() {
     }
 }
 
-impl XlsxDocument {
-    /// installs the progress hook before `open` runs, so the recalculation
-    /// inside an open reports progress too.
-    fn opened<E>(open: impl FnOnce() -> Result<Session, E>) -> Result<Self, E> {
-        betteroffice_xlsx::set_progress_hook(Some(engine_progress));
-        open().map(|session| Self {
-            session,
-            update_observer: None,
-        })
+fn wasm_host() -> Host {
+    Host {
+        now_serial,
+        timer_ms: performance_now,
+        progress: engine_progress,
+        version: xlsx_engine::Session::version(),
     }
 }
 
-struct UpdateObserver {
-    pending: Arc<Mutex<PendingUpdateEvents>>,
-    _subscription: UpdateSubscription,
+fn map_engine_error(error: EngineError) -> JsValue {
+    match error.kind {
+        ErrorKind::Message => JsValue::from_str(&error.message),
+        ErrorKind::Error => js_sys::Error::new(&error.message).into(),
+        ErrorKind::TypeError => js_sys::TypeError::new(&error.message).into(),
+        ErrorKind::PendingException => unreachable!(),
+    }
 }
 
-#[derive(Default)]
-struct PendingUpdateEvents {
-    events: VecDeque<UpdateEvent>,
-    bytes: usize,
-    overflowed: bool,
+/// a workbook handle exposed to js; wraps the pure `Session`.
+#[wasm_bindgen]
+pub struct XlsxDocument {
+    inner: Document,
 }
 
 #[wasm_bindgen]
 pub struct XlsxSnapshotBuilder {
-    builder: WorkbookSnapshotBuilder,
+    inner: SnapshotBuilder,
 }
 
 #[wasm_bindgen]
@@ -151,29 +134,23 @@ impl XlsxSnapshotBuilder {
     #[wasm_bindgen(constructor)]
     pub fn new() -> XlsxSnapshotBuilder {
         Self {
-            builder: WorkbookSnapshotBuilder::new(),
+            inner: SnapshotBuilder::new(wasm_host()),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.builder
-            .push(chunk)
-            .map(|_| ())
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+        self.inner.push(chunk).map_err(map_engine_error)
     }
 
     pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
-        let budget = SnapshotBudget::new(records, bytes)
-            .map_err(|error| JsValue::from(js_sys::Error::new(&error.to_string())))?;
-        self.builder
-            .advance(budget)
-            .map(|progress| progress.is_ready())
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+        self.inner.advance(records, bytes).map_err(map_engine_error)
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        XlsxDocument::opened(|| self.builder.finish().map(Session::from_hydrated_workbook))
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+        self.inner
+            .finish()
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 }
 
@@ -191,12 +168,9 @@ impl XlsxDocument {
         through_seq: f64,
         preserve_history: Option<bool>,
     ) -> Result<Vec<u8>, JsValue> {
-        self.session
-            .recovery_checkpoint(
-                parse_recovery_sequence(through_seq)?,
-                preserve_history.unwrap_or(false),
-            )
-            .map_err(|error| js_sys::Error::new(&error).into())
+        self.inner
+            .recovery_checkpoint(through_seq, preserve_history)
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
@@ -204,45 +178,43 @@ impl XlsxDocument {
         bytes: &[u8],
         through_seq: f64,
     ) -> Result<XlsxDocument, JsValue> {
-        let through_seq = parse_recovery_sequence(through_seq)?;
-        XlsxDocument::opened(|| Session::open_recovery_checkpoint(bytes, through_seq))
-            .map_err(|error| js_sys::Error::new(&error).into())
+        Document::open_recovery_checkpoint(bytes, through_seq, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = beginPeerSnapshot)]
     pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
-        self.session
+        self.inner
             .begin_peer_snapshot(records, bytes)
-            .map_err(|error| js_sys::Error::new(&error).into())
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
     pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        self.session
+        self.inner
             .next_peer_snapshot_chunk()
             .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
-            .map_err(|error| js_sys::Error::new(&error).into())
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = endPeerSnapshot)]
     pub fn end_peer_snapshot(&mut self) {
-        self.session.end_peer_snapshot();
+        self.inner.end_peer_snapshot();
     }
 
     #[doc(hidden)]
     #[wasm_bindgen(js_name = adoptPeerVersion)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), JsValue> {
-        self.session
+        self.inner
             .adopt_peer_version(version)
-            .map_err(|error| JsValue::from_str(&error))
+            .map_err(map_engine_error)
     }
 
     #[doc(hidden)]
     #[wasm_bindgen(js_name = peerHydrationJson)]
     pub fn peer_hydration_json(&self) -> Result<String, JsValue> {
-        self.session
-            .peer_hydration_json()
-            .map_err(|error| JsValue::from_str(&error))
+        self.inner.peer_hydration_json().map_err(map_engine_error)
     }
 
     #[doc(hidden)]
@@ -251,14 +223,16 @@ impl XlsxDocument {
         bytes: &[u8],
         hydration: &str,
     ) -> Result<XlsxDocument, JsValue> {
-        XlsxDocument::opened(|| Session::open_with_peer_hydration_json(bytes, hydration))
-            .map_err(|error| JsValue::from_str(&error))
+        Document::open_with_peer_hydration_json(bytes, hydration, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 
     /// open a workbook from raw `.xlsx` bytes.
     pub fn open(bytes: &[u8]) -> Result<XlsxDocument, JsValue> {
-        XlsxDocument::opened(|| Session::open(bytes, now_serial()))
-            .map_err(|e| JsValue::from_str(&e))
+        Document::open(bytes, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = openWithCalculationJson)]
@@ -266,146 +240,88 @@ impl XlsxDocument {
         bytes: &[u8],
         context: &str,
     ) -> Result<XlsxDocument, JsValue> {
-        XlsxDocument::opened(|| Session::open_with_calculation_json(bytes, context))
-            .map_err(|error| js_sys::TypeError::new(&error).into())
+        Document::open_with_calculation_json(bytes, context, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = setCalculationContextJson)]
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), JsValue> {
-        self.session
+        self.inner
             .set_calculation_context_json(context)
-            .map_err(|error| js_sys::TypeError::new(&error).into())
+            .map_err(map_engine_error)
     }
 
     /// Open a replica with a positive, safe-integer client ID.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<XlsxDocument, JsValue> {
-        let client_id = parse_client_id(client_id)?;
-        XlsxDocument::opened(|| Session::open_collaborative(bytes, client_id, now_serial()))
-            .map_err(|e| JsValue::from_str(&e))
+        Document::open_collaborative(bytes, client_id, wasm_host())
+            .map(|inner| XlsxDocument { inner })
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]
     pub fn client_id(&self) -> f64 {
-        self.session.client_id() as f64
+        self.inner.client_id()
     }
 
     #[wasm_bindgen(js_name = encodeStateVector)]
     pub fn encode_state_vector(&self) -> Vec<u8> {
-        self.session.encode_state_vector()
+        self.inner.encode_state_vector()
     }
 
     #[wasm_bindgen(js_name = encodeStateAsUpdate)]
     pub fn encode_state_as_update(&self) -> Vec<u8> {
-        self.session.encode_state_as_update()
+        self.inner.encode_state_as_update()
     }
 
     #[wasm_bindgen(js_name = encodeDiff)]
     pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, JsValue> {
-        self.session
+        self.inner
             .encode_diff(remote_state_vector)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = applyUpdateJson)]
     pub fn apply_update_json(&mut self, update: &[u8]) -> Result<String, JsValue> {
-        self.session
-            .apply_update_json(update, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .apply_update_json(update)
+            .map_err(map_engine_error)
     }
 
     /// Start queuing origin-prefixed Yrs update events for polling.
     #[wasm_bindgen(js_name = startUpdateObservation)]
     pub fn start_update_observation(&mut self) -> Result<(), JsValue> {
-        if self.update_observer.is_some() {
-            return Ok(());
-        }
-        let pending = Arc::new(Mutex::new(PendingUpdateEvents::default()));
-        let observed = Arc::clone(&pending);
-        let subscription = self
-            .session
-            .observe_update_v1(move |event| {
-                // carries no update, and nothing this handle exposes recalculates alone.
-                if event.origin == UpdateOrigin::Recalculation {
-                    return;
-                }
-                let mut observed = observed
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if observed.overflowed {
-                    return;
-                }
-                let bytes = event.update.len().saturating_add(1);
-                if observed.events.len() >= MAX_QUEUED_UPDATE_EVENTS
-                    || bytes > MAX_QUEUED_UPDATE_BYTES.saturating_sub(observed.bytes)
-                {
-                    observed.events.clear();
-                    observed.bytes = 0;
-                    observed.overflowed = true;
-                    return;
-                }
-                observed.bytes += bytes;
-                observed.events.push_back(event);
-            })
-            .map_err(|e| JsValue::from_str(&e))?;
-        self.update_observer = Some(UpdateObserver {
-            pending,
-            _subscription: subscription,
-        });
-        Ok(())
+        self.inner
+            .start_update_observation()
+            .map_err(map_engine_error)
     }
 
     /// Stop observation and discard queued events.
     #[wasm_bindgen(js_name = clearUpdateObservation)]
     pub fn clear_update_observation(&mut self) {
-        self.update_observer = None;
+        self.inner.clear_update_observation();
     }
 
     /// Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
     #[wasm_bindgen(js_name = drainUpdateEvent)]
     pub fn drain_update_event(&self) -> Result<Vec<u8>, JsValue> {
-        let Some(observer) = &self.update_observer else {
-            return Ok(Vec::new());
-        };
-        let mut pending = observer
-            .pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if pending.overflowed {
-            pending.overflowed = false;
-            return Err(JsValue::from_str(
-                "xlsx update observation queue exceeded its limit",
-            ));
-        }
-        let event = pending.events.pop_front();
-        let Some(event) = event else {
-            return Ok(Vec::new());
-        };
-        pending.bytes = pending
-            .bytes
-            .saturating_sub(event.update.len().saturating_add(1));
-        let mut encoded = Vec::with_capacity(event.update.len() + 1);
-        encoded.push(match event.origin {
-            UpdateOrigin::Local | UpdateOrigin::Recalculation => 0,
-            UpdateOrigin::Remote => 1,
-        });
-        encoded.extend_from_slice(&event.update);
-        Ok(encoded)
+        self.inner.drain_update_event().map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = printDisplayListJson)]
     pub fn print_display_list_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .print_display_list_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// serialized `DisplayList` for a serialized `Viewport`.
     #[wasm_bindgen(js_name = displayListJson)]
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .display_list_json(viewport_json)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// @experimental
@@ -415,253 +331,221 @@ impl XlsxDocument {
         sheet: u32,
         viewport_json: &str,
     ) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .display_list_for_json(sheet, viewport_json)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = displayListProfiledJson)]
     pub fn display_list_profiled_json(&self, viewport_json: &str) -> Result<String, JsValue> {
-        self.session
-            .display_list_profiled_json(viewport_json, &mut performance_now)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .display_list_profiled_json(viewport_json)
+            .map_err(map_engine_error)
     }
 
     /// the chart under a viewport-local point, or `null`.
     #[wasm_bindgen(js_name = chartAtPointJson)]
     pub fn chart_at_point_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .chart_at_point_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// slide a chart by a pixel delta as one undo step.
     #[wasm_bindgen(js_name = moveChartJson)]
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .move_chart_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.move_chart_json(args).map_err(map_engine_error)
     }
 
     /// render the current sheet viewport to png bytes (raster feature only).
     #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderPng)]
     pub fn render_png(&self, viewport_json: &str) -> Result<Vec<u8>, JsValue> {
-        self.session
+        self.inner
             .render_png(viewport_json)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// render an a1 range (default: used range) at an optional scale to png.
     #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderRangePng)]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, JsValue> {
-        self.session
-            .render_range_png(args)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.render_range_png(args).map_err(map_engine_error)
     }
 
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {
-        self.session
-            .sheet_info_json()
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.sheet_info_json().map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = sheetCount)]
     pub fn sheet_count(&self) -> usize {
-        self.session.sheet_count()
+        self.inner.sheet_count()
     }
 
     #[wasm_bindgen(js_name = sheetInfoForJson)]
     pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .sheet_info_for_json(sheet)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = selectionDataJson)]
     pub fn selection_data_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .selection_data_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = cellRectJson)]
     pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .cell_rect_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.cell_rect_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = calculationStatusJson)]
     pub fn calculation_status_json(&self) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .calculation_status_json()
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// switch the active sheet by index.
     #[wasm_bindgen(js_name = setActiveSheet)]
     pub fn set_active_sheet(&mut self, index: u32) -> Result<(), JsValue> {
-        self.session
-            .set_active_sheet(index)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.set_active_sheet(index).map_err(map_engine_error)
     }
 
     /// enter one cell edit; returns updated `SheetInfo` json.
     #[wasm_bindgen(js_name = editCellJson)]
     pub fn edit_cell_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .edit_cell_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.edit_cell_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = editCellProfiledJson)]
     pub fn edit_cell_profiled_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .edit_cell_profiled_json(args, now_serial(), &mut performance_now)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .edit_cell_profiled_json(args)
+            .map_err(map_engine_error)
     }
 
     /// enter a batch of cell edits as one undo step; returns `SheetInfo` json.
     #[wasm_bindgen(js_name = editCellsJson)]
     pub fn edit_cells_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .edit_cells_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.edit_cells_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = moveRangeJson)]
     pub fn move_range_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .move_range_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.move_range_json(args).map_err(map_engine_error)
     }
 
     /// apply a raw op list as one user transaction; returns `SheetInfo` json.
     #[wasm_bindgen(js_name = applyOpsJson)]
     pub fn apply_ops_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {
-        self.session
-            .apply_ops_json(transaction_json, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .apply_ops_json(transaction_json)
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = chartsJson)]
     pub fn charts_json(&self, sheet: u32) -> Result<String, JsValue> {
-        self.session
-            .charts_json(sheet)
-            .map_err(|error| JsValue::from_str(&error))
+        self.inner.charts_json(sheet).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = editChartsJson)]
     pub fn edit_charts_json(&mut self, edits: &str) -> Result<String, JsValue> {
-        self.session
-            .edit_charts_json(edits, now_serial())
-            .map_err(|error| JsValue::from_str(&error))
+        self.inner.edit_charts_json(edits).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = conditionalFormatsJson)]
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .conditional_formats_json(sheet)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = applyOpsProfiledJson)]
     pub fn apply_ops_profiled_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {
-        self.session
-            .apply_ops_profiled_json(transaction_json, now_serial(), &mut performance_now)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .apply_ops_profiled_json(transaction_json)
+            .map_err(map_engine_error)
     }
 
     /// undo the last transaction; returns `{"applied":bool,"sheetInfo":{...}}`.
     #[wasm_bindgen(js_name = undoJson)]
     pub fn undo_json(&mut self) -> Result<String, JsValue> {
-        self.session
-            .undo_json(now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.undo_json().map_err(map_engine_error)
     }
 
     /// redo the last undone transaction; same shape as `undoJson`.
     #[wasm_bindgen(js_name = redoJson)]
     pub fn redo_json(&mut self) -> Result<String, JsValue> {
-        self.session
-            .redo_json(now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.redo_json().map_err(map_engine_error)
     }
 
     /// the editable representation of one cell.
     #[wasm_bindgen(js_name = cellJson)]
     pub fn cell_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .cell_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.cell_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = searchTextJson)]
     pub fn search_text_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .search_text_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.search_text_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = cellPositionJson)]
     pub fn cell_position_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .cell_position_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// a rectangular block of cells for clipboard copy.
     #[wasm_bindgen(js_name = rangeCellsJson)]
     pub fn range_cells_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .range_cells_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.range_cells_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = patchRangeStyleJson)]
     pub fn patch_range_style_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .patch_range_style_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .patch_range_style_json(args)
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = setRangeNumberFormatJson)]
     pub fn set_range_number_format_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .set_range_number_format_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .set_range_number_format_json(args)
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = selectionFormattingJson)]
     pub fn selection_formatting_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .selection_formatting_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = captureFormatJson)]
     pub fn capture_format_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .capture_format_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = applyFormatJson)]
     pub fn apply_format_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .apply_format_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.apply_format_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = mergedRangesJson)]
     pub fn merged_ranges_json(&self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .merged_ranges_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = visibleMergedRangesJson)]
@@ -670,99 +554,91 @@ impl XlsxDocument {
         sheet: u32,
         viewport_json: &str,
     ) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .visible_merged_ranges_json(sheet, viewport_json)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = historyStateJson)]
     pub fn history_state_json(&self) -> Result<String, JsValue> {
-        self.session
-            .history_state_json()
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.history_state_json().map_err(map_engine_error)
     }
 
     /// register an agent proposal (preview only); returns the stored `Proposal` json.
     #[wasm_bindgen(js_name = proposeJson)]
     pub fn propose_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .propose_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.propose_json(args).map_err(map_engine_error)
     }
 
     /// the pending proposals: `{"proposals":[...]}`.
     #[wasm_bindgen(js_name = listProposalsJson)]
     pub fn list_proposals_json(&self) -> Result<String, JsValue> {
-        self.session
-            .list_proposals_json()
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.list_proposals_json().map_err(map_engine_error)
     }
 
     /// accept a proposal as one agent transaction; returns the edit envelope
     /// plus `proposalId`, or a `{"code":"staleProposal",...}` error when the base moved.
     #[wasm_bindgen(js_name = acceptProposalJson)]
     pub fn accept_proposal_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
-            .accept_proposal_json(args, now_serial())
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner
+            .accept_proposal_json(args)
+            .map_err(map_engine_error)
     }
 
     /// reject a proposal by id; returns `{"removed":bool}`.
     #[wasm_bindgen(js_name = rejectProposalJson)]
     pub fn reject_proposal_json(&mut self, args: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .reject_proposal_json(args)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// The session-scoped version of the committed workbook state.
     #[wasm_bindgen(js_name = documentVersion)]
     pub fn document_version(&self) -> String {
-        self.session.document_version()
+        self.inner.document_version()
     }
 
     #[wasm_bindgen(js_name = readCellsJson)]
     pub fn read_cells_json(&self, request: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .read_cells_json(request)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = listDefinedNamesJson)]
     pub fn list_defined_names_json(&self, request: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .list_defined_names_json(request)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = findTextJson)]
     pub fn find_text_json(&self, request: &str) -> Result<String, JsValue> {
-        self.session
-            .find_text_json(request)
-            .map_err(|e| JsValue::from_str(&e))
+        self.inner.find_text_json(request).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = validateEditsJson)]
     pub fn validate_edits_json(&self, request: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .validate_edits_json(request)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// apply an edit batch all-or-nothing; volatile functions see only the request's clock.
     #[wasm_bindgen(js_name = applyEditsJson)]
     pub fn apply_edits_json(&mut self, request: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .apply_edits_json(request)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// Export the committed workbook with the version it was read at; nothing recalculates.
     #[wasm_bindgen(js_name = exportStructuredJson)]
     pub fn export_structured_json(&self, options: &str) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .export_structured_json(options)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = exportMarkdownJson)]
@@ -771,42 +647,32 @@ impl XlsxDocument {
         options: &str,
         markdown_options: &str,
     ) -> Result<String, JsValue> {
-        self.session
+        self.inner
             .export_markdown_json(options, markdown_options)
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(map_engine_error)
     }
 
     /// serialize the current workbook back to `.xlsx` bytes.
     #[wasm_bindgen(js_name = saveBytes)]
     pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
-        self.session.save().map_err(|e| JsValue::from_str(&e))
+        self.inner.save_bytes().map_err(map_engine_error)
     }
 
     /// crate version string.
     pub fn version() -> String {
-        Session::version().to_string()
+        xlsx_engine::Session::version().to_string()
     }
 }
 
 #[wasm_bindgen(js_name = displayListCellLimit)]
 pub fn display_list_cell_limit() -> f64 {
-    betteroffice_xlsx::MAX_DISPLAY_CELLS as f64
-}
-
-fn parse_recovery_sequence(value: f64) -> Result<u64, JsValue> {
-    if !value.is_finite()
-        || value.fract() != 0.0
-        || !(0.0..=9_007_199_254_740_991.0).contains(&value)
-    {
-        return Err(js_sys::TypeError::new("Invalid recovery sequence").into());
-    }
-    Ok(value as u64)
+    xlsx_engine::display_list_cell_limit()
 }
 
 /// Export `.xlsx` bytes as read: stored formula results, no clock.
 #[wasm_bindgen(js_name = exportXlsxStructuredJson)]
 pub fn export_xlsx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
-    core::export_xlsx_structured_json(bytes, options).map_err(|e| JsValue::from_str(&e))
+    xlsx_engine::export_xlsx_structured_json(bytes, options).map_err(map_engine_error)
 }
 
 #[wasm_bindgen(js_name = exportXlsxMarkdownJson)]
@@ -815,37 +681,11 @@ pub fn export_xlsx_markdown_json(
     options: &str,
     markdown_options: &str,
 ) -> Result<String, JsValue> {
-    core::export_xlsx_markdown_json(bytes, options, markdown_options)
-        .map_err(|e| JsValue::from_str(&e))
+    xlsx_engine::export_xlsx_markdown_json(bytes, options, markdown_options)
+        .map_err(map_engine_error)
 }
 
 #[wasm_bindgen(js_name = renderXlsxMarkdownJson)]
 pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    core::render_xlsx_markdown_json(content, options).map_err(|e| JsValue::from_str(&e))
-}
-
-fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
-    if !client_id.is_finite()
-        || client_id.fract() != 0.0
-        || client_id < 1.0
-        || client_id > MAX_COLLABORATION_CLIENT_ID as f64
-    {
-        return Err(JsValue::from_str(
-            "client ID must be a nonzero integer no greater than Number.MAX_SAFE_INTEGER",
-        ));
-    }
-    Ok(client_id as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn update_queue_covers_the_largest_pending_resolution_burst() {
-        assert_eq!(
-            MAX_QUEUED_UPDATE_BYTES,
-            MAX_COLLABORATION_BYTES * 2 + MAX_QUEUED_UPDATE_EVENTS
-        );
-    }
+    xlsx_engine::render_xlsx_markdown_json(content, options).map_err(map_engine_error)
 }
