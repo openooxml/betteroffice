@@ -715,6 +715,70 @@ fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
         .clone()
 }
 
+fn toc_with_sized_field_result(instruction: &str, complex: bool) -> Vec<Value> {
+    let result = concat!(
+        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/>"#,
+        r#"</w:rPr><w:t>3</w:t></w:r>"#,
+    );
+    let field = if complex {
+        format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText> {instruction} target </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                r#"<w:hyperlink w:anchor="target">{result}</w:hyperlink>"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            instruction = instruction,
+            result = result,
+        )
+    } else {
+        format!(
+            r#"<w:fldSimple w:instr=" {instruction} target ">{result}</w:fldSimple>"#,
+        )
+    };
+    let body = format!(
+        concat!(
+            r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+            r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+            r#"<w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t>"#,
+            r#"</w:r></w:hyperlink>{field}</w:p>"#,
+        ),
+        field = field,
+    );
+    let bytes = document(&body, &styles(Some(20), Some(28)));
+    lowered_runs(&bytes, chain_env(&bytes))
+}
+
+#[test]
+fn ref_field_results_keep_their_direct_toc_sizes() {
+    for complex in [false, true] {
+        let runs = toc_with_sized_field_result("REF", complex);
+        let entry = runs.iter().find(|run| run["text"] == "Entry one").unwrap();
+        let result = runs
+            .iter()
+            .find(|run| run["text"] == "3" || run["fallback"] == "3")
+            .unwrap();
+        assert_eq!(entry["fontSize"], 14.0, "{entry}");
+        assert_eq!(result["fontSize"], 14.0, "{result}");
+        assert_eq!(result["kind"], if complex { "text" } else { "field" });
+    }
+}
+
+#[test]
+fn pageref_field_results_do_not_block_the_toc_size_proof() {
+    for complex in [false, true] {
+        let runs = toc_with_sized_field_result("pAgErEf", complex);
+        let entry = runs.iter().find(|run| run["text"] == "Entry one").unwrap();
+        let result = runs
+            .iter()
+            .find(|run| run["text"] == "3" || run["fallback"] == "3")
+            .unwrap();
+        assert_eq!(entry["fontSize"], 10.0, "{entry}");
+        assert_eq!(result["fontSize"], 10.0, "{result}");
+    }
+}
+
 #[test]
 fn an_opaque_toc_field_keeps_its_14pt_cached_entry_text() {
     let body = concat!(

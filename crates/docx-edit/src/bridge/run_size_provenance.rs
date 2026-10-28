@@ -71,11 +71,11 @@ pub(crate) fn paragraph_sizes(
     impl Field {
         fn entry_result(&self) -> bool {
             self.result
-                && self
+                && !self
                     .instruction
                     .split_whitespace()
                     .next()
-                    .is_some_and(|instruction| instruction.eq_ignore_ascii_case("TOC"))
+                    .is_some_and(|instruction| instruction.eq_ignore_ascii_case("PAGEREF"))
         }
     }
 
@@ -86,7 +86,15 @@ pub(crate) fn paragraph_sizes(
         direct_cs: &mut bool,
     ) -> bool {
         if node.matches_name("w", "fldSimple") {
-            return true;
+            fields.push(Field {
+                instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
+                result: true,
+            });
+            let valid = node
+                .child_elements()
+                .all(|child| visit(child, fields, found, direct_cs));
+            fields.pop();
+            return valid;
         }
         if node.matches_name("w", "r") {
             let mut control = false;
@@ -362,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn source_entry_sizes_exclude_tabs_and_field_results() {
+    fn source_entry_sizes_exclude_tabs_and_pageref_results() {
         use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 
         let sized = r#"<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>"#;
@@ -376,7 +384,7 @@ mod tests {
             ),
             sized = sized,
         );
-        let cases = [
+        let mut cases = vec![
             (format!("<w:r>{sized}<w:tab/><w:ptab/></w:r>"), true),
             (
                 format!(
@@ -388,13 +396,27 @@ mod tests {
                 ),
                 true,
             ),
-            (complex, true),
+            (complex.clone(), true),
             (format!("<w:r>{sized}<w:t>Direct entry</w:t></w:r>"), false),
             (
                 format!(r#"<w:r>{sized}<w:sym w:font="Arial" w:char="0041"/></w:r>"#),
                 false,
             ),
         ];
+        for instruction in ["TOC", "REF", "HYPERLINK", "SEQ", "UNKNOWN"] {
+            cases.push((
+                format!(
+                    concat!(
+                        r#"<w:fldSimple w:instr=" {instruction} target "><w:r>{sized}"#,
+                        "<w:t>3</w:t></w:r></w:fldSimple>",
+                    ),
+                    instruction = instruction,
+                    sized = sized,
+                ),
+                false,
+            ));
+            cases.push((complex.replace("PAGEREF", instruction), false));
+        }
         for linked in [false, true] {
             for (content, eligible) in &cases {
                 let entry = concat!(
