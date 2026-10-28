@@ -237,6 +237,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const column = useRef<HTMLDivElement>(null);
   const measuredWindow = useRef<{ start: number; end: number } | null>(null);
   const chromeHold = useMemo(createPageChromeHold, []);
+  const pauseWarm = useRef<(() => void) | null>(null);
   const scrollSettle = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (scrollSettle.current !== null) clearTimeout(scrollSettle.current);
@@ -289,6 +290,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     const scroll = () => {
       schedule();
       chromeHold.set(true);
+      pauseWarm.current?.();
       if (scrollSettle.current !== null) clearTimeout(scrollSettle.current);
       scrollSettle.current = setTimeout(() => {
         scrollSettle.current = null;
@@ -315,29 +317,64 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   const caretPage = geometry?.caret ? clientPointToPage(geometry.caret.x, geometry.caret.y, { left: 0, top: 0 }, 1, pages)?.page.page.pageId : undefined;
   const visiblePages = useMemo(() => pages.filter(({ page }) => page.pageId === caretPage ||
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
+  const warmed = useRef(new WeakSet<NonNullable<ReturnType<typeof pageQueries.get>>>());
+  const lastInput = useRef(Number.NEGATIVE_INFINITY);
+  useEffect(() => {
+    const input = () => { lastInput.current = performance.now(); };
+    for (const type of ['keydown', 'beforeinput', 'compositionupdate']) document.addEventListener(type, input, true);
+    return () => { for (const type of ['keydown', 'beforeinput', 'compositionupdate']) document.removeEventListener(type, input, true); };
+  }, []);
   useEffect(() => {
     const presented = visiblePages.flatMap(({ displayPage }) => displayPage && !displayPage.unbuilt ? [displayPage] : []);
     pageQueries.retain(presented);
     let index = 0;
-    let cancel = () => {};
-    const warm = () => {
-      const page = presented[index++];
-      if (!page) return;
-      pageQueries.get(page)?.hitTestRegions(0, 0, 0);
-      if (index < presented.length) schedule();
+    let active = true;
+    let cancel: (() => void) | null = null;
+    let due: number | null = null;
+    const warm = (deadline?: IdleDeadline) => {
+      cancel = null;
+      if (!active) return;
+      if (chromeHold.held) { schedule(); return; }
+      const quiet = performance.now() - lastInput.current;
+      if (quiet < 500) {
+        due = null;
+        const id = setTimeout(() => { cancel = null; schedule(); }, 500 - quiet);
+        cancel = () => clearTimeout(id);
+        return;
+      }
+      const overdue = !!deadline && (deadline.didTimeout || (due !== null && performance.now() >= due));
+      while (index < presented.length) {
+        if (deadline && !overdue && deadline.timeRemaining() < 4) break;
+        const queries = pageQueries.get(presented[index]!);
+        if (queries && !warmed.current.has(queries)) {
+          if (deadline && !overdue && deadline.timeRemaining() < 4) break;
+          queries.hitTestRegions(0, 0, 0);
+          warmed.current.add(queries);
+          index++;
+          due = null;
+          break;
+        } else index++;
+      }
+      schedule();
     };
     const schedule = () => {
-      if (typeof requestIdleCallback === 'function') {
-        const id = requestIdleCallback(warm);
+      if (cancel || !active || index >= presented.length || !queryEngineReady) return;
+      if (chromeHold.held) {
+        cancel = chromeHold.whenReleased(() => { cancel = null; schedule(); });
+      } else if (typeof requestIdleCallback === 'function') {
+        due ??= performance.now() + 1000;
+        const id = requestIdleCallback(warm, { timeout: Math.max(1, due - performance.now()) });
         cancel = () => cancelIdleCallback(id);
       } else {
         const id = setTimeout(warm, 32);
         cancel = () => clearTimeout(id);
       }
     };
-    if (presented.length && queryEngineReady) schedule();
-    return () => cancel();
-  }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady]);
+    const pause = () => { cancel?.(); cancel = null; due = null; schedule(); };
+    pauseWarm.current = pause;
+    schedule();
+    return () => { active = false; cancel?.(); if (pauseWarm.current === pause) pauseWarm.current = null; };
+  }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady, chromeHold]);
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
   const [pictureDragging, setPictureDragging] = useState(false);
