@@ -81,6 +81,7 @@ fn wrapped_cover_reserves_shared_default_header_with_own_geometry() {
                 .clone()
         };
         assert_eq!(body_margins(&pages[0])["top"], 100.0, "case {index}");
+        assert_eq!(pages[0]["fragments"][0]["y"], 100.0, "case {index}");
         assert_eq!(
             body_margins(&pages[1])["top"],
             (top as f64 / 15.0).max(100.0),
@@ -145,7 +146,8 @@ fn consecutive_wrapped_sections_inherit_authored_margins_after_a_tall_header() {
                 concat!(
                     "<w:document ",
                     "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
-                    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+                    "xmlns:r=\"",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
                     "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">",
                     "<w:body>{body}</w:body></w:document>"
                 ),
@@ -342,6 +344,10 @@ fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_positio
         assert_eq!(page["size"]["h"], 600.0);
         assert_eq!(page["margins"]["bottom"], 80.0);
         assert_eq!(page["bodyMargins"]["bottom"], 200.0);
+        for fragment in page["fragments"].as_array().unwrap() {
+            let bottom = fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap();
+            assert!(bottom <= 400.0, "body overlaps the footer: {fragment}");
+        }
     }
     assert_eq!(pages[2]["size"]["h"], 1000.0);
     assert_eq!(pages[2]["bodyMargins"]["bottom"], 200.0);
