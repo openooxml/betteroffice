@@ -60,6 +60,10 @@ function compress(bytes: Uint8Array, dictionary?: Uint8Array): Uint8Array {
 }
 
 describe('internal font decoder', () => {
+  test.skipIf(process.env.CI === undefined)('decoder wasm is built in CI', () => {
+    expect(hasWasm).toBe(true);
+  });
+
   test('unsupported manifest codecs fail before decoding or passthrough', async () => {
     for (const bytes of [hello, helloFrame]) {
       await expect(decodeFontBytes(bytes, undefined, { codec: 'woff2t' }))
