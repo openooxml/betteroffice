@@ -232,7 +232,9 @@ or `anchor`) and its `type` (`picture`, `shape`, `textBox`, `group`, `chart`,
 `diagram` or `other`). Content-control atoms carry `drawings` when nonempty,
 listing the same properties in document order, including nested controls and
 hyperlinks, projected to the requested revision view;
-drawings inside field results are not listed.
+drawings inside field results are not listed, except drawings in a tracked
+change inside a complex field's result, which reads treat as content beside the
+field, inside or outside a control.
 Structured export image and unsupported inlines carry
 the same object as `drawing`, null when the drawing has none, and an image
 inline's `altText` is its `descr`, falling back to its `title`. Sessions seeded
