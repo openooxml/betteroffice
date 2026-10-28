@@ -10685,7 +10685,7 @@ mod tests {
         let small_contexts = build(&small_text);
         let large_contexts = build(&large_text);
         let renderer = renderer();
-        let (small_elapsed, _) = best_of_three(|| {
+        let (small_elapsed, small_saved) = best_of_three(|| {
             small_contexts
                 .iter()
                 .map(|(session, _, _)| renderer.save(session).unwrap())
@@ -10702,8 +10702,10 @@ mod tests {
             ratio < 2.8,
             "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
-        for ((_, plain_bytes, plain_autofit), saved) in
-            large_contexts.iter().zip(large_saved.iter())
+        for ((_, plain_bytes, plain_autofit), saved) in small_contexts
+            .iter()
+            .zip(small_saved.iter())
+            .chain(large_contexts.iter().zip(large_saved.iter()))
         {
             let reopened = pptx_parse::parse_pptx(saved).unwrap();
             let part = &reopened.slides[0].part_path;
