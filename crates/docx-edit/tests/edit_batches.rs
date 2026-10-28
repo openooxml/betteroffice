@@ -1790,6 +1790,154 @@ fn open_numbered_restyle(body: &str) -> EditingDoc {
 }
 
 #[test]
+fn restyle_numbered_runs_keep_provenance_after_in_run_text_replacement() {
+    for (formatting, expected) in [
+        (r#"<w:rPr><w:b/><w:sz w:val="24"/></w:rPr>"#, 24.0),
+        ("", 32.0),
+        (r#"<w:rPr><w:rStyle w:val="Fixed24"/><w:i/></w:rPr>"#, 24.0),
+    ] {
+        let doc = open_numbered_restyle(&format!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr><w:r>{formatting}<w:t>young People</w:t></w:r></w:p>"#
+        ));
+        doc.replace_range(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", 6, 12),
+            "people",
+        )
+        .unwrap();
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        let attrs = marks(&doc, "body", "young people");
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size")
+        };
+        assert_eq!(number(size.get("size")), Some(expected));
+        assert!(active(&attrs, "bold"));
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap();
+        assert!(part.legacy_paragraphs.is_empty());
+        assert_eq!(part.paragraph_patches.len(), 1);
+        assert!(!part.paragraph_patches[0].text_edits.is_empty());
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_allow_irrelevant_provenance_differences_after_text_edits() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        r#"<w:r><w:rPr><w:i w:val="0"/></w:rPr><w:t>a</w:t></w:r>"#,
+        "<w:r><w:t>b</w:t></w:r></w:p>",
+    ));
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 1),
+        "!",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let attrs = marks(&doc, "body", "a!b");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing run size")
+    };
+    assert_eq!(number(size.get("size")), Some(32.0));
+    assert!(active(&attrs, "bold"));
+    assert!(!active(&attrs, "italic"));
+}
+
+#[test]
+fn restyle_numbered_runs_match_distinct_signatures_after_text_edits() {
+    for linked in [false, true] {
+        let runs = concat!(
+            r#"<w:r><w:rPr><w:b/><w:sz w:val="24"/></w:rPr><w:t>young People</w:t></w:r>"#,
+            "<w:r><w:t>Inherited</w:t></w:r>",
+        );
+        let content = if linked {
+            format!(r#"<w:hyperlink w:anchor="target">{runs}</w:hyperlink>"#)
+        } else {
+            runs.to_owned()
+        };
+        let doc = open_numbered_restyle(&format!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>{content}</w:p>"#
+        ));
+        doc.replace_range(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", 6, 12),
+            "people",
+        )
+        .unwrap();
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        for (text, expected) in [("young people", 24.0), ("Inherited", 32.0)] {
+            let attrs = marks(&doc, "body", text);
+            let Some(Any::Map(size)) = attrs.get("fontSize") else {
+                panic!("missing run size")
+            };
+            assert_eq!(number(size.get("size")), Some(expected));
+            assert!(active(&attrs, "bold"));
+        }
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap();
+        assert!(part.legacy_paragraphs.is_empty());
+        assert_eq!(part.paragraph_patches.len(), 1);
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_refuse_unmatched_formatting_after_text_edits() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t>young People</w:t></w:r></w:p>",
+    ));
+    doc.replace_range(
+        &EditCtx::local("", ""),
+        StoryRange::new("body", 6, 12),
+        "people",
+    )
+    .unwrap();
+    doc.format_range(
+        &EditCtx::local("", ""),
+        StoryRange::new("body", 0, 12),
+        &docx_edit::InlineFormatDelta {
+            bold: docx_edit::Patch::Set(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let before = doc.story_segments("body").unwrap();
+    let version = doc.version();
+    let failure = refuse(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    )
+    .failure;
+    assert_eq!(failure.code, EditFailureCode::Unsupported);
+    assert_eq!(doc.story_segments("body").unwrap(), before);
+    assert_eq!(doc.version(), version);
+}
+
+#[test]
 fn restyle_numbered_runs_refuse_retyped_equal_text_without_mutation() {
     for linked in [false, true] {
         for remote in [false, true] {
@@ -2132,7 +2280,7 @@ fn restyle_numbered_runs_keep_complex_script_off_properties() {
 }
 
 #[test]
-fn restyle_numbered_runs_require_unchanged_text_with_or_without_hyperlinks() {
+fn restyle_numbered_runs_refuse_ambiguous_edited_provenance_with_or_without_hyperlinks() {
     for linked in [false, true] {
         for edited in [None, Some(0), Some(8), Some(17)] {
             let runs = concat!(
@@ -2191,7 +2339,7 @@ fn restyle_numbered_runs_require_unchanged_text_with_or_without_hyperlinks() {
 }
 
 #[test]
-fn restyle_numbered_runs_refuse_typing_into_originally_empty_text() {
+fn restyle_numbered_runs_rebase_typing_into_originally_empty_text() {
     let doc = open_numbered_restyle(concat!(
         r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
         r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
@@ -2204,22 +2352,17 @@ fn restyle_numbered_runs_refuse_typing_into_originally_empty_text() {
         FormatPolicy::Inherit,
     )
     .unwrap();
-    let before = doc.story_segments("body").unwrap();
-    let version = doc.version();
-    let failure = refuse(
+    apply(
         &doc,
         &UndoSession::new(),
         vec![set_style("00000001", "Heading1")],
-    )
-    .failure;
-    assert_eq!(failure.code, EditFailureCode::Unsupported);
-    assert!(
-        failure
-            .message
-            .contains("restyle this numbered paragraph before editing its text")
     );
-    assert_eq!(doc.story_segments("body").unwrap(), before);
-    assert_eq!(doc.version(), version);
+    let attrs = marks(&doc, "body", "Inherited");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing run size")
+    };
+    assert_eq!(number(size.get("size")), Some(32.0));
+    assert!(active(&attrs, "bold"));
 }
 
 #[test]

@@ -281,8 +281,9 @@ pub(super) fn write(
                 let named = lowered
                     .cells
                     .iter()
-                    .find(|cell| cell.from <= *at && *at < cell.to);
-                if !named.is_some_and(|cell| {
+                    .enumerate()
+                    .find(|(_, cell)| cell.from <= *at && *at < cell.to);
+                if !named.is_some_and(|(_, cell)| {
                     cell.run == donor.run && matches!(cell.unit, UnitV1::Text { .. })
                 }) {
                     return Err(donor_error("plan names a different donor"));
@@ -300,6 +301,25 @@ pub(super) fn write(
                         &insert.inherit,
                         &insert.attrs,
                     )?;
+                    let properties = if restyle {
+                        let deltas = properties::restyle_run_deltas(
+                            original,
+                            &deltas,
+                            &donor_attrs,
+                            named
+                                .and_then(|(at, _)| inherited.get(at).copied())
+                                .unwrap_or(&empty),
+                            &insert.inherit,
+                        )?;
+                        properties::run_properties(
+                            original,
+                            &deltas,
+                            &insert.inherit,
+                            &insert.attrs,
+                        )?
+                    } else {
+                        properties
+                    };
                     inserts.push(Insert {
                         node: donor.node,
                         at: edit.from,

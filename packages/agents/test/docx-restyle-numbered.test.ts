@@ -264,6 +264,32 @@ test('restyling an unedited numbered heading with a footnote saves only its styl
   expect(await saved.file('word/footnotes.xml')!.async('string')).toBe(footnotes);
 }, 30_000);
 
+test('restyling after accepting an in-run text correction keeps a paragraph patch', async () => {
+  for (const direct of [true, false]) {
+    const source = await restyleFixture();
+    const zip = await JSZip.loadAsync(source.bytes);
+    const heading = (direct ? HEADING : HEADING.replace(/(<w:r\b[^>]*>)<w:rPr>[\s\S]*?<\/w:rPr>/g, '$1'))
+      .replace('Some heading', 'young People');
+    zip.file('word/document.xml', source.document.replace(HEADING, heading));
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    const match = doc.grep({ query: 'People' }).matches[0]!;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: match.match, newText: 'people' }] });
+    expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
+    await doc.edit({
+      version: doc.list().version,
+      edits: [{ op: 'set_paragraph_style', paragraph: item(doc, 'young people').ref, style: 'heading 1' }],
+    });
+    const part = doc.session.paragraphSavePlan().splicedParts!
+      .find(entry => entry.part === 'word/document.xml')!;
+    expect(part.paragraphPatches?.map(patch => patch.ordinal)).toContain(0);
+    expect((part.legacyParagraphs ?? []).filter(entry => entry.ordinal === 0)).toEqual([]);
+    const saved = await JSZip.loadAsync(await doc.export());
+    expect(byText(await saved.file('word/document.xml')!.async('string'), 'young people')).toBe(
+      heading.replace('young People', 'young people').replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
+    expect(await saved.file('word/numbering.xml')!.async('string')).toBe(NUMBERING);
+  }
+}, 30_000);
+
 test('restyling refuses equal text whose original run items were replaced', async () => {
   const source = await restyleFixture();
   const zip = await JSZip.loadAsync(source.bytes);
@@ -289,32 +315,23 @@ test('restyling refuses equal text whose original run items were replaced', asyn
   expect(doc.session.storySegments('body')).toEqual(before);
 }, 30_000);
 
-test('restyling a text-edited numbered heading requires saving and reopening first', async () => {
+test('restyling after inserting text into a directly formatted heading keeps a paragraph patch', async () => {
   const source = await restyleFixture();
   const doc = await open(source.bytes);
   doc.session.insertText({ story: 'body', paraId: '00004301', offset: 0 }, 'Some ');
   const target = item(doc, 'Some Some heading');
-  const version = doc.list().version;
-  const before = doc.session.storySegments('body');
-  const error = await refusal(doc.edit({
-    version,
+  await doc.edit({
+    version: doc.list().version,
     edits: [{ op: 'set_paragraph_style', paragraph: target.ref, style: 'heading 1' }],
-  }));
-  expect(error.code).toBe('UNSUPPORTED');
-  expect(error.message).toContain('restyle this numbered paragraph before editing its text, or save and reopen first');
-  expect(doc.list().version).toBe(version);
-  expect(doc.session.storySegments('body')).toEqual(before);
-  const bytes = await doc.export();
-  const saved = await JSZip.loadAsync(bytes);
-  const edited = blocks(await saved.file('word/document.xml')!.async('string'))[0]!;
-  const reopened = await open(bytes);
-  await reopened.edit({
-    version: reopened.list().version,
-    edits: [{ op: 'set_paragraph_style', paragraph: item(reopened, 'Some Some heading').ref, style: 'heading 1' }],
   });
-  const restored = await JSZip.loadAsync(await reopened.export());
-  expect(blocks(await restored.file('word/document.xml')!.async('string'))[0]).toBe(
-    edited.replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
+  const part = doc.session.paragraphSavePlan().splicedParts!
+    .find(entry => entry.part === 'word/document.xml')!;
+  expect(part.paragraphPatches?.map(patch => patch.ordinal)).toContain(0);
+  expect((part.legacyParagraphs ?? []).filter(entry => entry.ordinal === 0)).toEqual([]);
+  const saved = await JSZip.loadAsync(await doc.export());
+  expect(byText(await saved.file('word/document.xml')!.async('string'), 'Some Some heading')).toBe(
+    HEADING.replace('Some heading', 'Some Some heading')
+      .replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
 }, 30_000);
 
 test('set_paragraph_style still refuses a style that defines list numbering', async () => {

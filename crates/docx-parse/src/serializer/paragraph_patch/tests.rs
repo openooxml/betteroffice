@@ -1392,6 +1392,51 @@ fn paragraph_patch_restyle_keeps_complex_script_fields_inherited_or_direct() {
 }
 
 #[test]
+fn paragraph_patch_restyle_text_replacement_preserves_run_xml() {
+    for direct in [false, true] {
+        for changed in [false, true] {
+            let size = if direct { "<w:sz w:val='24'/>" } else { "" };
+            let source = format!(
+                "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr><w:r w:rsidR='12345678'><w:rPr><w:i/><w:noProof/>{size}</w:rPr><w:t>x</w:t></w:r></w:p>"
+            );
+            let target_size = if changed {
+                40
+            } else if direct {
+                24
+            } else {
+                32
+            };
+            let before = json!({"fontSize": {"size": 24}, "italic": true});
+            let after = json!({"fontSize": {"size": target_size}, "italic": true, "bold": true});
+            let next = json!({"fontSize": {"size": 32}, "bold": true});
+            let mut plan = numbered_run_restyle(
+                before,
+                after.clone(),
+                json!({"fontSize": {"size": 24}}),
+                next.clone(),
+            );
+            plan.run_edits.clear();
+            replace(&mut plan, 0, 1, "y", after.clone());
+            plan.text_edits[0].insert[0].inherit = attrs(next);
+            let mut properties = plan.seed.properties.clone();
+            properties.insert("pStyle".to_owned(), json!("Heading1"));
+            plan.result_sha256 = result_sha256(&[text("y", after)], &properties);
+            let expected = source
+                .replace("w:val='Body24'", "w:val='Heading1'")
+                .replace(">x<", ">y<");
+            let expected = if changed && direct {
+                expected.replace("w:val='24'", "w:val='40'")
+            } else if changed {
+                expected.replace("</w:rPr>", "<w:sz w:val=\"40\"/></w:rPr>")
+            } else {
+                expected
+            };
+            assert_eq!(write(&source, &plan).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
 fn paragraph_patch_restyle_keeps_inherited_run_properties_out_of_xml() {
     for direct_size in ["", "sz", "szCs"] {
         for target_size in [32, 40] {

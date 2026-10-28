@@ -1123,6 +1123,128 @@ fn original_run_formatting(
     Ok(runs)
 }
 
+fn run_signature(attrs: &BTreeMap<String, Any>) -> BTreeMap<String, Any> {
+    fn normalized(value: &Any) -> Option<Any> {
+        match value {
+            Any::Null | Any::Undefined => None,
+            Any::Map(map) => Some(Any::Map(Arc::new(
+                map.iter()
+                    .filter_map(|(key, value)| normalized(value).map(|value| (key.clone(), value)))
+                    .collect(),
+            ))),
+            _ => Some(value.clone()),
+        }
+    }
+    attrs
+        .iter()
+        .filter(|(key, _)| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .filter_map(|(key, value)| normalized(value).map(|value| (key.clone(), value)))
+        .collect()
+}
+
+fn rebased_run_attr(
+    key: &str,
+    current: Option<&Any>,
+    previous: Option<&Any>,
+    next: Option<&Any>,
+    direct: Option<&Any>,
+) -> Option<Any> {
+    let effective = if matches!(key, "boldCs" | "italicCs") {
+        current.or(direct).or(previous)
+    } else {
+        current
+    };
+    rebase_style_attr(effective, previous, next, direct)
+}
+
+fn edited_run_formatting(
+    chunks: &[Chunk],
+    boundaries: Option<&Any>,
+    source: &crate::seed::SourceMetadata,
+    story: &str,
+    previous_style: Option<&str>,
+    next_style: &str,
+    node_start: u32,
+    pilcrow: u32,
+) -> Result<Vec<DirectRunFormatting>, &'static str> {
+    let Some(Any::Array(boundaries)) = boundaries else {
+        return Err(MISSING_RUN_PROVENANCE);
+    };
+    let mut originals = Vec::new();
+    for boundary in boundaries.iter() {
+        let Any::Map(boundary) = boundary else {
+            return Err(MISSING_RUN_PROVENANCE);
+        };
+        let formatting = boundary.get("formatting");
+        let seeded = source
+            .seeded_run_attrs(story, previous_style, formatting)
+            .map_err(|_| MISSING_RUN_PROVENANCE)?
+            .into_iter()
+            .collect();
+        originals.push((
+            run_signature(&seeded),
+            formatting.map(direct_run_attrs).unwrap_or_default(),
+        ));
+    }
+    let mut runs = Vec::new();
+    for chunk in chunks {
+        if !matches!(chunk.kind, ChunkKind::Text(_))
+            || chunk.start < node_start
+            || chunk.end() > pilcrow
+        {
+            continue;
+        }
+        let signature = run_signature(&chunk.attrs);
+        let mut matches = originals.iter().filter(|(attrs, _)| *attrs == signature);
+        let Some((_, direct)) = matches.next() else {
+            return Err(EDITED_NUMBERED_PARAGRAPH);
+        };
+        let run_style = match chunk.attrs.get("runStyle") {
+            Some(Any::Map(style)) => match style.get("styleId") {
+                Some(Any::String(style)) => Some(style.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let inherited = |style| {
+            crate::seed::payload(source.patch_inheritance(story, style, run_style).1)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+        };
+        let previous = inherited(previous_style);
+        let next = inherited(Some(next_style));
+        let keys: BTreeSet<_> = previous.keys().chain(next.keys()).collect();
+        for (_, candidate) in matches {
+            if candidate == direct {
+                continue;
+            }
+            for key in &keys {
+                let old = present(previous.get(*key));
+                let new = present(next.get(*key));
+                if old == new
+                    || (chunk.attr_active(crate::format::HYPERLINK)
+                        && matches!(key.as_str(), "textColor" | "underline"))
+                {
+                    continue;
+                }
+                let current = present(chunk.attrs.get(*key));
+                if rebased_run_attr(key, current, old, new, direct.get(*key))
+                    != rebased_run_attr(key, current, old, new, candidate.get(*key))
+                {
+                    return Err(EDITED_NUMBERED_PARAGRAPH);
+                }
+            }
+        }
+        runs.push(DirectRunFormatting {
+            start: chunk.start,
+            end: chunk.end(),
+            attrs: direct.clone(),
+        });
+    }
+    Ok(runs)
+}
+
 fn rebase_attrs(
     current: &BTreeMap<String, Any>,
     old: &BTreeMap<String, Any>,
@@ -1412,23 +1534,31 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     let retained = direct_numbering
         .then(|| source.restyle_run_boundaries(story_id, para_id))
         .flatten();
-    let direct_runs = if direct_numbering {
-        if !source.paragraph_content_unchanged(txn, story, story_id, node_start, pilcrow) {
-            return Err(EDITED_NUMBERED_PARAGRAPH);
-        }
-        Some(original_run_formatting(
-            chunks,
-            properties,
-            retained.as_ref(),
-            node_start,
-            pilcrow,
-        )?)
-    } else {
-        None
-    };
     let previous_style = match properties.get("pStyle") {
         Some(Any::String(style)) => Some(style.as_ref()),
         _ => None,
+    };
+    let direct_runs = if direct_numbering {
+        Some(
+            if source.paragraph_content_unchanged(txn, story, story_id, node_start, pilcrow) {
+                original_run_formatting(chunks, properties, retained.as_ref(), node_start, pilcrow)?
+            } else {
+                edited_run_formatting(
+                    chunks,
+                    properties
+                        .get("_originalRunBoundaries")
+                        .or(retained.as_ref()),
+                    source,
+                    story_id,
+                    previous_style,
+                    style_id,
+                    node_start,
+                    pilcrow,
+                )?
+            },
+        )
+    } else {
+        None
     };
     let mut inheritance = HashMap::new();
     let mut formats = Vec::new();
@@ -1493,19 +1623,12 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                 }
                 let current = present(chunk.attrs.get(*key));
                 let wanted = if direct_numbering {
-                    let authored = direct.and_then(|direct| direct.get(*key));
-                    let effective = if matches!(*key, "boldCs" | "italicCs") {
-                        current
-                            .or(authored)
-                            .or_else(|| present(old_inherited.get(*key)))
-                    } else {
-                        current
-                    };
-                    rebase_style_attr(
-                        effective,
+                    rebased_run_attr(
+                        key,
+                        current,
                         present(old_inherited.get(*key)),
                         present(new_inherited.get(*key)),
-                        authored,
+                        direct.and_then(|direct| direct.get(*key)),
                     )
                 } else {
                     let follows_style = STYLE_CONTROLLED_MARKS.contains(key)

@@ -385,7 +385,7 @@ impl SourceMetadata {
         let Some(&(clock, len)) = self.structure.seeded_content.get(story_id) else {
             return false;
         };
-        let BranchID::Nested(origin) = story.as_ref().id() else {
+        let BranchID::Nested(origin) = AsRef::<yrs::branch::Branch>::as_ref(story).id() else {
             return false;
         };
         if origin.clock >= clock {
@@ -428,7 +428,7 @@ impl SourceMetadata {
         StickyIndex::from_id(ID::new(mark.client, first), Assoc::After)
             .get_offset(txn)
             .is_some_and(|offset| {
-                offset.index == start && offset.branch.id() == story.as_ref().id()
+                offset.index == start && offset.branch.id() == AsRef::<yrs::branch::Branch>::as_ref(story).id()
             })
     }
 
@@ -491,6 +491,38 @@ impl SourceMetadata {
         self.structure
             .run_revisions
             .contains(&(story.to_owned(), key.to_owned()))
+    }
+
+    pub(crate) fn seeded_run_attrs(
+        &self,
+        story: &str,
+        paragraph_style: Option<&str>,
+        formatting: Option<&Any>,
+    ) -> Result<Vec<(String, Any)>, String> {
+        let table_context = self.structure.patch_table_styles.get(story).or_else(|| {
+            self.peer_patch_table_styles
+                .get()
+                .and_then(|styles| styles.get(story))
+        });
+        let mut table_styles;
+        let styles = if let Some((paragraph, run)) = table_context {
+            table_styles = self.styles.clone();
+            table_styles.set_table_paragraph_formatting(paragraph.clone());
+            table_styles.set_table_run_formatting(run.clone());
+            &table_styles
+        } else {
+            &self.styles
+        };
+        let paragraph =
+            json!({ "type": "paragraph", "formatting": { "styleId": paragraph_style } });
+        let formatting = formatting
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| json!({}));
+        let run = json!({ "type": "run", "formatting": formatting });
+        let style = paragraph_style_formatting(&paragraph, styles, None);
+        payload(marks_to_attrs(&run_marks(&run, style.as_deref(), styles)))
     }
 
     pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
@@ -6493,7 +6525,7 @@ fn seed_lowered(
             .into_iter()
             .filter_map(|(story, range)| {
                 let text = crate::story_ref(&txn, &story).ok()?;
-                match text.as_ref().id() {
+                match AsRef::<yrs::branch::Branch>::as_ref(&text).id() {
                     BranchID::Nested(id) if id.client == range.client && id.clock < range.clock => {
                         Some((story, (range.clock, range.len)))
                     }

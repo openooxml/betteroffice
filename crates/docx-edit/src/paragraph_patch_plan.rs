@@ -1255,7 +1255,7 @@ pub(crate) fn diff_paragraph_v1(
                         .text_donor(previous.0, i)
                         .map_or(&seeded_mark, |at| old_inherit[at].as_ref());
                     if token.attrs.get("runStyle") != donor_attrs.get("runStyle")
-                        || inherit.as_ref() != donor_inherit
+                        || (!patchable_restyle && inherit.as_ref() != donor_inherit)
                     {
                         return Err(context.restyle("inserted run inheritance"));
                     }

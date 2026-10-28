@@ -292,7 +292,8 @@ fn unchanged_inheritance(patch: &ParagraphPatchV1) -> Result<(), Failure> {
             }
         };
         if edit.insert.iter().any(|insert| {
-            insert.inherit != *inherit || insert.attrs.get("runStyle") != attrs.get("runStyle")
+            (!numbered_restyle && insert.inherit != *inherit)
+                || insert.attrs.get("runStyle") != attrs.get("runStyle")
         }) {
             return Err(restyle());
         }
