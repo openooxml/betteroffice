@@ -583,8 +583,14 @@ export class DocxAgentDocument {
     const draft = await createYrsSession();
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
-      if (source) draft.openDocx(new Uint8Array(source), false);
-      draft.loadState(this.session.encodeState());
+      const state = this.session.encodeState();
+      if (source) {
+        const bytes = new Uint8Array(source);
+        const host = draft.openDocx(bytes, false);
+        draft.bootstrapPeer(state, this.session.encodePeerMetadata(), bytes, host);
+      } else {
+        draft.loadState(state);
+      }
       return draft;
     } catch (error) { draft.destroy(); throw error; }
   }

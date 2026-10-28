@@ -8,7 +8,10 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
+use yrs::{
+    Any, Array as _, Assoc, BranchID, ID, IndexedSequence, Map as YrsMap, Out, ReadTxn,
+    StickyIndex, Text as _, TextRef, Transact,
+};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -286,6 +289,8 @@ struct SourceStructure {
     )]
     restyle_runs: HashMap<(String, String), Vec<Value>>,
     #[serde(skip)]
+    seeded_content: HashMap<String, (u32, u32)>,
+    #[serde(skip)]
     patch_table_styles: PatchTableStyles,
 }
 
@@ -346,6 +351,87 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn seed_identities(&self) -> BTreeMap<String, (u32, u32)> {
+        self.structure
+            .seeded_content
+            .iter()
+            .map(|(story, range)| (story.clone(), *range))
+            .collect()
+    }
+
+    pub(crate) fn restore_seed_identities(
+        &mut self,
+        identities: BTreeMap<String, (u32, u32)>,
+    ) -> Result<(), String> {
+        let mut ranges = HashMap::new();
+        for (story, (clock, len)) in identities {
+            if len == 0 || clock.checked_add(len).is_none() {
+                return Err("invalid seeded content identity".to_owned());
+            }
+            ranges.insert(story, (clock, len));
+        }
+        self.structure.seeded_content = ranges;
+        Ok(())
+    }
+
+    pub(crate) fn paragraph_content_unchanged<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story: &TextRef,
+        story_id: &str,
+        start: u32,
+        pilcrow: u32,
+    ) -> bool {
+        let Some(&(clock, len)) = self.structure.seeded_content.get(story_id) else {
+            return false;
+        };
+        let BranchID::Nested(origin) = story.as_ref().id() else {
+            return false;
+        };
+        if origin.clock >= clock {
+            return false;
+        }
+        let Some(end) = clock.checked_add(len) else {
+            return false;
+        };
+        let Some(mark) = story
+            .sticky_index(txn, pilcrow, Assoc::After)
+            .and_then(|index| index.id().copied())
+        else {
+            return false;
+        };
+        if mark.client != origin.client || mark.clock >= end {
+            return false;
+        }
+        let Some(first) = pilcrow
+            .checked_sub(start)
+            .and_then(|len| mark.clock.checked_sub(len))
+        else {
+            return false;
+        };
+        if first < clock {
+            return false;
+        }
+        let snapshot = txn.snapshot();
+        if snapshot.state_map.get(&mark.client) < end
+            || snapshot
+                .delete_set
+                .get(&mark.client)
+                .is_some_and(|deleted| {
+                    deleted
+                        .ranges()
+                        .any(|range| range.start <= mark.clock && first < range.end)
+                })
+        {
+            return false;
+        }
+        StickyIndex::from_id(ID::new(mark.client, first), Assoc::After)
+            .get_offset(txn)
+            .is_some_and(|offset| {
+                offset.index == start && offset.branch.id() == story.as_ref().id()
+            })
+    }
+
     pub(crate) fn restyle_run_boundaries(&self, story: &str, para_id: &str) -> Option<Any> {
         let runs = self
             .structure
@@ -6400,6 +6486,22 @@ fn seed_lowered(
     seed_opaque_sequences(document, &context.opaque_sequences, seeded);
     document.set_media_sources(sources);
     read.pin(document, &ranges);
+    let mut structure = context.source;
+    {
+        let txn = document.yrs_doc().transact();
+        structure.seeded_content = ranges
+            .into_iter()
+            .filter_map(|(story, range)| {
+                let text = crate::story_ref(&txn, &story).ok()?;
+                match text.as_ref().id() {
+                    BranchID::Nested(id) if id.client == range.client && id.clock < range.clock => {
+                        Some((story, (range.clock, range.len)))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+    }
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
         document.retain_source(SourcePackage::Ready(Arc::new(index)));
@@ -6407,7 +6509,7 @@ fn seed_lowered(
     document.install_source(
         SourceMetadata {
             styles: context.styles,
-            structure: context.source,
+            structure,
             read,
             peer_patch_table_styles: OnceLock::new(),
         },
@@ -7153,6 +7255,20 @@ mod tests {
                 pin.unit
             );
         }
+    }
+
+    #[test]
+    fn restyle_provenance_requires_locally_recorded_seed_ids() {
+        let bytes = fixture::Package::new(&fixture::para("00000001", &fixture::run("aa"))).bytes();
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let source = doc.source_metadata().unwrap();
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        assert!(source.paragraph_content_unchanged(&txn, &story, "body", 0, 2));
+        let shared: SourceMetadata =
+            serde_json::from_value(serde_json::to_value(source.as_ref()).unwrap()).unwrap();
+        assert!(!shared.paragraph_content_unchanged(&txn, &story, "body", 0, 2));
     }
 
     #[test]

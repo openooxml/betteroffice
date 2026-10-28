@@ -264,6 +264,31 @@ test('restyling an unedited numbered heading with a footnote saves only its styl
   expect(await saved.file('word/footnotes.xml')!.async('string')).toBe(footnotes);
 }, 30_000);
 
+test('restyling refuses equal text whose original run items were replaced', async () => {
+  const source = await restyleFixture();
+  const zip = await JSZip.loadAsync(source.bytes);
+  const heading = '<w:p w14:paraId="00004301"><w:pPr><w:pStyle w:val="ListParagraph"/>' +
+    '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>' +
+    '<w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>a</w:t></w:r></w:p>';
+  zip.file('word/document.xml', source.document.replace(HEADING, heading));
+  zip.file('word/styles.xml', source.styles.replace('<w:contextualSpacing/></w:pPr></w:style>',
+    '<w:contextualSpacing/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  doc.session.replaceRange({ story: 'body', start: { paraId: '00004301', offset: 0 }, end: { paraId: '00004301', offset: 1 } }, '');
+  doc.session.insertText({ story: 'body', paraId: '00004301', offset: 1 }, 'a');
+  const target = item(doc, 'aa');
+  const version = doc.list().version;
+  const before = doc.session.storySegments('body');
+  const error = await refusal(doc.edit({
+    version,
+    edits: [{ op: 'set_paragraph_style', paragraph: target.ref, style: 'heading 1' }],
+  }));
+  expect(error.code).toBe('UNSUPPORTED');
+  expect(error.message).toContain('restyle this numbered paragraph before editing its text, or save and reopen first');
+  expect(doc.list().version).toBe(version);
+  expect(doc.session.storySegments('body')).toEqual(before);
+}, 30_000);
+
 test('restyling a text-edited numbered heading requires saving and reopening first', async () => {
   const source = await restyleFixture();
   const doc = await open(source.bytes);

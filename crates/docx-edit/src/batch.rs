@@ -1703,6 +1703,8 @@ fn plan_style<T: ReadTxn>(
         style_id,
         source,
         &target.story,
+        &text,
+        views.txn(),
     )
     .map_err(|message| unsupported(message, &requested))?;
     Ok(Planned {

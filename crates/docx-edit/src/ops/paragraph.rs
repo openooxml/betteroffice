@@ -1278,7 +1278,7 @@ fn rebase_paragraph_runs(
 /// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's
 /// value or clears, the source direct formatting drops those keys, the controlled run marks take
 /// the style's values, and other run marks that matched the previous style follow the new one.
-pub(crate) fn plan_paragraph_style(
+pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     chunks: &[crate::ops::Chunk],
     para_id: &str,
     pilcrow: u32,
@@ -1289,6 +1289,8 @@ pub(crate) fn plan_paragraph_style(
     style_id: &str,
     source: &crate::seed::SourceMetadata,
     story_id: &str,
+    story: &TextRef,
+    txn: &T,
 ) -> Result<StylePlan, &'static str> {
     let target: HashMap<&str, &Any> = next
         .properties
@@ -1411,6 +1413,9 @@ pub(crate) fn plan_paragraph_style(
         .then(|| source.restyle_run_boundaries(story_id, para_id))
         .flatten();
     let direct_runs = if direct_numbering {
+        if !source.paragraph_content_unchanged(txn, story, story_id, node_start, pilcrow) {
+            return Err(EDITED_NUMBERED_PARAGRAPH);
+        }
         Some(original_run_formatting(
             chunks,
             properties,

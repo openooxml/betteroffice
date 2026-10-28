@@ -1790,6 +1790,133 @@ fn open_numbered_restyle(body: &str) -> EditingDoc {
 }
 
 #[test]
+fn restyle_numbered_runs_refuse_retyped_equal_text_without_mutation() {
+    for linked in [false, true] {
+        for remote in [false, true] {
+            let runs = concat!(
+                "<w:r><w:t>a</w:t></w:r>",
+                r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>a</w:t></w:r>"#,
+            );
+            let content = if linked {
+                format!(r#"<w:hyperlink w:anchor="target">{runs}</w:hyperlink>"#)
+            } else {
+                runs.to_owned()
+            };
+            let doc = open_numbered_restyle(&format!(
+                r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>{content}</w:p>"#
+            ));
+            let peer = EditingDoc::new(7002);
+            let edited = if remote {
+                peer.apply_update_v1(&doc.encode_state_as_update_v1())
+                    .unwrap();
+                &peer
+            } else {
+                &doc
+            };
+            edited
+                .delete_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 1))
+                .unwrap();
+            edited
+                .insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("body", 1),
+                    "a",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+            if remote {
+                doc.apply_update_v1(&peer.encode_state_as_update_v1())
+                    .unwrap();
+            }
+            let before = doc.story_segments("body").unwrap();
+            let text: String = before
+                .iter()
+                .filter_map(|segment| match &segment.content {
+                    SegmentContent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, "aa");
+            let version = doc.version();
+            let failure = refuse(
+                &doc,
+                &UndoSession::new(),
+                vec![set_style("00000001", "Heading1")],
+            )
+            .failure;
+            assert_eq!(failure.code, EditFailureCode::Unsupported);
+            assert!(
+                failure
+                    .message
+                    .contains("restyle this numbered paragraph before editing its text")
+            );
+            assert_eq!(doc.story_segments("body").unwrap(), before);
+            assert_eq!(doc.version(), version);
+        }
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_allow_text_edits_in_other_paragraphs() {
+    let numbered = concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>a</w:t></w:r></w:p>"#,
+    );
+    let other = r#"<w:p w14:paraId="00000002"><w:r><w:t>Other</w:t></w:r></w:p>"#;
+    for preceding in [false, true] {
+        let body = if preceding {
+            format!("{other}{numbered}")
+        } else {
+            format!("{numbered}{other}")
+        };
+        let doc = open_numbered_restyle(&body);
+        let start = if preceding { 0 } else { 3 };
+        doc.replace_range(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", start, start + 5),
+            "Edited",
+        )
+        .unwrap();
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        let segments = doc.story_segments("body").unwrap();
+        let sizes: Vec<_> = segments
+            .iter()
+            .filter(|segment| matches!(&segment.content, SegmentContent::Text(text) if text == "a"))
+            .map(|segment| {
+                let Some(Any::Map(size)) = segment.attributes.get("fontSize") else {
+                    panic!("missing run size")
+                };
+                number(size.get("size"))
+            })
+            .collect();
+        assert_eq!(sizes, vec![Some(32.0), Some(24.0)]);
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap();
+        let ordinal = u32::from(preceding);
+        assert!(
+            part.paragraph_patches
+                .iter()
+                .any(|patch| patch.ordinal == ordinal)
+        );
+        assert!(
+            part.legacy_paragraphs
+                .iter()
+                .all(|paragraph| paragraph.ordinal != ordinal)
+        );
+    }
+}
+
+#[test]
 fn restyle_numbered_runs_refuse_deletions_without_mutation() {
     for linked in [false, true] {
         for removed in [0, 1] {
