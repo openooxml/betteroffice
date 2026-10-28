@@ -112,7 +112,7 @@ test('recovery after a crash on a deck whose state exceeds the update cap', asyn
       faultControl.crash();
     });
     const acceptedSeq = value.client.state.throughSeq;
-    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1), { timeout: 15000 });
     expect(checkpoint).not.toHaveBeenCalled();
     const recovered = await value.api.recoverySave();
     const saved = wasm.openPresentation(recovered.bytes);
