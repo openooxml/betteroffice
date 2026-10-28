@@ -108,7 +108,13 @@ pub(super) fn splice_comments(
         };
         if (!thread_changed && original.para_id.is_none() && parent_ids.contains(&id))
             || !same_para_id
-            || !can_replay(original, comment, fragment, thread_changed, text_patches.contains_key(&id))?
+            || !can_replay(
+                original,
+                comment,
+                fragment,
+                thread_changed,
+                text_patches.contains_key(&id),
+            )?
         {
             return Err(error_xml("comment changed"));
         }
@@ -871,7 +877,10 @@ fn text_hunks(source: &str, written: &str) -> Vec<(usize, usize, String)> {
         start += 1;
     }
     let (mut source_end, mut written_end) = (source.len(), written.len());
-    while source_end > start && written_end > start && source[source_end - 1] == written[written_end - 1] {
+    while source_end > start
+        && written_end > start
+        && source[source_end - 1] == written[written_end - 1]
+    {
         source_end -= 1;
         written_end -= 1;
     }
@@ -901,7 +910,9 @@ fn text_hunks(source: &str, written: &str) -> Vec<(usize, usize, String)> {
             }
             row += 1;
             column += 1;
-        } else if column < columns && (row == rows || lengths[row][column + 1] >= lengths[row + 1][column]) {
+        } else if column < columns
+            && (row == rows || lengths[row][column + 1] >= lengths[row + 1][column])
+        {
             current
                 .get_or_insert_with(|| (start + row, start + row, String::new()))
                 .2
@@ -951,7 +962,12 @@ fn comment_text_patch(
         let Some(nodes) = comment_text_nodes(fragment, &fragment_tags, &spans[index]) else {
             return Ok(None);
         };
-        if nodes.iter().map(|node| node.text.as_str()).collect::<String>() != source_text {
+        if nodes
+            .iter()
+            .map(|node| node.text.as_str())
+            .collect::<String>()
+            != source_text
+        {
             return Ok(None);
         }
         let mut offsets = Vec::with_capacity(nodes.len());
@@ -960,12 +976,19 @@ fn comment_text_patch(
             offsets.push(offset);
             offset += node.text.chars().count();
         }
-        let mut texts: Vec<Vec<char>> = nodes.iter().map(|node| node.text.chars().collect()).collect();
-        for (hunk_start, hunk_end, replacement) in text_hunks(&source_text, &written_text).into_iter().rev() {
+        let mut texts: Vec<Vec<char>> = nodes
+            .iter()
+            .map(|node| node.text.chars().collect())
+            .collect();
+        for (hunk_start, hunk_end, replacement) in
+            text_hunks(&source_text, &written_text).into_iter().rev()
+        {
             let replacement: Vec<char> = replacement.chars().collect();
             if hunk_start == hunk_end {
-                let node = (0..texts.len()).rev()
-                    .find(|node| offsets[*node] <= hunk_start && hunk_start <= offsets[*node] + texts[*node].len());
+                let node = (0..texts.len()).rev().find(|node| {
+                    offsets[*node] <= hunk_start
+                        && hunk_start <= offsets[*node] + texts[*node].len()
+                });
                 let Some(node) = node else {
                     return Ok(None);
                 };
@@ -975,10 +998,12 @@ fn comment_text_patch(
                 text.extend(&texts[node][at..]);
                 texts[node] = text;
             } else {
-                let first = (0..texts.len())
-                    .find(|node| offsets[*node] <= hunk_start && hunk_start < offsets[*node] + texts[*node].len());
-                let last = (0..texts.len())
-                    .find(|node| offsets[*node] < hunk_end && hunk_end <= offsets[*node] + texts[*node].len());
+                let first = (0..texts.len()).find(|node| {
+                    offsets[*node] <= hunk_start && hunk_start < offsets[*node] + texts[*node].len()
+                });
+                let last = (0..texts.len()).find(|node| {
+                    offsets[*node] < hunk_end && hunk_end <= offsets[*node] + texts[*node].len()
+                });
                 let (Some(first), Some(last)) = (first, last) else {
                     return Ok(None);
                 };
@@ -1236,7 +1261,13 @@ mod tests {
                 content: vec![
                     reference,
                     run(first, None),
-                    run(second, Some(TextFormatting { bold: Some(true), ..TextFormatting::default() })),
+                    run(
+                        second,
+                        Some(TextFormatting {
+                            bold: Some(true),
+                            ..TextFormatting::default()
+                        }),
+                    ),
                     run(third, None),
                 ],
                 list_rendering: None,
@@ -1257,15 +1288,32 @@ mod tests {
 
     #[test]
     fn text_patch_changes_only_wt_text_and_keeps_ids_and_proofing() {
-        let source = comment("First identity proofed here. ", "Second identity ", "proofed there.");
-        let written = comment("First identity-proofed here. ", "Second identity-proofed", " there.");
+        let source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        let written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
         let patch = comment_text_patch(&source, &written, FRAGMENT)
             .unwrap()
             .expect("a text-only change patches");
         let expected = FRAGMENT
-            .replace("<w:t>First identity proofed here. </w:t>", "<w:t xml:space=\"preserve\">First identity-proofed here. </w:t>")
-            .replace("<w:t>Second identity </w:t>", "<w:t>Second identity-proofed</w:t>")
-            .replace("<w:t>proofed there.</w:t>", "<w:t xml:space=\"preserve\"> there.</w:t>");
+            .replace(
+                "<w:t>First identity proofed here. </w:t>",
+                "<w:t xml:space=\"preserve\">First identity-proofed here. </w:t>",
+            )
+            .replace(
+                "<w:t>Second identity </w:t>",
+                "<w:t>Second identity-proofed</w:t>",
+            )
+            .replace(
+                "<w:t>proofed there.</w:t>",
+                "<w:t xml:space=\"preserve\"> there.</w:t>",
+            );
         assert_eq!(apply_patches(FRAGMENT, patch), expected);
     }
 
@@ -1278,19 +1326,38 @@ mod tests {
             .unwrap()
             .expect("a text-only change patches");
         let expected = FRAGMENT
-            .replace("<w:t>alpha be</w:t>", "<w:t xml:space=\"preserve\">alpha x </w:t>")
-            .replace("<w:t>ta gamma</w:t>", "<w:t xml:space=\"preserve\"> gamma</w:t>");
+            .replace(
+                "<w:t>alpha be</w:t>",
+                "<w:t xml:space=\"preserve\">alpha x </w:t>",
+            )
+            .replace(
+                "<w:t>ta gamma</w:t>",
+                "<w:t xml:space=\"preserve\"> gamma</w:t>",
+            );
         assert_eq!(apply_patches(FRAGMENT, patch), expected);
     }
 
     #[test]
     fn text_patch_ignores_unchanged_and_rejects_formatting_changes() {
-        let source = comment("First identity proofed here. ", "Second identity ", "proofed there.");
-        assert_eq!(comment_text_patch(&source, &source.clone(), FRAGMENT).unwrap(), None);
+        let source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        assert_eq!(
+            comment_text_patch(&source, &source.clone(), FRAGMENT).unwrap(),
+            None
+        );
         let mut written = source.clone();
         if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut written.content[0].content[2] {
-            run.formatting = Some(TextFormatting { italic: Some(true), ..TextFormatting::default() });
+            run.formatting = Some(TextFormatting {
+                italic: Some(true),
+                ..TextFormatting::default()
+            });
         }
-        assert_eq!(comment_text_patch(&source, &written, FRAGMENT).unwrap(), None);
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
     }
 }
