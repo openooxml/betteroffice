@@ -58,13 +58,13 @@ Decoding is a single operation, with no recursive attempt on the result.
 
 For plain zstd, the internal TypeScript decoder uses the built-in Node zstd
 decompressor when available, otherwise the standalone wasm decoder. An explicit
-`wasmUrl` selects wasm. `woff2t+zstd` always uses the full wasm pipeline, including
-in Node. Both codecs share one module, which links the decompression-only zstd C
-source and wuff 0.2.9 with default features disabled. Wuff reconstructs the font
-with `decompress_woff2_with_custom_brotli` and an identity callback; brotli and
-flate2 are absent from this wasm feature set. The builder alone enables brotli
-for reference verification. These modules are not wired into the font loader
-or package exports in this slice.
+`wasmUrl` selects wasm; without it the decoder loads `dist/decoder/fontpack.wasm`
+from the package root. `woff2t+zstd` always uses the full wasm pipeline,
+including in Node. Both codecs share one module, which links the
+decompression-only zstd C source and wuff 0.2.9 with default features disabled.
+Wuff reconstructs the font with `decompress_woff2_with_custom_brotli` and an
+identity callback; brotli and flate2 are absent from this wasm feature set. The
+builder alone enables brotli for reference verification.
 
 Each manifest face must have `codec: "zstd"` or `codec: "woff2t+zstd"`.
 Callers pass that value as the
@@ -148,9 +148,12 @@ last `-`, or the entire stem when there is no `-`.
 `version` is a semantic version. `encodedLength` is the complete frame size in
 bytes; `byteLength` is the final sfnt size. `sha256` is the lowercase hexadecimal
 SHA-256 of the final sfnt, including reconstruction for `woff2t+zstd`.
-The builder decodes and compares every face before
-writing its manifest. Display family names, weights, styles, scripts and metric
-compatibility remain in the TypeScript manifest and are not fields in schema 1.
+The builder decodes and compares every face before writing its manifest. It
+refuses an existing output directory, writes the whole pack into a staging
+directory beside it and renames that into place, so a failed build never leaves
+a partial or mixed pack. Display family names, weights, styles, scripts and
+metric compatibility remain in the TypeScript manifest and are not fields in
+schema 1.
 
 ## Raw wasm ABI
 

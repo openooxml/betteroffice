@@ -314,7 +314,7 @@ export async function decodeFontFace(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const url = options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url);
+  const url = options?.wasmUrl ?? new URL('../dist/decoder/fontpack.wasm', import.meta.url);
   let instance = await decoder(url);
   while (instance.failed) instance = await decoder(url);
   return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);

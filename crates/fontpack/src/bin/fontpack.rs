@@ -4,8 +4,9 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fontpack::Codec;
 use serde::Serialize;
@@ -290,7 +291,57 @@ fn build(options: Options) -> Result<()> {
             }
         }
     }
-    fs::create_dir_all(&options.out)?;
+    let name = options
+        .out
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| invalid("invalid output directory name"))?;
+    let parent = match options.out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let out = parent.join(name);
+    if fs::symlink_metadata(&out).is_ok() {
+        return Err(invalid(format!(
+            "output {} already exists; remove it before rebuilding",
+            out.display()
+        ))
+        .into());
+    }
+    fs::create_dir_all(parent)?;
+    let staging = staging_dir(parent, name)?;
+    let written = write_pack(&options, &sources, &dictionaries, &staging)
+        .and_then(|()| fs::rename(&staging, &out).map_err(Into::into));
+    if written.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    written
+}
+
+fn staging_dir(parent: &Path, name: &str) -> Result<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    for attempt in 0..100u32 {
+        let staging = parent.join(format!(
+            ".{name}.partial-{}-{nanos:x}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::other("cannot create a unique staging directory").into())
+}
+
+fn write_pack(
+    options: &Options,
+    sources: &[Source],
+    dictionaries: &[Option<usize>],
+    staging: &Path,
+) -> Result<()> {
     let mut faces = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         let dictionary = dictionaries[index].map(|index| &sources[index]);
@@ -313,7 +364,7 @@ fn build(options: Options) -> Result<()> {
             return Err(invalid(format!("glyph count mismatch for {}", source.file)).into());
         }
         let file = format!("{}.zst", source.file);
-        fs::write(options.out.join(&file), &encoded)?;
+        fs::write(staging.join(&file), &encoded)?;
         faces.push(Face {
             file,
             source: source.file.clone(),
@@ -328,13 +379,13 @@ fn build(options: Options) -> Result<()> {
     faces.sort_by(|left, right| left.file.cmp(&right.file));
     let manifest = Manifest {
         format: 1,
-        pack: options.pack,
-        version: options.version,
+        pack: options.pack.clone(),
+        version: options.version.clone(),
         faces,
     };
     let mut json = serde_json::to_vec_pretty(&manifest)?;
     json.push(b'\n');
-    fs::write(options.out.join("manifest.json"), json)?;
+    fs::write(staging.join("manifest.json"), json)?;
     Ok(())
 }
 
