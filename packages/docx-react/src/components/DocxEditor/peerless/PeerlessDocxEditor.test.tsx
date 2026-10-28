@@ -1230,11 +1230,12 @@ test('a requirements hint during a toolbar font pick waits for the pick instead 
   });
   expect(requests.filter(request => request.type === 'fontRequirements')).toHaveLength(asked);
   release();
-  await act(async () => { expect(await picked).toMatchObject({ ok: true }); });
-  const kinds = () => requests.flatMap(request => request.type === 'edit' ? [request.command.kind] : []);
-  expect(kinds()).toContain('formatRange');
+  await act(async () => { await picked; });
+  const environments = () => requests.flatMap(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment'
+    ? [(request.command.payload as yrs.DocxCommandPayloads['setFontEnvironment']).families] : []);
+  expect(environments()[0]).toContain('Picked');
   await waitFor(() => expect(requests.filter(request => request.type === 'fontRequirements')).toHaveLength(asked + 1));
-  await waitFor(() => expect(kinds().filter(kind => kind === 'setFontEnvironment')).toHaveLength(2));
+  await waitFor(() => expect(environments()).toHaveLength(2));
 });
 
 test('an aborted toolbar font pick whose loader never settles no longer holds font refreshes back', async () => {
