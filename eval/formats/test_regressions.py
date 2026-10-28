@@ -224,17 +224,18 @@ def slide_comment(author, index, text, thread=''):
             f'<p:text>{text}</p:text>{extension}</p:cm>')
 
 
-def layout_shape(identity, name, placeholder, text=''):
-    body = f'<p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else '<p:txBody><a:bodyPr/><a:p/></p:txBody>'
+def layout_shape(identity, name, placeholder, text='', body_pr='<a:bodyPr/>'):
+    body = f'<p:txBody>{body_pr}<a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else f'<p:txBody>{body_pr}<a:p/></p:txBody>'
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{identity}" name="{name}"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr>'
             f'<p:spPr/>{body}</p:sp>')
 
 
-def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
+def layout_slide_package(slide_placeholder, layout='slideLayout1.xml', title_body='<a:bodyPr/>', subtitle_body='<a:bodyPr/>',
+                         layout_title_body='<a:bodyPr/>'):
     main = 'application/vnd.openxmlformats-officedocument.presentationml'
     layouts = {
         'slideLayout1.xml': ('Title Only', layout_shape(2, 'Title 1', '<p:ph type="title"/>')),
-        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>')
+        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>', body_pr=layout_title_body)
                              + layout_shape(3, 'Content Placeholder 2', '<p:ph idx="1" hasCustomPrompt="1"/>', 'Add notes')),
     }
     parts = {
@@ -246,8 +247,8 @@ def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
         'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
         'ppt/slides/_rels/slide1.xml.rels': relationships([(f'{RELS}/slideLayout', f'../slideLayouts/{layout}')]),
         'ppt/slides/slide1.xml': (f'<p:sld {P_NS}><p:cSld><p:spTree>'
-                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading')
-                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy')
+                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading', title_body)
+                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy', subtitle_body)
                                   + '</p:spTree></p:cSld></p:sld>'),
     }
     for name, (title, shapes) in layouts.items():
@@ -624,6 +625,27 @@ class OfficeEquivalentTests(unittest.TestCase):
             'placeholder on another index': (moved('<p:ph idx="2"/>'), False),
             'placeholder keeps its old type': (moved('<p:ph type="subTitle" idx="1"/>'), False),
         })
+
+    def test_title_moved_onto_an_autofit_layout_may_save_the_powerpoint_fit(self):
+        task = complex_task('pptx', {'layout': [{'slide': 1, 'name': 'Title and Content', 'placeholders': {
+            'Title 1': {'layout_placeholder': 'Title 1', 'text': 'Heading'}}}]})
+        fitted = '<a:bodyPr><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>'
+        for layout_title, outputs in (
+                ('<a:bodyPr><a:normAutofit/></a:bodyPr>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'title saved with the fit': (fitted, '<a:bodyPr/>', True),
+                    'fit on an unmoved placeholder': ('<a:bodyPr/>', fitted, False),
+                    'autofit without a fit': ('<a:bodyPr><a:normAutofit/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with another body change': ('<a:bodyPr wrap="none"><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with an extra child': ('<a:bodyPr><a:normAutofit fontScale="77500"/><a:scene3d/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'shrink on overflow instead': ('<a:bodyPr><a:spAutoFit/></a:bodyPr>', '<a:bodyPr/>', False)}),
+                ('<a:bodyPr/>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'fit on a layout title without autofit': (fitted, '<a:bodyPr/>', False)})):
+            def deck(layout, title='<a:bodyPr/>', subtitle='<a:bodyPr/>', layout_title=layout_title):
+                return lambda: layout_slide_package('<p:ph type="subTitle" idx="1"/>', layout, title, subtitle, layout_title)
+            self.assert_verdicts(task, deck('slideLayout1.xml'), {
+                name: (deck('slideLayout2.xml', title, subtitle), accepted) for name, (title, subtitle, accepted) in outputs.items()})
 
     def test_slide_table_frame_may_refit_its_grid_like_powerpoint(self):
         a, b, c = (1000, 'a'), (2000, 'b'), (3000, 'c')

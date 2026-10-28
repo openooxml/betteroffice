@@ -179,7 +179,8 @@ fn translate_command(
             rail,
             clip,
         } => {
-            let line = PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style, *rail)?;
+            let line =
+                PreparedLine::new(*x1, *y1, *x2, *y2, *width, color, style.as_deref(), *rail)?;
             paint_clipped(scene, clip.as_ref(), |scene| line.paint(scene))
         }
         DrawCmd::Path {
@@ -221,24 +222,67 @@ fn translate_command(
             highlight,
             dashed_underline,
             font_family: _,
+            number_format,
             ghost: _,
             chart: _,
+            rotation_deg,
+            rotation_box: _,
+            rotation_valign: _,
+            stacked,
+            wrap,
         } => {
-            let text = PreparedText::new(
-                *x,
-                *y,
-                text,
-                *font_size,
-                color,
-                *align,
-                *bold,
-                *italic,
-                *underline,
-                *strike,
-                highlight.as_deref(),
-                *dashed_underline,
-            )?;
-            paint_clipped(scene, Some(clip), |scene| text.paint(scene, font))
+            if *stacked {
+                return Err("stacked text is not translated".to_owned());
+            }
+            if let Some(degrees) = rotation_deg {
+                return Err(format!("text rotated {degrees} degrees is not translated"));
+            }
+            let prepare = |x: f32, y: f32, text: &str, align: Align| {
+                PreparedText::new(
+                    x,
+                    y,
+                    text,
+                    *font_size,
+                    color,
+                    align,
+                    *bold,
+                    *italic,
+                    *underline,
+                    *strike,
+                    highlight.as_deref(),
+                    *dashed_underline,
+                )
+            };
+            let runs = if let Some(layout) = number_format {
+                let mut runs = Vec::new();
+                xlsx_render::paint_number_format(
+                    text,
+                    layout,
+                    *align,
+                    |literal| measure_text(literal, *font_size),
+                    |literal, x| runs.push(prepare(x, *y, literal, Align::Left)),
+                );
+                runs.into_iter().collect::<Result<Vec<_>, _>>()?
+            } else if let Some(wrap) = wrap {
+                let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
+                    measure_text(line, *font_size)
+                });
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| {
+                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap);
+                        prepare(*x, y, line, *align)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                vec![prepare(*x, *y, text, *align)?]
+            };
+            paint_clipped(scene, Some(clip), |scene| {
+                for run in &runs {
+                    run.paint(scene, font);
+                }
+            })
         }
     }
 }
@@ -281,15 +325,15 @@ impl PreparedLine {
         y2: f32,
         width: f32,
         color: &str,
-        style: &Option<String>,
+        style: Option<&str>,
         rail: Option<f32>,
     ) -> Result<Self, String> {
-        if !matches!(style.as_deref(), None | Some("solid" | "double"))
-            && border_dash(style.as_deref().unwrap_or_default()).is_empty()
+        if !matches!(style, None | Some("solid" | "double"))
+            && border_dash(style.unwrap_or_default()).is_empty()
         {
             return Err(format!(
                 "line style {} is not translated",
-                style.as_deref().unwrap_or_default()
+                style.unwrap_or_default()
             ));
         }
         Ok(Self {
@@ -299,7 +343,7 @@ impl PreparedLine {
             y2: finite(y2, "line y2")?,
             width: nonnegative_f32(width, "line width")?,
             color: strict_color(color)?,
-            style: style.clone(),
+            style: style.map(str::to_owned),
             rail: rail
                 .map(|rail| nonnegative_f32(rail, "line rail"))
                 .transpose()?,
@@ -578,6 +622,15 @@ impl PreparedText {
     }
 }
 
+fn measure_text(text: &str, font_size_pt: f32) -> f32 {
+    let advance: i32 = shape(text)
+        .glyph_positions()
+        .iter()
+        .map(|position| position.x_advance)
+        .sum();
+    advance as f32 * font_size_pt * PX_PER_PT / FACE.units_per_em() as f32
+}
+
 fn shape(text: &str) -> GlyphBuffer {
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(text);
@@ -779,7 +832,7 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_render::{GridMeta, PathStroke};
+    use xlsx_render::{GridMeta, NumberFormatLayout, PathStroke, TextValign, TextWrap};
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
@@ -789,6 +842,7 @@ mod tests {
             grid: GridMeta::default(),
             hyperlinks: Vec::new(),
             charts: Vec::new(),
+            truncated: false,
         }
     }
 
@@ -844,7 +898,7 @@ mod tests {
                 y2: 4.0 + index as f32 * 4.0,
                 width: 1.0,
                 color: "#123456".into(),
-                style: style.map(str::to_owned),
+                style: style.map(Into::into),
                 rail: None,
                 clip: Some(clip),
             });
@@ -878,11 +932,104 @@ mod tests {
             highlight: Some("#ffff0080".into()),
             dashed_underline: true,
             font_family: Some("Ignored like xlsx-raster".into()),
+            number_format: None,
             ghost: true,
             chart: true,
+            rotation_deg: None,
+            rotation_box: None,
+            rotation_valign: None,
+            stacked: false,
+            wrap: None,
         });
         let page = translate_sheet(&display_list(commands)).unwrap();
         assert_eq!(page.skipped.total(), 0);
+    }
+
+    fn text(text: &str) -> DrawCmd {
+        DrawCmd::Text {
+            x: 4.0,
+            y: 20.0,
+            text: text.into(),
+            font_size: 11.0,
+            color: "#000000".into(),
+            clip: DisplayRect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 60.0,
+            },
+            align: Align::Left,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            highlight: None,
+            dashed_underline: false,
+            font_family: None,
+            number_format: None,
+            ghost: false,
+            chart: false,
+            rotation_deg: None,
+            rotation_box: None,
+            rotation_valign: None,
+            stacked: false,
+            wrap: None,
+        }
+    }
+
+    #[test]
+    fn wrapped_and_number_formatted_text_is_translated() {
+        let mut wrapped = text("one two three four five six");
+        let mut formatted = text("12345678");
+        let mut overflowing = text("12345678");
+        if let DrawCmd::Text { wrap, .. } = &mut wrapped {
+            *wrap = Some(TextWrap {
+                width: 30.0,
+                line_height: 14.0,
+                valign: TextValign::Top,
+            });
+        }
+        for (command, width, overflow) in
+            [(&mut formatted, 90.0, false), (&mut overflowing, 8.0, true)]
+        {
+            if let DrawCmd::Text { number_format, .. } = command {
+                *number_format = Some(NumberFormatLayout {
+                    left: 2.0,
+                    width,
+                    parts: Vec::new(),
+                    general: None,
+                    overflow,
+                });
+            }
+        }
+        let page = translate_sheet(&display_list(vec![wrapped, formatted, overflowing])).unwrap();
+        assert_eq!(page.skipped.total(), 0);
+    }
+
+    #[test]
+    fn rotated_and_stacked_text_become_counted_placeholders() {
+        let mut rotated = text("Rotated");
+        let mut stacked = text("Stacked");
+        if let DrawCmd::Text { rotation_deg, .. } = &mut rotated {
+            *rotation_deg = Some(45.0);
+        }
+        if let DrawCmd::Text { stacked: flag, .. } = &mut stacked {
+            *flag = true;
+        }
+        let page = translate_sheet(&display_list(vec![rotated, stacked])).unwrap();
+        assert_eq!(page.skipped.counts.get("text"), Some(&2));
+        assert!(
+            page.skipped
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("rotated 45 degrees"))
+        );
+        assert!(
+            page.skipped
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("stacked text"))
+        );
     }
 
     #[test]

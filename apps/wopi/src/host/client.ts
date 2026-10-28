@@ -361,12 +361,27 @@ export function createHostClient(options: HostClientOptions): HostClient {
     });
   }
 
-  function wrapUpload(source: ReadableStream<Uint8Array>, state: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; pulled?: boolean }, op: string, accessToken: string): ReadableStream<Uint8Array> {
+  interface UploadState {
+    exceeded: boolean;
+    error?: WopiHostError;
+    onDone?: () => void;
+    pulled?: boolean;
+    onIdleTimeout?: () => void;
+    clearIdleTimer?: () => void;
+  }
+
+  function wrapUpload(source: ReadableStream<Uint8Array>, state: UploadState, op: string, accessToken: string): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     let count = 0;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    state.clearIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         state.pulled = true;
+        state.clearIdleTimer?.();
         let chunk: ChunkResult;
         try {
           chunk = await idleRead(reader, op, accessToken);
@@ -390,8 +405,14 @@ export function createHostClient(options: HostClientOptions): HostClient {
           return;
         }
         controller.enqueue(chunk.value);
+        idleTimer = setTimeout(() => {
+          idleTimer = undefined;
+          state.error = new WopiHostError("timeout", `${op} timed out after ${bodyIdleTimeoutMs} ms without data`);
+          state.onIdleTimeout?.();
+        }, bodyIdleTimeoutMs);
       },
       async cancel(reason) {
+        state.clearIdleTimer?.();
         await reader.cancel(reason);
       },
     }, { highWaterMark: 0 });
@@ -410,7 +431,8 @@ export function createHostClient(options: HostClientOptions): HostClient {
       headers.set("X-WOPI-TimeStamp", signed.timestamp);
       if (spec.override) headers.set("X-WOPI-Override", spec.override);
       if (spec.op === "GetFile") headers.set("X-WOPI-MaxExpectedSize", String(maxFileBytes));
-      const uploadState: { exceeded: boolean; error?: WopiHostError; onDone?: () => void; pulled?: boolean } = { exceeded: false };
+      const controller = new AbortController();
+      const uploadState: UploadState = { exceeded: false, onIdleTimeout: () => controller.abort() };
       let body: BodyInit | undefined;
       let streamed = false;
       if (spec.body instanceof Uint8Array && spec.body.byteLength > 1024 * 1024) {
@@ -426,7 +448,6 @@ export function createHostClient(options: HostClientOptions): HostClient {
         body = wrapUpload(spec.body, uploadState, spec.op, input.accessToken) as BodyInit;
       }
       const exceeded = () => uploadState.exceeded || (spec.exceeded ? spec.exceeded() : false);
-      const controller = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       let connectTimer: ReturnType<typeof setTimeout> | undefined;
       const armHeaderTimeout = () => {
@@ -454,6 +475,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       } catch (err) {
         if (timer) clearTimeout(timer);
         if (connectTimer) clearTimeout(connectTimer);
+        uploadState.clearIdleTimer?.();
         if (exceeded()) throw tooLarge(spec.op);
         if (uploadState.error) throw uploadState.error;
         const timedOut = controller.signal.aborted;
@@ -466,6 +488,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       }
       if (timer) clearTimeout(timer);
       if (connectTimer) clearTimeout(connectTimer);
+      uploadState.clearIdleTimer?.();
       if (exceeded()) {
         try {
           await response.body?.cancel();

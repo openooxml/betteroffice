@@ -265,7 +265,7 @@ fn charge_steps(ctx: &EvalContext<'_>, steps: u64) -> Result<(), ErrorValue> {
 }
 
 /// the nodes one evaluation of `expr` walks.
-fn nodes(expr: &Expr) -> u64 {
+pub(crate) fn nodes(expr: &Expr) -> u64 {
     1 + match expr {
         Expr::ArrayLiteral { values, .. } => values.iter().map(nodes).sum(),
         Expr::Unary { expr, .. } | Expr::Percent(expr) => nodes(expr),
@@ -709,6 +709,12 @@ type ArrayFn = fn(&[Expr], &EvalContext<'_>) -> Value;
 
 fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     let upper = crate::functions::bare_name(name).to_ascii_uppercase();
+    if matches!(upper.as_str(), "SMALL" | "LARGE")
+        && let Some(value) =
+            crate::functions::criteria_index::nth_match(args, ctx, upper == "LARGE", true)
+    {
+        return Value::Scalar(value);
+    }
     if let Some(f) = lookup_array(&upper) {
         return f(args, ctx);
     }
