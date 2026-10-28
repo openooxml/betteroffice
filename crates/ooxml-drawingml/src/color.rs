@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Theme;
+use crate::fmath;
 
 /// DrawingML transforms; hue and hue offsets use turns, other values use fractions.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -324,7 +325,7 @@ fn srgb_to_linear(value: f64) -> f64 {
     if value <= 0.04045 {
         value / 12.92
     } else {
-        ((value + 0.055) / 1.055).powf(2.4)
+        fmath::pow((value + 0.055) / 1.055, 2.4)
     }
 }
 
@@ -332,7 +333,7 @@ fn linear_to_srgb(value: f64) -> f64 {
     if value <= 0.0031308 {
         value * 12.92
     } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
+        1.055 * fmath::pow(value, 1.0 / 2.4) - 0.055
     }
 }
 

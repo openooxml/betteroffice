@@ -63,7 +63,8 @@ export type AnchorGeometryTarget =
   | { kind: 'revision'; revisionId: string }
   | { kind: 'paragraph'; paragraph: DocxParagraphAnchor }
   | { kind: 'search'; paragraph: DocxParagraphAnchor; text: string; occurrence?: DocxOccurrence }
-  | { kind: 'range'; version: string; range: DocxTextRange };
+  | { kind: 'range'; version: string; range: DocxTextRange }
+  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number };
 
 /** @internal */
 export interface RawAnchorRange {
@@ -73,7 +74,7 @@ export interface RawAnchorRange {
 
 /** @internal */
 export type AnchorResolution =
-  | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc }
+  | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean }
   | AnchorResolutionFailure;
 
 /** Cached reads of one document version. */
@@ -147,7 +148,14 @@ interface ViewParagraph {
   inlineStart: number;
   rawLength: number;
   viewLength: number;
+  joins: boolean;
   spans: ViewSpan[];
+  atoms: Array<{
+    view: number;
+    raw: number;
+    embedKind: string;
+    payload: Record<string, unknown>;
+  }>;
 }
 
 const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
@@ -157,15 +165,18 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
   let rawLength = 0;
   let viewLength = 0;
   let spans: ViewSpan[] = [];
+  let atoms: ViewParagraph['atoms'] = [];
   let leading = true;
   let inlineStart = 0;
   for (const segment of segments) {
     if (segment.kind === 'pilcrow') {
-      paragraphs.push({ index: paragraphs.length, paraId: segment.paraId, inlineStart, rawLength, viewLength, spans });
+      const joins = segment.properties[view === 'accepted' ? 'pPrDel' : 'pPrIns'] != null;
+      paragraphs.push({ index: paragraphs.length, paraId: segment.paraId, inlineStart, rawLength, viewLength, joins, spans, atoms });
       inlineStart = 0;
       rawLength = 0;
       viewLength = 0;
       spans = [];
+      atoms = [];
       leading = true;
       continue;
     }
@@ -178,6 +189,9 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
     const length = segment.kind === 'text' ? segment.text.length : 1;
     const hidden = segment.attributes[view === 'accepted' ? 'del' : 'ins'] != null;
     if (!hidden && length > 0) {
+      if (segment.kind === 'embed') {
+        atoms.push({ view: viewLength, raw: rawLength, embedKind: segment.embedKind, payload: segment.payload });
+      }
       spans.push({ raw: rawLength, view: viewLength, length });
       viewLength += length;
     }
@@ -186,16 +200,20 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
   return paragraphs;
 }
 
+const DRAWING_EMBEDS = new Set(['image', 'shape', 'chart', 'opaqueDrawing']);
+
 interface ViewParagraphIndex {
   byId: Map<string, ViewParagraph | null>;
+  list: ViewParagraph[];
 }
 
 function indexViewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView): ViewParagraphIndex {
   const byId = new Map<string, ViewParagraph | null>();
-  for (const paragraph of viewParagraphs(segments, view)) {
+  const list = viewParagraphs(segments, view);
+  for (const paragraph of list) {
     byId.set(paragraph.paraId, byId.has(paragraph.paraId) ? null : paragraph);
   }
-  return { byId };
+  return { byId, list };
 }
 
 function viewsAt(session: AnchorReader, version: string, story: string, view: DocxTextView) {
@@ -409,6 +427,44 @@ export function resolveAnchorTarget(
       paragraph: paragraph.loc,
     };
   }
+  if (target.kind === 'drawing') {
+    if (!Number.isInteger(target.offset) || target.offset < 0) {
+      return anchorFailure('missing-target', 'The offset is not on a drawing');
+    }
+    const { story, paraId } = paragraph.loc;
+    const views = viewsAt(session, version, story, 'accepted');
+    const view = views.byId.get(paraId);
+    if (view === null) {
+      return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
+    }
+    let first = view?.index ?? 0;
+    while (view && first > 0 && views.list[first - 1]!.joins && views.list[first]!.inlineStart === 0) first -= 1;
+    let base = 0;
+    let found: { paraId: string; atom: ViewParagraph['atoms'][number] } | undefined;
+    for (const part of view ? views.list.slice(first, view.index + 1) : []) {
+      const atom = part.atoms.find((candidate) => base + candidate.view === target.offset);
+      if (atom) {
+        found = { paraId: part.paraId, atom };
+        break;
+      }
+      base += part.viewLength;
+    }
+    const atom = found?.atom;
+    if (
+      !found ||
+      !atom ||
+      (!DRAWING_EMBEDS.has(atom.embedKind) && atom.payload.docPr === undefined)
+    ) {
+      return anchorFailure('missing-target', 'The offset is not on a drawing');
+    }
+    const at = { story, paraId: found.paraId, offset: atom.raw };
+    return {
+      ok: true,
+      ranges: [{ start: at, end: { ...at, offset: atom.raw + 1 } }],
+      paragraph: paragraph.loc,
+      drawing: true,
+    };
+  }
   if (!target.text) return anchorFailure('missing-target', 'The search text is empty');
   const occurrence = target.occurrence ?? 'first';
   if (
@@ -473,6 +529,8 @@ export function resolveAnchorTarget(
 export interface ProposalDisplayTarget {
   ranges: { from: number; to: number }[];
   paragraph: number | null;
+  /** The ranges are one drawing atom; answer with its drawn frame box. */
+  drawing?: boolean;
   /** A header or footer target's story, whose positions these are; absent for the body. */
   root?: string;
   /** With `root`, that story's hidden ranges. */
@@ -547,7 +605,12 @@ function displayMapping(reader: ProposalGeometryReader, version: string, root = 
       ranges.push(mapped);
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-    return { ok: true, ranges, paragraph: positionFor(resolved.paragraph) };
+    return {
+      ok: true,
+      ranges,
+      paragraph: positionFor(resolved.paragraph),
+      ...(resolved.drawing ? { drawing: true } : {}),
+    };
   };
   return { positionFor, display, displayTarget };
 }

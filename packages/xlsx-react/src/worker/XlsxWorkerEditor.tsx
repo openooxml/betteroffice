@@ -1129,7 +1129,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const data = kind === 'cut' && reachesSheetEdge(range) ?
           await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
         const edits = kind === 'paste' ? [] : clearedCells(range, () => data?.usedRange);
-        if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+        if (!edits) throw new WorkerInputRefusal(t('editor.clearExceedsLimit'));
         if (kind === 'cut' && edits.length === 0) return;
         if (kind === 'paste') {
           fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
@@ -1188,7 +1188,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const data = reachesSheetEdge(range) ?
         await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
       const edits = clearedCells(range, () => data?.usedRange);
-      if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+      if (!edits) throw new WorkerInputRefusal(t('editor.clearExceedsLimit'));
       if (edits.length === 0) return;
       op = { method: 'editCells', args: [sheet, edits] };
       if (!reachesSheetEdge(range)) discardPreview = await previewEdits(sheet, edits, op);

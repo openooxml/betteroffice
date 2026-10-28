@@ -586,6 +586,7 @@ impl StoryParser<'_, '_> {
         {
             run.content.push(RunContent::Shape {
                 shape: Box::new(shape),
+                drawing_properties: crate::image::parse_drawing_properties(drawing),
             });
         }
         Ok(())
@@ -1280,7 +1281,7 @@ mod tests {
             .find_map(|content| match content {
                 ParagraphContent::Inline(InlineNode::Run(run)) => {
                     run.content.iter().find_map(|content| match content {
-                        RunContent::Shape { shape } => Some(shape.as_ref()),
+                        RunContent::Shape { shape, .. } => Some(shape.as_ref()),
                         _ => None,
                     })
                 }
@@ -1328,7 +1329,7 @@ mod tests {
             panic!("run")
         };
         assert_eq!(run.content.len(), 1);
-        let RunContent::Shape { shape } = &run.content[0] else {
+        let RunContent::Shape { shape, .. } = &run.content[0] else {
             panic!("group")
         };
         let children = shape.children.as_ref().unwrap();
@@ -1390,7 +1391,7 @@ mod tests {
             .content
             .iter()
             .find_map(|content| match content {
-                RunContent::Shape { shape } => Some(shape.as_ref()),
+                RunContent::Shape { shape, .. } => Some(shape.as_ref()),
                 _ => None,
             })
             .expect("text box shape");

@@ -65,7 +65,8 @@ function appXml(
   appName: string,
   ext: string,
 ): string {
-  const actions = (["view", "edit", "editnew"] as const)
+  const order = ext === "" ? (["edit", "view", "editnew"] as const) : (["view", "edit", "editnew"] as const);
+  const actions = order
     .map((name) => actionXml(publicUrl, name, ext))
     .join("\n");
   return [
