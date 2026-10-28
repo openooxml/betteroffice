@@ -4,6 +4,7 @@
 pub mod addr;
 pub mod chart;
 pub mod date;
+mod fmath;
 pub mod numfmt;
 pub mod progress;
 pub mod rich_text;

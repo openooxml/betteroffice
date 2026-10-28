@@ -51,6 +51,7 @@ export interface PeerlessFrameGeometry {
 
 /** @internal */
 export interface PeerlessProvisionalCaret {
+  source?: 'click' | 'echo';
   readonly throughSeq: number | undefined;
   pageIndex: number;
   rect: DocxEchoRect;
@@ -92,6 +93,8 @@ export interface PeerlessViewStore {
   ): void;
   installFrameGeometry(geometry: PeerlessFrameGeometry): void;
   setProvisionalCaret(caret: PeerlessProvisionalCaret | null): void;
+  subscribeProvisionalCaret?(listener: () => void): () => void;
+  getProvisionalCaret?(): PeerlessProvisionalCaret | null;
   dispose(): void;
 }
 
@@ -110,12 +113,23 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
   };
   let disposed = false;
   const listeners = new Set<() => void>();
+  const caretListeners = new Set<() => void>();
   const sameIdentity = (identity: PeerlessViewIdentity) =>
     identity.session === snapshot.identity.session && identity.incarnation === snapshot.identity.incarnation &&
     identity.epoch === snapshot.identity.epoch;
   const publish = (next: PeerlessViewSnapshot) => {
+    const previous = snapshot;
     snapshot = next;
-    for (const listener of listeners) listener();
+    const caretChanged = previous.provisionalCaret !== next.provisionalCaret;
+    const otherChanged = previous.identity !== next.identity || previous.version !== next.version ||
+      previous.throughSeq !== next.throughSeq || previous.presentedThroughSeq !== next.presentedThroughSeq ||
+      previous.versionSinceSeq !== next.versionSinceSeq || previous.workerSelection !== next.workerSelection ||
+      previous.anchors !== next.anchors || previous.editState !== next.editState || previous.geometry !== next.geometry;
+    const echoOnly = caretChanged && !otherChanged && previous.provisionalCaret?.source !== 'click' &&
+      next.provisionalCaret?.source !== 'click' &&
+      (previous.provisionalCaret?.source === 'echo' || next.provisionalCaret?.source === 'echo');
+    if (otherChanged || (caretChanged && !echoOnly)) for (const listener of listeners) listener();
+    if (caretChanged) for (const listener of caretListeners) listener();
   };
   return {
     subscribe(listener) {
@@ -142,7 +156,8 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
         workerSelection: selected === undefined ? undefined : structuredClone(selected),
         anchors: anchors(selected), editState,
         geometry: replacement ? null : snapshot.geometry,
-        provisionalCaret: replacement || state.version > provisionalRevision.version ? null : snapshot.provisionalCaret,
+        provisionalCaret: replacement || (snapshot.provisionalCaret?.source !== 'echo' &&
+          state.version > provisionalRevision.version) ? null : snapshot.provisionalCaret,
       });
     },
     installFrameGeometry(geometry) {
@@ -152,21 +167,31 @@ export function createPeerlessViewStore(initial: PeerlessViewSnapshot): Peerless
       const seq = snapshot.provisionalCaret?.throughSeq;
       publish({ ...snapshot, presentedThroughSeq: geometry.coversThroughSeq, geometry,
         provisionalCaret: (seq !== undefined && geometry.coversThroughSeq >= seq) ||
-          geometry.documentVersion !== provisionalRevision.documentVersion ||
-          (provisionalRevision.layoutRevision !== undefined && geometry.layoutRevision > provisionalRevision.layoutRevision)
+          (snapshot.provisionalCaret?.source !== 'echo' &&
+            (geometry.documentVersion !== provisionalRevision.documentVersion ||
+              (provisionalRevision.layoutRevision !== undefined && geometry.layoutRevision > provisionalRevision.layoutRevision)))
           ? null : snapshot.provisionalCaret });
     },
     setProvisionalCaret(caret) {
       if (disposed || snapshot.provisionalCaret === caret ||
-        (caret?.throughSeq !== undefined && snapshot.geometry && snapshot.geometry.coversThroughSeq >= caret.throughSeq)) return;
+        (caret?.throughSeq !== undefined && snapshot.geometry && snapshot.geometry.coversThroughSeq >= caret.throughSeq) ||
+        (caret?.throughSeq !== undefined && snapshot.provisionalCaret?.throughSeq !== undefined &&
+          caret.throughSeq < snapshot.provisionalCaret.throughSeq)) return;
       provisionalRevision = {
         version: snapshot.version, documentVersion: snapshot.geometry?.documentVersion, layoutRevision: snapshot.geometry?.layoutRevision,
       };
       publish({ ...snapshot, provisionalCaret: caret });
     },
+    subscribeProvisionalCaret(listener) {
+      if (disposed) return () => {};
+      caretListeners.add(listener);
+      return () => { caretListeners.delete(listener); };
+    },
+    getProvisionalCaret: () => snapshot.provisionalCaret ?? null,
     dispose() {
       disposed = true;
       listeners.clear();
+      caretListeners.clear();
     },
   };
 }

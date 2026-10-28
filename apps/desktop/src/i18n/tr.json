@@ -1,0 +1,54 @@
+{
+  "_lang": "tr",
+  "titleBar": {
+    "edited": "Düzenlendi",
+    "collaborate": "Birlikte çalış",
+    "connecting": "Bağlanıyor…",
+    "home": "Giriş",
+    "open": "Aç…",
+    "save": "Kaydet"
+  },
+  "notice": {
+    "dismissError": "Hatayı kapat"
+  },
+  "room": {
+    "roomId": "Oda kimliği",
+    "yourName": "Adınız",
+    "joinRoom": "Odaya katıl",
+    "leaveRoom": "Odadan ayrıl",
+    "hint": "Birlikte düzenlemek için aynı dosyayı açın ve aynı oda kimliğini girin.",
+    "saveBeforeJoining": "Bir odaya katılmadan önce değişikliklerinizi kaydedin. Herkes aynı dosyayı açmalıdır."
+  },
+  "editor": {
+    "opening": "Düzenleyici açılıyor…",
+    "viewing": "Görüntüleme",
+    "editing": "Düzenleme",
+    "connected": "Bağlandı",
+    "workbookDisposed": "Çalışma kitabı düzenleyicisi kapatıldı.",
+    "presentationDisposed": "Sunu düzenleyicisi kapatıldı.",
+    "documentDisposed": "Belge düzenleyicisi kapatıldı.",
+    "stillOpening": "Düzenleyici dosyayı hâlâ açıyor. Bir süre sonra tekrar deneyin.",
+    "disconnected": "Bağlantı kesildi"
+  },
+  "start": {
+    "dropFileHere": "Dosyanızı buraya bırakın",
+    "openDocument": "Belge aç",
+    "openSpreadsheet": "E-tablo aç",
+    "openPresentation": "Sunu aç",
+    "intro": "Kaldığınız yerden devam edin.",
+    "openFile": "Dosya aç…",
+    "opening": "Açılıyor…",
+    "dropHint": "veya buraya bir dosya bırakın",
+    "recentFiles": "Son dosyalar",
+    "recent": "Son kullanılanlar"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Kaydedilmemiş değişiklikler atılsın mı?"
+  },
+  "errors": {
+    "openInApp": ".{ext} dosyalarını BetterOffice {app} içinde açın.",
+    "couldNotRead": "{name} okunamadı.",
+    "chooseFile": "Bir .{ext} dosyası seçin.",
+    "unsupportedFile": "Bir Word belgesi, Excel elektronik tablosu veya PowerPoint sunusu seçin."
+  }
+}

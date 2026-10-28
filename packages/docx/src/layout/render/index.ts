@@ -187,9 +187,11 @@ export { extractTrackedChangesFromYrs, type TrackedChangesResult } from './yrsTr
 
 export {
   captureInlinePositionEmuFromDisplayList,
+  findDrawingRectsByDocPos,
   findImagePrimitiveAtPoint,
   findImagePrimitiveByDocPos,
   type DisplayListImageRegion,
+  type LocatedDrawingRect,
   type LocatedImagePrimitive,
 } from './displayListImages';
 

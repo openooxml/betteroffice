@@ -596,6 +596,14 @@ class OfficeEquivalentTests(unittest.TestCase):
                                     '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
         runner.checker.drawing_text(empty_first, 'New text')
         self.assertEqual(empty_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
+        field_first = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:fld id="{{1}}" type="slidenum"><a:rPr i="1"/><a:t>3</a:t></a:fld>'
+                                    '<a:r><a:t>Plain</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(field_first, 'New text')
+        self.assertEqual(field_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
+        plain_field = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:fld id="{{1}}" type="slidenum"><a:t>3</a:t></a:fld>'
+                                    '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(plain_field, 'New text')
+        self.assertIsNone(plain_field.find('a:p/a:r/a:rPr', runner.checker.NS))
 
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
