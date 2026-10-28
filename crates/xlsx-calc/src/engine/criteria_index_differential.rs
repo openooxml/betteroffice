@@ -1084,3 +1084,353 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
         assert!(!budget.criteria_index_covers(sheet, reader));
     }
 }
+
+#[test]
+fn nth_match_differential_generated() {
+    let mut rng = Lcg(0x1234_5eed);
+    for case in 0..360 {
+        let mut wb = empty();
+        wb.sheets.push(Sheet::new("Other"));
+        let horizontal = case % 2 == 1;
+        for offset in 0..8 {
+            let value = if case % 4 == 0 {
+                rng.value()
+            } else if offset % 3 == 0 {
+                CellValue::Empty
+            } else {
+                [
+                    number(0.0),
+                    number(2.0),
+                    CellValue::Text {
+                        value: "Apple".into(),
+                    },
+                    CellValue::Bool { value: false },
+                ][offset as usize % 4]
+                    .clone()
+            };
+            let (row, col) = if horizontal {
+                (1, offset + 1)
+            } else {
+                (offset + 1, 1)
+            };
+            put(&mut wb, row, col, value);
+        }
+        put(&mut wb, 0, 3, number(2.0));
+        put(&mut wb, 0, 4, number(1.9));
+        let key = [
+            "D1",
+            "1",
+            "0",
+            "FALSE",
+            "TRUE",
+            "\"aPpLe\"",
+            "\"\"",
+            "D20",
+            "1/0",
+            "2+0",
+        ][case / 2 % 10];
+        if case % 13 == 0 {
+            put(
+                &mut wb,
+                0,
+                3,
+                CellValue::Error {
+                    value: ErrorValue::NA,
+                },
+            );
+        }
+        let end = if case % 3 == 0 { 30 } else { 9 };
+        let range = if horizontal {
+            "B2:AD2".to_string()
+        } else {
+            format!("B2:B{end}")
+        };
+        let positions = if horizontal {
+            "COLUMN(Other!B8:AD8)".to_string()
+        } else {
+            format!("ROW(Other!H2:J{end})")
+        };
+        let offset = [
+            "-ROW(A2)+1",
+            "+0.25-(-2)",
+            "-3",
+            "+1e16-1e16",
+            "-COLUMN(A1)+2",
+        ][case / 3 % 5];
+        let otherwise = ["", ",FALSE", ",\"\"", ",\"ignored\"", ",0", ",TRUE"][case / 5 % 6];
+        let k = [
+            "0", "-1", "1.9", "30", "ROW(2:2)", "E1", "1", "\"2\"", "TRUE", "{1,2}",
+        ][case / 7 % 10];
+        let condition = if case % 4 < 2 {
+            format!("{key}={range}")
+        } else {
+            format!("{range}={key}")
+        };
+        for (col, name) in [(36, "SMALL"), (37, "LARGE")] {
+            let source = format!("{name}(IF({condition},{positions}{offset}{otherwise}),{k})");
+            if case % 5 == 0 {
+                formula(&mut wb, 0, col, &source);
+            } else {
+                array(&mut wb, 0, col, &source, 1, 1);
+            }
+        }
+        if case % 11 == 0 {
+            let (row, col) = if horizontal { (1, 3) } else { (3, 1) };
+            formula(&mut wb, row, col, "1+1");
+        }
+        if case % 17 == 0 {
+            let (row, col) = (1, 1);
+            for offset in 0..3 {
+                let at = if horizontal {
+                    CellRef::new(row, col + offset)
+                } else {
+                    CellRef::new(row + offset, col)
+                };
+                put(&mut wb, at.row, at.col, CellValue::Empty);
+            }
+            array(
+                &mut wb,
+                row,
+                col,
+                if horizontal {
+                    "SEQUENCE(1,3)"
+                } else {
+                    "SEQUENCE(3)"
+                },
+                1,
+                1,
+            );
+        }
+        compare(&wb, 100_000);
+        compare_budget(&wb, 1 + (case % 100) as u64);
+    }
+}
+
+#[test]
+fn nth_match_index_is_used_for_both_orders_and_orientations() {
+    for horizontal in [false, true] {
+        for name in ["SMALL", "LARGE"] {
+            for cse in [false, true] {
+                let mut wb = empty();
+                for offset in 0..40 {
+                    let (row, col) = if horizontal {
+                        (1, offset + 1)
+                    } else {
+                        (offset + 1, 1)
+                    };
+                    put(
+                        &mut wb,
+                        row,
+                        col,
+                        CellValue::Text {
+                            value: "Apple".into(),
+                        },
+                    );
+                }
+                let (range, positions) = if horizontal {
+                    ("B2:AO2", "COLUMN(B7:AO7)")
+                } else {
+                    ("B2:B41", "ROW(H2:H41)")
+                };
+                let source = format!("{name}(IF({range}=\"APPLE\",{positions}-1,FALSE),ROW(2:2))");
+                if cse {
+                    array(&mut wb, 0, 45, &source, 1, 1);
+                } else {
+                    formula(&mut wb, 0, 45, &source);
+                }
+                compare(&wb, 100_000);
+                let (_, budget) = recalc(&mut wb, true, 100_000);
+                assert!(budget.criteria_index_reads.get() > 0, "{source}, CSE {cse}");
+            }
+        }
+    }
+}
+
+#[test]
+fn nth_match_headroom_matches_unindexed_call_cost() {
+    for source in [
+        "SMALL(IF(B2:B41=1,ROW(H2:H41)-ROW(A2)+1),ROW(2:2))",
+        "LARGE(IF(1=B2:B41,ROW(H2:H41)+0.5,FALSE),E1)",
+        "SMALL(IF(B2:AO2=1,COLUMN(B8:AO8)-COLUMN(A1),\"\"),1.9)",
+    ] {
+        for cse in [false, true] {
+            let mut wb = empty();
+            for offset in 0..40 {
+                put(&mut wb, offset + 1, 1, number(1.0));
+                put(&mut wb, 1, offset + 1, number(1.0));
+            }
+            put(&mut wb, 0, 4, number(2.0));
+            let expr = crate::parse_formula(source).unwrap();
+            let evaluate_call = |enabled, limit| {
+                let budget = Rc::new(EvaluationBudget::new(limit));
+                budget.criteria_index_enabled.set(enabled);
+                let ctx = EvalContext::with_budget(&wb, SheetId(0), Rc::clone(&budget));
+                let value = if cse {
+                    crate::array::evaluate_array(&expr, &ctx).into_scalar()
+                } else {
+                    crate::evaluate(&expr, &ctx)
+                };
+                (value, budget)
+            };
+            let (_, off) = evaluate_call(false, 100_000);
+            let cost = 100_000 - off.remaining();
+            for limit in [cost - 1, cost, cost + 1] {
+                let (actual, on) = evaluate_call(true, limit);
+                let (expected, _) = evaluate_call(false, limit);
+                assert_eq!(actual, expected, "{source}, {limit}, CSE {cse}");
+                if limit < cost {
+                    assert_eq!(on.criteria_index_reads.get(), 0);
+                } else {
+                    assert!(on.criteria_index_reads.get() > 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn nth_match_refusals_preserve_results_without_range_reads() {
+    for source in [
+        "SMALL(IF(B2:B41=D1+0,ROW(B2:B41)),1)",
+        "SMALL(IF(B2:B41=1,ROW(B2:B41),0),1)",
+        "SMALL(IF(B2:B41=1,ROW(B2:B41)*2),1)",
+        "SMALL(IF(B2:B41=1,B2:B41),1)",
+        "SMALL(IF(B2:B41=D1,ROW(B2:B41)),1)",
+        "SMALL(IF(B2:B41=1,ROW(B2:B41)),ABS(1))",
+        "SMALL(IF(B2:B41=1,ROW(B3:B42)),1)",
+        "SMALL(IF(B2:B41=1,COLUMN(B2:B41)),1)",
+    ] {
+        let mut wb = empty();
+        put(
+            &mut wb,
+            0,
+            3,
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+        );
+        put(&mut wb, 40, 1, number(1.0));
+        array(&mut wb, 0, 5, source, 1, 1);
+        compare_untouched(&wb, || EvaluationBudget::new(100_000));
+    }
+}
+
+#[test]
+fn nth_match_blank_postings_and_tail_merge_in_position_order() {
+    for key in ["0", "FALSE", "\"\"", "D1"] {
+        let mut wb = empty();
+        for (row, value) in [
+            CellValue::Empty,
+            number(0.0),
+            CellValue::Bool { value: false },
+            CellValue::Text {
+                value: String::new(),
+            },
+            number(3.0),
+            CellValue::Empty,
+            number(-0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put(&mut wb, row as u32 + 1, 1, value);
+        }
+        for n in 1..=15 {
+            for (col, name) in [(5, "SMALL"), (6, "LARGE")] {
+                array(
+                    &mut wb,
+                    n,
+                    col,
+                    &format!("{name}(IF(B2:B12={key},ROW(H2:H12)-1,\"ignored\"),{n})"),
+                    1,
+                    1,
+                );
+            }
+        }
+        compare(&wb, 100_000);
+        let (_, budget) = recalc(&mut wb, true, 100_000);
+        assert!(budget.criteria_index_reads.get() > 0, "key {key}");
+    }
+    let mut wb = empty();
+    put(&mut wb, 2, 1, number(0.0));
+    array(&mut wb, 0, 5, "LARGE(IF(B2:B30=0,ROW(B2:B30)),1)", 1, 1);
+    let actual = compare(&wb, 100_000);
+    assert_eq!(actual.value(SheetId(0), CellRef::new(0, 5)), number(30.0));
+}
+
+#[test]
+fn nth_match_text_headroom_keeps_materialized_errors() {
+    let mut wb = empty();
+    for row in 1..9 {
+        put(
+            &mut wb,
+            row,
+            1,
+            CellValue::Text {
+                value: "Apple".into(),
+            },
+        );
+    }
+    array(
+        &mut wb,
+        0,
+        5,
+        "SMALL(IF(B2:B9=\"APPLE\",ROW(B2:B9),\"ignored\"),1)",
+        1,
+        1,
+    );
+    for bytes in [0, 4, 5, 44, 51, 52, 100] {
+        let mut indexed = wb.clone();
+        let mut streamed = wb.clone();
+        recalc_with(
+            &mut indexed,
+            true,
+            EvaluationBudget::with_text(100_000, bytes),
+        );
+        recalc_with(
+            &mut streamed,
+            false,
+            EvaluationBudget::with_text(100_000, bytes),
+        );
+        assert_eq!(
+            indexed.value(SheetId(0), CellRef::new(0, 5)),
+            streamed.value(SheetId(0), CellRef::new(0, 5)),
+            "text budget {bytes}"
+        );
+    }
+}
+
+#[test]
+fn nth_match_final_anchor_index_invalidates_on_spill_write() {
+    let mut wb = empty();
+    for row in 1..30 {
+        put(&mut wb, row, 1, number(1.0));
+    }
+    let at = CellRef::new(7, 1);
+    array(&mut wb, at.row, at.col, "1+0", 1, 1);
+    array(&mut wb, 0, 5, "SMALL(IF(B2:B30=1,ROW(B2:B30)),1)", 1, 1);
+    compare(&wb, 100_000);
+    let (_, budget) = recalc(&mut wb, true, 100_000);
+    assert!(budget.criteria_index_covers(SheetId(0), at));
+    write_spill(
+        &mut wb,
+        key(SheetId(0), at),
+        Spill {
+            range: CellRange::new(at, at),
+            values: vec![number(2.0)],
+        },
+        &budget,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(!budget.criteria_index_covers(SheetId(0), at));
+}
+
+#[test]
+fn nth_match_spilled_criteria_keep_the_existing_path() {
+    let mut wb = empty();
+    array(&mut wb, 1, 1, "SEQUENCE(8)", 8, 1);
+    array(&mut wb, 0, 5, "SMALL(IF(B2:B9=2,ROW(B2:B9)),1)", 1, 1);
+    compare(&wb, 100_000);
+    compare_untouched(&wb, || EvaluationBudget::new(100_000));
+}

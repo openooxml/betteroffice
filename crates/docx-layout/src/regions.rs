@@ -294,6 +294,20 @@ impl DocumentRegions {
 }
 
 impl RegionSection {
+    pub fn page_number_start(&self) -> Option<u64> {
+        let start = self.page_numbering.as_ref()?.start?;
+        let odd = match self.section_start {
+            Some(crate::types::SectionBreakType::OddPage) => true,
+            Some(crate::types::SectionBreakType::EvenPage) => false,
+            _ => return Some(start),
+        };
+        Some(if (start % 2 != 0) == odd {
+            start
+        } else {
+            start.checked_add(1).unwrap_or_else(|| start - 1)
+        })
+    }
+
     fn normalize_authored(&mut self) {
         let Some(properties) = self.properties.as_ref() else {
             return;
@@ -459,6 +473,19 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        let mode = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            .and_then(|compat| compat.get("compatibilityMode"))
+            .or_else(|| self.measurement.compat.get("compatibilityMode"))
+            .cloned()
+            .unwrap_or(serde_json::json!(12));
+        if !self.measurement.compat.is_object() {
+            self.measurement.compat = serde_json::json!({});
+        }
+        self.measurement.compat["compatibilityMode"] = mode;
         if let Some(compatibility) = self
             .regions
             .settings
@@ -502,19 +529,14 @@ pub fn apply_section_geometry_to_blocks<T>(
         .iter()
         .map(|section| {
             Some(crate::types::SectionPageRestart {
-                start: section.page_numbering.as_ref()?.start?,
+                start: section.page_number_start()?,
                 align_parity: section
                     .even_and_odd_headers
                     .unwrap_or(regions.even_and_odd_headers),
             })
         })
         .collect();
-    options.section_page_restarts = restarts
-        .iter()
-        .skip(1)
-        .flatten()
-        .any(|restart| restart.align_parity)
-        .then_some(restarts);
+    options.section_page_restarts = restarts.iter().any(Option::is_some).then_some(restarts);
     if first.page_size.is_some() {
         options.page_size.clone_from(&first.page_size);
     }
@@ -629,9 +651,7 @@ fn apply_document_regions_with(
                 .or_else(|| regions.watermark.clone());
             page.vertical_align = section.vertical_align.clone();
             let restart = section
-                .page_numbering
-                .as_ref()
-                .and_then(|numbering| numbering.start)
+                .page_number_start()
                 .filter(|_| page.section_page_index == Some(0));
             let number = restart.unwrap_or(previous_number + 1);
             if let Some(numbering) = &section.page_numbering {
@@ -1081,6 +1101,27 @@ mod tests {
     }
 
     #[test]
+    fn split_keeps_a_supplied_compatibility_mode_when_regions_carry_none() {
+        let mode = |value: serde_json::Value| {
+            let request: RegionLayoutInput = serde_json::from_value(value).unwrap();
+            request.split().3.compat["compatibilityMode"].clone()
+        };
+        let measured = json!({"compat": {"compatibilityMode": 15}});
+        assert_eq!(
+            mode(json!({"measured": [], "options": {}, "measurement": measured.clone()})),
+            json!(15)
+        );
+        assert_eq!(
+            mode(json!({
+                "measured": [], "options": {}, "measurement": measured,
+                "regions": {"settings": {"compatibilityFlags": {"compatibilityMode": 14}}}
+            })),
+            json!(14)
+        );
+        assert_eq!(mode(json!({"measured": [], "options": {}})), json!(12));
+    }
+
+    #[test]
     fn section_geometry_populates_options_and_breaks() {
         let request: RegionLayoutInput = serde_json::from_value(json!({
             "measured": [{
@@ -1177,6 +1218,147 @@ mod tests {
         let mut layout = crate::compute_layout_input(&mut input).unwrap();
         apply_document_regions(&mut layout, &regions);
         layout
+    }
+
+    #[test]
+    fn authored_odd_page_uses_the_incoming_restart() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(1), 1, Some("oddPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(1));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_restart_at_two_after_one_page_needs_no_filler() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 1, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(2));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_uses_restart_instead_of_physical_parity() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 2, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 3, "headers={headers}");
+            assert_eq!(layout.pages[2].section_page_number, Some(2));
+            assert_eq!(layout.pages[2].parity_filler, None);
+            assert!(!layout.pages[2].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_rounds_an_odd_restart_without_a_filler() {
+        for headers in [false, true] {
+            for preceding in [1, 2] {
+                let (mut input, mut regions) =
+                    restart_parity_input(headers, Some(1), preceding, Some("evenPage"), 1);
+                for title_pg in [false, true] {
+                    regions.sections[1].title_pg = title_pg;
+                    let mut layout = crate::compute_layout_input(&mut input).unwrap();
+                    apply_document_regions(&mut layout, &regions);
+                    assert_eq!(layout.pages.len(), preceding + 1);
+                    let first = &layout.pages[preceding];
+                    assert_eq!(first.number as usize, preceding + 1);
+                    assert_eq!(first.section_page_number, Some(2));
+                    assert_eq!(first.page_label.as_deref(), Some("2"));
+                    assert_eq!(first.section_page_index, Some(0));
+                    assert_eq!(first.parity_filler, None);
+                    assert!(!first.fragments.is_empty());
+                    assert_eq!(
+                        regions.sections[1].page_numbering.as_ref().unwrap().start,
+                        Some(1)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn even_page_restart_keeps_the_authored_blank_first_page() {
+        for headers in [false, true] {
+            let (mut input, regions) =
+                restart_parity_input(headers, Some(1), 3, Some("evenPage"), 1);
+            let mut blank = input.measured.last().unwrap().clone();
+            let LayoutBlock::Paragraph(paragraph) = &mut blank.block else {
+                panic!("paragraph expected");
+            };
+            paragraph.id = crate::types::BlockId::Str("blank-first".into());
+            paragraph.runs.clear();
+            let index = input.measured.len() - 1;
+            input.measured.insert(index, blank);
+            input.measured.insert(
+                index + 1,
+                serde_json::from_value(json!({
+                    "block": {"kind": "pageBreak", "id": "authored-blank"},
+                    "measure": {"kind": "pageBreak"}
+                }))
+                .unwrap(),
+            );
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            assert_eq!(layout.pages.len(), 5);
+            assert_eq!(layout.pages[3].number, 4);
+            assert_eq!(layout.pages[3].region_section_index, 1);
+            assert_eq!(layout.pages[3].section_page_number, Some(2));
+            assert_eq!(layout.pages[3].section_page_index, Some(0));
+            assert_eq!(layout.pages[4].section_page_number, Some(3));
+            assert_eq!(layout.pages[4].section_page_index, Some(1));
+            assert!(layout.pages.iter().all(|page| page.parity_filler.is_none()));
+        }
+    }
+
+    #[test]
+    fn authored_parity_rounds_mismatched_restart_numbers() {
+        for (section_type, start, expected) in
+            [("evenPage", 3, 4), ("oddPage", 2, 3), ("oddPage", 0, 1)]
+        {
+            let layout = restart_parity_layout(false, Some(start), 1, Some(section_type));
+            assert_eq!(layout.pages.len(), 2);
+            assert_eq!(layout.pages[1].section_page_number, Some(expected));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_odd_page_without_restart_keeps_physical_parity() {
+        for headers in [false, true] {
+            for first_start in [1, 2] {
+                let (mut input, regions) =
+                    restart_parity_input(headers, None, 1, Some("oddPage"), first_start);
+                let mut layout = crate::compute_layout_input(&mut input).unwrap();
+                apply_document_regions(&mut layout, &regions);
+                assert_eq!(
+                    layout.pages.len(),
+                    3,
+                    "headers={headers}, start={first_start}"
+                );
+                assert_eq!(layout.pages[1].parity_filler, Some(true));
+                assert!(layout.pages[1].fragments.is_empty());
+                assert!(!layout.pages[2].fragments.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn restarts_reach_placement_without_header_parity_alignment() {
+        let (input, _) = restart_parity_input(false, Some(1), 1, Some("oddPage"), 2);
+        let restarts = input.options.section_page_restarts.as_ref().unwrap();
+        assert_eq!(restarts[0].unwrap().start, 2);
+        assert_eq!(restarts[1].unwrap().start, 1);
+        assert!(
+            restarts
+                .iter()
+                .flatten()
+                .all(|restart| !restart.align_parity)
+        );
     }
 
     #[test]

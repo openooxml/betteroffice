@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { updateDownloadSnapshots } from './download-snapshot.mjs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import { NATIVE_PACKAGES, validateNativeVersions } from './native-bindings.mjs';
 import {
@@ -142,6 +143,12 @@ if (checkOnly) {
 }
 
 run('bun', ['run', 'changeset', 'version']);
+try {
+  const counts = await updateDownloadSnapshots();
+  console.log(`Download snapshots: ${JSON.stringify(counts)}`);
+} catch (error) {
+  console.warn(`Download snapshots kept: ${error instanceof Error ? error.message : error}`);
+}
 const after = rustReleaseVersion();
 
 if (after !== before) {

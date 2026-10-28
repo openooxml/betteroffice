@@ -1,0 +1,54 @@
+{
+  "_lang": "fr",
+  "titleBar": {
+    "edited": "Modifié",
+    "collaborate": "Collaborer",
+    "connecting": "Connexion…",
+    "home": "Accueil",
+    "open": "Ouvrir…",
+    "save": "Enregistrer"
+  },
+  "notice": {
+    "dismissError": "Ignorer l’erreur"
+  },
+  "room": {
+    "roomId": "ID de la salle",
+    "yourName": "Votre nom",
+    "joinRoom": "Rejoindre la salle",
+    "leaveRoom": "Quitter la salle",
+    "hint": "Ouvrez le même fichier et saisissez le même ID de salle pour modifier ensemble.",
+    "saveBeforeJoining": "Enregistrez vos modifications avant de rejoindre une salle. Tout le monde doit ouvrir le même fichier."
+  },
+  "editor": {
+    "opening": "Ouverture de l’éditeur…",
+    "viewing": "Affichage",
+    "editing": "Modification",
+    "connected": "Connecté",
+    "workbookDisposed": "L’éditeur de classeur a été fermé.",
+    "presentationDisposed": "L’éditeur de présentation a été fermé.",
+    "documentDisposed": "L’éditeur de document a été fermé.",
+    "stillOpening": "L’éditeur ouvre encore le fichier. Réessayez dans un instant.",
+    "disconnected": "Déconnecté"
+  },
+  "start": {
+    "dropFileHere": "Déposez votre fichier ici",
+    "openDocument": "Ouvrir un document",
+    "openSpreadsheet": "Ouvrir une feuille de calcul",
+    "openPresentation": "Ouvrir une présentation",
+    "intro": "Reprenez là où vous vous étiez arrêté.",
+    "openFile": "Ouvrir un fichier…",
+    "opening": "Ouverture…",
+    "dropHint": "ou déposez un fichier ici",
+    "recentFiles": "Fichiers récents",
+    "recent": "Récents"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Ignorer les modifications non enregistrées ?"
+  },
+  "errors": {
+    "openInApp": "Ouvrez les fichiers .{ext} dans BetterOffice {app}.",
+    "couldNotRead": "Impossible de lire {name}.",
+    "chooseFile": "Choisissez un fichier .{ext}.",
+    "unsupportedFile": "Choisissez un document Word, un classeur Excel ou une présentation PowerPoint."
+  }
+}

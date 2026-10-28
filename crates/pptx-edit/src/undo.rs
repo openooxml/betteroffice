@@ -1,16 +1,16 @@
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use serde::Serialize;
 use yrs::sync::time::Clock;
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use yrs::types::{Event, PathSegment};
 use yrs::undo::StackItem;
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use yrs::{DeepObservable, Map, MapRef, Subscription};
 use yrs::{Doc, IdSet, Origin, ReadTxn, Transact};
 
@@ -113,11 +113,11 @@ pub struct DeckUndoManager {
     kept: Arc<AtomicBool>,
     client_id: u64,
     tables: HashMap<String, IdSet>,
-    #[cfg(any(feature = "wasm", test))]
+    #[cfg(any(feature = "engine", test))]
     history: Option<HistoryObserver>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HistoryReceipt {
@@ -127,20 +127,20 @@ pub(crate) struct HistoryReceipt {
     pub slide_order_changed: bool,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Default)]
 struct HistoryState {
     owners: HashMap<String, String>,
     receipt: Option<HistoryReceipt>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 struct HistoryObserver {
     state: Arc<Mutex<HistoryState>>,
     _subscriptions: Vec<Subscription>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 fn index_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, slide_id: &str) {
     if state
         .owners
@@ -153,7 +153,7 @@ fn index_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, sl
     refresh_shape(txn, state, shape_id, slide_id);
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, slide_id: &str) {
     let Ok(shape) = crate::deck::shape_ref(txn, shape_id) else {
         return;
@@ -175,7 +175,7 @@ fn refresh_shape<T: ReadTxn>(txn: &T, state: &mut HistoryState, shape_id: &str, 
     }
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 fn index_slide<T: ReadTxn>(txn: &T, state: &mut HistoryState, slide_id: &str) {
     let Ok(slide) = crate::deck::slide_ref(txn, slide_id) else {
         return;
@@ -187,7 +187,7 @@ fn index_slide<T: ReadTxn>(txn: &T, state: &mut HistoryState, slide_id: &str) {
     }
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 impl DeckSession {
     pub(crate) fn enable_history_receipts(&self) -> EditResult<()> {
         let mut undo = self.undo.borrow_mut();
@@ -310,7 +310,7 @@ impl DeckUndoManager {
             kept,
             client_id,
             tables: HashMap::new(),
-            #[cfg(any(feature = "wasm", test))]
+            #[cfg(any(feature = "engine", test))]
             history: None,
         })
     }

@@ -17,6 +17,7 @@ import {
   type OpenFile,
   type RecentFile,
 } from "./bridge";
+import { t } from "./i18n";
 import { SessionRevision } from "./session";
 import type { EditorApi, PreparedFile, Room } from "./Editor";
 
@@ -165,7 +166,7 @@ export function App() {
       if (!current?.revision.dirty || checkpoint === approved) return checkpoint;
       const choice = isNative()
         ? await invoke<string>({ type: "confirmClose", name: current.file.name })
-        : window.confirm("Discard unsaved changes?")
+        : window.confirm(t("dialogs.discardUnsavedChanges"))
         ? "discard"
         : "cancel";
       if (choice === "discard") approved = checkpoint;
@@ -199,7 +200,7 @@ export function App() {
         const format = formatOf(file.name);
         if (format !== config.format)
           throw new Error(
-            `Open .${format} files in BetterOffice ${names[format]}.`
+            t("errors.openInApp", { ext: format, app: names[format] })
           );
         setBusy(true);
         busyRef.current = true;
@@ -208,7 +209,7 @@ export function App() {
         setOpeningDocx(workerDocx);
         setError(null);
         const response = await fetch(file.url);
-        if (!response.ok) throw new Error(`Could not read ${file.name}.`);
+        if (!response.ok) throw new Error(t("errors.couldNotRead", { name: file.name }));
         const { prepareFile } = await import("./Editor");
         const prepared = await prepareFile(
           new Uint8Array(await response.arrayBuffer()),
@@ -337,7 +338,7 @@ export function App() {
   const openBrowserFile = useCallback(
     async (file: File) => {
       if (formatOf(file.name) !== config.format)
-        throw new Error(`Choose a .${config.format} file.`);
+        throw new Error(t("errors.chooseFile", { ext: config.format }));
       const bytes = new Uint8Array(await file.arrayBuffer());
       if (isNative()) {
         await open(
@@ -488,7 +489,7 @@ export function App() {
         {session && (
           <span className="document-name">
             {session.file.name}
-            {dirty ? " · Edited" : ""}
+            {dirty ? ` · ${t("titleBar.edited")}` : ""}
           </span>
         )}
         {session && (
@@ -500,28 +501,28 @@ export function App() {
               className="quiet-button"
               onClick={() => setRoomPanel(!roomPanel)}
             >
-              {room ? status || "Connecting…" : "Collaborate"}
+              {room ? status || t("titleBar.connecting") : t("titleBar.collaborate")}
             </button>
             <button
               className="quiet-button"
               onClick={() => void close().catch(report)}
               disabled={busy}
             >
-              Home
+              {t("titleBar.home")}
             </button>
             <button
               className="quiet-button"
               onClick={() => void open()}
               disabled={busy && !openingDocx}
             >
-              Open…
+              {t("titleBar.open")}
             </button>
             <button
               className="quiet-button"
               onClick={() => void save()}
               disabled={busy && !openingDocx}
             >
-              Save
+              {t("titleBar.save")}
             </button>
           </div>
         )}
@@ -529,7 +530,7 @@ export function App() {
       {error && (
         <div className="notice" role="alert">
           {error}
-          <button aria-label="Dismiss error" onClick={() => setError(null)}>
+          <button aria-label={t("notice.dismissError")} onClick={() => setError(null)}>
             ×
           </button>
         </div>
@@ -541,9 +542,7 @@ export function App() {
             event.preventDefault();
             const form = new FormData(event.currentTarget);
             if (session.revision.dirty) {
-              report(
-                "Save your changes before joining a room. Everyone should open the same file."
-              );
+              report(t("room.saveBeforeJoining"));
               return;
             }
             void switchRoom({
@@ -554,22 +553,22 @@ export function App() {
         >
           <input
             name="room"
-            aria-label="Room ID"
-            placeholder="Room ID"
+            aria-label={t("room.roomId")}
+            placeholder={t("room.roomId")}
             defaultValue={room?.id}
             required
             maxLength={128}
           />
           <input
             name="name"
-            aria-label="Your name"
-            placeholder="Your name"
+            aria-label={t("room.yourName")}
+            placeholder={t("room.yourName")}
             defaultValue={room?.name}
             required
             maxLength={80}
           />
           <button className="quiet-button" type="submit">
-            Join room
+            {t("room.joinRoom")}
           </button>
           {room && (
             <button
@@ -577,19 +576,19 @@ export function App() {
               type="button"
               onClick={() => void switchRoom(null)}
             >
-              Leave room
+              {t("room.leaveRoom")}
             </button>
           )}
-          <p>Open the same file and enter the same room ID to edit together.</p>
+          <p>{t("room.hint")}</p>
         </form>
       )}
       {session || pending ? (
         <main className="editor-stage" inert={busy && !openingDocx}>
           {[session, pending?.session].filter((current): current is Session => !!current).map((current) => (
-            <div key={current.key} className="editor-layer"
+            <div key={current.key} className="editor-layer" dir="ltr"
               style={{ visibility: current === session ? "visible" : "hidden" }}
               inert={current !== session} aria-hidden={current !== session}>
-              <Suspense fallback={<p className="loading">Opening editor…</p>}>
+              <Suspense fallback={<p className="loading">{t("editor.opening")}</p>}>
                 <Editor
                   key={`${current.key}:${current === session ? room?.id ?? "" : ""}`}
                   file={current.prepared}

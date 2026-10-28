@@ -22,3 +22,6 @@ xlsx-model.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm.workspace = true
+
+[dev-dependencies]
+libm.workspace = true

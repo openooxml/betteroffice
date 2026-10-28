@@ -1641,6 +1641,50 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(41_390.0));
     }
 
+    /// a TEXT conversion that fails must not poison the cell with an
+    /// unsupported flag: the cell and its dependents recalc normally.
+    #[test]
+    fn a_failed_text_conversion_recalcs_after_an_edit() {
+        let (mut wb, s) = one_sheet();
+        let text = |v: &str| CellValue::Text { value: v.into() };
+        put_text(&mut wb, s, "A1", "99-1");
+        put_num(&mut wb, s, "B1", 5.0);
+        put_cached_formula(&mut wb, s, "C1", "TEXT(A1,\"0\")&B1", text("99-15"));
+        put_cached_formula(&mut wb, s, "D1", "C1", text("99-15"));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C1"), text("99-15"));
+
+        put_num(&mut wb, s, "B1", 10.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("B1"))], None);
+        assert_eq!(value(&wb, s, "C1"), text("99-110"));
+        assert_eq!(value(&wb, s, "D1"), text("99-110"));
+    }
+
+    /// date text TEXT converts in a 1904 workbook lands on the same date.
+    #[test]
+    fn text_converts_date_text_in_a_1904_workbook() {
+        let (mut wb, s) = one_sheet();
+        wb.date_system = xlsx_model::DateSystem::V1904;
+        put_text(&mut wb, s, "A1", "November 2025");
+        put_formula(&mut wb, s, "B1", "TEXT(A1,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B1"),
+            CellValue::Text {
+                value: "November 2025 ".into()
+            }
+        );
+        put_text(&mut wb, s, "A2", "November 1902");
+        put_formula(&mut wb, s, "B2", "TEXT(A2,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B2"),
+            CellValue::Text {
+                value: "November 1902".into()
+            }
+        );
+    }
+
     /// excel trims only ascii spaces off date text, so other unicode spaces,
     /// full-width digits and number-like clock junk leave it text.
     #[test]

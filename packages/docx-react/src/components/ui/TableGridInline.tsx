@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactElement } from 'react';
+import { useTranslation } from '../../i18n';
 
 interface TableGridInlineProps {
   onInsert: (rows: number, columns: number) => void;
@@ -35,6 +36,7 @@ const labelStyle: CSSProperties = {
 };
 
 export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: TableGridInlineProps) {
+  const { t } = useTranslation();
   const [selection, setSelection] = useState({ row: 0, col: 0 });
   const [focusedCell, setFocusedCell] = useState({ row: 1, col: 1 });
   const gridRef = useRef<HTMLDivElement>(null);
@@ -99,7 +101,7 @@ export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: Tab
           }}
           onClick={() => onInsert(row, col)}
           role="gridcell"
-          aria-label={`${col} columns, ${row} rows`}
+          aria-label={t('dialogs.insertTable.cellSize', { cols: col, rows: row })}
           aria-selected={isSelected}
           data-row={row}
           data-column={col}
@@ -115,7 +117,9 @@ export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: Tab
   }
 
   const gridLabel =
-    selection.row > 0 && selection.col > 0 ? `${selection.col} × ${selection.row}` : 'Select size';
+    selection.row > 0 && selection.col > 0
+      ? `${selection.col} × ${selection.row}`
+      : t('dialogs.insertTable.selectSize');
 
   return (
     <div>
@@ -133,7 +137,7 @@ export function TableGridInline({ onInsert, gridRows = 6, gridColumns = 6 }: Tab
           );
         }}
         role="grid"
-        aria-label="Table size selector"
+        aria-label={t('dialogs.insertTable.sizeSelector')}
         aria-multiselectable="true"
       >
         {gridRowsContent}

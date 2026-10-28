@@ -2465,7 +2465,7 @@ mod tests {
                 .display_list()
                 .commands
                 .iter()
-                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "2048"))
+                .any(|command| matches!(command, DrawCmd::Text { text, .. } if &**text == "2048"))
         );
         let state = document.editing_state().unwrap();
         assert!(state.can_save);
@@ -2523,7 +2523,7 @@ mod tests {
                 .display_list()
                 .commands
                 .iter()
-                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "42"))
+                .any(|command| matches!(command, DrawCmd::Text { text, .. } if &**text == "42"))
         );
         assert!(
             !reference
@@ -2531,7 +2531,9 @@ mod tests {
                 .display_list()
                 .commands
                 .iter()
-                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "=40+2"))
+                .any(|command| {
+                    matches!(command, DrawCmd::Text { text, .. } if &**text == "=40+2")
+                })
         );
     }
 
@@ -2688,7 +2690,12 @@ mod tests {
                 ["translated"],
             1
         );
-        assert_eq!(document.pages[1].skipped.counts["placeholder"], 1);
+        assert_eq!(
+            document.pages[1].skipped.total(),
+            0,
+            "{:?}",
+            document.pages[1].skipped.counts
+        );
     }
 
     #[test]
@@ -2927,19 +2934,27 @@ mod tests {
     }
 
     #[test]
-    fn pptx_save_refuses_to_flatten_unchanged_run_color_metadata() {
-        let source =
-            test_fixtures::write_pptx("pptx-theme-linked", &test_fixtures::theme_linked_pptx());
+    fn pptx_save_keeps_theme_linked_run_colors() {
+        let source_bytes = test_fixtures::theme_linked_pptx();
+        let source = test_fixtures::write_pptx("pptx-theme-linked", &source_bytes);
         let mut document = load_document(&source, 0, 8_192).unwrap();
         let probe = pptx_probe(&document, 0);
         assert!(document.pptx_select_hit(probe.hit));
         assert!(document.pptx_insert_text("Theme ").unwrap());
-        let output = test_fixtures::write_pptx("pptx-theme-refused", b"sentinel");
+        let output = test_fixtures::write_pptx("pptx-theme-kept", b"sentinel");
 
-        let error = document.save_pptx_to(&output).unwrap_err().to_string();
-        assert!(error.contains("run color metadata"), "{error}");
-        assert!(error.contains("unchanged text"), "{error}");
-        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        document.save_pptx_to(&output).unwrap();
+        let saved = fs::read(&output).unwrap();
+        let source_slide =
+            String::from_utf8(test_fixtures::part(&source_bytes, "ppt/slides/slide1.xml")).unwrap();
+        let saved_slide =
+            String::from_utf8(test_fixtures::part(&saved, "ppt/slides/slide1.xml")).unwrap();
+        let theme = r#"<a:schemeClr val="accent1"/>"#;
+        let source_colors = source_slide.matches(theme).count();
+        assert!(source_colors > 0);
+        assert!(saved_slide.matches(theme).count() >= source_colors);
+        assert!(!saved_slide.contains("<a:srgbClr"));
+        assert!(saved_slide.contains("Theme "));
         fs::remove_file(source).unwrap();
         fs::remove_file(output).unwrap();
     }

@@ -792,6 +792,9 @@ pub struct TextRunPrimitive {
     pub rotation_deg: Option<Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub horizontal_scale: Option<Number>,
+    /// Canvas-only width ratio for substituted font bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substitute_scale: Option<Number>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub all_caps: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -3921,6 +3924,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         opacity: Some(px(opacity)),
         rotation_deg: rotation,
         horizontal_scale: None,
+        substitute_scale: None,
         all_caps: false,
         small_caps: false,
         hidden: false,
@@ -4565,6 +4569,140 @@ impl<'a> ShapeFonts<'a> {
             .resolve(chain, ch)
             .or_else(|| chain.last().copied())
     }
+}
+
+fn painted_text_width(
+    fonts: &ShapeFonts<'_>,
+    font: ooxml_text::FontId,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+) -> Option<f64> {
+    let size = effective_font_px_of(fmt);
+    let features = kern_features_of(fmt, size);
+    let direction = shape_direction_for_level(bidi_level);
+    let language = fmt.language.as_ref().and_then(|language| {
+        if ooxml_text::level_is_rtl(bidi_level) {
+            language.bidi.as_deref().or(language.latin.as_deref())
+        } else {
+            language.east_asia.as_deref().or(language.latin.as_deref())
+        }
+    });
+    let width = |text: &str, small_caps: bool| {
+        if text
+            .chars()
+            .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
+        {
+            return None;
+        }
+        let mut features = features.clone();
+        if small_caps {
+            features.push(ooxml_text::ShapeFeature {
+                tag: *b"smcp",
+                value: 1,
+            });
+        }
+        ooxml_text::shape::shape_with_properties(
+            fonts.store,
+            font,
+            text,
+            size as f32,
+            &features,
+            direction,
+            language,
+        )
+        .ok()
+        .map(|glyphs| {
+            glyphs
+                .iter()
+                .map(|glyph| f64::from(glyph.x_advance))
+                .sum::<f64>()
+        })
+    };
+    if fmt.all_caps == Some(true) {
+        return width(&text.to_uppercase(), false);
+    }
+    if fmt.small_caps != Some(true) {
+        return width(text, false);
+    }
+    let mut total = 0.0;
+    let mut segment = String::new();
+    let mut segment_scale = 1.0;
+    let mut segment_smcp = false;
+    for ch in text.chars() {
+        let real_small_cap = authoritative
+            && ch.is_lowercase()
+            && {
+                let text = ch.to_string();
+                let plain = ooxml_text::shape_with_direction(
+                    fonts.store,
+                    font,
+                    &text,
+                    size as f32,
+                    &[],
+                    direction,
+                );
+                let featured = ooxml_text::shape_with_direction(
+                    fonts.store,
+                    font,
+                    &text,
+                    size as f32,
+                    &[ooxml_text::ShapeFeature {
+                        tag: *b"smcp",
+                        value: 1,
+                    }],
+                    direction,
+                );
+                matches!((plain, featured), (Ok(a), Ok(b)) if a.iter().map(|glyph| glyph.glyph_id).collect::<Vec<_>>() != b.iter().map(|glyph| glyph.glyph_id).collect::<Vec<_>>())
+            };
+        let scale = if ch.is_lowercase() && !real_small_cap {
+            if authoritative {
+                ooxml_text::WORD_SMALL_CAPS_ADVANCE_SCALE
+            } else {
+                ooxml_text::BROWSER_SMALL_CAPS_ADVANCE_SCALE
+            }
+        } else {
+            1.0
+        };
+        if (scale != segment_scale || real_small_cap != segment_smcp) && !segment.is_empty() {
+            total += width(&segment, segment_smcp)? * f64::from(segment_scale);
+            segment.clear();
+        }
+        segment_scale = scale;
+        segment_smcp = real_small_cap;
+        if ch.is_lowercase() && !real_small_cap {
+            segment.extend(ooxml_text::uppercase_for_language(ch, language));
+        } else {
+            segment.push(ch);
+        }
+    }
+    Some(total + width(&segment, segment_smcp)? * f64::from(segment_scale))
+}
+
+fn text_substitute_scale(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+) -> Option<Number> {
+    let ratio = fonts.and_then(|fonts| {
+        let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+        let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+        let font = *chain.first()?;
+        if fonts.store.family_widths(font).ok()?.is_none()
+            && fonts.store.advance_scale(font).ok()? == 1.0
+        {
+            return None;
+        }
+        let owner = fonts.store.byte_owner(font).ok()?;
+        let wanted = painted_text_width(fonts, font, text, fmt, bidi_level, authoritative)?;
+        let own = painted_text_width(fonts, owner, text, fmt, bidi_level, authoritative)?;
+        let ratio = wanted / own;
+        (ratio.is_finite() && ratio > 0.0 && (ratio - 1.0).abs() > 1e-3).then_some(ratio)
+    });
+    ratio.and_then(Number::from_f64)
 }
 
 fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
@@ -5961,15 +6099,15 @@ pub(crate) fn emit_paragraph_fragment(
     let indent = attrs.and_then(|a| a.indent).unwrap_or_default();
 
     // rtl paragraphs mirror the two indent sides
-    let ind_l = indent.left.unwrap_or(0.0).max(0.0);
-    let ind_r = indent.right.unwrap_or(0.0).max(0.0);
+    let ind_l = indent.left.unwrap_or(0.0);
+    let ind_r = indent.right.unwrap_or(0.0);
     let (indent_left, indent_right) = if is_rtl {
         (ind_r, ind_l)
     } else {
         (ind_l, ind_r)
     };
-    let hanging = indent.hanging.unwrap_or(0.0).max(0.0);
-    let first_line = indent.first_line.unwrap_or(0.0).max(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    let first_line = indent.first_line.unwrap_or(0.0);
 
     let block_ref = BlockRef::of(&frag.block_id);
     let pmark_revision = attrs.and_then(|a| {
@@ -6034,7 +6172,7 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                if !is_rtl && indent_left > 0.0 {
+                if !is_rtl && indent_left != 0.0 {
                     indent_left - hanging
                 } else {
                     indent_left
@@ -6120,6 +6258,13 @@ pub(crate) fn emit_paragraph_fragment(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: None,
+            substitute_scale: text_substitute_scale(
+                ctx.shape,
+                "¶",
+                &RunFormattingIn::default(),
+                0,
+                false,
+            ),
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -6356,6 +6501,16 @@ pub(crate) fn line_text_insets(
     has_list_marker: bool,
     overrun: f64,
 ) -> (f64, f64) {
+    if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
+        let text_indent = if !is_first_line {
+            0.0
+        } else if has_list_marker && hanging > 0.0 {
+            overrun
+        } else {
+            first_line - hanging
+        };
+        return (indent_left, text_indent);
+    }
     let has_hanging = hanging > 0.0;
     let has_first_line = first_line > 0.0;
     let mut pad_left = indent_left;
@@ -6570,7 +6725,14 @@ fn emit_line(
             rtl: geom.is_rtl.then_some(true),
             opacity: None,
             rotation_deg: None,
-            horizontal_scale: None,
+            horizontal_scale: horizontal_scale_of(&marker_format),
+            substitute_scale: text_substitute_scale(
+                ctx.shape,
+                marker,
+                &marker_format,
+                base_bidi_level(geom.is_rtl),
+                false,
+            ),
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -6848,6 +7010,7 @@ fn emit_line(
                         *width,
                         *logical_order,
                         block_ref,
+                        ctx.shape,
                     );
                     if run.pm_start.is_some() {
                         emitted_positioned_text = true;
@@ -7058,6 +7221,13 @@ fn emit_line(
                 opacity: None,
                 rotation_deg: None,
                 horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    "",
+                    &RunFormattingIn::default(),
+                    default_bidi_level,
+                    false,
+                ),
                 all_caps: false,
                 small_caps: false,
                 hidden: false,
@@ -7126,6 +7296,7 @@ fn emit_tab_leader(
     width: f64,
     logical_order: Option<u64>,
     block_ref: &BlockRef,
+    shape: Option<&ShapeFonts<'_>>,
 ) {
     if width <= 0.0 {
         return;
@@ -7150,6 +7321,15 @@ fn emit_tab_leader(
         if let Some(color) = &measured.color {
             fmt.color = Some(color.clone());
         }
+        fmt.all_caps = Some(false);
+        let text = glyph.repeat(count as usize);
+        let substitute_scale = text_substitute_scale(
+            shape,
+            &text,
+            &fmt,
+            base_bidi_level(fmt.rtl == Some(true)),
+            false,
+        );
         let mut attrs = block_ref.attrs();
         attrs.doc_start = tab.pm_start;
         attrs.doc_end = tab.pm_end;
@@ -7169,7 +7349,7 @@ fn emit_tab_leader(
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
         }));
         prims.push(Primitive::Text(TextRunPrimitive {
-            text: glyph.repeat(count as usize),
+            text,
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
@@ -7182,6 +7362,7 @@ fn emit_tab_leader(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: horizontal_scale_of(&fmt),
+            substitute_scale,
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -7487,6 +7668,7 @@ fn emit_text_segment(
             opacity: None,
             rotation_deg: None,
             horizontal_scale: horizontal_scale_of(fmt),
+            substitute_scale: text_substitute_scale(shape, text, fmt, bidi_level, exact_advance),
             all_caps: fmt.all_caps == Some(true),
             small_caps: fmt.small_caps == Some(true),
             hidden: fmt.hidden == Some(true),
@@ -9497,6 +9679,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     opacity: None,
                     rotation_deg: None,
                     horizontal_scale: None,
+                    substitute_scale: None,
                     all_caps: false,
                     small_caps: false,
                     hidden: false,

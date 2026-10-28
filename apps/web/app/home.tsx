@@ -32,6 +32,7 @@ import {
   SITE,
   SUITE,
 } from "./content";
+import { BLOG_PATH, FEED_URL, formatDate, latestPosts, postPath, publishedPosts } from "../lib/blog";
 import { softwareJsonLd } from "../lib/home-jsonld";
 import type { DownloadCounts } from "../lib/home-jsonld";
 
@@ -106,6 +107,7 @@ function Status({ status }: { status: string }) {
 }
 
 export function Home({ downloads = {} }: { downloads?: DownloadCounts }) {
+  const LATEST = latestPosts(publishedPosts());
   return (
     <>
       <script
@@ -377,6 +379,34 @@ export function Home({ downloads = {} }: { downloads?: DownloadCounts }) {
           </ul>
         </div>
       </section>
+
+      {LATEST.length > 0 && (
+        <section aria-labelledby="blog">
+          <div className={`wrap rule ${pad}`}>
+            <h2 id="blog" className={`${h2} max-w-[14ch]`}>
+              From the blog
+            </h2>
+            <ul className="mt-[clamp(2.5rem,5vw,4rem)] grid gap-px border border-line-soft bg-line-soft md:grid-cols-3">
+              {LATEST.map((post) => (
+                <li key={post.slug} className="bg-bg p-6">
+                  <p className={label}>{formatDate(post.date)}</p>
+                  <h3 className={`${itemName} mt-3`}>
+                    <a href={postPath(post)} className={bodyLink}>
+                      {post.title}
+                    </a>
+                  </h3>
+                  <p className={`${small} mt-3`}>{post.description}</p>
+                </li>
+              ))}
+            </ul>
+            <p className={`${small} mt-8`}>
+              <a href={BLOG_PATH} className={bodyLink}>All posts</a>
+              {" · "}
+              <a href={FEED_URL} className={bodyLink}>Atom feed</a>
+            </p>
+          </div>
+        </section>
+      )}
 
       <section aria-labelledby="coda" className="overflow-hidden">
         <div className={`wrap rule ${pad} grid items-end gap-x-12 gap-y-12 lg:grid-cols-12`}>

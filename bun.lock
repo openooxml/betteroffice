@@ -53,12 +53,15 @@
       "version": "0.1.9",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
+        "@betteroffice/docx-i18n": "workspace:*",
         "@betteroffice/docx-react": "workspace:*",
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
+        "@betteroffice/pptx-i18n": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
+        "@betteroffice/xlsx-i18n": "workspace:*",
         "@betteroffice/xlsx-react": "workspace:*",
         "react": "^19.2.7",
         "react-dom": "^19.2.7",
@@ -178,6 +181,14 @@
         "@types/react-dom": "^19.2.3",
         "typescript": "^6.0.3",
         "wrangler": "^4.151.0",
+      },
+    },
+    "apps/wopi": {
+      "name": "@betteroffice/wopi",
+      "version": "0.0.1",
+      "devDependencies": {
+        "@types/bun": "^1.4.2",
+        "typescript": "^6.0.3",
       },
     },
     "bindings/docx-native": {
@@ -705,6 +716,8 @@
     "@betteroffice/vsdx-react": ["@betteroffice/vsdx-react@workspace:packages/vsdx-react"],
 
     "@betteroffice/web": ["@betteroffice/web@workspace:apps/web"],
+
+    "@betteroffice/wopi": ["@betteroffice/wopi@workspace:apps/wopi"],
 
     "@betteroffice/xlsx": ["@betteroffice/xlsx@workspace:packages/xlsx"],
 
