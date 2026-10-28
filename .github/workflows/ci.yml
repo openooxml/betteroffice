@@ -193,6 +193,8 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test
+        env:
+          BETTEROFFICE_ENGINE: wasm
         run: bun run test --shard=${{ matrix.shard }}/2
 
   audit:
@@ -448,15 +450,28 @@ jobs:
       - name: Build and test
         run: |
           for package in $(node scripts/native-bindings.mjs --paths); do
-            bunx napi build --cwd "$package" --platform -- --locked
+            if [ "$package" = "bindings/pptx-native" ]; then
+              bunx napi build --cwd "$package" --platform --release -- --locked
+            else
+              bunx napi build --cwd "$package" --platform -- --locked
+            fi
             bun test "$package/index.test.ts"
           done
 
       - name: Check engine surface
         run: bun scripts/check-engine-surface.ts xlsx
 
+      - name: Test the pptx packages on the native engine
+        run: |
+          bun run build:docx-wasm
+          bun run build:fonts
+          BETTEROFFICE_ENGINE=native bun test --isolate packages/pptx/
+          BETTEROFFICE_ENGINE=native bun test --isolate packages/agents/test/pptx-mcp.test.ts packages/agents/test/pptx-render.test.ts packages/agents/test/pptx-table.test.ts packages/agents/test/pptx-text-fidelity.test.ts packages/agents/test/pptx.test.ts
+
       - name: Check native and wasm parity
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
+        env:
+          BETTEROFFICE_ENGINE: wasm
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
