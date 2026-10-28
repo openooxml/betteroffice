@@ -7,7 +7,7 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import type { DocxCommandEnvelope, DocxCommandFrame, DocxCommandIntent, DocxFrameReservations,
   DocxCommandHooks, DocxCommandInitRequest } from './residentCommandProtocol';
 import { registerCommandFonts } from './residentCommandFonts';
-import { ResidentSessionFonts } from './residentFontEnvironment';
+import { commandMayNeedNewFonts, ResidentSessionFonts } from './residentFontEnvironment';
 import { readPartGeometry } from './residentParts';
 import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
@@ -74,7 +74,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   const selection = () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() });
   const work = { wholeListBuilds: 0, partGeometryPageVisits: 0 };
   const engine = {
-    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters,
+    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters, hasPendingUpdate: () => false,
     partGeometry: (frame: Parameters<typeof readPartGeometry>[1]) => {
       work.partGeometryPageVisits += frame.pages.length;
       return readPartGeometry({ partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0], frame);
@@ -130,7 +130,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     relayout() { state.layoutDirty = true; relaidBuild = true; },
     preparedFonts: new WeakMap(), registerCommandFonts, GlyphCache,
     reply() {}, intactBackBuffers: new Map(), forgetRequirementsCache() {},
-    retainedLayoutVersion: null, fontRequirements: null,
+    retainedLayoutVersion: null, fontRequirements: null, fontRequirementsHinted: false, commandMayNeedNewFonts,
     loadRustDisplayListQueryEngine: async () => null, loadedRustDisplayListQueryEngine: () => null,
     layoutPreviewVersion: 0, readResidentFrameGeometry: async () => undefined,
     hooks: {
