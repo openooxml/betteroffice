@@ -15227,7 +15227,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 trigger,
             )
             .unwrap();
-            assert_eq!(warm, cold);
+            assert_eq!(
+                serde_json::to_value(&warm).unwrap(),
+                serde_json::to_value(&cold).unwrap()
+            );
             assert_eq!(measured, fresh);
         }
     }
