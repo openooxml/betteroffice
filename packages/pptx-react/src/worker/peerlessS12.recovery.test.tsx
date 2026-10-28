@@ -441,9 +441,10 @@ for (const fault of ['gap', 'engine'] as const) test(`source recovery rejects ${
   } finally { factory.mockRestore(); }
 });
 
-test('recovery copies a shared-memory file before keeping it as a Blob', async () => {
+for (const kind of ['view', 'buffer'] as const) test(`recovery copies a shared-memory ${kind} file before keeping it as a Blob`, async () => {
   const bytes = await deck();
-  const shared = new Uint8Array(new SharedArrayBuffer(bytes.byteLength + 8), 4, bytes.byteLength);
+  const memory = new SharedArrayBuffer(bytes.byteLength + 8);
+  const shared = kind === 'buffer' ? Buffer.from(memory, 4, bytes.byteLength) : new Uint8Array(memory, 4, bytes.byteLength);
   shared.set(bytes);
   const Original = globalThis.Blob;
   globalThis.Blob = class extends Original {
@@ -454,10 +455,17 @@ test('recovery copies a shared-memory file before keeping it as a Blob', async (
       super(parts, options);
     }
   };
+  const error = mock(() => {});
   try {
-    const value = await open({ file: shared });
-    shared.fill(0);
-    const recovered = await value.api.recoverySave();
-    expect(recovered.bytes).toEqual(bytes);
+    const value = await open({ file: shared, onError: error });
+    const checkpoint = spyOn(value.client, 'checkpoint');
+    try {
+      shared.fill(0);
+      await act(async () => { faultControl.crash(); });
+      await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+      const recovered = await value.api.recoverySave();
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(recovered.bytes).toEqual(bytes);
+    } finally { checkpoint.mockRestore(); }
   } finally { globalThis.Blob = Original; }
 });
