@@ -283,6 +283,16 @@ fn browser_text_run(
     text: &str,
     formatting: serde_json::Value,
 ) -> TextRunPrimitive {
+    browser_text_run_with_chain(store, family, &[font.to_u32()], text, formatting)
+}
+
+fn browser_text_run_with_chain(
+    store: &FontStore,
+    family: &str,
+    chain: &[u32],
+    text: &str,
+    formatting: serde_json::Value,
+) -> TextRunPrimitive {
     let mut input: serde_json::Value =
         serde_json::from_str(&build_input(text, 0.0, None, false, None)).unwrap();
     let run = &mut input["measured"][0]["block"]["runs"][0];
@@ -291,7 +301,7 @@ fn browser_text_run(
         .unwrap()
         .extend(formatting.as_object().unwrap().clone());
     let chains = serde_json::json!({
-        (format!("{}|0|0", family.to_lowercase())): [font.to_u32()]
+        (format!("{}|0|0", family.to_lowercase())): chain
     });
     let measure = ooxml_text::measure_paragraph_json(
         store,
@@ -352,7 +362,9 @@ fn browser_painted_all_caps_use_substitute_widths() {
         let painted = text.to_uppercase();
         let own_width = shaped_width(&store, base, &painted);
         let view_width = shaped_width(&store, view, &painted);
-        let scale = run.horizontal_scale.as_ref().unwrap().as_f64().unwrap() / 100.0;
+        let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+        assert!(run.horizontal_scale.is_none());
+        assert!(run.letter_spacing.is_none());
         assert!((scale - view_width / own_width).abs() < 1e-5, "{family}");
         assert!(
             (own_width * scale - run.width.as_f64().unwrap()).abs() < 0.002,
@@ -376,6 +388,12 @@ fn browser_painted_matching_arial_keeps_its_horizontal_scale() {
     ] {
         let run = browser_text_run(&store, "Arial", view, "Plain Arial", formatting);
         assert!(run.horizontal_scale.is_none());
+        assert!(run.substitute_scale.is_none());
+        assert!(
+            !serde_json::to_string(&run)
+                .unwrap()
+                .contains("substituteScale")
+        );
     }
 }
 
@@ -394,6 +412,7 @@ fn browser_painted_substitutes_skip_near_unity_corrections() {
         serde_json::json!({"textShadow": true}),
     );
     assert!(run.horizontal_scale.is_none());
+    assert!(run.substitute_scale.is_none());
     let scaled = browser_text_run(
         &store,
         "Lucida Bright",
@@ -405,10 +424,11 @@ fn browser_painted_substitutes_skip_near_unity_corrections() {
         scaled.horizontal_scale.as_ref().unwrap().as_f64(),
         Some(150.0)
     );
+    assert!(scaled.substitute_scale.is_none());
 }
 
 #[test]
-fn browser_painted_substitute_multiplies_existing_character_scale() {
+fn browser_painted_substitute_keeps_existing_character_scale() {
     let mut store = store_with_liberation();
     let base = FontId::from_u32(0);
     let view = store
@@ -425,9 +445,10 @@ fn browser_painted_substitute_multiplies_existing_character_scale() {
     let painted = text.to_uppercase();
     let own_width = shaped_width(&store, base, &painted);
     let ratio = shaped_width(&store, view, &painted) / own_width;
-    let scale = run.horizontal_scale.as_ref().unwrap().as_f64().unwrap();
-    assert!((scale - 150.0 * ratio).abs() < 0.001);
-    assert!((own_width * scale / 100.0 - run.width.as_f64().unwrap()).abs() < 0.002);
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    assert!((scale - ratio).abs() < 1e-5);
+    assert_eq!(run.horizontal_scale.as_ref().unwrap().as_f64(), Some(150.0));
+    assert!((own_width * scale * 1.5 - run.width.as_f64().unwrap()).abs() < 0.002);
     assert_eq!(run.x.as_f64(), Some(FRAG_X));
 }
 
@@ -446,7 +467,8 @@ fn browser_painted_effects_use_table_and_static_substitute_widths() {
                 text,
                 serde_json::json!({(effect): true}),
             );
-            let scale = run.horizontal_scale.as_ref().unwrap().as_f64().unwrap() / 100.0;
+            let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+            assert!(run.horizontal_scale.is_none());
             assert!(
                 (shaped_width(&store, base, text) * scale - run.width.as_f64().unwrap()).abs()
                     < 0.002,
@@ -467,7 +489,8 @@ fn browser_painted_small_caps_use_the_measured_casing_ratio() {
             serde_json::json!({"smallCaps": true, "authoritativeShaping": authoritative});
         let run = browser_text_run(&store, "Aptos", view, text, formatting.clone());
         let own = browser_text_run(&store, "Aptos", base, text, formatting);
-        let scale = run.horizontal_scale.as_ref().unwrap().as_f64().unwrap() / 100.0;
+        let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+        assert!(run.horizontal_scale.is_none());
         assert!((own.width.as_f64().unwrap() * scale - run.width.as_f64().unwrap()).abs() < 0.002);
         assert!(run.small_caps);
     }
@@ -499,11 +522,57 @@ fn browser_painted_substitute_leaders_keep_measured_repeat_positions() {
             _ => None,
         })
         .unwrap();
-    let scale = run.horizontal_scale.as_ref().unwrap().as_f64().unwrap() / 100.0;
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    assert!(run.horizontal_scale.is_none());
     let leader = run.attrs.leader_glyphs.as_ref().unwrap();
-    assert!((leader.advance.as_ref().unwrap().as_f64().unwrap() * scale - advance).abs() < 0.001);
+    assert!((leader.advance.as_ref().unwrap().as_f64().unwrap() - advance).abs() < 0.001);
     assert!((shaped_width(&store, base, ".") * scale - advance).abs() < 0.001);
     assert_eq!(run.x.as_f64(), Some(FRAG_X));
+}
+
+#[test]
+fn browser_painted_substitute_keeps_measured_tracking() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let run = browser_text_run(
+        &store,
+        "Arial Narrow",
+        view,
+        "tracked heading",
+        serde_json::json!({"allCaps": true, "letterSpacing": 10.0}),
+    );
+    assert!(run.substitute_scale.is_some());
+    assert!(run.horizontal_scale.is_none());
+    assert_eq!(run.letter_spacing.as_ref().unwrap().as_f64(), Some(10.0));
+}
+
+#[test]
+fn browser_painted_fallback_text_has_no_primary_substitute_correction() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let text = "مرحبا";
+    assert!(text.chars().all(|ch| !store.covers(view, ch).unwrap()));
+    let fallback = store
+        .register(
+            include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf").to_vec(),
+        )
+        .unwrap();
+    assert!(text.chars().all(|ch| store.covers(fallback, ch).unwrap()));
+    let run = browser_text_run_with_chain(
+        &store,
+        "Arial Narrow",
+        &[view.to_u32(), fallback.to_u32()],
+        text,
+        serde_json::json!({"textShadow": true}),
+    );
+    assert!(run.substitute_scale.is_none());
+    assert!(run.horizontal_scale.is_none());
 }
 
 fn build_rtl_mixed_input() -> String {

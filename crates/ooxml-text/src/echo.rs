@@ -705,6 +705,49 @@ mod tests {
         assert!((glyphs[0].x_advance - expected).abs() < 1e-4);
     }
 
+    #[test]
+    fn substituted_ligature_ignores_a_soft_hyphen_inside_its_cluster() {
+        let (mut store, base) = f_ligature_font(&['i']);
+        let view = store
+            .register_named_substitute(base, "Calibri Light")
+            .unwrap();
+        let glyphs = shape_with_direction(
+            &store,
+            view,
+            "f\u{00AD}i",
+            32.0,
+            &kern_features(true),
+            ShapeDirection::Ltr,
+        )
+        .unwrap();
+        let ligature = glyphs.iter().find(|glyph| glyph.x_advance != 0.0).unwrap();
+        assert!(
+            glyphs
+                .iter()
+                .any(|glyph| glyph.cluster == ligature.cluster && glyph.x_advance == 0.0)
+        );
+        let expected: f32 = shape_with_direction(
+            &store,
+            view,
+            "fi",
+            32.0,
+            &kern_features(true),
+            ShapeDirection::Ltr,
+        )
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph.x_advance)
+        .sum();
+        assert!((glyphs.iter().map(|glyph| glyph.x_advance).sum::<f32>() - expected).abs() < 1e-4);
+        let widths = crate::family_metrics::family_metrics("calibri light", false, false).unwrap();
+        let table = ['f', 'i']
+            .into_iter()
+            .map(|ch| crate::family_metrics::family_advance(widths, ch).unwrap())
+            .sum::<f32>()
+            * 32.0;
+        assert!((expected - table).abs() < 1e-4);
+    }
+
     fn contextual_positioning_font(kind: u16, extension: bool, feature: &[u8; 4]) -> Vec<u8> {
         let (store, font) = store();
         let a = store.glyph_id(font, 'A').unwrap().unwrap();

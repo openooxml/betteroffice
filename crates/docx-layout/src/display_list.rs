@@ -792,6 +792,9 @@ pub struct TextRunPrimitive {
     pub rotation_deg: Option<Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub horizontal_scale: Option<Number>,
+    /// Canvas-only width ratio for substituted font bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substitute_scale: Option<Number>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub all_caps: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -3921,6 +3924,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         opacity: Some(px(opacity)),
         rotation_deg: rotation,
         horizontal_scale: None,
+        substitute_scale: None,
         all_caps: false,
         small_caps: false,
         hidden: false,
@@ -4586,6 +4590,12 @@ fn painted_text_width(
         }
     });
     let width = |text: &str, small_caps: bool| {
+        if text
+            .chars()
+            .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
+        {
+            return None;
+        }
         let mut features = features.clone();
         if small_caps {
             features.push(ooxml_text::ShapeFeature {
@@ -4670,7 +4680,7 @@ fn painted_text_width(
     Some(total + width(&segment, segment_smcp)? * f64::from(segment_scale))
 }
 
-fn text_horizontal_scale(
+fn text_substitute_scale(
     fonts: Option<&ShapeFonts<'_>>,
     text: &str,
     fmt: &RunFormattingIn,
@@ -4692,10 +4702,7 @@ fn text_horizontal_scale(
         let ratio = wanted / own;
         (ratio.is_finite() && ratio > 0.0 && (ratio - 1.0).abs() > 1e-3).then_some(ratio)
     });
-    match ratio {
-        Some(ratio) => Some(px(fmt.horizontal_scale.unwrap_or(100.0) * ratio)),
-        None => horizontal_scale_of(fmt),
-    }
+    ratio.and_then(Number::from_f64)
 }
 
 fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
@@ -6250,7 +6257,8 @@ pub(crate) fn emit_paragraph_fragment(
             rtl: None,
             opacity: None,
             rotation_deg: None,
-            horizontal_scale: text_horizontal_scale(
+            horizontal_scale: None,
+            substitute_scale: text_substitute_scale(
                 ctx.shape,
                 "¶",
                 &RunFormattingIn::default(),
@@ -6707,7 +6715,8 @@ fn emit_line(
             rtl: geom.is_rtl.then_some(true),
             opacity: None,
             rotation_deg: None,
-            horizontal_scale: text_horizontal_scale(
+            horizontal_scale: horizontal_scale_of(&marker_format),
+            substitute_scale: text_substitute_scale(
                 ctx.shape,
                 marker,
                 &marker_format,
@@ -7201,7 +7210,8 @@ fn emit_line(
                 rtl: None,
                 opacity: None,
                 rotation_deg: None,
-                horizontal_scale: text_horizontal_scale(
+                horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
                     ctx.shape,
                     "",
                     &RunFormattingIn::default(),
@@ -7303,15 +7313,13 @@ fn emit_tab_leader(
         }
         fmt.all_caps = Some(false);
         let text = glyph.repeat(count as usize);
-        let horizontal_scale = text_horizontal_scale(
+        let substitute_scale = text_substitute_scale(
             shape,
             &text,
             &fmt,
             base_bidi_level(fmt.rtl == Some(true)),
             false,
         );
-        let paint_ratio = horizontal_scale.as_ref().map(num_f64).unwrap_or(100.0)
-            / fmt.horizontal_scale.unwrap_or(100.0);
         let mut attrs = block_ref.attrs();
         attrs.doc_start = tab.pm_start;
         attrs.doc_end = tab.pm_end;
@@ -7322,7 +7330,7 @@ fn emit_tab_leader(
             count: Some(count),
             x: Some(px(x)),
             baseline_y: Some(px(baseline)),
-            advance: Some(px(advance / paint_ratio)),
+            advance: Some(px(advance)),
             width: Some(px(width)),
             font: measured.font.clone(),
             font_id: None,
@@ -7343,7 +7351,8 @@ fn emit_tab_leader(
             rtl: tab.fmt.rtl.filter(|rtl| *rtl),
             opacity: None,
             rotation_deg: None,
-            horizontal_scale,
+            horizontal_scale: horizontal_scale_of(&fmt),
+            substitute_scale,
             all_caps: false,
             small_caps: false,
             hidden: false,
@@ -7648,7 +7657,8 @@ fn emit_text_segment(
             },
             opacity: None,
             rotation_deg: None,
-            horizontal_scale: text_horizontal_scale(shape, text, fmt, bidi_level, exact_advance),
+            horizontal_scale: horizontal_scale_of(fmt),
+            substitute_scale: text_substitute_scale(shape, text, fmt, bidi_level, exact_advance),
             all_caps: fmt.all_caps == Some(true),
             small_caps: fmt.small_caps == Some(true),
             hidden: fmt.hidden == Some(true),
@@ -9659,6 +9669,7 @@ impl PlotSink for PrimitiveSink<'_> {
                     opacity: None,
                     rotation_deg: None,
                     horizontal_scale: None,
+                    substitute_scale: None,
                     all_caps: false,
                     small_caps: false,
                     hidden: false,

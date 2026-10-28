@@ -189,9 +189,12 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
             continue;
         }
         let advance = text.get(bounds[0]..bounds[1]).and_then(|cluster| {
-            cluster.chars().try_fold(0.0, |total, ch| {
-                family_advance(widths, ch).map(|advance| total + (advance * 1000.0).round())
-            })
+            cluster
+                .chars()
+                .filter(|&ch| !is_default_ignorable(ch))
+                .try_fold(0.0, |total, ch| {
+                    family_advance(widths, ch).map(|advance| total + (advance * 1000.0).round())
+                })
         });
         clusters.insert(
             bounds[0] as u32,
@@ -206,11 +209,98 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
     }
 }
 
+fn is_default_ignorable(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD
+            | 0x034F
+            | 0x061C
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF0..=0xFFF8
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn mixed_clusters_skip_default_ignorables_but_keep_visible_hyphens() {
+        let widths = crate::family_metrics::family_metrics("arial narrow", false, false).unwrap();
+        let expected =
+            (family_advance(widths, 'f').unwrap() + family_advance(widths, 'i').unwrap()) * 32.0;
+        for ch in [
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{061C}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{17B5}',
+            '\u{180B}',
+            '\u{180F}',
+            '\u{200B}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{206F}',
+            '\u{3164}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{FEFF}',
+            '\u{FFA0}',
+            '\u{FFF0}',
+            '\u{FFF8}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E0000}',
+            '\u{E0FFF}',
+            '-',
+        ] {
+            let mut glyphs = [
+                ShapedGlyph {
+                    glyph_id: 1,
+                    cluster: 0,
+                    x_advance: 10.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                },
+                ShapedGlyph {
+                    glyph_id: 2,
+                    cluster: 0,
+                    x_advance: 0.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                },
+            ];
+            apply_family_widths(&mut glyphs, &format!("f{ch}i"), 32.0, widths);
+            let expected = expected
+                + if ch == '-' {
+                    family_advance(widths, ch).unwrap() * 32.0
+                } else {
+                    0.0
+                };
+            assert!((glyphs[0].x_advance - expected).abs() < 1e-4, "{ch:?}");
+            assert_eq!(glyphs[1].x_advance, 0.0);
+        }
+    }
 
     #[test]
     fn table_clusters_assign_the_total_to_the_first_visual_glyph() {
