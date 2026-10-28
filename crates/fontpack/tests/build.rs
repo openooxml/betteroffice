@@ -117,3 +117,29 @@ fn builder_refuses_an_existing_output_and_leaves_no_staging() {
     entries.sort();
     assert_eq!(entries, ["out", "src"]);
 }
+
+#[test]
+fn builder_accepts_a_dot_suffixed_output_and_skips_stale_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("A-Regular.ttf"), common::synthetic(42)).unwrap();
+    let stale = temp.path().join(".out.partial-1");
+    fs::create_dir(&stale).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_fontpack"))
+        .args(["build", "--src"])
+        .arg(&src)
+        .arg("--out")
+        .arg(temp.path().join("out").join("."))
+        .args(["--pack", "synthetic", "--version", "1.2.3"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(temp.path().join("out/manifest.json").is_file());
+    assert!(stale.is_dir());
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 3);
+}

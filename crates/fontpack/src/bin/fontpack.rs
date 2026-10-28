@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -195,13 +196,6 @@ fn build(options: Options) -> Result<()> {
             }
         }
     }
-    if fs::symlink_metadata(&options.out).is_ok() {
-        return Err(invalid(format!(
-            "output {} already exists; remove it before rebuilding",
-            options.out.display()
-        ))
-        .into());
-    }
     let name = options
         .out
         .file_name()
@@ -211,15 +205,40 @@ fn build(options: Options) -> Result<()> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
+    let out = parent.join(name);
+    if fs::symlink_metadata(&out).is_ok() {
+        return Err(invalid(format!(
+            "output {} already exists; remove it before rebuilding",
+            out.display()
+        ))
+        .into());
+    }
     fs::create_dir_all(parent)?;
-    let staging = parent.join(format!(".{name}.partial-{}", std::process::id()));
-    fs::create_dir(&staging)?;
+    let staging = staging_dir(parent, name)?;
     let written = write_pack(&options, &sources, &dictionaries, &staging)
-        .and_then(|()| fs::rename(&staging, &options.out).map_err(Into::into));
+        .and_then(|()| fs::rename(&staging, &out).map_err(Into::into));
     if written.is_err() {
         let _ = fs::remove_dir_all(&staging);
     }
     written
+}
+
+fn staging_dir(parent: &Path, name: &str) -> Result<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    for attempt in 0..100u32 {
+        let staging = parent.join(format!(
+            ".{name}.partial-{}-{nanos:x}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(io::Error::other("cannot create a unique staging directory").into())
 }
 
 fn write_pack(
