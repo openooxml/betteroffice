@@ -557,7 +557,12 @@ class OfficeEquivalentTests(unittest.TestCase):
                  '<w:r><w:fldChar w:fldCharType="end"/></w:r>' + text_run(' tail.') + '</w:p>')
         link = ('<w:p><w:hyperlink w:anchor="a"><w:r><w:rPr><w:i/></w:rPr><w:t>Linked</w:t></w:r></w:hyperlink>'
                 + text_run(' plain ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>later</w:t></w:r></w:p>')
+        boxed = ('<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>'
+                 '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>'
+                 + text_run('Body text.') + '</w:p>')
         for name, template, inserted, accepted in (
+                ('plain like the body text after a text box', boxed, plain, True),
+                ('italic like the text box inside the paragraph', boxed, italic, False),
                 ('italic like an opening hyperlink run', link, italic, True),
                 ('plain after an italic opening hyperlink run', link, plain, False),
                 ('plain like the opening run', body, plain, True),

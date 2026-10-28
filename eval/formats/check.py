@@ -1254,10 +1254,16 @@ def accept_revisions(root):
 
 def opening_run_props(paragraph, prefix):
     runs = {q(prefix, 'r'), q(prefix, 'fld')} if prefix == 'a' else {w('r')}
-    for run in paragraph.iter():
-        if run.tag in runs and any(node.text for node in run.findall(f'{prefix}:t', NS)):
-            return run.find(f'{prefix}:rPr', NS)
-    return paragraph.find(f'{prefix}:r/{prefix}:rPr', NS)
+    def visible(node):
+        for child in node:
+            if child.tag in runs:
+                if any(text.text for text in child.findall(f'{prefix}:t', NS)):
+                    return child
+            elif child.tag != q(prefix, 'p') and (found := visible(child)) is not None:
+                return found
+        return None
+    run = visible(paragraph)
+    return run.find(f'{prefix}:rPr', NS) if run is not None else paragraph.find(f'{prefix}:r/{prefix}:rPr', NS)
 
 
 def real_expected_package(package, spec, fmt):
