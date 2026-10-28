@@ -14,11 +14,12 @@ export function StartScreen({
   dragging: boolean;
   busy: boolean;
 }) {
-  const heading: DesktopKey = {
+  const headings: Record<Configuration["format"], DesktopKey> = {
     docx: "start.openDocument",
     xlsx: "start.openSpreadsheet",
     pptx: "start.openPresentation",
-  }[config.format];
+  };
+  const heading = headings[config.format];
   return (
     <main className={`start-screen${dragging ? " dragging" : ""}`}>
       <div className="start-content">

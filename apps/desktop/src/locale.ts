@@ -59,8 +59,8 @@ export function resolveLocale(languages: readonly string[]): LocaleCode {
     if (primary === "pt") return "pt-BR";
     if (primary === "zh") {
       const traditional =
-        parts.includes("hant") ||
-        parts.some((part) => ["tw", "hk", "mo"].includes(part));
+        !parts.includes("hans") &&
+        (parts.includes("hant") || parts.some((part) => ["tw", "hk", "mo"].includes(part)));
       return traditional ? "zh-TW" : "zh-CN";
     }
     const byPrimary = primaryCodes.get(primary);
