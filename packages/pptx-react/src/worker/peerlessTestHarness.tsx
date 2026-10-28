@@ -162,8 +162,17 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  try { releaseReplies(); cleanup(); await owner?.dispose(); }
-  finally { for (const restore of restorers.splice(0).reverse()) restore(); }
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    releaseReplies(); cleanup(); await owner?.dispose();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    for (const restore of restorers.splice(0).reverse()) restore();
+  }
 });
 afterAll(async () => {
   if (!ownsDom) return;
