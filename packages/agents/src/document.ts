@@ -150,6 +150,7 @@ export class DocxAgentDocument {
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
   private resolvedComments = new Map<string, boolean>();
+  private readonly textEditedComments = new Set<string>();
 
   constructor(
     readonly session: YrsSession,
@@ -626,7 +627,7 @@ export class DocxAgentDocument {
             const earlier = this.resolvedComments;
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
               comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })),
-              new Set(edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])));
+              new Set([...this.textEditedComments, ...edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])]));
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -638,6 +639,7 @@ export class DocxAgentDocument {
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
+        for (const edit of edits) if (edit.op === 'replace_comment_text') this.textEditedComments.add(edit.comment);
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {

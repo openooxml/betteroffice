@@ -107,6 +107,30 @@ test('replace_comment_text edits a reply without changing its thread or done sta
   expect(comments.find(item => item.id === '1')!.done).toBe(true);
 });
 
+for (const op of ['replace_comment_text', 'reply_comment', 'resolve_comment'] as const) {
+  test(`a prior comment text replacement survives a later ${op} batch`, async () => {
+    const doc = await open();
+    const first = await doc.edit({ version: doc.list().version, edits: [{ op: 'replace_comment_text', comment: '0', find: 'identity proofed', replace: 'identity-proofed' }] });
+    const edit: DocxAgentEdit = op === 'replace_comment_text'
+      ? { op, comment: '2', find: 'identity proofed', replace: 'identity-proofed' }
+      : op === 'reply_comment'
+        ? { op, comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }
+        : { op, comment: '0' };
+    const second = await doc.edit({ version: first.version, edits: [edit] });
+    expect(second.applied).toBe(true);
+    const reopened = await open(await doc.export());
+    const comments = reopened.list({ story: 'comments', limit: 100 }).items;
+    expect(comments.find(comment => comment.id === '0')!.text).toBe('First identity-proofed here. Second identity-proofed there.\nClosing line stays.');
+    if (op === 'replace_comment_text') {
+      expect(comments.find(comment => comment.id === '2')).toMatchObject({ parentId: '0', text: 'Reply identity-proofed too.' });
+    } else if (op === 'reply_comment') {
+      expect(comments.find(comment => comment.text === 'Follow up')).toMatchObject({ parentId: '0', author: 'Editor' });
+    } else {
+      expect(comments.find(comment => comment.id === '0')!.done).toBe(true);
+    }
+  });
+}
+
 test('replace_comment_text refuses source comments with unpreserved edge whitespace', async () => {
   const zip = await JSZip.loadAsync(await commentTextFixture());
   const xml = await zip.file('word/comments.xml')!.async('string');
