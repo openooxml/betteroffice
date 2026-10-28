@@ -487,7 +487,7 @@ export function replaceCommentText(session: YrsSession, id: string, find: string
     const excerpt = commentText(comment.body).replace(/\n$/, '').slice(0, 80);
     throw new DocumentToolError('NO_MATCH', `Comment ${id} does not contain ${JSON.stringify(find.slice(0, 80))}. Comment text begins ${JSON.stringify(excerpt)}.`);
   }
-  for (const { paragraph, occurrences, segments } of plans) {
+  for (const { occurrences, segments } of plans) {
     for (const [start, end] of [...occurrences].reverse()) {
       const touched = segments.filter(segment => segment.start < end && start < segment.end);
       const first = touched[0];
@@ -498,13 +498,6 @@ export function replaceCommentText(session: YrsSession, id: string, find: string
         segment.part.text = prefix + (segment === first ? replace : '') + suffix;
       }
     }
-    const content = paragraph.content as Array<Record<string, unknown>>;
-    for (const item of content) {
-      if (item?.type === 'run' && Array.isArray(item.content)) {
-        item.content = (item.content as Array<{ type?: string; text?: string }>).filter(part => part?.type !== 'text' || part.text !== '');
-      }
-    }
-    paragraph.content = content.filter(item => item?.type !== 'run' || !Array.isArray(item.content) || item.content.length > 0);
   }
   session.updateComment(id, { body });
   return replacements;

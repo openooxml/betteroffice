@@ -716,9 +716,43 @@ fn blanked(value: &impl Serialize) -> Result<Value, ParseError> {
     Ok(value)
 }
 
+fn normalize_defaults(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for child in object.values_mut() {
+                normalize_defaults(child);
+            }
+            object.retain(|_, child| {
+                !matches!(child, Value::Null | Value::Bool(false))
+                    && !child.as_object().is_some_and(|nested| nested.is_empty())
+            });
+        }
+        Value::Array(array) => {
+            for child in array.iter_mut() {
+                normalize_defaults(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn blank_text(value: &mut Value) {
     match value {
         Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("paragraph") {
+                for key in ["extraAttributes", "listRendering", "renderedPageBreakBefore"] {
+                    object.remove(key);
+                }
+                if let Some(formatting) = object.get_mut("formatting") {
+                    normalize_defaults(formatting);
+                }
+                if object
+                    .get("formatting")
+                    .is_some_and(|formatting| formatting.is_null() || formatting.as_object().is_some_and(|values| values.is_empty()))
+                {
+                    object.remove("formatting");
+                }
+            }
             if object.get("type").and_then(Value::as_str) == Some("text") {
                 object.insert("text".to_owned(), Value::String(String::new()));
             }
@@ -748,13 +782,13 @@ fn blank_text(value: &mut Value) {
     }
 }
 
-fn value_text(value: &Value, out: &mut String) {
+fn value_text_parts(value: &Value, out: &mut Vec<String>) {
     match value {
-        Value::Array(array) => array.iter().for_each(|child| value_text(child, out)),
+        Value::Array(array) => array.iter().for_each(|child| value_text_parts(child, out)),
         Value::Object(object) => {
             if object.get("type").and_then(Value::as_str) == Some("text") {
                 if let Some(text) = object.get("text").and_then(Value::as_str) {
-                    out.push_str(text);
+                    out.push(text.to_owned());
                 }
                 return;
             }
@@ -777,7 +811,7 @@ fn value_text(value: &Value, out: &mut String) {
                     continue;
                 }
                 if let Some(child) = object.get(key) {
-                    value_text(child, out);
+                    value_text_parts(child, out);
                 }
             }
         }
@@ -785,11 +819,13 @@ fn value_text(value: &Value, out: &mut String) {
     }
 }
 
-fn model_paragraph_text(paragraph: &crate::paragraph::Paragraph) -> Result<String, ParseError> {
+fn model_paragraph_text_parts(
+    paragraph: &crate::paragraph::Paragraph,
+) -> Result<Vec<String>, ParseError> {
     let value = projection(paragraph)?;
-    let mut text = String::new();
-    value_text(&value, &mut text);
-    Ok(text)
+    let mut parts = Vec::new();
+    value_text_parts(&value, &mut parts);
+    Ok(parts)
 }
 
 fn direct_paragraph_spans(tags: &[Tag]) -> Vec<Range<usize>> {
@@ -869,68 +905,6 @@ fn comment_text_nodes(
     Some(nodes)
 }
 
-fn text_hunks(source: &str, written: &str) -> Vec<(usize, usize, String)> {
-    let source: Vec<char> = source.chars().collect();
-    let written: Vec<char> = written.chars().collect();
-    let mut start = 0;
-    while start < source.len().min(written.len()) && source[start] == written[start] {
-        start += 1;
-    }
-    let (mut source_end, mut written_end) = (source.len(), written.len());
-    while source_end > start
-        && written_end > start
-        && source[source_end - 1] == written[written_end - 1]
-    {
-        source_end -= 1;
-        written_end -= 1;
-    }
-    let old = &source[start..source_end];
-    let new = &written[start..written_end];
-    if old.is_empty() || new.is_empty() || old.len() * new.len() > 1_000_000 {
-        return vec![(start, source_end, new.iter().collect())];
-    }
-    let (rows, columns) = (old.len(), new.len());
-    let mut lengths = vec![vec![0u32; columns + 1]; rows + 1];
-    for row in (0..rows).rev() {
-        for column in (0..columns).rev() {
-            lengths[row][column] = if old[row] == new[column] {
-                lengths[row + 1][column + 1] + 1
-            } else {
-                lengths[row + 1][column].max(lengths[row][column + 1])
-            };
-        }
-    }
-    let mut hunks: Vec<(usize, usize, String)> = Vec::new();
-    let mut current: Option<(usize, usize, String)> = None;
-    let (mut row, mut column) = (0, 0);
-    while row < rows || column < columns {
-        if row < rows && column < columns && old[row] == new[column] {
-            if let Some(hunk) = current.take() {
-                hunks.push(hunk);
-            }
-            row += 1;
-            column += 1;
-        } else if column < columns
-            && (row == rows || lengths[row][column + 1] >= lengths[row + 1][column])
-        {
-            current
-                .get_or_insert_with(|| (start + row, start + row, String::new()))
-                .2
-                .push(new[column]);
-            column += 1;
-        } else {
-            current
-                .get_or_insert_with(|| (start + row, start + row, String::new()))
-                .1 = start + row + 1;
-            row += 1;
-        }
-    }
-    if let Some(hunk) = current {
-        hunks.push(hunk);
-    }
-    hunks
-}
-
 fn comment_text_patch(
     source: &Comment,
     written: &Comment,
@@ -953,83 +927,30 @@ fn comment_text_patch(
     let mut patches = Vec::new();
     let mut changed = false;
     for (index, paragraph) in source.content.iter().enumerate() {
-        let source_text = model_paragraph_text(paragraph)?;
-        let written_text = model_paragraph_text(&written.content[index])?;
-        if source_text == written_text {
+        let source_parts = model_paragraph_text_parts(paragraph)?;
+        let written_parts = model_paragraph_text_parts(&written.content[index])?;
+        if source_parts == written_parts {
             continue;
         }
         changed = true;
         let Some(nodes) = comment_text_nodes(fragment, &fragment_tags, &spans[index]) else {
             return Ok(None);
         };
-        if nodes
-            .iter()
-            .map(|node| node.text.as_str())
-            .collect::<String>()
-            != source_text
+        if nodes.len() != source_parts.len()
+            || nodes.len() != written_parts.len()
+            || nodes
+                .iter()
+                .zip(&source_parts)
+                .any(|(node, part)| node.text != *part)
         {
             return Ok(None);
         }
-        let mut offsets = Vec::with_capacity(nodes.len());
-        let mut offset = 0;
-        for node in &nodes {
-            offsets.push(offset);
-            offset += node.text.chars().count();
-        }
-        let mut texts: Vec<Vec<char>> = nodes
-            .iter()
-            .map(|node| node.text.chars().collect())
-            .collect();
-        for (hunk_start, hunk_end, replacement) in
-            text_hunks(&source_text, &written_text).into_iter().rev()
-        {
-            let replacement: Vec<char> = replacement.chars().collect();
-            if hunk_start == hunk_end {
-                let node = (0..texts.len()).rev().find(|node| {
-                    offsets[*node] <= hunk_start
-                        && hunk_start <= offsets[*node] + texts[*node].len()
-                });
-                let Some(node) = node else {
-                    return Ok(None);
-                };
-                let at = hunk_start - offsets[node];
-                let mut text = texts[node][..at].to_vec();
-                text.extend(&replacement);
-                text.extend(&texts[node][at..]);
-                texts[node] = text;
-            } else {
-                let first = (0..texts.len()).find(|node| {
-                    offsets[*node] <= hunk_start && hunk_start < offsets[*node] + texts[*node].len()
-                });
-                let last = (0..texts.len()).find(|node| {
-                    offsets[*node] < hunk_end && hunk_end <= offsets[*node] + texts[*node].len()
-                });
-                let (Some(first), Some(last)) = (first, last) else {
-                    return Ok(None);
-                };
-                for node in first..=last {
-                    let mut text = if node == first {
-                        texts[node][..hunk_start - offsets[node]].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    if node == first {
-                        text.extend(&replacement);
-                    }
-                    if node == last {
-                        text.extend(&texts[node][hunk_end - offsets[node]..]);
-                    }
-                    texts[node] = text;
-                }
-            }
-        }
-        for (node, text) in nodes.iter().zip(texts) {
-            let replacement: String = text.into_iter().collect();
-            if replacement != node.text {
+        for (node, replacement) in nodes.iter().zip(&written_parts) {
+            if *replacement != node.text {
                 if node.empty {
                     return Ok(None);
                 }
-                patches.push((node.range.clone(), escape_xml(&replacement)));
+                patches.push((node.range.clone(), escape_xml(replacement)));
                 let edge_whitespace = matches!(replacement.chars().next(), Some(' ' | '\t'))
                     || matches!(replacement.chars().next_back(), Some(' ' | '\t'));
                 if edge_whitespace && !node.preserve {
@@ -1214,7 +1135,7 @@ fn error_xml(message: impl Into<String>) -> ParseError {
 
 #[cfg(test)]
 mod tests {
-    use crate::formatting::TextFormatting;
+    use crate::formatting::{ParagraphFormatting, TextFormatting};
     use crate::inline::{InlineNode, Run, RunContent, RunType};
     use crate::paragraph::{Paragraph, ParagraphContent};
 
@@ -1335,6 +1256,45 @@ mod tests {
                 "<w:t xml:space=\"preserve\"> gamma</w:t>",
             );
         assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_keeps_a_fully_covered_run_as_an_empty_wt() {
+        const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha b</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>et</w:t></w:r><w:r><w:t>a gamma</w:t></w:r></w:p></w:comment>";
+        let source = comment("alpha b", "et", "a gamma");
+        let written = comment("alpha x", "", "a gamma");
+        let patch = comment_text_patch(&source, &written, FRAGMENT)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = FRAGMENT
+            .replace("<w:t>alpha b</w:t>", "<w:t>alpha x</w:t>")
+            .replace("<w:t>et</w:t>", "<w:t></w:t>");
+        assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_rejects_a_paragraph_formatting_change_with_the_text() {
+        let mut source = comment(
+            "First identity proofed here. ",
+            "Second identity ",
+            "proofed there.",
+        );
+        source.content[0].formatting = Some(ParagraphFormatting {
+            alignment: Some("left".to_owned()),
+            ..ParagraphFormatting::default()
+        });
+        let mut written = comment(
+            "First identity-proofed here. ",
+            "Second identity-proofed",
+            " there.",
+        );
+        written.content[0].formatting = Some(ParagraphFormatting {
+            alignment: Some("center".to_owned()),
+            ..ParagraphFormatting::default()
+        });
+        assert_eq!(comment_text_patch(&source, &written, FRAGMENT).unwrap(), None);
+        written.content[0].formatting = source.content[0].formatting.clone();
+        assert!(comment_text_patch(&source, &written, FRAGMENT).unwrap().is_some());
     }
 
     #[test]
