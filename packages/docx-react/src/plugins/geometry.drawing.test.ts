@@ -175,7 +175,7 @@ describe('drawing geometry targets', () => {
     const result = anchored(geometry.getAnchorGeometry(target));
     expect(result.rects).toEqual([{ ...frame, pageIndex: 0 }]);
     expect(result.anchor).toEqual(result.rects[0]);
-    expect(result.pageRect).toMatchObject({ pageIndex: 0 });
+    expect(result.pageRect).toMatchObject({ width: PAGE.width, height: PAGE.height });
   });
 
   test('an anchored picture answers with its floating frame', () => {

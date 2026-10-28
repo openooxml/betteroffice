@@ -668,7 +668,7 @@ export function createPluginGeometry(
   /** Places `target`, or the raw ranges a caller resolved itself. */
   const anchorGeometry = (
     target: AnchorGeometryTarget | null,
-    raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc },
+    raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean },
     reservationTarget = false,
     hiddenTarget = false
   ): DocxAnchorGeometryResult => {

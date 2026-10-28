@@ -141,7 +141,7 @@ export function findDrawingRectsByDocPos(
     let right = -Infinity;
     let bottom = -Infinity;
     for (const primitive of candidates) {
-      if (!('x' in primitive) || typeof primitive.x !== 'number') continue;
+      if (!('x' in primitive) || !('y' in primitive)) continue;
       const w = 'w' in primitive && typeof primitive.w === 'number' ? primitive.w : 0;
       const h = 'h' in primitive && typeof primitive.h === 'number' ? primitive.h : 0;
       x = Math.min(x, primitive.x);

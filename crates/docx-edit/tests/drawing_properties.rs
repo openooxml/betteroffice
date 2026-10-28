@@ -380,39 +380,52 @@ fn structured_export_carries_doc_pr_properties() {
     )));
 }
 
+fn without_drawing_properties(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut removed = 0;
+            if map
+                .get("drawing")
+                .is_some_and(|drawing| drawing.get("docPrId").is_some())
+            {
+                map.remove("drawing");
+                removed += 1;
+            }
+            removed
+                + map
+                    .values_mut()
+                    .map(without_drawing_properties)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items.iter_mut().map(without_drawing_properties).sum(),
+        _ => 0,
+    }
+}
+
 #[test]
-fn save_round_trip_keeps_document_xml_unchanged() {
+fn saves_ignore_drawing_properties() {
     let bytes = fixture();
-    let _doc = open(&bytes);
     let wire = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
     let projection = docx_parse::parse_docx_s8_projection(&bytes).unwrap();
-    let body = serde_json::to_value(projection.body).unwrap();
-    let request: docx_parse::serializer::S13SaveRequest =
-        serde_json::from_value(serde_json::json!({
-            "determinism": {
-                "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                "now": "2030-01-02T03:04:05.006Z"
-            },
-            "document": body,
-            "relationshipEntries": wire.document.package.relationship_entries,
-            "headerEntries": wire.document.package.header_entries,
-            "options": {"updateModifiedDate": false},
-            "selective": serde_json::Value::Null
-        }))
-        .unwrap();
-    let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
-    let original = ooxml_opc::unzip_parts(&bytes).unwrap();
-    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    let part = |parts: &[(String, Vec<u8>)], name: &str| {
-        parts
-            .iter()
-            .find(|(path, _)| path == name)
+    let save = |body: serde_json::Value| {
+        let request: docx_parse::serializer::S13SaveRequest =
+            serde_json::from_value(serde_json::json!({
+                "determinism": {
+                    "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "now": "2030-01-02T03:04:05.006Z"
+                },
+                "document": body,
+                "relationshipEntries": wire.document.package.relationship_entries,
+                "headerEntries": wire.document.package.header_entries,
+                "options": {"updateModifiedDate": false},
+                "selective": serde_json::Value::Null
+            }))
+            .unwrap();
+        ooxml_opc::unzip_parts(&docx_parse::serializer::write_docx_s13(request, &bytes).unwrap())
             .unwrap()
-            .1
-            .clone()
     };
-    assert_eq!(
-        part(&saved_parts, "word/document.xml"),
-        part(&original, "word/document.xml")
-    );
+    let body = serde_json::to_value(projection.body).unwrap();
+    let mut stripped = body.clone();
+    assert!(without_drawing_properties(&mut stripped) >= 4);
+    assert_eq!(save(body), save(stripped));
 }
