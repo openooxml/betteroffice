@@ -9,9 +9,11 @@ import {
   BLOG_MARKDOWN_URL,
   BLOG_URL,
   FEED_URL,
+  blogPosts,
   blogTwin,
   canonicalUrl,
   jsonLdScript,
+  latestPosts,
   listed,
   llmsFull,
   llmsTxt,
@@ -155,7 +157,7 @@ describe("production content", () => {
     const { GET } = await import("../app/llms.txt/route.ts");
     await withPosts([DRAFT], async () => {
       expect(() => BlogIndex()).toThrow();
-      expect(await GET().text()).not.toContain("## Blog");
+      expect(await (await GET()).text()).not.toContain("## Blog");
       expect(blogTwin("/blog.md", [DRAFT])).toBeNull();
     });
     expect(homepageMarkdown([], null, [])).not.toContain("/blog");
@@ -231,7 +233,7 @@ describe("indexes for agents and crawlers", () => {
     expect(llmsTxt(LLMS_BASE, [])).toBe(LLMS_BASE);
 
     const { GET } = await import("../app/llms.txt/route.ts");
-    expect(await GET().text()).toBe(llms);
+    expect(await (await GET()).text()).toBe(llms);
     expect(await withPosts([DRAFT], async () => (await GET()).text())).toBe(LLMS_BASE);
   });
 
@@ -250,7 +252,7 @@ describe("indexes for agents and crawlers", () => {
   });
 
   test("the sitemap lists published posts with their last change, and no drafts", async () => {
-    const { default: sitemap } = await import("../app/sitemap.ts");
+    const { pagesSitemap: sitemap } = await import("./pages-sitemap.ts");
     const entries = sitemap();
     const lorem = entries.find((entry) => entry.url === `${BLOG_URL}/lorem-ipsum`);
     expect(lorem.lastModified).toBe("2026-10-10");
@@ -355,5 +357,37 @@ describe("blog pages", () => {
     const { metadata } = await import("../app/blog/page.tsx");
     expect(metadata.openGraph.images[0].url).toBe("/opengraph-image");
     expect(metadata.twitter.images[0].url).toBe("/opengraph-image");
+  });
+});
+
+describe("homepage blog block", () => {
+  const README = readFileSync(join(import.meta.dir, "..", "..", "..", "README.md"), "utf8");
+  process.env.BETTEROFFICE_BENCHMARKS = README;
+  process.env.BETTEROFFICE_AGENT_EVALS = README;
+  const render = async () => renderToStaticMarkup(createElement((await import("../app/home.tsx")).Home));
+
+  test("links the latest published posts directly, newest first, from the post source", async () => {
+    const html = await render();
+    const section = html.slice(html.indexOf('aria-labelledby="blog"'), html.indexOf('aria-labelledby="coda"'));
+    const hrefs = [...section.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+    expect(hrefs).toEqual(["/blog/lorem-ipsum", "/blog/dolor-sit-amet", "/blog", "https://betteroffice.dev/blog/feed.xml"]);
+    expect(section).toContain("From the blog");
+    expect(section).not.toContain(DRAFT.slug);
+    expect(latestPosts(PUBLISHED, 1).map((post) => post.slug)).toEqual(["lorem-ipsum"]);
+  });
+
+  test("shows no block without a published post, and the markdown twin follows", async () => {
+    await withPosts([DRAFT], async () => {
+      expect(await render()).not.toContain('aria-labelledby="blog"');
+      expect(homepageMarkdown([], null, listed(blogPosts()))).not.toContain("From the blog");
+    });
+  });
+
+  test("the markdown twin lists the same posts under the same heading", () => {
+    const md = homepageMarkdown([], null, PUBLISHED);
+    const block = md.slice(md.indexOf("## From the blog"), md.indexOf("## ", md.indexOf("## From the blog") + 3));
+    expect(block).not.toBe("");
+    expect(md.indexOf("## From the blog")).toBeLessThan(md.indexOf("## The future"));
+    for (const post of latestPosts(PUBLISHED)) expect(block).toContain(`[${post.title}](${markdownUrl(post)})`);
   });
 });

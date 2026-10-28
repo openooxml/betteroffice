@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSite, loadData } from './build';
-import { renderPages, taskAnchor } from './render';
+import { renderPages, robots, sitemap, taskAnchor } from './render';
 import type { Suite } from './stats';
 
 test('build every page without client scripts, invalid values or a long dash', async () => {
@@ -16,7 +16,7 @@ test('build every page without client scripts, invalid values or a long dash', a
       expect(page).not.toMatch(/[\u2013\u2014]|undefined|NaN|<script/);
       expect(page).toContain('name="viewport"');
     }
-    expect(pages.get('suites/v3/index.html')).toContain('96 tasks (32 DOCX, 32 XLSX, 32 PPTX) on 90 real-world fixtures, 3 runs per task,');
+    expect(pages.get('suites/v3/index.html')).toContain('129 tasks (43 DOCX, 43 XLSX, 43 PPTX) on 90 real-world fixtures, 3 runs per task,');
     expect(pages.get('suites/v2/index.html')).toContain('30 synthetic fixtures (10 DOCX, 10 XLSX, 10 PPTX), one run per task, complete agent workflows with the same model: generic file tools vs the BetterOffice MCP server.');
     const reproduce = pages.get('suites/v2/reproduce/index.html')!;
     const data = await loadData();
@@ -119,4 +119,40 @@ test('missing suite descriptions fail before rendering', async () => {
 test('task anchors are unambiguous and safe for ids and URL fragments', () => {
   expect(taskAnchor('a-b', 'c')).not.toBe(taskAnchor('a', 'b-c'));
   expect(taskAnchor('model /é', 'task #"')).toMatch(/^task-[a-f0-9-]+$/);
+});
+
+test('every page has a unique title, a description and a canonical, and the sitemap lists each canonical page once', async () => {
+  const data = await loadData();
+  const pages = renderPages(data);
+  const titles = new Map<string, string>();
+  for (const [path, html] of pages) {
+    const title = html.match(/<title>([^<]+)<\/title>/)![1]!;
+    expect(titles.get(title)).toBeUndefined();
+    titles.set(title, path);
+    expect(html).toMatch(/<meta name="description" content="[^"]{40,}" \/>/);
+    expect(html).not.toMatch(/name="robots"/);
+    expect(html.match(/<link rel="canonical" href="https:\/\/evals\.betteroffice\.dev\/[^"]*" \/>/g)).toHaveLength(1);
+  }
+  const latest = [...data.suites].sort((a, b) => b.date.localeCompare(a.date))[0]!.suite;
+  expect(pages.get('suites/' + latest + '/index.html')).toContain('<link rel="canonical" href="https://evals.betteroffice.dev/" />');
+  expect(pages.get('failures/index.html')).toContain('<link rel="canonical" href="https://evals.betteroffice.dev/failures/" />');
+  const xml = sitemap(data);
+  const locs = [...xml.matchAll(/<loc>([^<]+)<\/loc><lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/g)].map(m => m[1]!);
+  expect(new Set(locs).size).toBe(locs.length);
+  for (const loc of ['https://evals.betteroffice.dev/', 'https://evals.betteroffice.dev/failures/', 'https://evals.betteroffice.dev/method/', 'https://evals.betteroffice.dev/reproduce/', 'https://evals.betteroffice.dev/docx/', 'https://evals.betteroffice.dev/suites/v2/']) expect(locs).toContain(loc);
+  for (const loc of locs) {
+    const path = loc.slice('https://evals.betteroffice.dev/'.length);
+    expect(pages.has(path ? path + 'index.html' : 'index.html')).toBe(true);
+    expect(pages.get(path ? path + 'index.html' : 'index.html')).toContain(`<link rel="canonical" href="${loc}" />`);
+  }
+  expect(robots()).toBe('User-agent: *\nAllow: /\n\nSitemap: https://evals.betteroffice.dev/sitemap.xml\n');
+});
+
+test('the build writes robots.txt and sitemap.xml', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'evals-seo-'));
+  try {
+    await buildSite(directory);
+    expect(await readFile(join(directory, 'robots.txt'), 'utf8')).toContain('Sitemap: https://evals.betteroffice.dev/sitemap.xml');
+    expect(await readFile(join(directory, 'sitemap.xml'), 'utf8')).toContain('<urlset');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

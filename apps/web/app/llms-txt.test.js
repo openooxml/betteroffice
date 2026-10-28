@@ -17,7 +17,7 @@ const LLMS = readFileSync(join(ROOT, "apps/web/content/llms.txt"), "utf8");
 const README = readFileSync(join(ROOT, "README.md"), "utf8");
 process.env.BETTEROFFICE_BENCHMARKS = README;
 process.env.BETTEROFFICE_AGENT_EVALS = README;
-const { default: Home } = await import("./page.tsx");
+const { Home } = await import("./home.tsx");
 const PAGE = renderToStaticMarkup(createElement(Home));
 
 // what llms.txt carries, at index level, for each section of the landing page
@@ -32,6 +32,7 @@ const COVERAGE = {
   ],
   collaboration: ["People and agents", "offline edits", `(${DOCS}/docs/collaboration)`],
   packages: ["never leave the page", ...PACKAGES.map((pkg) => `[${pkg.name}](`), `(${DOCS}/docs/packages)`, `(${RELEASES})`],
+  blog: [],
   coda: [`(${DEMO})`, `(${DOCS})`],
 };
 

@@ -95,8 +95,15 @@ pub fn handle_section_break(
     paginator: &mut Paginator,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
+    parity_restart: Option<u64>,
 ) -> Result<bool, LayoutError> {
-    section_breaks::handle_section_break(block, paginator, next_section_config, next_section_type)
+    section_breaks::handle_section_break(
+        block,
+        paginator,
+        next_section_config,
+        next_section_type,
+        parity_restart,
+    )
 }
 
 pub fn balance_terminal_continuous_text_columns(
@@ -860,12 +867,12 @@ pub fn layout_floating_table(
     let h_start = match horizontal {
         "page" => 0.0,
         "text" => column_x,
-        _ => margins.left,
+        _ => paginator.active_margins().left,
     };
     let h_end = match horizontal {
         "page" => page.size.w,
         "text" => column_x + column_width,
-        _ => page.size.w - margins.right,
+        _ => page.size.w - paginator.active_margins().right,
     };
     let v_start = match vertical {
         "page" => 0.0,
