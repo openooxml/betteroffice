@@ -5,12 +5,20 @@ pub(crate) fn trailing_leading(block: &ParagraphBlock, line: &TypesetRow) -> f64
         return 0.0;
     };
     if runs.iter().any(|run| {
-        !matches!(
-            run,
-            Run::Text(_) | Run::Tab(_) | Run::Field(_) | Run::LineBreak(_)
-        )
+        let fmt = match run {
+            Run::Text(run) => &run.fmt,
+            Run::Tab(run) => &run.fmt,
+            Run::Field(run) => &run.fmt,
+            Run::LineBreak(_) => return false,
+            _ => return true,
+        };
+        fmt.comment_ids.as_ref().is_some_and(|ids| !ids.is_empty())
+            || fmt.is_insertion == Some(true)
+            || fmt.is_deletion == Some(true)
     }) || block.attrs.as_ref().is_some_and(|attrs| {
         attrs.shading.is_some()
+            || attrs.p_pr_ins.is_some()
+            || attrs.p_pr_del.is_some()
             || attrs.borders.as_ref().is_some_and(|borders| {
                 [
                     borders.bottom.as_ref(),

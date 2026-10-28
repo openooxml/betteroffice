@@ -1,3 +1,4 @@
+use docx_layout::display_list::Primitive;
 use docx_layout::types::{BlockId, Fragment, Input, Layout};
 use serde_json::{Value, json};
 
@@ -67,6 +68,38 @@ fn slices(layout: &Layout, id: &str) -> Vec<(usize, usize, usize)> {
                 })
         })
         .collect()
+}
+
+fn footnote_boundary_input(target: Value) -> Input {
+    let mut value = input(vec![prefix(62.0), target], 100.0);
+    value.options.footnote_reserved_heights = Some([("1".to_owned(), 20.0)].into_iter().collect());
+    value
+}
+
+fn assert_full_pitch_fit_above_footnotes(target: Value) {
+    let mut value = footnote_boundary_input(target);
+    let result = docx_layout::compute_layout_input(&mut value).unwrap();
+    assert_eq!(slices(&result, "text"), vec![(1, 0, 1)]);
+    let display = docx_layout::build_display_list(&value, &result).unwrap();
+    let mut decoration_count = 0;
+    for (index, page) in display.pages.iter().enumerate() {
+        let layout_page = &result.pages[index];
+        let reserved = if index == 0 { 20.0 } else { 0.0 };
+        let bottom = layout_page.size.h - layout_page.margins.bottom - reserved;
+        for primitive in &page.primitives {
+            let (y, height) = match primitive {
+                Primitive::Decoration(decoration) => (&decoration.y, &decoration.h),
+                Primitive::Rect(rect) => (&rect.y, &rect.h),
+                _ => continue,
+            };
+            if height.as_f64() != Some(60.0) {
+                continue;
+            }
+            decoration_count += 1;
+            assert!(y.as_f64().unwrap() + height.as_f64().unwrap() <= bottom);
+        }
+    }
+    assert!(decoration_count > 0);
 }
 
 #[test]
@@ -222,6 +255,72 @@ fn footnote_reservation_uses_the_same_font_box_boundary() {
     value.options.footnote_reserved_heights = Some([("1".to_owned(), 42.0)].into_iter().collect());
     let result = docx_layout::compute_layout_input(&mut value).unwrap();
     assert_eq!(slices(&result, "text"), vec![(0, 0, 3)]);
+}
+
+#[test]
+fn comment_highlights_require_full_pitch_above_footnotes() {
+    for run in [
+        json!({"kind": "text", "text": "x", "commentIds": [1]}),
+        json!({"kind": "field", "fieldType": "MERGEFIELD", "fallback": "x", "commentIds": [1]}),
+    ] {
+        let mut target = text(
+            1,
+            60.0,
+            json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"] = json!([run]);
+        assert_full_pitch_fit_above_footnotes(target);
+    }
+}
+
+#[test]
+fn tracked_insertions_and_deletions_require_full_pitch_above_footnotes() {
+    for mark in ["isInsertion", "isDeletion"] {
+        for mut run in [
+            json!({"kind": "text", "text": "x"}),
+            json!({"kind": "field", "fieldType": "MERGEFIELD", "fallback": "x"}),
+        ] {
+            run[mark] = json!(true);
+            let mut target = text(
+                1,
+                60.0,
+                json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+            );
+            target["block"]["runs"] = json!([run]);
+            assert_full_pitch_fit_above_footnotes(target);
+        }
+    }
+}
+
+#[test]
+fn paragraph_revision_marks_require_full_pitch_above_footnotes() {
+    for mark in ["pPrIns", "pPrDel"] {
+        let mut attrs = json!({
+            "spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"},
+        });
+        attrs[mark] = json!({"revisionId": 1, "author": "Reviewer", "date": "2026-01-01"});
+        assert_full_pitch_fit_above_footnotes(text(1, 60.0, attrs));
+    }
+}
+
+#[test]
+fn undecorated_runs_preserve_font_box_fit_above_footnotes() {
+    for run in [
+        json!({"kind": "text", "text": "x"}),
+        json!({"kind": "text", "text": "x", "commentIds": [],
+            "isInsertion": false, "isDeletion": false}),
+        json!({"kind": "text", "text": "x", "highlight": "#ffff00"}),
+    ] {
+        let mut target = text(
+            1,
+            60.0,
+            json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"] = json!([run]);
+        let mut value = footnote_boundary_input(target);
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(0, 0, 1)]);
+    }
 }
 
 #[test]
