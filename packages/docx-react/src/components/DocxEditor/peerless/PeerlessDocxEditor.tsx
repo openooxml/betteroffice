@@ -89,6 +89,8 @@ const PREVIEW_CUT = { blocks: 200, paragraphBudget: 256 };
 const SIDEBAR_EDGE = 16;
 /** Quiet time after an edit that may need new fonts before the requirements are read again. */
 const FONT_REFRESH_DELAY_MS = 200;
+/** Least time between two such reads, which walk the whole document in the worker. */
+const FONT_REFRESH_INTERVAL_MS = 1000;
 const EMPTY_COMMENTS: NonNullable<DocxEditorProps['comments']> = [];
 const EMPTY_CHANGES: TrackedChangeEntry[] = [];
 const EMPTY_PAGES: NonNullable<PeerlessFrameGeometry['pages']> = [];
@@ -381,7 +383,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
-  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null }>({ pending: false, pick: null });
+  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null; read: number }>(
+    { pending: false, pick: null, read: -Infinity });
   const refreshFonts = useRef(() => {});
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
     theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
@@ -723,7 +726,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }
     const signature = JSON.stringify(settings.current.fonts ?? []);
     const provider = settings.current.measurementFontProvider;
-    if (requirementsChanged) fontRefresh.current.pending = false;
+    if (requirementsChanged) { fontRefresh.current.pending = false; fontRefresh.current.read = performance.now(); }
     else {
       if (fontJob.current?.signature === signature && fontJob.current.provider === provider) return;
       if (!fontJob.current && opened.signature === signature && opened.provider === provider) return;
@@ -783,7 +786,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   refreshFonts.current = () => {
     const state = fontRefresh.current;
     clearTimeout(state.timer);
-    state.timer = setTimeout(() => { state.timer = undefined; updateFontEnvironment(true); }, FONT_REFRESH_DELAY_MS);
+    const delay = Math.max(FONT_REFRESH_DELAY_MS, state.read + FONT_REFRESH_INTERVAL_MS - performance.now());
+    state.timer = setTimeout(() => { state.timer = undefined; updateFontEnvironment(true); }, delay);
   };
   prepareFontFamily.current = async family => {
     const current = active.current;

@@ -74,7 +74,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   const selection = () => ({ anchor: { ...focus(), offset: focus().offset - (options.range ? 1 : 0) }, focus: focus() });
   const work = { wholeListBuilds: 0, partGeometryPageVisits: 0 };
   const engine = {
-    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters, hasPendingUpdate: () => false,
+    proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters,
     partGeometry: (frame: Parameters<typeof readPartGeometry>[1]) => {
       work.partGeometryPageVisits += frame.pages.length;
       return readPartGeometry({ partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0], frame);

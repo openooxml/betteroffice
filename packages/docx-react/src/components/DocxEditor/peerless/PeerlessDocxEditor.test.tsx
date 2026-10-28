@@ -1176,8 +1176,10 @@ test('a script typed after open loads its fallback face once and a covered scrip
     return 'data' in face ? new TextDecoder().decode(face.data).trim() : null;
   })).toEqual(['calibri|0|0', 'cjk-jp']);
   const before = asked();
+  const second = performance.now();
   await hint();
-  await waitFor(() => expect(asked()).toBe(before + 1));
+  await waitFor(() => expect(asked()).toBe(before + 1), { timeout: 3000 });
+  expect(performance.now() - second).toBeGreaterThan(500);
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
   expect(environments()).toHaveLength(opened + 1);
 });

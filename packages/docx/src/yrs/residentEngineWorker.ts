@@ -705,7 +705,6 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
           fontRequirements = null;
           forgetRequirementsCache();
         }
-        const waited = engine.hasPendingUpdate();
         const result = await hooks.apply(command, context);
         if (result.status === 'applied' || (result.status === 'noop' && ['setRenderEnvironment', 'setFontEnvironment'].includes(command.command.kind))) {
           try { relayout(); } catch (error) {
@@ -713,7 +712,7 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
-        if (result.status === 'applied' && !fontRequirementsHinted && commandMayNeedNewFonts(command.command.kind, command.command.payload, waited)) {
+        if (result.status === 'applied' && !fontRequirementsHinted && commandMayNeedNewFonts(command.command.kind, command.command.payload)) {
           fontRequirementsHinted = true;
           reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
         }
