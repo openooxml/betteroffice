@@ -83,6 +83,7 @@ export interface SaveResult {
   itemVersion: string | null;
   by: string | null;
   conflictName?: string;
+  conflictUrl?: string;
 }
 
 /** Dependencies for one file session. */
