@@ -38,6 +38,20 @@ function textBox(kind: 'drawingml' | 'vml', fonts: string): string {
   return `<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Text Box 41"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>${content}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 }
 
+function mixedSlotsPackage(fonts: string): Uint8Array<ArrayBuffer> {
+  const body = `<w:p>${textBox('drawingml', fonts)}</w:p><w:p>${textBox('vml', fonts)}</w:p>` +
+    '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>' +
+    `<w:r><w:rPr>${fonts}</w:rPr><w:t>Title</w:t></w:r></w:p>`;
+  const parts = new Map(Object.entries(unzipContainer(fontPackage('Calibri', fonts, '', body))));
+  const types = new TextDecoder().decode(parts.get('[Content_Types].xml'));
+  parts.set('[Content_Types].xml', toBytes(types.replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>')));
+  const rels = new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'));
+  parts.set('word/_rels/document.xml.rels', toBytes(rels.replace('</Relationships>', `<Relationship Id="numbering" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`)));
+  parts.set('word/numbering.xml', toBytes(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>${fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`));
+  parts.set('word/theme/theme1.xml', toBytes('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>'));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
 type FontSlots = 'latin' | 'eastAsia/cs' | 'all slots';
 
 function pairedFonts(slots: FontSlots, site: string): string {
@@ -151,6 +165,45 @@ function assertThemeFontPaint(session: YrsSession, document: Document, texts: st
 }
 
 for (const path of ['native', 'typescript'] as const) {
+  for (const [slot, fonts, ascii, hAnsi] of [
+    ['hAnsi', '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:hAnsiTheme="minorHAnsi"/>', 'Times New Roman', 'Calibri'],
+    ['ascii', '<w:rFonts w:ascii="Times New Roman" w:asciiTheme="minorHAnsi" w:hAnsi="Arial"/>', 'Calibri', 'Arial'],
+  ] as const) {
+    test(`${path} mixed ${slot} theme fonts stay in their own run and numbering slots`, async () => {
+      const bytes = mixedSlotsPackage(fonts);
+      const document = await parseDocx(bytes.buffer, { preloadFonts: false });
+      const source = await createYrsSession();
+      const session = await createYrsSession();
+      try {
+        if (path === 'native') source.seedFromDocx(bytes);
+        else documentToYrs(source, document);
+        session.openDocx(bytes, false);
+        session.loadState(source.encodeState());
+        const original = session.encodeState();
+        const request = buildResidentRegionLayoutRequest(document, 24, {});
+        const blocks = session.yrsBlocksForStory('body', request.renderEnv) as LayoutBlock[];
+        const runs = blocks.flatMap(block => block.kind === 'paragraph' ? block.runs
+          : block.kind === 'shape' ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
+            : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : []);
+        const text = runs.filter(run => run.kind === 'text' && ['Title', 'Box'].includes(run.text));
+        expect(text).toHaveLength(3);
+        for (const run of text) expect(run).toMatchObject({
+          fontFamily: ascii, fontSlots: { ascii, hAnsi },
+        });
+        const paragraph = blocks.find(block => block.kind === 'paragraph' &&
+          block.runs.some(run => run.kind === 'text' && run.text === 'Title'));
+        expect(paragraph).toMatchObject({ attrs: { listMarker: '1.', listMarkerFontFamily: ascii } });
+        expect(session.storySegments('body').find(segment => segment.kind === 'text')?.attributes.fontFamily)
+          .toMatchObject({ ascii: 'Times New Roman', hAnsi: 'Arial' });
+        expect(session.encodeState()).toEqual(original);
+        expect(rFontsByPart((await saveYrsDocx(session)).bytes)).toEqual(rFontsByPart(bytes));
+      } finally {
+        source.destroy();
+        session.destroy();
+      }
+    });
+  }
+
   for (const [authored, fonts, seeded] of [
     ['theme-only', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>', 'Times New Roman'],
     ['paired', FONTS, 'Cambria'],

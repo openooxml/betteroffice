@@ -4617,6 +4617,8 @@ fn lower_paragraph_attrs(
         list_state.marker_fonts(properties.num_id?, properties.ilvl.unwrap_or(0.0))
     }) {
         let mut slots = RunFontSlots {
+            ascii: fonts.ascii.filter(|font| !font.is_empty()),
+            h_ansi: fonts.h_ansi.filter(|font| !font.is_empty()),
             ascii_theme: fonts.ascii_theme,
             h_ansi_theme: fonts.h_ansi_theme,
             ..RunFontSlots::default()
@@ -5521,6 +5523,65 @@ mod tests {
     }
 
     #[test]
+    fn mixed_font_slots_resolve_independently_for_runs_defaults_and_shapes() {
+        let env = RenderEnv {
+            font_theme: Some(docx_parse::Theme::default()),
+            ..RenderEnv::default()
+        };
+        for (reference, ascii, h_ansi) in [
+            ("hAnsiTheme", "Times New Roman", "Calibri"),
+            ("asciiTheme", "Calibri", "Arial"),
+        ] {
+            let mut fonts = json!({
+                "ascii": "Times New Roman", "hAnsi": "Arial",
+                "eastAsia": "MS Mincho", "cs": "Tahoma"
+            });
+            fonts[reference] = json!("minorHAnsi");
+            let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+            let original = attrs.clone();
+            let formatting = lower_run_formatting(Some(&attrs), &env);
+            assert_eq!(formatting.font_family.as_deref(), Some(ascii));
+            let slots = formatting.font_slots.unwrap();
+            assert_eq!(slots.ascii.as_deref(), Some(ascii));
+            assert_eq!(slots.h_ansi.as_deref(), Some(h_ansi));
+            assert_eq!(slots.east_asia.as_deref(), Some("MS Mincho"));
+            assert_eq!(slots.cs.as_deref(), Some("Tahoma"));
+            assert_eq!(attrs, original);
+            let rtl = yrs_attrs(json!({"fontFamily": fonts, "rtl": true}));
+            let rtl = lower_run_formatting(Some(&rtl), &env);
+            assert_eq!(rtl.font_family.as_deref(), Some("Tahoma"));
+            assert_eq!(rtl.font_slots.as_ref(), Some(&slots));
+
+            let defaults = BTreeMap::from([(
+                "defaultTextFormatting".to_owned(),
+                crate::seed::any_from_value(json!({"fontFamily": fonts})).unwrap(),
+            )]);
+            let run = paragraph_run_defaults(&defaults, &env);
+            assert_eq!(run.font_family.as_deref(), Some(ascii));
+            assert_eq!(run.font_slots.as_ref(), Some(&slots));
+            let mut paragraph = ParagraphAttrs::default();
+            lower_paragraph_defaults(&defaults, &mut paragraph, &env);
+            assert_eq!(paragraph.default_font_family.as_deref(), Some(ascii));
+
+            let shape = json!({
+                "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": [{"type": "paragraph", "content": [{
+                    "type": "run", "formatting": {"fontFamily": fonts},
+                    "content": [{"type": "text", "text": "Box"}]
+                }]}]}
+            });
+            let original = shape.clone();
+            let block = shapes::lower_shape_json(&shape, 1, &env).unwrap();
+            let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+                panic!("missing text box run");
+            };
+            assert_eq!(run.fmt.font_family.as_deref(), Some(ascii));
+            assert_eq!(run.fmt.font_slots.as_ref(), Some(&slots));
+            assert_eq!(shape, original);
+        }
+    }
+
+    #[test]
     fn partial_layout_themes_preserve_names_for_missing_slots() {
         let env: RenderEnv = serde_json::from_value(json!({"fontTheme": {
             "fontScheme": {"majorFont": {"latin": "Calibri"}}
@@ -5646,6 +5707,58 @@ mod tests {
                 Some("Calibri")
             );
             assert_eq!(doc.encode_state_as_update_v1(), original);
+        }
+    }
+
+    #[test]
+    fn numbering_theme_precedence_keeps_the_other_font_slot() {
+        for (fonts, expected) in [
+            (
+                r#"<w:rFonts w:ascii="Times New Roman" w:hAnsi="Arial" w:hAnsiTheme="minorHAnsi"/>"#,
+                "Times New Roman",
+            ),
+            (
+                r#"<w:rFonts w:ascii="Times New Roman" w:asciiTheme="minorHAnsi" w:hAnsi="Arial"/>"#,
+                "Calibri",
+            ),
+            (
+                r#"<w:rFonts w:ascii="" w:hAnsi="Arial" w:hAnsiTheme="unknown"/>"#,
+                "Arial",
+            ),
+        ] {
+            let numbering = format!(
+                r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+                crate::seed::fixture::NS
+            );
+            let bytes = crate::seed::fixture::Package::new(
+                r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+            )
+            .numbering(&numbering)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+            for preview in [false, true] {
+                let doc = EditingDoc::new(75304);
+                if preview {
+                    assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+                } else {
+                    crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+                }
+                let original = doc.encode_state_as_update_v1();
+                let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+                let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                    panic!("missing paragraph");
+                };
+                let attrs = paragraph.attrs.as_ref().unwrap();
+                assert_eq!(attrs.list_marker.as_deref(), Some("1."));
+                assert_eq!(attrs.list_marker_font_family.as_deref(), Some(expected));
+                assert_eq!(doc.encode_state_as_update_v1(), original);
+            }
         }
     }
 
