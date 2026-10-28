@@ -45,6 +45,7 @@ export interface FileSessionEvents {
   closed: Record<string, never>;
   lostFlush: Record<string, never>;
   tokenExpiring: { userId: string; hostUserId: string; expiresAt: number | null };
+  userInvalidated: { userId: string; reason?: "unauthorized" };
 }
 
 export type FileSessionEventName = keyof FileSessionEvents;
@@ -482,6 +483,7 @@ export class FileSession {
     this.#log("error", "journal broken: write failed");
     this.#emit("journalBroken", { kind: "writeFailed" });
     this.#setViewOnly("journalBroken");
+    this.#enqueueTask(() => this.#runAutosave());
   }
 
   async #openSource(bytes: Uint8Array, info: CheckFileInfo): Promise<void> {
@@ -607,9 +609,10 @@ export class FileSession {
   }
 
   async #attemptLock(accessToken: string): Promise<void> {
+    const requestedAt = this.#now();
     try {
       await this.#host.lock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId });
-      this.#renewLock();
+      this.#renewLock(requestedAt);
       this.#scheduleRefresh();
       return;
     } catch (err) {
@@ -626,8 +629,9 @@ export class FileSession {
       }
       if (current && current.startsWith(OUR_LOCK_PREFIX)) {
         try {
+          const relockRequestedAt = this.#now();
           await this.#host.unlockAndRelock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId, oldLock: current });
-          this.#renewLock();
+          this.#renewLock(relockRequestedAt);
           this.#scheduleRefresh();
           return;
         } catch (relockErr) {
@@ -738,17 +742,20 @@ export class FileSession {
     this.#lockDeadline = null;
   }
 
-  #renewLock(): void {
+  #renewLock(requestedAt: number): void {
     this.#clearLeaseTimer();
+    const deadline = requestedAt + LOCK_LEASE_MS;
     this.#lockHeld = true;
-    this.#lastLockRefreshAt = this.#now();
-    this.#lockDeadline = this.#lastLockRefreshAt + LOCK_LEASE_MS;
+    this.#lastLockRefreshAt = requestedAt;
+    this.#lockDeadline = deadline;
     this.#refreshFailures = 0;
+    this.#checkLockLease();
+    if (!this.#lockHeld) return;
     this.#leaseTimer = this.#scheduler.setTimeout(() => {
       this.#leaseTimer = null;
       this.#checkLockLease();
       this.#scheduleRefresh();
-    }, LOCK_LEASE_MS);
+    }, Math.max(0, deadline - this.#now()));
   }
 
   #checkLockLease(): void {
@@ -792,6 +799,7 @@ export class FileSession {
     while (tokenUser) {
       const refreshing = this.#lockHeld && this.#viewOnlyReason !== "lockLost";
       const deadline = this.#lockDeadline;
+      const requestedAt = this.#now();
       try {
         if (refreshing) {
           await this.#host.refreshLock({ wopiSrc: this.wopiSrc, accessToken: tokenUser.accessToken, lock: this.lockId });
@@ -803,7 +811,7 @@ export class FileSession {
         } else {
           await this.#host.lock({ wopiSrc: this.wopiSrc, accessToken: tokenUser.accessToken, lock: this.lockId });
         }
-        this.#renewLock();
+        this.#renewLock(requestedAt);
         if (!refreshing) {
           await this.#refreshSourceUnderLock(tokenUser.accessToken);
           if (this.#viewOnlyReason === "lockLost") {
@@ -855,9 +863,15 @@ export class FileSession {
   }
 
   #markTokenDead(user: UserSession): void {
-    if (user.expiresAt === null || user.expiresAt > this.#now()) user.expiresAt = this.#now();
-    user.canWrite = false;
+    const now = this.#now();
+    const affected = this.#history.filter((candidate) => candidate.accessToken === user.accessToken);
+    for (const candidate of affected) {
+      if (candidate.expiresAt === null || candidate.expiresAt > now) candidate.expiresAt = now;
+      candidate.canWrite = false;
+      this.#clearUserTimers(candidate.id);
+    }
     this.#syncLeader();
+    for (const candidate of affected) this.#emit("userInvalidated", { userId: candidate.id, reason: "unauthorized" });
   }
 
   /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
@@ -1064,9 +1078,12 @@ export class FileSession {
         });
         this.#recordWritten(result.itemVersion);
         let info: CheckFileInfo | null = null;
+        let unauthorized = false;
         try {
           info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: current.accessToken });
-        } catch {}
+        } catch (err) {
+          unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
+        }
         if (info?.Version && info.Version !== result.itemVersion) {
           return this.#saveCurrentConflict(current, tried);
         }
@@ -1074,6 +1091,7 @@ export class FileSession {
         if (info?.LastModifiedTime && info.Version === result.itemVersion) this.#lastModifiedTime = info.LastModifiedTime;
         this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
         if (!this.dirty) this.#firstDirtyAt = null;
+        if (unauthorized) this.#markTokenDead(current);
         const by = options.by && options.by === current.id ? options.by : current.id;
         this.#emit("saved", { itemVersion: this.#itemVersion, by });
         return { saved: true, itemVersion: this.#itemVersion, by };
@@ -1193,7 +1211,10 @@ export class FileSession {
             if (editor) {
               try {
                 await this.#attemptLock(editor.accessToken);
+                if (this.#lockHeld) await this.#refreshSourceUnderLock(editor.accessToken);
               } catch {
+                this.#loseLock();
+                this.#scheduleRefresh();
                 this.#log("warn", "relock after reconnect failed");
               }
             }
