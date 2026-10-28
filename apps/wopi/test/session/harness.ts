@@ -106,6 +106,8 @@ export function makeHarness(options: {
   beforeUnlock?: () => Promise<void>;
   beforeCheckFileInfo?: () => Promise<void>;
   refreshStatus?: () => number | null;
+  lockStatus?: () => number | null;
+  getLockStatus?: () => number | null;
   relativeStatus?: () => number | null;
 } = {}): Harness {
   const clock = new FakeClock();
@@ -131,7 +133,11 @@ export function makeHarness(options: {
     if (override === "PUT" && options.beforePut) await options.beforePut();
     if (override === "UNLOCK" && options.beforeUnlock) await options.beforeUnlock();
     if (request.method === "GET" && !url.pathname.endsWith("/contents") && options.beforeCheckFileInfo) await options.beforeCheckFileInfo();
-    const status = override === "REFRESH_LOCK" ? options.refreshStatus?.() : override === "PUT_RELATIVE" ? options.relativeStatus?.() : null;
+    const status = override === "REFRESH_LOCK" ? options.refreshStatus?.()
+      : override === "PUT_RELATIVE" ? options.relativeStatus?.()
+      : override === "LOCK" && !request.headers.get("X-WOPI-OldLock") ? options.lockStatus?.()
+      : override === "GET_LOCK" ? options.getLockStatus?.()
+      : null;
     if (status) return new Response(null, { status });
     return host.fetch(request);
   };

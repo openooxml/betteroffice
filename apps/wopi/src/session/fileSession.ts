@@ -634,7 +634,9 @@ export class FileSession {
       if (current === null) {
         try {
           current = (await this.#host.getLock({ wopiSrc: this.wopiSrc, accessToken })).lock;
-        } catch {}
+        } catch (lockErr) {
+          if (lockErr instanceof WopiHostError && lockErr.kind === "unauthorized") throw lockErr;
+        }
       }
       if (current && current.startsWith(OUR_LOCK_PREFIX)) {
         try {
