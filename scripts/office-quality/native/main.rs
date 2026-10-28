@@ -134,8 +134,20 @@ fn region_request(package: &Value) -> Value {
         .as_f64()
         .unwrap_or(20.0);
     let mut chain_sizes = serde_json::Map::new();
+    let mut hyperlink_sizes = serde_json::Map::new();
     for style in &styles {
-        if style["type"] != "paragraph" {
+        let hyperlink = style["type"] == "character"
+            && ["styleId", "name"].iter().any(|key| {
+                matches!(
+                    style[key]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "hyperlink" | "followedhyperlink"
+                )
+            });
+        if style["type"] != "paragraph" && !hyperlink {
             continue;
         }
         let Some(style_id) = style["styleId"].as_str() else {
@@ -160,14 +172,23 @@ fn region_request(package: &Value) -> Value {
                 .as_str()
                 .and_then(|id| styles.iter().find(|style| style["styleId"] == id).copied());
         }
-        let resolved = size.unwrap_or(doc_default_size);
-        chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
+        if hyperlink {
+            if let Some(size) = size {
+                hyperlink_sizes.insert(style_id.to_owned(), json!(size / 2.0));
+            }
+        } else {
+            let resolved = size.unwrap_or(doc_default_size);
+            chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
+        }
     }
     let mut render_env = json!({"themeColors": package["theme"]["colorScheme"],
         "defaultTabStopTwips": package["settings"]["defaultTabStop"],
         "defaultParagraphStyleId": default_style, "tocStyleIds": toc});
     if package["styles"].is_object() {
         render_env["paragraphStyleFontSizes"] = json!(chain_sizes);
+        if !hyperlink_sizes.is_empty() {
+            render_env["hyperlinkStyleFontSizes"] = json!(hyperlink_sizes);
+        }
         render_env["docDefaultFontSize"] = json!(doc_default_size / 2.0);
     }
     json!({
