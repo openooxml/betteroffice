@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { createFrameGate } from './frameGate';
+import { createFrameGate, MAX_RECTS_PER_SURFACE } from './frameGate';
 import type { ConsumedMessage } from './types';
 
 const rect = { x: 0, y: 0, width: 4, height: 4 };
@@ -69,6 +69,18 @@ test('geometry alone can be taken and nonoverlapping damage stays separate', () 
   gate.markDamage('page:1', rect); gate.markDamage('page:1', { ...rect, x: 10 });
   gate.markDamage('page:1', { ...rect, width: 0 });
   expect(gate.take()!.surfaces.get('page:1')?.rects.length).toBe(2);
+});
+
+test('the fifth disjoint rectangle collapses pending damage to one union', () => {
+  expect(MAX_RECTS_PER_SURFACE).toBe(4);
+  for (const count of [MAX_RECTS_PER_SURFACE, MAX_RECTS_PER_SURFACE + 1]) {
+    const gate = createFrameGate();
+    gate.markDamage('page:1', 'full'); gate.onConsumed(consumed(gate.take()!.epoch));
+    for (let index = 0; index < count; index += 1) gate.markDamage('page:1', { ...rect, x: index * 10 });
+    const rects = gate.take()!.surfaces.get('page:1')!.rects;
+    if (count === MAX_RECTS_PER_SURFACE) expect(rects.length).toBe(count);
+    else expect(rects).toEqual([{ ...rect, width: 44 }]);
+  }
 });
 
 test('base follows only presented frames and the initial frame fully replaces every surface', () => {

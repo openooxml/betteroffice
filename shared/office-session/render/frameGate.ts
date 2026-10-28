@@ -1,6 +1,9 @@
 import { intersects, isEmpty, union } from './rects';
 import type { ConsumedMessage, DeviceRect } from './types';
 
+/** @internal Disjoint damage collapses to one union above this descriptor limit. */
+export const MAX_RECTS_PER_SURFACE = 4;
+
 /** @internal Damage and optional changed geometry for one surface. */
 export type SurfaceWork = { rects: DeviceRect[]; full: boolean; geometryRevision?: number };
 
@@ -35,6 +38,7 @@ export function createFrameGate() {
         } else index += 1;
       }
       work.rects.push(merged);
+      if (work.rects.length > MAX_RECTS_PER_SURFACE) work.rects = [work.rects.reduce(union)];
     },
     markGeometry(id: string, revision: number) {
       const work = surface(id);

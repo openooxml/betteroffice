@@ -57,21 +57,24 @@ export type ResyncMessage = { surface?: SurfaceKey; reason: string };
 /** @internal Injected main-thread animation scheduling. */
 export type FrameScheduler<H> = { requestFrame(callback: () => void): H; cancelFrame(handle: H): void };
 
-/** @internal Maximum cloned header size in UTF-8 bytes. */
+/** @internal Maximum cloned metadata size in UTF-8 bytes. */
 export const HEADER_BUDGET_BYTES = 2048;
 const HEADER_FIELDS = ['session', 'incarnation', 'epoch', 'baseEpoch', 'coversThroughSeq',
   'viewportGeneration', 'scale', 'retire', 'progressive', 'geometryRevision'] as const;
 
-/** @internal Ordered transferables without absent projections. */
+/** @internal Unique transferables in first-occurrence order without absent projections. */
 export function transferList<B extends ClosableBitmap>(frame: RenderFrame<B>): (ArrayBuffer | B)[] {
-  return [...(frame.geometry ? [frame.geometry] : []), ...(frame.echo ? [frame.echo] : []),
-    ...frame.patches.map(({ bitmap }) => bitmap), ...(frame.plates ?? []).map(({ bitmap }) => bitmap)];
+  return [...new Set<ArrayBuffer | B>([...(frame.geometry ? [frame.geometry] : []), ...(frame.echo ? [frame.echo] : []),
+    ...frame.patches.map(({ bitmap }) => bitmap), ...(frame.plates ?? []).map(({ bitmap }) => bitmap)])];
 }
 
-/** @internal UTF-8 size of only the declared header fields. */
-export function headerBytes(frame: FrameHeader): number {
+/** @internal UTF-8 size of cloned headers and patch/plate descriptors, excluding transferables. */
+export function headerBytes(frame: FrameHeader & Partial<RenderFrame<ClosableBitmap>>): number {
   const header = Object.fromEntries(HEADER_FIELDS.map((key) => [key, frame[key]]));
-  return new TextEncoder().encode(JSON.stringify(header)).byteLength;
+  const metadata = { ...header,
+    patches: frame.patches?.map(({ surface, rect, full }) => ({ surface, rect, full })),
+    plates: frame.plates?.map(({ surface, rect }) => ({ surface, rect })) };
+  return new TextEncoder().encode(JSON.stringify(metadata)).byteLength;
 }
 
 /** @internal Strict header guard excluding undeclared object graphs. */

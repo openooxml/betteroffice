@@ -21,7 +21,7 @@ function host(hooks: Partial<Pick<RenderPresenterOptions<Bitmap, number>, 'valid
     requestFrame(callback) { const id = handle++; turns.set(id, callback); return id; },
     cancelFrame(id: number) { cancelled.push(id); turns.delete(id); },
     validate: hooks.validate ?? (() => 'ok'),
-    present(value) { hooks.present?.(value); presented.push(value.epoch); },
+    present(value) { const result = hooks.present?.(value); presented.push(value.epoch); return result; },
     consumed(message) { consumed.push(message); },
     resync(message) { resync.push(message); },
     onError(error) { errors.push(error); },
@@ -145,6 +145,26 @@ test('throwing presentation discards, closes all bitmaps, requests all surfaces 
   expect(h.consumed.map(({ status }) => status)).toEqual(['discarded']);
   expect(h.resync).toEqual([{ reason: 'present-failed' }]);
   expect(h.errors).toEqual([error]);
+  expect(next.patches[0]!.bitmap.closed).toBe(1);
+  expect(next.plates[0]!.bitmap.closed).toBe(1);
+  expect(h.ownership.openCount).toBe(0);
+});
+
+test('a cast thenable presentation is discarded synchronously without chaining its result', () => {
+  type AcceptsDeferred = ((frame: RenderFrame<Bitmap>) => Promise<void>) extends RenderPresenterOptions<Bitmap, number>['present'] ? true : false;
+  const acceptsDeferred: AcceptsDeferred = false;
+  expect(acceptsDeferred).toBe(false);
+  let chained = 0;
+  const present = (() => ({ then() { chained += 1; } })) as unknown as RenderPresenterOptions<Bitmap, number>['present'];
+  const h = host({ present }), next = frame(1);
+  next.plates = [{ ...next.patches[0]!, bitmap: bitmap() }];
+  h.presenter.receive(next); h.tick();
+  expect(h.presenter.counters.presented).toBe(0);
+  expect(h.consumed.map(({ status }) => status)).toEqual(['discarded']);
+  expect(h.resync).toEqual([{ reason: 'present-failed' }]);
+  expect(h.errors[0]).toBeInstanceOf(Error);
+  expect((h.errors[0] as Error).message).toBe('present must be synchronous');
+  expect(chained).toBe(0);
   expect(next.patches[0]!.bitmap.closed).toBe(1);
   expect(next.plates[0]!.bitmap.closed).toBe(1);
   expect(h.ownership.openCount).toBe(0);

@@ -5,7 +5,7 @@ import { surfaceKeyId, type ClosableBitmap, type ConsumedMessage, type FrameSche
 /** @internal Validation precedes the synchronous compositor transaction. */
 export type RenderPresenterOptions<B extends ClosableBitmap, H> = FrameScheduler<H> & {
   validate(frame: RenderFrame<B>, presentedSurfaces: ReadonlySet<string>, presentedEpoch: number | undefined): 'ok' | 'stale' | 'mismatch';
-  present(frame: RenderFrame<B>): void;
+  present(frame: RenderFrame<B>): undefined;
   consumed(message: ConsumedMessage): void;
   resync(message: ResyncMessage): void;
   onStall?(): void;
@@ -77,7 +77,11 @@ export function createRenderPresenter<B extends ClosableBitmap, H = number>(opti
     }
     try {
       for (const plate of frame.plates ?? []) ownership.retain(plate.bitmap, plate);
-      options.present(frame);
+      const result = options.present(frame) as unknown;
+      if (result !== null && (typeof result === 'object' || typeof result === 'function') &&
+        'then' in result && typeof result.then === 'function') {
+        throw new Error('present must be synchronous');
+      }
     } catch (error) { failed(frame, error); return; }
     if (!same) presentedSurfaces.clear();
     for (const patch of frame.patches) presentedSurfaces.add(surfaceKeyId(patch.surface));

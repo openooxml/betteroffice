@@ -20,12 +20,18 @@ test('header validation accepts declared fields and rejects nested graphs and wr
   }
 });
 
-test('ten-surface header fits the budget and measures UTF-8 without frame content', () => {
-  const keys: SurfaceKey[] = Array.from({ length: 10 }, (_, index) => ({ kind: 'pane', id: `surface:${index}` }));
-  const realistic = { ...header, retire: keys, geometryRevision: Object.fromEntries(keys.map((key) => [surfaceKeyId(key), 20])) };
+test('cloned frame metadata fits the budget for bounded patches and detects oversized frames', () => {
+  const keys: SurfaceKey[] = Array.from({ length: 10 }, (_, index) => ({ kind: 'pane', id: String(index) }));
+  const bitmap = { width: 32, height: 32, close() {} };
+  const patches = keys.slice(0, 3).flatMap((surface) => Array.from({ length: 4 }, (_, index) => ({
+    surface, rect: { x: index * 64, y: 0, width: 32, height: 32 }, bitmap, full: false })));
+  const realistic = { ...header, geometryRevision: Object.fromEntries(keys.map((key) => [surfaceKeyId(key), 20])),
+    patches, plates: [{ surface: keys[0]!, rect: patches[0]!.rect, bitmap }] };
   expect(headerBytes(realistic)).toBeLessThanOrEqual(HEADER_BUDGET_BYTES);
+  expect(headerBytes(realistic)).toBeGreaterThan(headerBytes(header));
+  expect(headerBytes({ ...realistic, patches: Array.from({ length: 200 }, () => patches[0]!) })).toBeGreaterThan(HEADER_BUDGET_BYTES);
   expect(headerBytes({ ...header, session: 'é' })).toBe(headerBytes({ ...header, session: 'a' }) + 1);
-  const withContent = { ...realistic, geometry: new ArrayBuffer(4096), patches: [] };
+  const withContent = { ...realistic, geometry: new ArrayBuffer(4096), echo: new ArrayBuffer(4096) };
   expect(headerBytes(withContent)).toBe(headerBytes(realistic));
   expect(surfaceKeyId({ kind: 'page', id: '1' })).not.toBe(surfaceKeyId({ kind: 'slide', id: '1' }));
 });
@@ -40,4 +46,7 @@ test('transfer list contains geometry, echo, patch and plate bitmaps in order', 
   expect(transferList(frame)).toEqual([frame.geometry!, frame.echo!, a, b, c]);
   expect(transferList({ ...header, patches: [] })).toEqual([]);
   expect(transferList({ ...header, patches: frame.patches })).toEqual([a, b]);
+  const aliased = { ...frame, echo: frame.geometry, patches: [...frame.patches, frame.patches[0]!],
+    plates: [{ surface, rect, bitmap: a }, ...frame.plates!] };
+  expect(transferList(aliased)).toEqual([frame.geometry!, a, b, c]);
 });
