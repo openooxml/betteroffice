@@ -212,7 +212,7 @@ test('insert before a paragraph after a table formats the whole new text', async
   await plain.edit({ version: plain.list().version, edits: [{
     op: 'insert_paragraphs', before: itemAfterBlock(plain, 'After table').ref, paragraphs: [{ text: 'Inserted plain' }],
   }] });
-  expect(plain.read(itemAfterBlock(plain, 'Inserted plain').ref).runs).toHaveLength(1);
+  expect(plain.read(itemAfterBlock(plain, 'Inserted plain').ref).runs.filter(run => !run.protected).map(run => run.end - run.start)).toEqual(['Inserted plain'.length]);
   expect(blocks(await xmlOf(plain)).map(textOf)).toContain('Inserted plain');
   expect(firstRPrOf(blockOf(await xmlOf(plain), 'Inserted plain'))).not.toContain('C00000');
 
@@ -221,7 +221,7 @@ test('insert before a paragraph after a table formats the whole new text', async
     op: 'insert_paragraphs', before: itemAfterBlock(anchored, 'After table').ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted anchored' }],
   }] });
   const saved = await xmlOf(anchored);
-  expect(anchored.read(itemAfterBlock(anchored, 'Inserted anchored').ref).runs).toHaveLength(1);
+  expect(anchored.read(itemAfterBlock(anchored, 'Inserted anchored').ref).runs.filter(run => !run.protected).map(run => run.end - run.start)).toEqual(['Inserted anchored'.length]);
   expect(canonical(firstRPrOf(blockOf(saved, 'Inserted anchored')))).toBe(canonical(firstRPrOf(blockOf(saved, 'After table'))));
 });
 
