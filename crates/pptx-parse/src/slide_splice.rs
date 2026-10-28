@@ -195,7 +195,7 @@ impl Splicer<'_> {
                     let gap = &self.source[cursor..child_span.range.start];
                     let gap_text = std::str::from_utf8(gap).unwrap_or("");
                     let whitespace_only = !gap.is_empty() && gap_text.trim().is_empty();
-                    if !whitespace_only || after_texts.iter().any(|text| *text == gap_text) {
+                    if !whitespace_only || after_texts.contains(&gap_text) {
                         output.extend_from_slice(gap);
                     }
                     cursor = child_span.range.end;
