@@ -516,6 +516,10 @@ impl Run {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_auto: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before_lines: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

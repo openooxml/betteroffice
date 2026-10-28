@@ -53,7 +53,7 @@ pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
-pub use story::baseline_story;
+pub use story::{baseline_story, style_from_run_properties};
 pub use table::{TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
@@ -139,9 +139,11 @@ impl DeckSession {
     /// [`Self::from_package_with_source`] when the file bytes are at hand, so
     /// peers can match them against the update.
     pub fn from_package(package: PptxPackage, client_id: u64) -> EditResult<Self> {
-        let bytes = pptx_parse::write_pptx(&package)
-            .map_err(|error| EditError::Parse(error.to_string()))?;
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        let fingerprint = {
+            let bytes = pptx_parse::write_pptx(&package)
+                .map_err(|error| EditError::Parse(error.to_string()))?;
+            format!("{:x}", Sha256::digest(bytes))
+        };
         Self::from_package_with_fingerprint(package, fingerprint, client_id)
     }
 
@@ -162,14 +164,16 @@ impl DeckSession {
         client_id: u64,
     ) -> EditResult<Self> {
         validate_client_id(client_id)?;
-        let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
-        deck::seed_doc(&bootstrap, &package, &fingerprint)?;
-        let baseline = bootstrap
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default());
+        let baseline = {
+            let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
+            deck::seed_doc(&bootstrap, &package, &fingerprint)?;
+            bootstrap
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default())
+        };
         let doc = session_doc(client_id);
-        hydrate_doc(&doc, &baseline)?;
-        deck::validate_doc(&doc)?;
+        hydrate_doc_owned(&doc, baseline)?;
+        deck::validated_snapshot(&doc, &package)?;
         Self::assemble(
             doc,
             client_id,
@@ -190,7 +194,7 @@ impl DeckSession {
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
         collect_garbage(&doc, None);
-        let (package, _snapshot) = deck::validate_doc(&doc)?;
+        let (package, _) = deck::validate_doc(&doc)?;
         Self::assemble(
             doc,
             client_id,
@@ -253,12 +257,18 @@ impl DeckSession {
 
     /// Re-attaches the matching source, importing what the stored package lacks.
     pub(crate) fn attach_source(self, source: &[u8]) -> EditResult<Self> {
-        let mut package = if self.package.models_connectors() {
-            pptx_parse::parse_pptx(source)
-        } else {
-            pptx_parse::parse_pptx_without_connectors(source)
-        }
-        .map_err(|error| EditError::Parse(error.to_string()))?;
+        let package = parse_source_package(self.package(), source)?;
+        self.attach_source_package(package)
+    }
+
+    #[cfg(feature = "wasm")]
+    pub(crate) fn attach_source_owned(self, source: Vec<u8>) -> EditResult<Self> {
+        let package = parse_source_package(self.package(), &source)?;
+        drop(source);
+        self.attach_source_package(package)
+    }
+
+    fn attach_source_package(self, mut package: PptxPackage) -> EditResult<Self> {
         let mut import = deck::SourceImport::new(self.package().clone(), &package);
         comments::import_source_comments(&self, &mut import)?;
         deck::import_source_render_data(&self.doc, &mut import)?;
@@ -563,8 +573,27 @@ fn validate_client_id(client_id: u64) -> EditResult<()> {
     Ok(())
 }
 
+fn parse_source_package(package: &PptxPackage, source: &[u8]) -> EditResult<PptxPackage> {
+    if package.models_connectors() {
+        pptx_parse::parse_pptx(source)
+    } else {
+        pptx_parse::parse_pptx_without_connectors(source)
+    }
+    .map_err(|error| EditError::Parse(error.to_string()))
+}
+
 fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     let update = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
+    hydrate_decoded(doc, update)
+}
+
+fn hydrate_doc_owned(doc: &Doc, bytes: Vec<u8>) -> EditResult<()> {
+    let update = decode_update_v1(&bytes).map_err(EditError::InvalidUpdate)?;
+    drop(bytes);
+    hydrate_decoded(doc, update)
+}
+
+fn hydrate_decoded(doc: &Doc, update: Update) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
     txn.apply_update(update)
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;

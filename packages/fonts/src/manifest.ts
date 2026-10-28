@@ -537,6 +537,7 @@ export function resolveScriptFallbackFace(
  */
 function looksSerif(family: string): boolean {
   const lower = family.toLowerCase();
+  if (/sans[ -]?serif/.test(lower)) return false;
   return (
     lower.includes('antiqua') ||
     lower.includes('bookman') ||

@@ -108,7 +108,8 @@ export function createWorkbookCommandHost(options: {
         if (intent.seq !== input.seq || intent.seq !== state.throughSeq + 1) {
           throw new Error(`Expected workbook command sequence ${state.throughSeq + 1}`);
         }
-        if (intent.afterSeq !== undefined && !state.statuses.has(intent.afterSeq)) refusal = 'dependency-expired';
+        if (intent.kind !== 'applyUpdate' && intent.kind !== 'collabPipe' &&
+          intent.afterSeq !== undefined && !state.statuses.has(intent.afterSeq)) refusal = 'dependency-expired';
       }
       const before = handle.version();
       let reply: WorkbookWireAck;

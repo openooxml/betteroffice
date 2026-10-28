@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { createRoomTransport, type RoomTransport } from "./createRoomTransport";
+import { createRoomTransport, type RoomTransport } from "../../../../shared/editor-host/collaboration/createRoomTransport";
 import type {
   CollaborationProvider,
   CollaborationProviderFactory,
   CollaborationReplica,
   CollaborationStatus,
-} from "./types";
+} from "../../../../shared/editor-host/collaboration/types";
 
 export const COLLAB_RELAY_ORIGIN =
   process.env.NEXT_PUBLIC_COLLAB_RELAY_ORIGIN ??
