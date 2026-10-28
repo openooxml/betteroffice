@@ -6099,15 +6099,15 @@ pub(crate) fn emit_paragraph_fragment(
     let indent = attrs.and_then(|a| a.indent).unwrap_or_default();
 
     // rtl paragraphs mirror the two indent sides
-    let ind_l = indent.left.unwrap_or(0.0).max(0.0);
-    let ind_r = indent.right.unwrap_or(0.0).max(0.0);
+    let ind_l = indent.left.unwrap_or(0.0);
+    let ind_r = indent.right.unwrap_or(0.0);
     let (indent_left, indent_right) = if is_rtl {
         (ind_r, ind_l)
     } else {
         (ind_l, ind_r)
     };
-    let hanging = indent.hanging.unwrap_or(0.0).max(0.0);
-    let first_line = indent.first_line.unwrap_or(0.0).max(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    let first_line = indent.first_line.unwrap_or(0.0);
 
     let block_ref = BlockRef::of(&frag.block_id);
     let pmark_revision = attrs.and_then(|a| {
@@ -6172,7 +6172,7 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                if !is_rtl && indent_left > 0.0 {
+                if !is_rtl && indent_left != 0.0 {
                     indent_left - hanging
                 } else {
                     indent_left
@@ -6501,6 +6501,16 @@ pub(crate) fn line_text_insets(
     has_list_marker: bool,
     overrun: f64,
 ) -> (f64, f64) {
+    if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
+        let text_indent = if !is_first_line {
+            0.0
+        } else if has_list_marker && hanging > 0.0 {
+            overrun
+        } else {
+            first_line - hanging
+        };
+        return (indent_left, text_indent);
+    }
     let has_hanging = hanging > 0.0;
     let has_first_line = first_line > 0.0;
     let mut pad_left = indent_left;
