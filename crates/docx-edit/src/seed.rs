@@ -428,7 +428,8 @@ impl SourceMetadata {
         StickyIndex::from_id(ID::new(mark.client, first), Assoc::After)
             .get_offset(txn)
             .is_some_and(|offset| {
-                offset.index == start && offset.branch.id() == AsRef::<yrs::branch::Branch>::as_ref(story).id()
+                offset.index == start
+                    && offset.branch.id() == AsRef::<yrs::branch::Branch>::as_ref(story).id()
             })
     }
 
