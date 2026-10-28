@@ -1779,7 +1779,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
-        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style></w:styles>"#
     );
     parts
         .iter_mut()
@@ -1825,6 +1825,50 @@ fn restyle_numbered_runs_keep_provenance_after_in_run_text_replacement() {
         assert!(part.legacy_paragraphs.is_empty());
         assert_eq!(part.paragraph_patches.len(), 1);
         assert!(!part.paragraph_patches[0].text_edits.is_empty());
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_refuse_ambiguous_complex_script_after_text_edits() {
+    for property in ["bCs", "iCs"] {
+        for linked in [false, true] {
+            for (previous, next, value) in [
+                ("Body24", "Heading1", ""),
+                ("Body24", "Heading1", r#" w:val="0""#),
+                ("ScriptBody", "ScriptHeading", r#" w:val="0""#),
+            ] {
+                let runs = format!(
+                    "<w:r><w:rPr><w:{property}{value}/></w:rPr><w:t>Explicit</w:t></w:r><w:r><w:t>young People</w:t></w:r>"
+                );
+                let content = if linked {
+                    format!(r#"<w:hyperlink w:anchor="target">{runs}</w:hyperlink>"#)
+                } else {
+                    runs
+                };
+                let doc = open_numbered_restyle(&format!(
+                    r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="{previous}"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>{content}</w:p>"#
+                ));
+                doc.replace_range(
+                    &EditCtx::local("", ""),
+                    StoryRange::new("body", 14, 20),
+                    "people",
+                )
+                .unwrap();
+                assert_eq!(accepted(&doc), ["Explicityoung people"]);
+                let before = doc.story_segments("body").unwrap();
+                let version = doc.version();
+                let failure =
+                    refuse(&doc, &UndoSession::new(), vec![set_style("00000001", next)]).failure;
+                assert_eq!(failure.code, EditFailureCode::Unsupported);
+                assert!(
+                    failure
+                        .message
+                        .contains("restyle this numbered paragraph before editing its text")
+                );
+                assert_eq!(doc.story_segments("body").unwrap(), before);
+                assert_eq!(doc.version(), version);
+            }
+        }
     }
 }
 

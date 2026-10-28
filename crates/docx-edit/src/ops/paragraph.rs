@@ -1142,6 +1142,25 @@ fn run_signature(attrs: &BTreeMap<String, Any>) -> BTreeMap<String, Any> {
         .collect()
 }
 
+fn restyle_run_keys<'a>(
+    keys: &[&'a str],
+    previous: &'a BTreeMap<String, Any>,
+    next: &'a BTreeMap<String, Any>,
+    direct_numbering: bool,
+) -> BTreeSet<&'a str> {
+    keys.iter()
+        .copied()
+        .chain(previous.keys().map(String::as_str))
+        .chain(next.keys().map(String::as_str))
+        .chain(
+            ["boldCs", "italicCs"]
+                .into_iter()
+                .filter(|_| direct_numbering),
+        )
+        .filter(|key| !PROTECTED_ATTRS.contains(key))
+        .collect()
+}
+
 fn rebased_run_attr(
     key: &str,
     current: Option<&Any>,
@@ -1164,6 +1183,7 @@ fn edited_run_formatting(
     story: &str,
     previous_style: Option<&str>,
     next_style: &str,
+    keys: &[&str],
     node_start: u32,
     pilcrow: u32,
 ) -> Result<Vec<DirectRunFormatting>, &'static str> {
@@ -1214,7 +1234,7 @@ fn edited_run_formatting(
         };
         let previous = inherited(previous_style);
         let next = inherited(Some(next_style));
-        let keys: BTreeSet<_> = previous.keys().chain(next.keys()).collect();
+        let keys = restyle_run_keys(keys, &previous, &next, true);
         for (_, candidate) in matches {
             if candidate == direct {
                 continue;
@@ -1222,9 +1242,8 @@ fn edited_run_formatting(
             for key in &keys {
                 let old = present(previous.get(*key));
                 let new = present(next.get(*key));
-                if old == new
-                    || (chunk.attr_active(crate::format::HYPERLINK)
-                        && matches!(key.as_str(), "textColor" | "underline"))
+                if chunk.attr_active(crate::format::HYPERLINK)
+                    && matches!(*key, "textColor" | "underline")
                 {
                     continue;
                 }
@@ -1552,6 +1571,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                     story_id,
                     previous_style,
                     style_id,
+                    &keys,
                     node_start,
                     pilcrow,
                 )?
@@ -1586,18 +1606,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             };
             (attrs(previous_style), attrs(Some(style_id)))
         });
-        let run_keys: BTreeSet<_> = keys
-            .iter()
-            .copied()
-            .chain(old_inherited.keys().map(String::as_str))
-            .chain(new_inherited.keys().map(String::as_str))
-            .chain(
-                ["boldCs", "italicCs"]
-                    .into_iter()
-                    .filter(|_| direct_numbering),
-            )
-            .filter(|key| !PROTECTED_ATTRS.contains(key))
-            .collect();
+        let run_keys = restyle_run_keys(&keys, old_inherited, new_inherited, direct_numbering);
         let ranges: Vec<_> = match &direct_runs {
             Some(runs) => {
                 let start = runs.partition_point(|run| run.end <= chunk.start);
