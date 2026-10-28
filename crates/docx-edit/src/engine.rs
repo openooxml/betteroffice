@@ -1812,6 +1812,12 @@ fn extend_input_for_header_footer(
     let mut first_break = true;
     let mut section_size = fallback_size;
     let mut section_margins = fallback_margins;
+    let mut physical_float_bands =
+        section_region_indices(input.measured.iter().map(|measured| &measured.block))
+            .map(|_| Vec::new());
+    let caller_float_bands = physical_float_bands
+        .as_ref()
+        .and_then(|_| input.options.section_page_float_bands.clone());
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
@@ -1846,6 +1852,38 @@ fn extend_input_for_header_footer(
                 .or_else(|| section.and_then(|section| section.footer_distance))
                 .or(margins.footer)
                 .or(Some(margins.bottom.abs()));
+            if let Some(physical_float_bands) = &mut physical_float_bands {
+                let bands = |hf_type| {
+                    let mut bands: Vec<_> = variants
+                        .iter()
+                        .filter(|variant| {
+                            variant.section_index == section_index && variant.hf_type == hf_type
+                        })
+                        .flat_map(|variant| {
+                            header_footer_float_bands(
+                                variant,
+                                HeaderFooterMetrics {
+                                    kind: variant.kind,
+                                    page_size: &section_size,
+                                    margins: &margins,
+                                },
+                            )
+                        })
+                        .collect();
+                    bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+                    bands
+                };
+                physical_float_bands.push(docx_layout::types::SectionPageFloatBands {
+                    default: bands(HeaderFooterType::Default),
+                    first: section
+                        .is_some_and(|section| section.title_pg)
+                        .then(|| bands(HeaderFooterType::First)),
+                    even: (regions.even_and_odd_headers
+                        || section.is_some_and(|section| section.even_and_odd_headers == Some(true)))
+                    .then(|| bands(HeaderFooterType::Even)),
+                    anchor_margins: Some(margins.clone()),
+                });
+            }
             let variant_height = |kind| {
                 variants
                     .iter()
@@ -1856,23 +1894,48 @@ fn extend_input_for_header_footer(
                     })
                     .map_or(0.0, |variant| variant.flow_height)
             };
-            section_margins = extend_body_margins(
+            let extended_margins = extend_body_margins(
                 &section_size,
                 &margins,
                 variant_height(HeaderFooterKind::Header),
                 variant_height(HeaderFooterKind::Footer),
             );
-            section_break.margins = Some(section_margins.clone());
+            section_break.margins = Some(extended_margins.clone());
             if ends_first_section {
-                input.options.margins = Some(section_margins.clone());
+                input.options.margins = Some(extended_margins);
             }
             continue;
         }
         if let Some(margins) = extended.get(section_index) {
             section_break.margins = Some(margins.clone());
-            section_margins.clone_from(margins);
+        }
+        if let Some(physical_float_bands) = &mut physical_float_bands {
+            physical_float_bands.push(
+                caller_float_bands
+                    .as_ref()
+                    .and_then(|bands| bands.get(section_index))
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
         section_index += 1;
+    }
+    if let Some(mut physical_float_bands) = physical_float_bands {
+        physical_float_bands.push(
+            caller_float_bands
+                .as_ref()
+                .and_then(|bands| bands.get(section_index))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        input.options.section_page_float_bands = physical_float_bands
+            .iter()
+            .any(|bands| {
+                !bands.default.is_empty()
+                    || bands.first.as_ref().is_some_and(|bands| !bands.is_empty())
+                    || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
+            })
+            .then_some(physical_float_bands);
     }
 }
 

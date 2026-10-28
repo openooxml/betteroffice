@@ -670,7 +670,7 @@ impl Paginator {
         let margins = self
             .section_page_float_bands
             .sections
-            .get(self.region_section_index())
+            .get(self.section_index)
             .filter(|bands| {
                 !bands.default.is_empty()
                     || [&bands.first, &bands.even]
@@ -719,7 +719,7 @@ impl Paginator {
         let bands = self
             .section_page_float_bands
             .sections
-            .get(self.region_section_index())
+            .get(self.section_index)
             .map(|variants| {
                 if let Some(first) = variants.first.as_ref().filter(|_| opens_section) {
                     first
