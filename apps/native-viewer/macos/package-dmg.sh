@@ -18,9 +18,11 @@ for index in "${!apps[@]}"; do
     fi
 done
 
-staging_dir=$(mktemp -d "${TMPDIR:-/tmp}/betteroffice-dmg.XXXXXX")
-errors="$staging_dir.err"
-trap 'rm -rf "$staging_dir" "$errors"' EXIT
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/betteroffice-dmg.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT
+staging_dir="$work_dir/staging"
+errors="$work_dir/hdiutil.err"
+mkdir "$staging_dir"
 
 mkdir -p "$(dirname "$dmg_path")"
 for app in "${apps[@]}"; do
@@ -28,9 +30,6 @@ for app in "${apps[@]}"; do
 done
 ln -s /Applications "$staging_dir/Applications"
 for attempt in 1 2 3 4 5; do
-    if [[ $attempt -gt 1 && -d /Volumes/BetterOffice ]]; then
-        hdiutil detach /Volumes/BetterOffice -force >/dev/null 2>&1 || true
-    fi
     status=0
     hdiutil create \
         -volname BetterOffice \

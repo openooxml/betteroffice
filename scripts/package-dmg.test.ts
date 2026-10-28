@@ -17,6 +17,7 @@ function packageWith(failures: string[]) {
       ditto: 'cp -R "$1" "$2"',
       sleep: `echo "$1" >> "${dir}/sleeps"`,
       hdiutil: `echo "$1" >> "${dir}/calls"
+ls "$TMPDIR" | grep '^betteroffice-dmg' >> "${dir}/scratch"
 failure=$(head -n 1 "${dir}/failures")
 sed -i.bak 1d "${dir}/failures"
 if [ -n "$failure" ]; then echo "hdiutil: create failed - $failure" >&2; exit 1; fi
@@ -36,7 +37,7 @@ touch "$last"`,
     const lines = (name: string) => {
       try { return readFileSync(join(dir, name), 'utf8').trim().split('\n').filter(Boolean); } catch { return []; }
     };
-    return { status: run.status, stderr: run.stderr, calls: lines('calls'), sleeps: lines('sleeps') };
+    return { status: run.status, stderr: run.stderr, calls: lines('calls'), sleeps: lines('sleeps'), scratch: lines('scratch') };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -62,4 +63,11 @@ test('package-dmg fails at once on any other hdiutil error', () => {
   expect(run.calls).toEqual(['create']);
   expect(run.sleeps).toEqual([]);
   expect(run.stderr).toContain('No space left on device');
+});
+
+test('package-dmg keeps hdiutil stderr inside its private scratch dir', () => {
+  const run = packageWith(['Resource busy']);
+  expect(run.status).toBe(0);
+  expect(run.scratch).toHaveLength(2);
+  expect(new Set(run.scratch).size).toBe(1);
 });
