@@ -163,15 +163,18 @@ fn region_request(package: &Value) -> Value {
         let resolved = size.unwrap_or(doc_default_size);
         chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
     }
+    let mut render_env = json!({"themeColors": package["theme"]["colorScheme"],
+        "defaultTabStopTwips": package["settings"]["defaultTabStop"],
+        "defaultParagraphStyleId": default_style, "tocStyleIds": toc});
+    if package["styles"].is_object() {
+        render_env["paragraphStyleFontSizes"] = json!(chain_sizes);
+        render_env["docDefaultFontSize"] = json!(doc_default_size / 2.0);
+    }
     json!({
         "bodyStory": "body", "options": {"pageGap": 24},
         "regions": {"sections": sections, "settings": package["settings"], "watermark": final_properties["watermark"]},
         "notes": {"contents": notes},
-        "renderEnv": {"themeColors": package["theme"]["colorScheme"],
-            "defaultTabStopTwips": package["settings"]["defaultTabStop"],
-            "defaultParagraphStyleId": default_style, "tocStyleIds": toc,
-            "paragraphStyleFontSizes": chain_sizes,
-            "docDefaultFontSize": doc_default_size / 2.0}
+        "renderEnv": render_env
     })
 }
 
