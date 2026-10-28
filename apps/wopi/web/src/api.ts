@@ -73,8 +73,8 @@ export class SessionApi {
       const reason = failure?.error?.kind;
       throw new Error(typeof reason === "string" ? reason : `Save failed (${response.status}).`);
     }
-    const body = (await response.json()) as { itemVersion?: unknown };
-    return { itemVersion: typeof body.itemVersion === "string" ? body.itemVersion : null };
+    const result = (await response.json()) as { itemVersion?: unknown };
+    return { itemVersion: typeof result.itemVersion === "string" ? result.itemVersion : null };
   }
 
   async close(): Promise<void> {
