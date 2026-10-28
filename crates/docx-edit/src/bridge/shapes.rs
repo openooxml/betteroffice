@@ -507,7 +507,7 @@ fn shape_paragraph(
         alignment,
         ..ParagraphAttrs::default()
     };
-    super::lower_paragraph_spacing(&values, &mut attrs, env);
+    super::lower_paragraph_spacing(&values, &mut attrs, env, false);
     super::lower_paragraph_indent(&values, &mut attrs);
     attrs.shading = shape_shading(field(paragraph, "formatting"), env);
     let mut runs: Vec<Run> = array(paragraph, "content")
