@@ -64,7 +64,7 @@ pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
 mod shapes;
-pub(crate) mod toc_fields;
+mod toc_fields;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -422,10 +422,6 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     let env = &with_sources;
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
-    local.toc_ends = doc
-        .source_index()
-        .map(|index| index.toc_field_ends())
-        .unwrap_or_default();
     local.block(source.as_ref().is_some_and(|source| {
         source
             .run_revision_stories()
@@ -696,11 +692,8 @@ fn walk_story_chunks<T: ReadTxn>(
     mut hidden_field_blocks: BTreeSet<String>,
     mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
-    let toc_paragraphs =
-        toc_field_paragraphs(txn, chunks, story_id, initial.story_index, &local.toc_ends);
-    if !env.hyperlink_style_font_sizes.is_empty() {
-        local.depend_on(toc_paragraphs.keys().cloned());
-    }
+    let toc_paragraphs = toc_field_paragraphs(txn, chunks, story_id, initial.story_index);
+    local.depend_on(toc_paragraphs.keys().cloned());
     let starts_at_boundary =
         initial.at_block_boundary && initial.paragraph_start == initial.story_index;
     let preview::WalkPosition {
@@ -1978,38 +1971,47 @@ fn toc_field_paragraphs<T: ReadTxn>(
     chunks: &[yrs::types::text::Diff<YChange>],
     story_id: &str,
     story_start: u32,
-    end_suffixes: &BTreeMap<String, u32>,
 ) -> BTreeMap<String, u32> {
     let mut paragraphs = Vec::new();
-    let mut marks = Vec::new();
+    let mut contents = Vec::new();
     let mut starts = Vec::new();
     let mut fields = Vec::new();
     let mut index = story_start;
     let mut paragraph_start = story_start;
+    let mut content = String::new();
     for chunk in chunks {
-        index += match &chunk.insert {
-            Out::Any(Any::String(text)) => utf16_len(text),
-            _ => 1,
-        };
-        let Out::YMap(map) = &chunk.insert else {
-            continue;
-        };
-        if is_pilcrow(map, txn) {
-            paragraphs.push(shared_map_string(map, txn, "paraId").unwrap_or_default());
-            marks.push(map);
-            starts.push(paragraph_start);
-            paragraph_start = index;
-        } else if shared_map_string(map, txn, "_kind").as_deref() == Some("field")
-            && shared_map_string(map, txn, "instruction").is_some_and(|instruction| {
-                instruction
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
-            })
-            && let Some(data) = shared_map_string(map, txn, "fieldData")
-                .and_then(|data| serde_json::from_str::<Value>(&data).ok())
-        {
-            fields.push((paragraphs.len(), data));
+        match &chunk.insert {
+            Out::Any(Any::String(text)) => {
+                index += utf16_len(text);
+                content.push_str(text);
+            }
+            Out::YMap(map) if is_pilcrow(map, txn) => {
+                paragraphs.push(shared_map_string(map, txn, "paraId").unwrap_or_default());
+                contents.push(std::mem::take(&mut content));
+                starts.push(paragraph_start);
+                index += 1;
+                paragraph_start = index;
+            }
+            Out::YMap(map) => {
+                if shared_map_string(map, txn, "_kind").as_deref() == Some("field")
+                    && shared_map_string(map, txn, "instruction").is_some_and(|instruction| {
+                        instruction
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
+                    })
+                    && let Some(data) = shared_map_string(map, txn, "fieldData")
+                        .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+                {
+                    fields.push((paragraphs.len(), data));
+                }
+                index += 1;
+                content.push('\0');
+            }
+            _ => {
+                index += 1;
+                content.push('\0');
+            }
         }
     }
     let mut members = BTreeMap::new();
@@ -2019,49 +2021,32 @@ fn toc_field_paragraphs<T: ReadTxn>(
             .flat_map(|key| field[key]["blocks"].as_array().into_iter().flatten())
             .filter(|block| block["type"] == "paragraph")
             .collect();
-        if following.is_empty() || owner >= paragraphs.len() {
+        let Some(closing) = following.last() else {
             continue;
-        }
-        let end_id = following
-            .last()
-            .and_then(|block| block["paraId"].as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                let prefix = format!("{story_id}:p");
-                let ordinal = paragraphs[owner]
-                    .strip_prefix(&prefix)?
-                    .parse::<usize>()
-                    .ok()?;
-                Some(format!("{prefix}{}", ordinal + following.len()))
-            });
-        let end = end_id
-            .as_ref()
-            .and_then(|id| {
-                paragraphs[owner..]
-                    .iter()
-                    .position(|paragraph| paragraph == id)
-            })
-            .map_or_else(
-                || (owner + following.len()).min(paragraphs.len() - 1),
-                |offset| owner + offset,
-            );
+        };
+        let Some(owner_id) = paragraphs.get(owner) else {
+            continue;
+        };
+        let end_id = closing["paraId"].as_str().map(str::to_owned).or_else(|| {
+            let prefix = format!("{story_id}:p");
+            let ordinal = owner_id.strip_prefix(&prefix)?.parse::<usize>().ok()?;
+            Some(format!("{prefix}{}", ordinal + following.len()))
+        });
+        let Some(end) = end_id.as_ref().and_then(|id| {
+            paragraphs[owner..]
+                .iter()
+                .position(|paragraph| paragraph == id)
+                .map(|offset| owner + offset)
+        }) else {
+            continue;
+        };
         for paragraph in &paragraphs[owner..end] {
             members.insert(paragraph.clone(), u32::MAX);
         }
-        let end_offset = end_suffixes.get(&paragraphs[end]).and_then(|suffix| {
-            use yrs::branch::{Branch, BranchID};
-            let BranchID::Nested(id) = AsRef::<Branch>::as_ref(marks[end]).id() else {
-                return None;
-            };
-            let position = yrs::StickyIndex::from_id(
-                yrs::ID::new(id.client, id.clock.checked_sub(*suffix)?.checked_sub(1)?),
-                yrs::Assoc::Before,
-            );
-            sticky_offset(&position, txn).map(|offset| offset.index)
-        });
-        let end_offset = end_offset.unwrap_or(u32::MAX);
-        if end_offset > starts[end] {
-            members.insert(paragraphs[end].clone(), end_offset);
+        if let Some(offset) = toc_fields::live_end(closing, &contents[end])
+            && offset > 0
+        {
+            members.insert(paragraphs[end].clone(), starts[end] + offset);
         }
     }
     members

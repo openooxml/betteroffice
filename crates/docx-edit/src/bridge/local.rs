@@ -16,7 +16,6 @@ pub(crate) struct LocalLowering {
     pub(super) chunks: Option<Rc<SeedChunks>>,
     validation_epoch: u64,
     dependent: BTreeSet<String>,
-    pub(super) toc_ends: Arc<BTreeMap<String, u32>>,
     pub(crate) edit: Option<TextEdit>,
     #[cfg(test)]
     pub(crate) materialized_text_units: u32,
