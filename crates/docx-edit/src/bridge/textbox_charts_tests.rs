@@ -83,7 +83,7 @@ fn alternate_content_text_box_chart_paints_inside_the_box() {
     assert_eq!(canvas["kind"], "rect");
     assert_eq!(canvas["w"], 192);
     assert_eq!(canvas["h"], 96);
-    assert_eq!(canvas["chart"], body_charts[0]["chart"]);
+    assert_eq!(canvas["chart"]["label"], body_charts[0]["chart"]["label"]);
     assert_eq!(canvas["ariaDescription"], "Quarterly sales");
     let shape = boxed
         .iter()

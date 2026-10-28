@@ -269,7 +269,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     return () => { try { collaboration.onReplica?.(null); } finally { retirePeerlessReplica(replica); } };
   }, [presentation, failure, props.collaboration?.onReplica]);
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
-  return <PptxCommandContext.Provider value={commands}><div ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
+  return <PptxCommandContext.Provider value={commands}><div dir="ltr" ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
     {toolbarVisible && (editorToolbar || chrome) && <div style={styles.toolbarShell}><EditorChromeContext.Provider value>
       {editorToolbar && <div style={styles.toolbar}>{toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}</div>}
       {toolbar === undefined && !props.readOnly && reviewState?.proposals && <ProposalsButton count={proposals.length} />}

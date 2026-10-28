@@ -1,0 +1,54 @@
+{
+  "_lang": "de",
+  "titleBar": {
+    "edited": "Bearbeitet",
+    "collaborate": "Zusammenarbeiten",
+    "connecting": "Verbinden…",
+    "home": "Start",
+    "open": "Öffnen…",
+    "save": "Speichern"
+  },
+  "notice": {
+    "dismissError": "Fehler schließen"
+  },
+  "room": {
+    "roomId": "Raum-ID",
+    "yourName": "Ihr Name",
+    "joinRoom": "Raum beitreten",
+    "leaveRoom": "Raum verlassen",
+    "hint": "Öffnen Sie dieselbe Datei und geben Sie dieselbe Raum-ID ein, um gemeinsam zu bearbeiten.",
+    "saveBeforeJoining": "Speichern Sie Ihre Änderungen, bevor Sie einem Raum beitreten. Alle sollten dieselbe Datei öffnen."
+  },
+  "editor": {
+    "opening": "Editor wird geöffnet…",
+    "viewing": "Anzeigen",
+    "editing": "Bearbeiten",
+    "connected": "Verbunden",
+    "workbookDisposed": "Der Arbeitsmappen-Editor wurde geschlossen.",
+    "presentationDisposed": "Der Präsentations-Editor wurde geschlossen.",
+    "documentDisposed": "Der Dokument-Editor wurde geschlossen.",
+    "stillOpening": "Der Editor öffnet die Datei noch. Versuchen Sie es gleich noch einmal.",
+    "disconnected": "Getrennt"
+  },
+  "start": {
+    "dropFileHere": "Legen Sie Ihre Datei hier ab",
+    "openDocument": "Ein Dokument öffnen",
+    "openSpreadsheet": "Eine Tabelle öffnen",
+    "openPresentation": "Eine Präsentation öffnen",
+    "intro": "Machen Sie dort weiter, wo Sie aufgehört haben.",
+    "openFile": "Datei öffnen…",
+    "opening": "Öffnen…",
+    "dropHint": "oder legen Sie eine Datei hier ab",
+    "recentFiles": "Zuletzt verwendete Dateien",
+    "recent": "Zuletzt verwendet"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Nicht gespeicherte Änderungen verwerfen?"
+  },
+  "errors": {
+    "openInApp": "Öffnen Sie .{ext}-Dateien in BetterOffice {app}.",
+    "couldNotRead": "{name} konnte nicht gelesen werden.",
+    "chooseFile": "Wählen Sie eine .{ext}-Datei.",
+    "unsupportedFile": "Wählen Sie ein Word-Dokument, eine Excel-Arbeitsmappe oder eine PowerPoint-Präsentation."
+  }
+}

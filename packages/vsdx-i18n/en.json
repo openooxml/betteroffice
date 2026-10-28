@@ -1,7 +1,7 @@
 {
   "_lang": "en",
-  "editor": { "appLabel": "Visio diagram editor", "opening": "Opening diagram…", "noPages": "No pages", "openPrompt": "Open a VSDX file", "toolbarLabel": "Diagram editing tools", "addShape": "Add shape", "deleteShape": "Delete selected", "fillColor": "Fill", "lineColor": "Line", "save": "Download" },
-  "pages": { "panelLabel": "Pages", "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}", "canvasLabelWithMultiSelection": "Page {current} of {total}; {count} shapes selected" },
+  "editor": { "appLabel": "Visio diagram editor", "opening": "Opening diagram…", "noPages": "No pages", "openPrompt": "Open a VSDX file", "addShape": "Add shape", "deleteShape": "Delete selected", "save": "Download" },
+  "pages": { "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}", "canvasLabelWithMultiSelection": "Page {current} of {total}; {count} shapes selected" },
   "statusBar": { "pageList": "Page list", "previousPage": "Previous page", "nextPage": "Next page", "pageTabs": "Page tabs", "addPage": "Add page", "zoomControls": "Zoom controls", "zoomOut": "Zoom out", "zoomIn": "Zoom in", "zoomSlider": "Zoom level", "zoomPercentage": "{zoom}%", "resetZoom": "Reset zoom to 100%", "fitToWindow": "Fit to window" },
   "shapes": { "selected": "Selected: {name}", "editingText": "Editing text of shape {name}" },
   "diagnostics": {
@@ -18,6 +18,7 @@
     "tabsLabel": "Ribbon tabs",
     "empty": "No commands here yet",
     "documentName": "Diagram",
+    "options": "{label} options",
     "lineWeightHint": "positive length, e.g. 0.018",
     "linePattern": { "none": "None", "solid": "Solid", "indexed": "Pattern {index}", "custom": "Custom ({value})", "unset": "\u2014" },
     "saved": "Saved",

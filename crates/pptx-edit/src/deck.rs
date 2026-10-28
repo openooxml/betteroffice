@@ -11,7 +11,7 @@ use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
     SlideLayout,
 };
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use yrs::types::AsPrelim;
@@ -46,7 +46,7 @@ const MAX_ADJUSTMENT_INDEX: usize = 32;
 /// Stays well under the 16 MiB collaboration frame cap once base64-encoded.
 const MAX_PENDING_PICTURE_BYTES: usize = 8 * 1024 * 1024;
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SlideMetadata {
@@ -56,14 +56,14 @@ pub(crate) struct SlideMetadata {
     layout_part_path: Option<String>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct DeckSize {
     width: i64,
     height: i64,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct DeckMetadata {
     slides: Vec<SlideMetadata>,
@@ -151,6 +151,15 @@ fn seed_shape(
     shape_map.insert(txn, "id", shape_id.as_str());
     shape_map.insert(txn, "sourceId", base.id as f64);
     shape_map.insert(txn, "name", base.name.as_str());
+    if let Some(title) = alt_text(&base.title) {
+        shape_map.insert(txn, "title", title);
+    }
+    if let Some(description) = alt_text(&base.description) {
+        shape_map.insert(txn, "description", description);
+    }
+    if base.decorative {
+        shape_map.insert(txn, "decorative", true);
+    }
     shape_map.insert(txn, "x", base.transform.x as f64);
     shape_map.insert(txn, "y", base.transform.y as f64);
     shape_map.insert(txn, "width", base.transform.width as f64);
@@ -252,6 +261,10 @@ fn seeded_child_path(path: &str, child_index: usize) -> String {
     format!("{path}.{child_index}")
 }
 
+fn alt_text(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|text| !text.is_empty())
+}
+
 pub(crate) fn shape_base(shape: &ShapeNode) -> &ShapeBase {
     match shape {
         ShapeNode::Shape(shape) => &shape.base,
@@ -280,7 +293,7 @@ impl DeckSession {
         snapshot_doc(&self.doc, &self.package)
     }
 
-    #[cfg(any(feature = "wasm", test))]
+    #[cfg(any(feature = "engine", test))]
     pub(crate) fn session_metadata(&self) -> EditResult<DeckMetadata> {
         let txn = self.doc.transact();
         let meta = required_map(&txn, META)?;
@@ -2333,6 +2346,7 @@ pub(crate) fn slide_parts<T: ReadTxn>(
     Ok(SlideParts {
         shape_ids: live_shape_order(&shape_order, txn)?,
         snapshot: SlideSnapshot {
+            header_footer: None,
             title: None,
             hidden: None,
             layout: None,
@@ -2396,7 +2410,7 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
     })
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 pub(crate) fn snapshot_selected_slides(
     doc: &Doc,
     package: &PptxPackage,
@@ -2715,6 +2729,9 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         source_id: required_u32(&shape, txn, "sourceId")?,
         kind: parse_shape_kind(&required_string(&shape, txn, "kind")?)?,
         name: required_string(&shape, txn, "name")?,
+        title: map_string(&shape, txn, "title").filter(|text| !text.is_empty()),
+        description: map_string(&shape, txn, "description").filter(|text| !text.is_empty()),
+        decorative: map_bool(&shape, txn, "decorative").unwrap_or_default(),
         x: required_i64(&shape, txn, "x")?,
         y: required_i64(&shape, txn, "y")?,
         width: required_i64(&shape, txn, "width")?,
@@ -2821,6 +2838,7 @@ fn baseline_slide(
         ),
     );
     Ok(SlideSnapshot {
+        header_footer: None,
         title: None,
         hidden: None,
         layout: None,
@@ -2920,6 +2938,9 @@ fn baseline_shape(
         source_id: base.id,
         kind,
         name: base.name.clone(),
+        title: alt_text(&base.title).map(str::to_owned),
+        description: alt_text(&base.description).map(str::to_owned),
+        decorative: base.decorative,
         x: baseline_integer("x", transform.x)?,
         y: baseline_integer("y", transform.y)?,
         width: baseline_integer("width", transform.width)?,
@@ -4294,7 +4315,9 @@ mod tests {
             base: ShapeBase {
                 id: 42,
                 name: "Custom picture".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: pptx_parse::ShapeTransform::default(),

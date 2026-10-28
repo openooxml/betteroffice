@@ -23,7 +23,7 @@ import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequ
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
-import { ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
+import { commandMayNeedNewFonts, ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
@@ -535,6 +535,19 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
       },
     }),
   } : {}) };
+  const applyCommand = hooks.apply;
+  const showsHiddenText = () => JSON.parse(init.layoutInput).renderEnv?.showHiddenText === true;
+  hooks.apply = async (prepared, context) => {
+    const { kind, payload } = prepared.command;
+    const hiddenBefore = kind === 'setRenderEnvironment' ? showsHiddenText() : undefined;
+    const result = await applyCommand(prepared, context);
+    if (!fontRequirementsHinted && ((result.status === 'applied' && commandMayNeedNewFonts(kind, payload)) ||
+      (hiddenBefore !== undefined && result.status !== 'refused' && showsHiddenText() !== hiddenBefore))) {
+      fontRequirementsHinted = true;
+      reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
+    }
+    return result;
+  };
   commandFrameChanges = changes;
   const prefixNavigation = {
     character: { backward: 'result', forward: 'result', up: 'complete', down: 'complete' },
@@ -1089,8 +1102,14 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   });
   commandInit = init;
   commandQueries = queriesFor;
+  commandShownText = () => {
+    const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
+    const renderEnv = (init.layoutWithRegions ? input : input.workerOwned).renderEnv ?? {};
+    return { showHiddenText: renderEnv.showHiddenText, revisionPreview: proposalRevisionPreview(registry.snapshot()) };
+  };
   releaseCommandHost = () => {
     commandQueries = null;
+    commandShownText = null;
     selectionQueries?.queries.dispose();
     selectionQueries = undefined;
     releaseResidentSelectionReads(engine);
@@ -1237,6 +1256,10 @@ let requirementsCache: {
 } | null = null;
 /** The layout input of the host's last font requirements request. */
 let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
+/** Whether the host heard, since its last font requirements request, that an edit may need new fonts. */
+let fontRequirementsHinted = false;
+/** The command session's hidden-text setting and proposal preview, which decide which text its layout shows. */
+let commandShownText: (() => { showHiddenText?: unknown; revisionPreview?: unknown }) | null = null;
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
@@ -1870,8 +1893,10 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
   }
   if (request.type === 'fontRequirements') {
     if (!session) throw new Error('Document worker is not initialized');
-    const requirementsJson = layoutFontRequirements(session, request.layoutInput);
+    const requirementsJson = layoutFontRequirements(session, commandShownText
+      ? withShownText(request.layoutInput, commandShownText()) : request.layoutInput);
     requestedRequirements = { owner: session, layoutInput: request.layoutInput };
+    fontRequirementsHinted = false;
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
@@ -2893,6 +2918,17 @@ function layoutMetaReply(meta: RetainedLayoutMeta, knownEpoch = sentHeadersFoote
 function forgetRequirementsCache(): void {
   requirementsCache?.release();
   requirementsCache = null;
+}
+
+/** `layoutInput` laid out with the given hidden-text setting and proposal preview, as the command session lays out. */
+function withShownText(layoutInput: string, shown: { showHiddenText?: unknown; revisionPreview?: unknown }): string {
+  const input = JSON.parse(layoutInput) as { renderEnv?: Record<string, unknown> };
+  const renderEnv = { ...input.renderEnv };
+  for (const key of ['showHiddenText', 'revisionPreview'] as const) {
+    if (shown[key] === undefined) delete renderEnv[key];
+    else renderEnv[key] = shown[key];
+  }
+  return JSON.stringify({ ...input, renderEnv });
 }
 
 function layoutFontRequirements(engine: ResidentEngineSession, layoutInput: string): string {

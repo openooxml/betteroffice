@@ -294,7 +294,7 @@ export type PresentationCommandMethods = {
   flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
   saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
   accessCommandEditor(fence: PresentationCommandFence, method: PresentationCommandAccessMethod, args: unknown[]): PresentationCommandAccessResult;
-  checkpointCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
+  checkpointCommandEditor(fence: PresentationCommandFence, options?: { rebase?: boolean }): PresentationCommandSaveResult;
   prepareCommandPicture(fence: PresentationCommandFence, bytes: ArrayBuffer): ArrayBuffer;
   readEditor(fence: PresentationCommandFence, request?: PptxReadRequest): PresentationCommandReadResult;
 };
@@ -310,7 +310,8 @@ export interface PresentationCommandClient {
   flush(seq?: number): Promise<PresentationCommandAck>;
   save(): Promise<Uint8Array>;
   access?<K extends PresentationCommandAccessMethod>(method: K, ...args: Parameters<PresentationCommandAccessMethods[K]>): Promise<ReturnType<PresentationCommandAccessMethods[K]>>;
-  checkpoint?(): Promise<PresentationCommandSaveResult>;
+  takeRecoveryUpdate?(): ArrayBuffer | undefined;
+  checkpoint?(options?: { rebase?: boolean }): Promise<PresentationCommandSaveResult>;
   preparePicture?(bytes: ArrayBuffer): Promise<ArrayBuffer>;
   read(request?: PptxReadRequest): Promise<PresentationCommandReadResult>;
   thumbnail(slideId: string, knownRevision?: number): Promise<PresentationCommandThumbnailResult>;

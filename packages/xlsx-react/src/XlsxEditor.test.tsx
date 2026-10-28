@@ -3322,6 +3322,12 @@ it('in-thread renders the supplied loading indicator while opening a file', asyn
   expect(view.queryByText('Opening in thread')).toBeNull();
 });
 
+it('pins the editor root to ltr', async () => {
+  const view = render(<XlsxEditor experimentalWorkerOpen={false} file={plain.bytes} onReady={() => {}} />);
+  await waitFor(() => expect(view.getByTestId('xlsx-name-box')).toBeDefined());
+  expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
 it('async host save calls the latest onSave once without a request or download', async () => {
   let api!: import('./worker/createAsyncEditorApi').XlsxAsyncEditorApi;
   const ready = (value: typeof api) => { api = value; };

@@ -133,8 +133,8 @@ export function PresenceStrip({
       {hiddenPeers > 0 && (
         <span
           data-testid="xlsx-presence-overflow"
-          title={`${hiddenPeers} more collaborators`}
-          aria-label={`${hiddenPeers} more collaborators`}
+          title={t('presence.moreCollaborators', { count: hiddenPeers })}
+          aria-label={t('presence.moreCollaborators', { count: hiddenPeers })}
           style={{
             display: 'inline-grid',
             placeItems: 'center',

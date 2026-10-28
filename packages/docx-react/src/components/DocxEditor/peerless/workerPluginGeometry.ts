@@ -1,7 +1,7 @@
 import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine, type DisplayListQueries, type DisplayListRect } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
-import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
+import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeDrawing, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
 import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
@@ -196,6 +196,12 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (target.kind === 'proposal' && !resolved) return { ok: false, failure: { code: 'unknown-proposal', message: 'No proposal is registered' } };
       if (!resolved) return entry.failed.has(keyOf(target)) ? readFailed : request ? pending : unavailable();
       if (!resolved.ok) return resolved;
+      if (resolved.drawing) {
+        const pos = resolved.ranges[0]?.from;
+        if (pos === undefined) return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
+        if (resolved.root && !resolved.rIds) return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
+        return placeDrawing(repeatedOf(measured), pos, resolved.root ? resolved.rIds : undefined);
+      }
       if (resolved.root) {
         return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph)
           : { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };

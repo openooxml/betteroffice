@@ -1,0 +1,54 @@
+{
+  "_lang": "en",
+  "titleBar": {
+    "edited": "Edited",
+    "collaborate": "Collaborate",
+    "connecting": "Connecting…",
+    "home": "Home",
+    "open": "Open…",
+    "save": "Save"
+  },
+  "notice": {
+    "dismissError": "Dismiss error"
+  },
+  "room": {
+    "roomId": "Room ID",
+    "yourName": "Your name",
+    "joinRoom": "Join room",
+    "leaveRoom": "Leave room",
+    "hint": "Open the same file and enter the same room ID to edit together.",
+    "saveBeforeJoining": "Save your changes before joining a room. Everyone should open the same file."
+  },
+  "editor": {
+    "opening": "Opening editor…",
+    "viewing": "Viewing",
+    "editing": "Editing",
+    "connected": "Connected",
+    "workbookDisposed": "The workbook editor was disposed.",
+    "presentationDisposed": "The presentation editor was disposed.",
+    "documentDisposed": "The document editor was disposed.",
+    "stillOpening": "The editor is still opening the file. Try again in a moment.",
+    "disconnected": "Disconnected"
+  },
+  "start": {
+    "dropFileHere": "Drop your file here",
+    "openDocument": "Open a document",
+    "openSpreadsheet": "Open a spreadsheet",
+    "openPresentation": "Open a presentation",
+    "intro": "Pick up where you left off.",
+    "openFile": "Open file…",
+    "opening": "Opening…",
+    "dropHint": "or drop a file here",
+    "recentFiles": "Recent files",
+    "recent": "Recent"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Discard unsaved changes?"
+  },
+  "errors": {
+    "openInApp": "Open .{ext} files in BetterOffice {app}.",
+    "couldNotRead": "Could not read {name}.",
+    "chooseFile": "Choose a .{ext} file.",
+    "unsupportedFile": "Choose a Word document, Excel spreadsheet, or PowerPoint presentation."
+  }
+}
