@@ -228,8 +228,20 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
         let body_bottom = page
             .fragments
             .iter()
-            .filter_map(|fragment| match fragment {
-                Fragment::Paragraph(fragment) => Some(fragment.y + fragment.height),
+            .filter_map(|item| match item {
+                Fragment::Paragraph(fragment) => {
+                    let measured = arena
+                        .find(item)
+                        .and_then(|index| input.measured.get(index));
+                    let height = match measured {
+                        Some(MeasuredBlock {
+                            block: LayoutBlock::Paragraph(block),
+                            measure: BlockExtent::Paragraph(measure),
+                        }) => crate::line_fit::fragment_fit_height(block, measure, fragment),
+                        _ => fragment.height,
+                    };
+                    Some(fragment.y + height)
+                }
                 Fragment::Table(fragment) => Some(fragment.y + fragment.height),
                 _ => None,
             })
