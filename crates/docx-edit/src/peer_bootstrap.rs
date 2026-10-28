@@ -2199,6 +2199,7 @@ mod tests {
                 "default_table",
                 "default_character",
                 "table_paragraph_formatting",
+                "font_theme",
             ],
         );
         assert_keys(&source["structure"], &["blocks", "run_revisions"]);

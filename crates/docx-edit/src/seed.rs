@@ -428,7 +428,9 @@ impl SourceMetadata {
         let style = paragraph_style_formatting(&paragraph, &self.styles, None);
         let run_style = self.styles.run_style_own(string(field(control, "styleId")));
         let inherited = merge_style_run_formatting(style.as_deref(), run_style);
-        let merged = merge_text_formatting(inherited.as_ref(), control);
+        let merged = self
+            .styles
+            .seed_formatting(merge_text_formatting(inherited.as_ref(), control));
         payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
 
@@ -721,6 +723,8 @@ pub struct StyleResolver {
     table_paragraph_formatting: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     table_run_formatting: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    font_theme: Option<docx_parse::Theme>,
     #[serde(skip)]
     memo: StyleMemo,
 }
@@ -1399,10 +1403,21 @@ pub(crate) fn package_styles(
 }
 
 impl StyleResolver {
+    fn seed_formatting(&self, mut formatting: Option<Value>) -> Option<Value> {
+        if let Some(theme) = &self.font_theme
+            && let Some(formatting) = formatting.as_mut()
+        {
+            resolve_seed_font_names(formatting, theme);
+        }
+        formatting
+    }
+
     /// Reads paragraph and character inheritance from package parts.
     pub fn from_parts(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
-        let (_, definitions) = package_styles(parts)?;
-        Ok(Self::new(definitions.as_ref()))
+        let (theme, definitions) = package_styles(parts)?;
+        let mut resolver = Self::new(definitions.as_ref());
+        resolver.font_theme = Some(theme);
+        Ok(resolver)
     }
 
     pub(crate) fn run_attrs(
@@ -1429,7 +1444,10 @@ impl StyleResolver {
         let resolved = self.resolve_paragraph_style(paragraph_style);
         let direct = run_style.map(|id| json!({ "styleId": id }));
         let direct = resolved_text_formatting(direct.as_ref(), self);
-        let formatting = merge_text_formatting(resolved.default_run.as_deref(), direct.as_ref());
+        let formatting = self.seed_formatting(merge_text_formatting(
+            resolved.default_run.as_deref(),
+            direct.as_ref(),
+        ));
         object(formatting.as_ref())
             .and_then(|value| {
                 payload(
@@ -1680,7 +1698,7 @@ impl StyleResolver {
     ) -> Option<Value> {
         let style_id = string(field(direct, "styleId"));
         let inherited = merge_style_run_formatting(paragraph_run, self.run_style_own(style_id));
-        merge_text_formatting_owned(inherited, direct)
+        self.seed_formatting(merge_text_formatting_owned(inherited, direct))
     }
 
     pub(crate) fn effective_run_formatting(
@@ -2323,6 +2341,7 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
+    styles: &StyleResolver,
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
@@ -2351,7 +2370,7 @@ fn field_payload(
             .then(|| field(Some(field_value), "formatting"))
             .flatten()
     });
-    let merged = merge_text_formatting(style_formatting, formatting);
+    let merged = styles.seed_formatting(merge_text_formatting(style_formatting, formatting));
     (
         map_from_value(json!({
             "fieldType": nullish(field(Some(field_value), "fieldType")),
@@ -2817,7 +2836,7 @@ fn hyperlink_to_units(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
                     .chain(extra_marks.iter().cloned())
@@ -2888,7 +2907,7 @@ fn field_to_units(
         })
     {
         opaque_sequences.extend(nested_sequence_names(value));
-        let (payload, marks) = field_payload(value, style_formatting, source);
+        let (payload, marks) = field_payload(value, style_formatting, styles, source);
         return vec![embed_unit("field", payload, &marks, 1)];
     }
     let mut units = Vec::new();
@@ -2908,7 +2927,7 @@ fn field_to_units(
             }
             Some("simpleField") => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
@@ -2934,7 +2953,7 @@ fn field_to_units(
             .cloned()
             .collect(),
     );
-    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    let (mut payload, marks) = field_payload(&visible, style_formatting, styles, source);
     let sequence_owner = string(field(Some(value), "instruction"))
         .and_then(docx_layout::sequence_fields::sequence_name)
         .is_some();
@@ -3073,7 +3092,7 @@ fn inline_container_units(
         }
         "simpleField" | "complexField" => {
             opaque_sequences.extend(nested_sequence_names(child));
-            let (payload, marks) = field_payload(child, style_formatting, source);
+            let (payload, marks) = field_payload(child, style_formatting, styles, source);
             vec![embed_unit("field", payload, &marks, 1)]
         }
         "inlineSdt" => vec![embed_unit(
@@ -3179,7 +3198,7 @@ fn sdt_payload(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(
@@ -3543,6 +3562,11 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
     }
+    let defaults = attrs.remove("defaultTextFormatting");
+    attrs.insert(
+        "defaultTextFormatting".to_owned(),
+        styles.seed_formatting(defaults).unwrap_or(Value::Null),
+    );
     if field(formatting, "frame").is_some_and(|frame| !frame.is_null())
         || (styles.enabled
             && field(
@@ -6162,48 +6186,6 @@ fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
     }
 }
 
-fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
-    match value {
-        OrderedValue::Array(values) => {
-            for value in values {
-                resolve_seed_ordered_fonts(value, theme);
-            }
-        }
-        OrderedValue::Object(values) => {
-            for (key, value) in values {
-                if key == "fontFamily" && matches!(value, OrderedValue::Object(_)) {
-                    let mut wrapper = json!({ "fontFamily": value.value() });
-                    resolve_seed_font_names(&mut wrapper, theme);
-                    *value = serde_json::from_value(wrapper["fontFamily"].take())
-                        .expect("font family remains valid JSON");
-                    if let OrderedValue::Object(fonts) = value {
-                        let order = [
-                            "ascii",
-                            "hAnsi",
-                            "eastAsia",
-                            "cs",
-                            "asciiTheme",
-                            "hAnsiTheme",
-                            "eastAsiaTheme",
-                            "csTheme",
-                            "hint",
-                        ];
-                        fonts.sort_by_key(|(key, _)| {
-                            order
-                                .iter()
-                                .position(|name| *name == key.as_str())
-                                .unwrap_or(order.len())
-                        });
-                    }
-                } else {
-                    resolve_seed_ordered_fonts(value, theme);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 fn lower_docx_with(
     mut envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
@@ -6215,8 +6197,7 @@ fn lower_docx_with(
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
-    let mut parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    resolve_seed_font_names(&mut parsed, &envelope.document.package.theme);
+    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
     let opaque_total = opaque_xml_bytes(&parsed);
     if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
         return Err(opaque_seed_budget_exceeded(opaque_total));
@@ -6225,20 +6206,20 @@ fn lower_docx_with(
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let mut ordered: OrderedValue =
+        let ordered: OrderedValue =
             serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
-        resolve_seed_ordered_fonts(&mut ordered, &envelope.document.package.theme);
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
         values
     } else {
         BTreeMap::new()
     };
+    let theme = std::mem::take(&mut envelope.document.package.theme);
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
-    let (mut context, roots) = lower_package(package, source_json);
+    let (mut context, roots) = lower_package(package, source_json, Some(theme));
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
@@ -6572,10 +6553,19 @@ pub(crate) fn replica_source(
 fn lower_package(
     package: &Value,
     source_json: BTreeMap<String, String>,
+    theme: Option<docx_parse::Theme>,
 ) -> (LoweringContext, Vec<SourceRoot>) {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
+    let mut definitions = field(Some(package), "styles").cloned();
+    if let Some(theme) = &theme
+        && let Some(definitions) = definitions.as_mut()
+    {
+        resolve_seed_font_names(definitions, theme);
+    }
+    let mut styles = StyleResolver::new(definitions.as_ref());
+    styles.font_theme = theme;
     let mut context = LoweringContext {
-        styles: StyleResolver::new(field(Some(package), "styles")),
+        styles,
         theme: field(Some(package), "theme").cloned(),
         source_json: Arc::new(source_json),
         plans: Vec::new(),
@@ -7095,6 +7085,47 @@ mod header_footer_alias_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn seed_font_snapshots_preserve_authored_names_and_theme_references() {
+        for names in [r#"w:ascii="Cambria" w:hAnsi="Cambria" "#, ""] {
+            let fonts = format!(
+                r#"<w:rFonts {names}w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#
+            );
+            let body = format!(
+                r#"<w:p><w:pPr><w:rPr>{fonts}</w:rPr></w:pPr><w:r><w:t>A</w:t></w:r><w:r><w:rPr>{fonts}</w:rPr><w:t>Title</w:t></w:r></w:p>"#
+            );
+            let bytes = fixture::Package::new(&body).bytes();
+            let envelope = parse_docx_for_edit(&bytes).unwrap();
+            let parsed = serde_json::to_value(&envelope.document).unwrap();
+            let paragraph = &parsed["package"]["document"]["content"][0];
+            let authored = &paragraph["content"][1]["formatting"];
+            let lowered = lower_docx(envelope, None).unwrap();
+            let plan = &lowered.context.plans[0];
+            assert_eq!(plan.units[1].attrs["fontFamily"]["ascii"], "Calibri Light");
+            assert_eq!(plan.units[1].attrs["fontFamily"]["hAnsi"], "Calibri Light");
+            let UnitContent::Embed { kind, payload } = &plan.units.last().unwrap().content else {
+                panic!("missing paragraph mark");
+            };
+            assert_eq!(kind, "pilcrow");
+            assert_eq!(
+                &payload["_originalRunBoundaries"][1]["formatting"],
+                authored
+            );
+            assert_eq!(
+                payload["_originalRunBoundaries"][1]["marksKey"],
+                marks_key(&plan.units[1].marks)
+            );
+            assert_eq!(
+                payload["_originalFormatting"]["runProperties"],
+                paragraph["formatting"]["runProperties"]
+            );
+            assert_eq!(
+                payload["defaultTextFormatting"]["fontFamily"]["ascii"],
+                "Calibri Light"
+            );
+        }
+    }
+
     #[test]
     fn seed_theme_fonts_override_names_on_the_same_element() {
         let mut theme = docx_parse::Theme::default();
@@ -9022,7 +9053,7 @@ mod tests {
             let package = json!({ "document": { "content": [
                 table, continuation, { "type": "table", "rows": [] }
             ] } });
-            let (context, _) = lower_package(&package, BTreeMap::new());
+            let (context, _) = lower_package(&package, BTreeMap::new(), None);
             assert_eq!(
                 context
                     .plans
@@ -9124,7 +9155,7 @@ mod tests {
             let expected = batches(context);
             for _ in 0..2 {
                 assert_eq!(
-                    batches(lower_package(&package, BTreeMap::new()).0),
+                    batches(lower_package(&package, BTreeMap::new(), None).0),
                     expected
                 );
             }

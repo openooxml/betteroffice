@@ -181,9 +181,12 @@ interface ProjectedTable {
   rows: ProjectedRow[];
 }
 
-interface LoweringContext {
+interface SeedFormattingContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
+}
+
+interface LoweringContext extends SeedFormattingContext {
   plans: StoryPlan[];
   compatibilityMode: number;
   opaqueSequences: string[];
@@ -231,7 +234,7 @@ function resolveTextFormatting(
   return styleFormatting ? mergeTextFormatting(styleFormatting, formatting) : formatting;
 }
 
-function formattingToMarks(formatting: TextFormatting | undefined): MarkDescriptor[] {
+function formattingToMarks(formatting: TextFormatting | undefined, theme?: Theme | null): MarkDescriptor[] {
   if (!formatting) return [];
   const marks: MarkDescriptor[] = [];
   const add = (name: string, attrs: Attrs = {}) => marks.push({ name, attrs });
@@ -275,16 +278,17 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
       sizeCs: formatting.fontSizeCs ?? null,
     });
   }
-  if (formatting.fontFamily) {
+  const fonts = seedFontNames(formatting, theme)?.fontFamily;
+  if (fonts) {
     add('fontFamily', {
-      ascii: formatting.fontFamily.ascii ?? null,
-      hAnsi: formatting.fontFamily.hAnsi ?? null,
-      eastAsia: formatting.fontFamily.eastAsia ?? null,
-      cs: formatting.fontFamily.cs ?? null,
-      asciiTheme: formatting.fontFamily.asciiTheme ?? null,
-      hAnsiTheme: formatting.fontFamily.hAnsiTheme ?? null,
-      eastAsiaTheme: formatting.fontFamily.eastAsiaTheme ?? null,
-      csTheme: formatting.fontFamily.csTheme ?? null,
+      ascii: fonts.ascii ?? null,
+      hAnsi: fonts.hAnsi ?? null,
+      eastAsia: fonts.eastAsia ?? null,
+      cs: fonts.cs ?? null,
+      asciiTheme: fonts.asciiTheme ?? null,
+      hAnsiTheme: fonts.hAnsiTheme ?? null,
+      eastAsiaTheme: fonts.eastAsiaTheme ?? null,
+      csTheme: fonts.csTheme ?? null,
     });
   }
   if (formatting.vertAlign === 'superscript') add('superscript');
@@ -390,13 +394,15 @@ function embedUnit(
 function runMarks(
   run: Run,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null
+  context: SeedFormattingContext
 ): MarkDescriptor[] {
+  const { styleResolver } = context;
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
   const marks = formattingToMarks(
-    mergeTextFormatting(mergeStyleRunFormatting(styleFormatting, runStyleFormatting), run.formatting)
+    mergeTextFormatting(mergeStyleRunFormatting(styleFormatting, runStyleFormatting), run.formatting),
+    context.theme
   );
   const styleId = run.formatting?.styleId;
   const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
@@ -547,7 +553,8 @@ function chartPayload(chart: Chart): Attrs {
 
 function fieldPayload(
   field: SimpleField | ComplexField,
-  styleFormatting?: TextFormatting
+  styleFormatting: TextFormatting | undefined,
+  theme?: Theme | null
 ): {
   payload: Attrs;
   marks: MarkDescriptor[];
@@ -578,7 +585,7 @@ function fieldPayload(
       fieldData: JSON.stringify(field),
       modelKind: 'field',
     },
-    marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting)),
+    marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting), theme),
   };
 }
 
@@ -708,7 +715,7 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
 function fieldToUnits(
   value: SimpleField | ComplexField,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   projectionId: number,
   opaqueSequences: string[]
 ): InlineUnit[] {
@@ -720,7 +727,7 @@ function fieldToUnits(
   ];
   if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
     opaqueSequences.push(...nestedSequenceNames(value));
-    const field = fieldPayload(value, styleFormatting);
+    const field = fieldPayload(value, styleFormatting, context.theme);
     return [embedUnit('field', field.payload, field.marks)];
   }
   const units: InlineUnit[] = [];
@@ -730,9 +737,9 @@ function fieldToUnits(
     opaqueSequences.push(
       ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
     );
-    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting, context.theme) : null;
     const projected = child.type === 'hyperlink'
-      ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
+      ? hyperlinkToUnits(child, styleFormatting, context, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
@@ -741,7 +748,7 @@ function fieldToUnits(
     units.push(...projected);
   });
   const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
-  const field = fieldPayload(visible, styleFormatting);
+  const field = fieldPayload(visible, styleFormatting, context.theme);
   opaqueSequences.push(
     ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)
   );
@@ -866,18 +873,18 @@ function runContentToUnits(
 function runToUnits(
   run: Run,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   opaqueSequences: string[],
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
-  const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
+  const marks = [...runMarks(run, styleFormatting, context), ...extraMarks];
   return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences));
 }
 
 function hyperlinkToUnits(
   hyperlink: Hyperlink,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   opaqueSequences: string[],
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
@@ -885,11 +892,11 @@ function hyperlinkToUnits(
   const link = hyperlinkMark(hyperlink);
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
-      const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
+      const marks = [...runMarks(child, styleFormatting, context), ...extraMarks, link];
       for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, context.theme);
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
       units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
@@ -898,7 +905,7 @@ function hyperlinkToUnits(
       hasTrackedControlContent(child)
     )) {
       units.push(embedUnit(
-        'sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [...extraMarks, link], 2
+        'sdt', sdtPayload(child, styleFormatting, context, opaqueSequences), [...extraMarks, link], 2
       ));
     }
   }
@@ -924,7 +931,7 @@ function trackedMark(
 function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   opaqueSequences: string[],
   inControl = false
 ): InlineUnit[] {
@@ -937,13 +944,13 @@ function trackedToUnits(
   const units: InlineUnit[] = [];
   for (const child of content.content) {
     if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]));
+      units.push(...runToUnits(child, styleFormatting, context, opaqueSequences, [mark]));
     } else if (child.type === 'hyperlink') {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
-      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
+      const linked = hyperlinkToUnits(child, styleFormatting, context, opaqueSequences, [mark]);
       units.push(...linked);
     } else if (inControl || child.type === 'inlineSdt' || hasTrackedControlContent(child)) {
-      const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
+      const nested = inlineContainerUnits(child, styleFormatting, context, opaqueSequences, inControl);
       const attrs = marksToYrsAttrs([mark]);
       units.push(...nested.map((unit) => ({
         ...unit,
@@ -958,31 +965,31 @@ function trackedToUnits(
 function inlineContainerUnits(
   child: InlineSdt['content'][number],
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   opaqueSequences: string[],
   inControl: boolean
 ): InlineUnit[] {
-  if (child.type === 'run') return runToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+  if (child.type === 'run') return runToUnits(child, styleFormatting, context, opaqueSequences);
   if (child.type === 'hyperlink') {
     opaqueSequences.push(...hyperlinkSequenceNames(child));
-    return hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+    return hyperlinkToUnits(child, styleFormatting, context, opaqueSequences);
   }
   if (child.type === 'simpleField' || child.type === 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(child));
-    const field = fieldPayload(child, styleFormatting);
+    const field = fieldPayload(child, styleFormatting, context.theme);
     return [embedUnit('field', field.payload, field.marks)];
   }
   if (child.type === 'inlineSdt') {
-    return [embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences), [], 2)];
+    return [embedUnit('sdt', sdtPayload(child, styleFormatting, context, opaqueSequences), [], 2)];
   }
   if (child.type === 'mathEquation') return [embedUnit('math', mathPayload(child))];
-  return trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
+  return trackedToUnits(child, styleFormatting, context, opaqueSequences, inControl);
 }
 
 function sdtPayload(
   sdt: InlineSdt,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   opaqueSequences: string[]
 ): Attrs {
   const content: Array<
@@ -1014,20 +1021,20 @@ function sdtPayload(
 
   for (const child of sdt.content) {
     if (child.type === 'run') {
-      runToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
+      runToUnits(child, styleFormatting, context, opaqueSequences).forEach(append);
     } else if (child.type === 'hyperlink') {
       opaqueSequences.push(...hyperlinkSequenceNames(child));
-      hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
+      hyperlinkToUnits(child, styleFormatting, context, opaqueSequences).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, context.theme);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
-      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
+      append(embedUnit('sdt', sdtPayload(child, styleFormatting, context, opaqueSequences)));
     } else if (child.type === 'mathEquation') {
       append(embedUnit('math', mathPayload(child)));
     } else {
-      trackedToUnits(child, styleFormatting, styleResolver, opaqueSequences, true).forEach(append);
+      trackedToUnits(child, styleFormatting, context, opaqueSequences, true).forEach(append);
     }
   }
   return dropNulls({
@@ -1102,9 +1109,9 @@ function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'col
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null
+  context: SeedFormattingContext
 ): Attrs | null {
-  const units = runToUnits(run, styleFormatting, styleResolver, []);
+  const units = runToUnits(run, styleFormatting, context, []);
   if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
@@ -1123,12 +1130,13 @@ function runBoundary(
 
 function paragraphAttrs(
   paragraph: Paragraph,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   units: readonly InlineUnit[],
   runBoundaries: Attrs[] | undefined,
   tableParagraphFormatting?: ParagraphFormatting,
   tableRunFormatting?: TextFormatting
 ): Attrs {
+  const { styleResolver } = context;
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
   const directFirst = formatting?.indentFirstLine === 0 ? undefined : formatting?.indentFirstLine;
@@ -1252,6 +1260,8 @@ function paragraphAttrs(
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
   }
 
+  attrs.defaultTextFormatting = seedFontNames(attrs.defaultTextFormatting as TextFormatting | undefined, context.theme) ?? null;
+
   if (paragraph.sectionProperties) {
     attrs._sectionProperties = paragraph.sectionProperties;
     const start = paragraph.sectionProperties.sectionStart;
@@ -1320,7 +1330,7 @@ function unitsForParagraphContent(content: ParagraphContent): number {
 
 function paragraphUnits(
   paragraph: Paragraph,
-  styleResolver: StyleResolver | null,
+  context: SeedFormattingContext,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; commentMarks: CommentMark[]; ppr: Attrs; opaqueSequences: string[] } {
@@ -1328,29 +1338,29 @@ function paragraphUnits(
   const opaqueSequences: string[] = [];
   const commentMarks: CommentMark[] = [];
   let boundaries: Attrs[] | undefined = [];
-  const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
+  const styleFormatting = paragraphStyleFormatting(paragraph, context.styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
     if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
       commentMarks.push({ unit: start, start: content.type === 'commentRangeStart', id: content.id });
     } else if (content.type === 'run') {
-      const boundary = runBoundary(content, styleFormatting, styleResolver);
+      const boundary = runBoundary(content, styleFormatting, context);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver, opaqueSequences));
+      units.push(...runToUnits(content, styleFormatting, context, opaqueSequences));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       opaqueSequences.push(...hyperlinkSequenceNames(content));
-      const linked = hyperlinkToUnits(content, styleFormatting, styleResolver, opaqueSequences);
+      const linked = hyperlinkToUnits(content, styleFormatting, context, opaqueSequences);
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex, opaqueSequences));
+      units.push(...fieldToUnits(content, styleFormatting, context, contentIndex, opaqueSequences));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
-        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver, opaqueSequences), [], 2)
+        embedUnit('sdt', sdtPayload(content, styleFormatting, context, opaqueSequences), [], 2)
       );
     } else if (
       content.type === 'insertion' ||
@@ -1359,7 +1369,7 @@ function paragraphUnits(
       content.type === 'moveTo'
     ) {
       boundaries = undefined;
-      units.push(...trackedToUnits(content, styleFormatting, styleResolver, opaqueSequences));
+      units.push(...trackedToUnits(content, styleFormatting, context, opaqueSequences));
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
@@ -1368,7 +1378,7 @@ function paragraphUnits(
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
-  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting, extraRunFormatting);
+  const attrs = paragraphAttrs(paragraph, context, units, boundaries, tableParagraphFormatting, extraRunFormatting);
   return { units, commentMarks, ppr: paraAttrsToPpr(attrs), opaqueSequences };
 }
 
@@ -1971,7 +1981,7 @@ function visitStory(
     if (block.type === 'paragraph') {
       const paragraph = paragraphUnits(
         block,
-        context.styleResolver,
+        context,
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
@@ -2124,37 +2134,22 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
   session.applySeedRawOps(plan.storyId, ops);
 }
 
-function seedFontNames(document: Document): () => void {
-  const restore: Array<() => void> = [];
-  const visit = (value: unknown): void => {
-    if (!value || typeof value !== 'object' || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
-    if (value instanceof Map) {
-      for (const child of value.values()) visit(child);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (record.fontFamily && typeof record.fontFamily === 'object') {
-      const original = record.fontFamily;
-      const fonts = { ...original } as Record<string, unknown>;
-      for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
-        const referenceName = fonts[reference];
-        if (typeof referenceName === 'string') {
-          const name = resolveRFontsThemeFont(referenceName, document.package.theme?.fontScheme);
-          if (name !== null) fonts[explicit] = name;
-          else if (!fonts[explicit]) {
-            const fallback = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
-            if (fallback !== null) fonts[explicit] = fallback;
-          }
-        }
+function seedFontNames(formatting: TextFormatting | undefined, theme?: Theme | null): TextFormatting | undefined {
+  if (!formatting?.fontFamily) return formatting;
+  const fonts = { ...formatting.fontFamily };
+  for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
+    const referenceName = fonts[reference];
+    if (typeof referenceName === 'string') {
+      const name = resolveRFontsThemeFont(referenceName, theme?.fontScheme);
+      if (name !== null) fonts[explicit] = name;
+      else if (!fonts[explicit]) {
+        const fallback = resolveThemeFont(referenceName, theme?.fontScheme);
+        if (fallback !== null) fonts[explicit] = fallback;
       }
-      const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
-      record.fontFamily = Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key]]));
-      restore.push(() => { record.fontFamily = original; });
     }
-    for (const child of Object.values(record)) visit(child);
-  };
-  visit(document.package);
-  return () => { restore.reverse().forEach(reset => reset()); };
+  }
+  const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
+  return { ...formatting, fontFamily: Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key as keyof typeof fonts]])) };
 }
 
 /**
@@ -2167,16 +2162,6 @@ function seedFontNames(document: Document): () => void {
  * @public
  */
 export function documentToYrs(
-  session: YrsSession,
-  document: Document,
-  options: YrsOpeningOptions = {}
-): void {
-  const restore = seedFontNames(document);
-  try { seedDocument(session, document, options); }
-  finally { restore(); }
-}
-
-function seedDocument(
   session: YrsSession,
   document: Document,
   options: YrsOpeningOptions = {}

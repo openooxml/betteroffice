@@ -14,14 +14,14 @@ const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const FONTS = '<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>';
 
-function fontPackage(latin: string | undefined, fonts: string): Uint8Array<ArrayBuffer> {
+function fontPackage(latin: string | undefined, fonts: string, prefix = ''): Uint8Array<ArrayBuffer> {
   const parts = new Map([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
       (latin !== undefined ? '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>' : '') + '</Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
     ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
       (latin !== undefined ? `<Relationship Id="theme" Type="${R}/theme" Target="theme/theme1.xml"/>` : '') + '</Relationships>'],
-    ['word/document.xml', `<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:rPr>${fonts}</w:rPr><w:t>Title</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`],
+    ['word/document.xml', `<w:document xmlns:w="${W}"><w:body><w:p>${prefix}<w:r><w:rPr>${fonts}</w:rPr><w:t>Title</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`],
   ]);
   if (latin !== undefined) parts.set('word/theme/theme1.xml', `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="${latin}"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>`);
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)]))));
@@ -32,6 +32,45 @@ beforeAll(() => preloadEditWasm(new Uint8Array(
 )));
 
 for (const path of ['native', 'typescript'] as const) {
+  for (const [theme, latin] of [['resolved', 'Calibri Light'], ['default', undefined]] as const) {
+    for (const [authored, authoredFonts] of [
+      ['paired', FONTS],
+      ['theme-only', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>'],
+    ] as const) {
+      test(`${path} ${theme} ${authored} fonts survive a paragraph split`, async () => {
+        const bytes = fontPackage(latin, authoredFonts, '<w:r><w:t>A</w:t></w:r>');
+        const session = await createYrsSession();
+        const hydrated = await createYrsSession();
+        try {
+          const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+          if (path === 'native') session.seedFromDocx(bytes);
+          else documentToYrs(session, parsed);
+          hydrated.openDocx(bytes, false);
+          hydrated.loadState(session.encodeState());
+          const target = hydrated.paragraphs('body')[0]!;
+          hydrated.splitParagraph({ story: 'body', paraId: target.paraId, offset: 1 });
+          const blocks = hydrated.yrsBlocksForStory('body', {}) as LayoutBlock[];
+          const fonts = blocks.flatMap(block => block.kind === 'paragraph'
+            ? block.runs.flatMap(run => run.kind === 'text' && run.text === 'Title' ? [run] : []) : []);
+          expect(fonts).toHaveLength(1);
+          expect(fonts[0]).toMatchObject({
+            fontFamily: 'Calibri Light',
+            fontSlots: { ascii: 'Calibri Light', hAnsi: 'Calibri Light' },
+          });
+          const saved = unzipContainer((await saveYrsDocx(hydrated)).bytes);
+          const xml = new TextDecoder().decode(saved['word/document.xml']);
+          expect([...xml.matchAll(/<w:rFonts\b[^>]*\/>/g)].map(match => match[0])).toEqual([authoredFonts]);
+          expect([...xml.matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)].map(match =>
+            [...match[1]!.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(text => text[1]).join('')
+          )).toEqual(['A', 'Title']);
+        } finally {
+          session.destroy();
+          hydrated.destroy();
+        }
+      });
+    }
+  }
+
   for (const [theme, latin, reference, effective] of [
     ['resolved', 'Calibri', 'majorHAnsi', 'Calibri'],
     ['default major', undefined, 'majorHAnsi', 'Calibri Light'],
