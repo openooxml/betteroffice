@@ -39,10 +39,7 @@ pub(crate) fn chart_primitive<'a>(
     budget: usize,
     text: &mut dyn FnMut(ChartText<'_>) -> Result<Primitive, RenderError>,
 ) -> Result<Primitive, RenderError> {
-    let mut chart = plot_model(space);
-    if !default_font.is_empty() {
-        chart.text.chart.font.get_or_insert(default_font);
-    }
+    let chart = plot_model_with_font(space, default_font);
     let mut primitives = Vec::new();
     let mut sink = ChartSink {
         primitives: &mut primitives,
@@ -67,6 +64,59 @@ pub(crate) fn chart_primitive<'a>(
         primitives,
         transform: frame.transform,
     })
+}
+
+/// visits chart fonts with zero text advances so labels remain unsplit.
+pub(crate) fn visit_chart_fonts(
+    space: &ChartSpace,
+    default_font: &str,
+    rect: PlotRect,
+    remaining: &mut usize,
+    visit: &mut dyn FnMut(&PlotFont),
+) {
+    struct FontSink<'a> {
+        remaining: &'a mut usize,
+        visit: &'a mut dyn FnMut(&PlotFont),
+    }
+
+    impl PlotSink for FontSink<'_> {
+        fn turns_text(&self) -> bool {
+            true
+        }
+
+        fn accepts_more(&mut self) -> bool {
+            *self.remaining > 0
+        }
+
+        fn measure_text(&mut self, _: &str, font: &PlotFont) -> Option<f64> {
+            if self.accepts_more() {
+                (self.visit)(font);
+            }
+            Some(0.0)
+        }
+
+        fn push_op(&mut self, op: PlotOp) -> bool {
+            if !self.accepts_more() {
+                return false;
+            }
+            *self.remaining -= 1;
+            if let PlotOp::Text { font, .. } = op {
+                (self.visit)(&font);
+            }
+            true
+        }
+    }
+
+    let chart = plot_model_with_font(space, default_font);
+    plot_chart_into(&chart, rect, &mut FontSink { remaining, visit });
+}
+
+fn plot_model_with_font<'a>(space: &'a ChartSpace, default_font: &'a str) -> PlotChart<'a> {
+    let mut chart = plot_model(space);
+    if !default_font.is_empty() {
+        chart.text.chart.font.get_or_insert(default_font);
+    }
+    chart
 }
 
 /// Supplies value labels only for legacy charts without `c:dLbls`, and leaves
