@@ -184,6 +184,117 @@ test('insert before validation refuses bad anchors and list continue', async () 
   await expect(doc.edit({ version: version(), edits: [{ op: 'insert_paragraphs', before: 'p9999', paragraphs: [{ text: 'X' }] }] })).rejects.toMatchObject({ code: 'UNKNOWN_REF' });
 });
 
+test('insert before keeps style inherited run formatting for read and later edits', async () => {
+  const doc = await open(await mainFixture());
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(doc, 'Heading').ref, paragraphs: [{ text: 'At the top' }],
+  }] });
+  const inserted = doc.read(item(doc, 'At the top').ref);
+  expect(inserted.runs).toHaveLength(1);
+  expect(inserted.runs[0].formatting.bold).toBe(true);
+  const match = doc.grep({ query: 'At the top' });
+  await doc.edit({ version: match.version, edits: [{ op: 'format_text', match: match.matches[0].match, italic: true }] });
+  const saved = await xmlOf(doc);
+  const added = blockOf(saved, 'At the top');
+  expect(firstRPrOf(added)).toContain('<w:i/>');
+  expect(firstRPrOf(added)).not.toMatch(/<w:b w:val="(?:0|false|off)"\/>/);
+  expect(doc.read(item(doc, 'At the top').ref).runs[0].formatting.bold).toBe(true);
+});
+
+test('insert before a paragraph after a table formats the whole new text', async () => {
+  const build = () => {
+    const cell = para('', 'Cell text');
+    const table = `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${cell}</w:tc></w:tr></w:tbl>`;
+    return fixtureWith(para('', 'Prev') + table + para(BODY_PPR, 'After table', BODY_RPR) + para('', 'Tail'), BODY_STYLES);
+  };
+  const plain = await open(await build());
+  await plain.edit({ version: plain.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(plain, 'After table').ref, paragraphs: [{ text: 'Inserted plain' }],
+  }] });
+  expect(plain.read(item(plain, 'Inserted plain').ref).runs).toHaveLength(1);
+  expect(blocks(await xmlOf(plain)).map(textOf)).toContain('Inserted plain');
+  expect(firstRPrOf(blockOf(await xmlOf(plain), 'Inserted plain'))).not.toContain('C00000');
+
+  const anchored = await open(await build());
+  await anchored.edit({ version: anchored.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(anchored, 'After table').ref, runFormat: 'anchor', paragraphs: [{ text: 'Inserted anchored' }],
+  }] });
+  const saved = await xmlOf(anchored);
+  expect(anchored.read(item(anchored, 'Inserted anchored').ref).runs).toHaveLength(1);
+  expect(canonical(firstRPrOf(blockOf(saved, 'Inserted anchored')))).toBe(canonical(firstRPrOf(blockOf(saved, 'After table'))));
+});
+
+test('explicit style on insert before resolves the new style instead of copying the anchor style', async () => {
+  const doc = await open(await mainFixture());
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(doc, 'Heading').ref,
+    paragraphs: [{ text: 'Lead-in', style: 'Normal' }, { text: 'Sub', style: 'Heading2' }],
+  }] });
+  const items = doc.list({ limit: 100 }).items;
+  expect(items.find(entry => entry.text === 'Lead-in')?.headingLevel).toBeNull();
+  expect(items.find(entry => entry.text === 'Sub')?.headingLevel).toBe(2);
+
+  const styles = '<w:style w:type="paragraph" w:styleId="SpacedA"><w:name w:val="Spaced A"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="111"/><w:jc w:val="center"/></w:pPr></w:style>'
+    + '<w:style w:type="paragraph" w:styleId="SpacedB"><w:name w:val="Spaced B"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="222"/></w:pPr></w:style>';
+  const leaked = await open(await fixtureWith(para('<w:pStyle w:val="SpacedA"/>', 'Anchor A') + para('', 'Tail'), styles));
+  await leaked.edit({ version: leaked.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(leaked, 'Anchor A').ref, paragraphs: [{ text: 'With B', style: 'SpacedB' }],
+  }] });
+  const added = blockOf(await xmlOf(leaked), 'With B');
+  expect(canonical(pPrOf(added))).toBe('<w:pPr><w:pStyle w:val="SpacedB"/></w:pPr>');
+});
+
+async function numberedStyleFixture(anchorText = 'Style one', noDefault = false): Promise<Uint8Array> {
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const level = `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="ListNumber"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>`;
+  const numbering = `<w:numbering xmlns:w="${w}"><w:abstractNum w:abstractNumId="2">${level}</w:abstractNum><w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num></w:numbering>`;
+  const styles = '<w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="3"/></w:numPr><w:spacing w:after="60"/></w:pPr></w:style>';
+  const body = para('<w:pStyle w:val="Heading1"/>', 'Heading') + para('<w:pStyle w:val="ListNumber"/>', anchorText) + para('', 'Plain') + para('', 'Tail');
+  return fixtureWith(body, styles, async zip => {
+    zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>'));
+    zip.file('word/_rels/document.xml.rels', (await zip.file('word/_rels/document.xml.rels')!.async('string')).replace('</Relationships>', '<Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>'));
+    zip.file('word/numbering.xml', numbering);
+    if (noDefault) zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace(' w:default="1"', ''));
+  });
+}
+
+test('insert before a style numbered paragraph keeps the list only without an explicit style', async () => {
+  const doc = await open(await numberedStyleFixture());
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(doc, 'Style one').ref, paragraphs: [{ text: 'Before style list' }],
+  }] });
+  expect(item(doc, 'Before style list').list).toEqual({ level: 0 });
+  const added = blockOf(await xmlOf(doc), 'Before style list');
+  expect(pPrOf(added)).toContain('<w:pStyle w:val="ListNumber"/>');
+  expect(pPrOf(added)).not.toContain('<w:numPr>');
+
+  const styled = await open(await numberedStyleFixture());
+  await styled.edit({ version: styled.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(styled, 'Style one').ref, paragraphs: [{ text: 'Not a list', style: 'Normal' }],
+  }] });
+  expect(item(styled, 'Not a list').list).toBeUndefined();
+  expect(pPrOf(blockOf(await xmlOf(styled), 'Not a list'))).not.toContain('<w:numPr>');
+});
+
+test('explicit numbered style is refused like after and a missing default style does not break before', async () => {
+  const doc = await open(await numberedStyleFixture());
+  const plain = item(doc, 'Plain').ref;
+  const codeOf = async (edit: Parameters<DocxAgentDocument['edit']>[0]['edits'][number]) => {
+    try { await doc.edit({ version: doc.list().version, edits: [edit] }); return 'ok'; }
+    catch (error) { return (error as { code: string }).code; }
+  };
+  const afterCode = await codeOf({ op: 'insert_paragraphs', after: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
+  const beforeCode = await codeOf({ op: 'insert_paragraphs', before: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
+  expect(afterCode).not.toBe('ok');
+  expect(beforeCode).toBe(afterCode);
+
+  const noDefault = await open(await numberedStyleFixture('Style one', true));
+  await noDefault.edit({ version: noDefault.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(noDefault, 'Heading').ref, paragraphs: [{ text: 'No default top' }],
+  }] });
+  expect(blocks(await xmlOf(noDefault)).map(textOf)[0]).toBe('No default top');
+});
+
 test('insert after keeps its existing plain behaviour', async () => {
   const doc = await open(await mainFixture());
   const receipt = await doc.edit({ version: doc.list().version, edits: [{

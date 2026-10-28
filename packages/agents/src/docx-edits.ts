@@ -228,12 +228,20 @@ function paragraphMarkAttrs(formatting: TextFormatting | null | undefined): Reco
   return attrs;
 }
 
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
+
 function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   const segments = draft.storySegments(target.story);
   const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
   let start = end;
   while (start > 0 && segments[start - 1].kind !== 'pilcrow') start--;
+  while (start < end && segments[start].kind === 'embed' && BLOCK_EMBEDS.has(segments[start].embedKind)) start++;
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
+}
+
+function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
+  const result = draft.formatTextTarget({ kind: 'paragraph', story: target.story, paraId: target.paraId }, delta);
+  if (!result.ok) throw new DocumentToolError(result.failure.code.toUpperCase().replaceAll('-', '_'), result.failure.message);
 }
 
 function inlineLength(child: ParagraphContent): number {
@@ -302,9 +310,11 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
   let attrs: Record<string, unknown> | undefined;
   let formatting: TextFormatting | undefined;
   let paragraphFormatting: ParagraphFormatting | undefined;
+  let tableRun: TextFormatting | undefined;
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
     paragraphFormatting = selected?.paragraphFormatting;
+    tableRun = selected?.tableRun;
     let offset = 0;
     const run = selected?.run && content.find(segment => {
       const start = offset;
@@ -321,7 +331,7 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
     }
   } finally { inheritance.dispose(); }
   const defaultStyleId = source?.package.styles?.styles.find(style => style.type === 'paragraph' && style.default)?.styleId;
-  return { attrs, formatting, paragraphFormatting, markProperties: mark.properties, defaultStyleId };
+  return { attrs, formatting, paragraphFormatting, tableRun, styles: source?.package.styles, markProperties: mark.properties, defaultStyleId };
 }
 
 function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
@@ -331,19 +341,40 @@ function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraph
     draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
     const current = paragraphSegments(draft, { story, paraId }).content;
     const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
-    draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: { ...cleared, ...attrs } });
+    formatParagraph(draft, { story, paraId }, { other: { ...cleared, ...attrs } });
   });
 }
 
-function clearRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[]) {
+function setInheritedRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], inherited: readonly Record<string, unknown>[]) {
   created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
-    draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: {} }]);
     const current = paragraphSegments(draft, { story, paraId }).content;
     const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
-    if (Object.keys(cleared).length) draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: cleared });
+    formatParagraph(draft, { story, paraId }, { other: { ...cleared, ...inherited[index] } });
   });
+}
+
+const LIST_DERIVED = ['listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor', 'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'listStartOverride'];
+const DIRECT_FLATTENED = new Set([...PARAGRAPH_PROPERTIES, 'cnfStyle', 'adjustRightInd'].filter(key => !['pStyle', '_originalFormatting', 'defaultTextFormatting', 'numPrFromStyle'].includes(key)));
+
+function applyDirectProperties(draft: YrsSession, target: DocxParagraphTarget, current: Record<string, unknown> | undefined, direct: Record<string, unknown>, effective: string | null, anchor: Record<string, unknown>) {
+  const set = (key: string, value: unknown) => {
+    if (JSON.stringify(current?.[key] ?? null) !== JSON.stringify(value ?? null)) draft.setParagraphAttr(target.paraId, key, value ?? null);
+  };
+  set('_originalFormatting', { ...(effective ? { styleId: effective } : {}), ...direct });
+  for (const [key, value] of Object.entries(direct)) {
+    if (key === 'runProperties') {
+      const anchorStyle = typeof anchor.pStyle === 'string' ? anchor.pStyle : null;
+      if (effective === anchorStyle) set('defaultTextFormatting', anchor.defaultTextFormatting ?? null);
+      continue;
+    }
+    if (key !== 'numPrFromStyle' && DIRECT_FLATTENED.has(key)) set(key, value);
+  }
+  if ('numPr' in direct) {
+    set('numPrFromStyle', null);
+    for (const key of LIST_DERIVED) set(key, anchor[key] ?? null);
+  }
 }
 
 function copiedProperties(anchor: Record<string, unknown>, original: unknown): Record<string, unknown> {
@@ -370,12 +401,36 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
 }
 
 export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[], runFormat?: 'style' | 'anchor'): DocxParagraphTarget[] {
-  const { attrs, formatting, paragraphFormatting, markProperties, defaultStyleId } = anchorRunFormat(draft, target);
-  const seeded = paragraphs.map(({ text, styleId }) => ({ text, styleId: defaultStyleId ?? styleId }));
-  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'start', paragraphs: seeded }).newParagraphs;
-  applyCopiedProperties(draft, target.story, created, copiedProperties(markProperties, paragraphFormatting ?? markProperties._originalFormatting), COPIED_PROPERTIES, index => paragraphs[index].styleId);
-  if (runFormat === 'anchor' && attrs) applyAnchorRunFormat(draft, created, paragraphs, attrs, formatting);
-  else clearRunFormat(draft, created, paragraphs);
+  const anchor = anchorRunFormat(draft, target);
+  const { markProperties } = anchor;
+  const anchorStyle = typeof markProperties.pStyle === 'string' ? markProperties.pStyle : null;
+  const directSource = anchor.paragraphFormatting ?? markProperties._originalFormatting;
+  const direct = Object.fromEntries(Object.entries((directSource && typeof directSource === 'object' ? directSource : {}) as Record<string, unknown>)
+    .filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
+  const inheritance = draft.runInheritance(anchor.styles);
+  let created: DocxParagraphTarget[] = [];
+  let inherited: Record<string, unknown>[] = [];
+  try {
+    const effective = paragraphs.map(({ styleId }) => styleId ?? anchorStyle);
+    const numbered = effective.map(style => style ? inheritance.paragraphFormatting(style, undefined)?.numPr != null : false);
+    inherited = effective.map(style => inheritance.attributes(style, null, anchor.tableRun));
+    const styleList = anchor.styles?.styles.filter(style => style.type === 'paragraph') ?? [];
+    const safeStyle = (anchor.defaultStyleId && !inheritance.paragraphFormatting(anchor.defaultStyleId, undefined)?.numPr ? anchor.defaultStyleId : undefined)
+      ?? styleList.find(style => !inheritance.paragraphFormatting(style.styleId, undefined)?.numPr)?.styleId;
+    const seededStyles = paragraphs.map(({ styleId }, index) => styleId ?? (numbered[index] && safeStyle ? safeStyle : effective[index]));
+    const seeded = paragraphs.map(({ text }, index) => seededStyles[index] ? { text, styleId: seededStyles[index] } : { text });
+    created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'start', paragraphs: seeded }).newParagraphs;
+    const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+    created.forEach((entry, index) => {
+      if (!paragraphs[index].styleId && numbered[index] && seededStyles[index] !== effective[index]) {
+        applyCopiedProperties(draft, target.story, [entry], copiedProperties(markProperties, directSource), COPIED_PROPERTIES);
+      } else {
+        applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
+      }
+    });
+  } finally { inheritance.dispose(); }
+  if (runFormat === 'anchor' && anchor.attrs) applyAnchorRunFormat(draft, created, paragraphs, anchor.attrs, anchor.formatting);
+  else setInheritedRunFormat(draft, created, paragraphs, inherited);
   return created;
 }
 
