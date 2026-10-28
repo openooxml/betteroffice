@@ -170,11 +170,6 @@ function insideStyle(node: ts.Node): boolean {
   return false;
 }
 
-function ignored(source: ts.SourceFile, node: ts.Node): boolean {
-  const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
-  const lines = source.text.split('\n');
-  return [lines[line], lines[line - 1]].some((text) => text?.includes('i18n-ignore'));
-}
 
 export function scanSource(file: string, text: string): HardcodedString[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
@@ -182,7 +177,7 @@ export function scanSource(file: string, text: string): HardcodedString[] {
   const seen = new Set<ts.Node>();
   const reported: ts.Node[] = [];
   const report = (node: ts.Node, kind: HardcodedString['kind'], name: string, value: string) => {
-    if (seen.has(node) || ignored(source, node)) return;
+    if (seen.has(node)) return;
     if (reported.some((outer) => node.pos >= outer.pos && node.end <= outer.end)) return;
     seen.add(node);
     reported.push(node);

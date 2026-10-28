@@ -12,7 +12,7 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import type { CSSProperties } from 'react';
-import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
+import type { SectionProperties, TabStop, TabStopAlignment } from '@betteroffice/docx/types/document';
 import { twipsToPixels, pixelsToTwips, formatPx } from '@betteroffice/docx/utils';
 import { useTranslation } from '../../i18n';
 import { createT, en } from '@betteroffice/docx-i18n';
@@ -572,12 +572,14 @@ const TAB_SYMBOLS: Record<string, string> = {
   bar: '|',
 };
 
-const TAB_ALIGNMENT_KEYS: Record<string, TranslationKey> = {
+const TAB_ALIGNMENT_KEYS: Record<TabStopAlignment, TranslationKey> = {
   left: 'ruler.tabAlignments.left',
   center: 'ruler.tabAlignments.center',
   right: 'ruler.tabAlignments.right',
   decimal: 'ruler.tabAlignments.decimal',
   bar: 'ruler.tabAlignments.bar',
+  clear: 'ruler.tabAlignments.clear',
+  num: 'ruler.tabAlignments.num',
 };
 
 function TabStopMarker({
@@ -610,7 +612,7 @@ function TabStopMarker({
       }}
       onMouseDown={onMouseDown}
       title={t('ruler.tabStop', {
-        alignment: t(TAB_ALIGNMENT_KEYS[tabStop.alignment] ?? 'ruler.tabAlignments.left'),
+        alignment: t(TAB_ALIGNMENT_KEYS[tabStop.alignment]),
         position: formatValueForTooltip(tabStop.position, 'inch', lang, t),
       })}
     >

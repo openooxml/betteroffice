@@ -26,7 +26,7 @@ import {
   getCategoryLabel,
   getAllCategories,
 } from './KeyboardShortcutsDialog/data';
-import { ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
+import { localizeKeys, ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
 export { formatKeys as formatShortcutKeys } from './KeyboardShortcutsDialog/ShortcutItem';
 
 // ============================================================================
@@ -157,8 +157,11 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
       return (
         name.toLowerCase().includes(query) ||
         description.toLowerCase().includes(query) ||
-        s.keys.toLowerCase().includes(query) ||
-        (s.altKeys && s.altKeys.toLowerCase().includes(query))
+        ([[s.keys, s.keysKey], [s.altKeys, s.altKeysKey]] as const).some(([keys, key]) => {
+          if (!keys) return false;
+          const shown = localizeKeys(key ? t(key) : keys, t);
+          return keys.toLowerCase().includes(query) || shown.toLowerCase().includes(query);
+        })
       );
     });
   }, [allShortcuts, searchQuery, t]);
