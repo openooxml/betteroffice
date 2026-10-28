@@ -1025,8 +1025,9 @@ fn rebase_style_attr(
 }
 
 fn direct_run_attrs(formatting: &Any) -> BTreeMap<String, Any> {
-    let mut attrs: BTreeMap<_, _> =
-        crate::seed::mark_run_attrs(formatting).into_iter().collect();
+    let mut attrs: BTreeMap<_, _> = crate::seed::mark_run_attrs(formatting)
+        .into_iter()
+        .collect();
     let Any::Map(formatting) = formatting else {
         return attrs;
     };
