@@ -654,6 +654,27 @@ fn a_dual_emf_whose_gdi_records_draw_nothing_draws_nothing() {
 }
 
 #[test]
+fn a_nested_dual_emf_whose_gdi_records_draw_nothing_plays_its_emf_plus_records() {
+    let inner = plus_fill_with_gdi(true, (76, bitblt(0x00AA_0029)));
+    let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);
+    image.extend(&inner);
+    let mut points = u32s(&[0, 2]);
+    points.extend(f32s(&[0.0, 0.0, 100.0, 100.0]));
+    points.extend(u32s(&[3]));
+    points.extend(f32s(&[0.0, 0.0, 100.0, 0.0, 0.0, 100.0]));
+    let drawing = replay(&plus_only(vec![
+        (0x4008, 0x0500, image),
+        (0x401B, 0, points),
+    ]))
+    .unwrap();
+    assert!(
+        shapes(&drawing.ops)
+            .iter()
+            .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK)))
+    );
+}
+
+#[test]
 fn emf_plus_draws_when_the_gdi_side_draws_or_is_not_dual() {
     for bytes in [
         plus_fill_with_gdi(false, (76, bitblt(0x00AA_0029))),

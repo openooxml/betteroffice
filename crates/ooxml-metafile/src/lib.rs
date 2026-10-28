@@ -154,9 +154,10 @@ pub(crate) fn play_nested(
 /// An EMF with EMF+ records plays them, as Office does, when they draw
 /// without omissions; otherwise, and for plain EMF, its GDI records play.
 /// A GDI rendition that fails falls back to EMF+ only when that draws. A dual
-/// EMF whose GDI records draw nothing plays them: GDI+ writes that side as a
-/// destination-only BitBlt where it has no GDI equivalent (an embedded EMF+
-/// only metafile), and Office shows nothing for such a picture.
+/// picture whose GDI records draw nothing plays them: GDI+ writes that side as
+/// a destination-only BitBlt where it has no GDI equivalent (an embedded EMF+
+/// only metafile), and Office shows nothing for such a picture. A metafile
+/// nested in EMF+ records is played by GDI+, so it plays its EMF+ records.
 fn play_full_emf(
     bytes: &[u8],
     depth: usize,
@@ -165,7 +166,7 @@ fn play_full_emf(
     let Some(dual) = plus_header(bytes, &budget) else {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     };
-    if dual && gdi_draws_nothing(bytes, &budget) {
+    if depth == 0 && dual && gdi_draws_nothing(bytes, &budget) {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
     let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
