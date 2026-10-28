@@ -277,6 +277,8 @@ pub struct CompatIn {
     pub no_leading: bool,
     #[serde(default)]
     pub do_not_expand_shift_return: bool,
+    #[serde(default)]
+    pub space_shrink_limit: Option<f32>,
     #[cfg(test)]
     #[serde(skip)]
     pub(super) gdi_line_metrics: bool,
@@ -437,6 +439,8 @@ pub struct RotationBoundsIn {
 #[serde(rename_all = "camelCase")]
 pub struct AttrsIn {
     #[serde(default)]
+    pub justification_mode: Option<String>,
+    #[serde(default)]
     pub alignment: Option<String>,
     #[serde(default)]
     pub spacing: Option<SpacingIn>,
@@ -541,9 +545,10 @@ impl SpacingIn {
 }
 
 /// One paragraph tab stop. `val` is the alignment mode —
-/// `start`/`end`/`center`/`decimal`/`bar`/`clear`, anything else behaving
-/// like `start` — and `pos` its position in **twips** from the content-area
-/// left edge.
+/// `start`/`end`/`center`/`decimal`/`bar`/`clear`, with the authored
+/// ST_TabJc spellings `left` and `right` accepted for `start` and `end`,
+/// anything else behaving like `start` — and `pos` its position in
+/// **twips** from the content-area left edge.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabStopIn {

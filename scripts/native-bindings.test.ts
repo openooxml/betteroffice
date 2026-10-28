@@ -162,7 +162,7 @@ describe('native package release wiring', () => {
 
   test('keeps native publishing outside the main release job', () => {
     const job = release.jobs.release;
-    expect(job['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(90);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
@@ -371,7 +371,9 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
-    expect(parity.run).toBe('bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts');
+    expect(parity.run).toBe(
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts'
+    );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

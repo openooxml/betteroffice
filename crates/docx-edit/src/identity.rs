@@ -38,6 +38,7 @@ use yrs::{
     TextRef, Transact, Transaction, TransactionMut,
 };
 
+use crate::bridge::run_size_provenance::ParagraphSizes;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -431,7 +432,15 @@ pub(crate) struct SourceIndex {
     own_digest: OnceLock<bool>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+    #[serde(skip)]
+    run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
+    #[serde(skip)]
+    run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
+    #[serde(skip)]
+    run_size_seeded: OnceLock<SeededUnitDigests>,
 }
+
+type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
 
 #[derive(Default)]
 struct SeedStates {
@@ -519,6 +528,83 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    pub(crate) fn run_size_source(&self, key: &str, story: &str) -> Option<Arc<ParagraphSizes>> {
+        if self.seeded.get(key)?.root != crate::structured::source::story_root(story) {
+            return None;
+        }
+        self.view_of(key)?;
+        let seeded = self.run_size_seeded.get_or_init(|| {
+            #[cfg(test)]
+            RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+            let mut units = BTreeMap::new();
+            for (story, state) in self.seed_states() {
+                for unit in &state.units {
+                    if let Some(key) = &unit.key {
+                        match units.entry(key.clone()) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(Some((story.clone(), unit.digest)));
+                            }
+                            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                entry.insert(None);
+                            }
+                        }
+                    }
+                }
+            }
+            units
+        });
+        let (seed_story, fingerprint) = seeded.get(key)?.as_ref()?;
+        if seed_story != story {
+            return None;
+        }
+        let mut cache = self.run_size_sources.lock().unwrap();
+        cache
+            .entry(key.to_owned())
+            .or_insert_with(|| self.collect_run_sizes(key, *fingerprint).map(Arc::new))
+            .clone()
+    }
+
+    fn collect_run_sizes(&self, key: &str, fingerprint: [u8; 32]) -> Option<ParagraphSizes> {
+        use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
+
+        fn paragraphs(node: &XmlElement, output: &mut BTreeMap<u32, XmlElement>) {
+            if node.local_name() == "p"
+                && let Some(ordinal) = node.paragraph_ordinal
+            {
+                output.insert(ordinal, node.clone());
+            }
+            for child in node.child_elements() {
+                paragraphs(child, output);
+            }
+        }
+
+        let ((part_index, ordinal), _) = self.view_of(key)?;
+        let path = self.parts.get(part_index)?.path();
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.record_source_ordinals();
+        let mut cache = self.run_size_paragraphs.lock().unwrap();
+        let nodes = cache.entry(part_index).or_insert_with(|| {
+            #[cfg(test)]
+            RUN_SIZE_SOURCE_PARTS.with(|count| count.set(count.get() + 1));
+            let mut nodes = BTreeMap::new();
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(self.bytes()) else {
+                return nodes;
+            };
+            let Some(index) = package.parts().position(|(name, _)| name == path) else {
+                return nodes;
+            };
+            if let Ok(bytes) = package.read(index)
+                && let Ok(document) = parse_xml(&bytes, path, &mut budget)
+                && let Some(root) = document.root()
+            {
+                paragraphs(root, &mut nodes);
+            }
+            nodes
+        });
+        crate::bridge::run_size_provenance::paragraph_sizes(nodes.get(&ordinal)?, fingerprint)
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: PackageBytes,
@@ -588,6 +674,9 @@ impl SourceIndex {
             seed_states: OnceLock::new(),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            run_size_sources: Mutex::new(BTreeMap::new()),
+            run_size_paragraphs: Mutex::new(BTreeMap::new()),
+            run_size_seeded: OnceLock::new(),
         }
     }
 
@@ -1061,6 +1150,96 @@ fn story_fingerprint(
     story_fingerprint_in(doc, &txn, story, comments)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STORY_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_SOURCE_PARTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_SEEDED_SNAPSHOTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[derive(Default)]
+struct UnitDigest(sha2::Sha256);
+
+impl UnitDigest {
+    fn segment(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.0.update(bytes);
+        self.0.update(b"\n");
+    }
+
+    fn marker(&mut self, relative: u32, key: &str, end: bool) -> Option<Vec<u8>> {
+        use sha2::Digest;
+        let bytes = serde_json::to_vec(&(relative, key, end)).ok()?;
+        self.0.update(&bytes);
+        Some(bytes)
+    }
+
+    fn finish(self) -> [u8; 32] {
+        use sha2::Digest;
+        self.0.finalize().into()
+    }
+}
+
+fn run_size_media(value: &Any) -> bool {
+    match value {
+        Any::String(value) => value.contains("media:"),
+        Any::Array(values) => values.iter().any(run_size_media),
+        Any::Map(values) => values.values().any(run_size_media),
+        _ => false,
+    }
+}
+
+pub(crate) fn run_size_fingerprint<'a>(
+    segments: impl Iterator<Item = crate::StorySegment>,
+    markers: impl Iterator<Item = (u32, &'a str, bool)>,
+) -> Option<[u8; 32]> {
+    #[cfg(test)]
+    RUN_SIZE_FINGERPRINTS.with(|count| count.set(count.get() + 1));
+    let mut segments: Vec<_> = segments.collect();
+    strip_display_only_keys(&mut segments);
+    let mut digest = UnitDigest::default();
+    let mut bytes = Vec::new();
+    let mut section = Vec::new();
+    let mut closed = false;
+    for segment in segments {
+        if closed || segment.attributes.values().any(run_size_media) {
+            return None;
+        }
+        match &segment.content {
+            crate::SegmentContent::Pilcrow(properties) => {
+                if properties.values.values().any(run_size_media) {
+                    return None;
+                }
+                closed = true;
+            }
+            crate::SegmentContent::OtherEmbed { kind, payload } => {
+                if kind != "field" || payload.values().any(run_size_media) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        segment_canonical(&segment, &mut bytes, &mut section);
+        digest.segment(&bytes);
+    }
+    if !closed {
+        return None;
+    }
+    for (relative, key, end) in markers {
+        digest.marker(relative, key, end)?;
+    }
+    Some(digest.finish())
+}
+
 fn story_fingerprint_in(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
@@ -1068,6 +1247,8 @@ fn story_fingerprint_in(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
+    #[cfg(test)]
+    STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {
@@ -1084,7 +1265,7 @@ fn story_fingerprint_in(
     boundaries.sort_unstable();
     let mut boundaries = boundaries.into_iter().peekable();
     let mut units = Vec::new();
-    let mut unit = Sha256::new();
+    let mut unit = UnitDigest::default();
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
@@ -1099,8 +1280,7 @@ fn story_fingerprint_in(
     let mut section_bytes = Vec::new();
     for segment in segments {
         segment_canonical(&segment, &mut bytes, &mut section_bytes);
-        unit.update(&bytes);
-        unit.update(b"\n");
+        unit.segment(&bytes);
         section_content.update(&section_bytes);
         section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
@@ -1121,11 +1301,10 @@ fn story_fingerprint_in(
         match &segment.content {
             crate::SegmentContent::Pilcrow(properties) => {
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
-                    let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
+                    let marker = unit.marker(at - start, key, end)?;
                     let relative = at - start;
                     let excluded = block_positions.partition_point(|&at| at < relative) as u32;
                     markers.push((relative - excluded, key.to_owned(), end));
-                    unit.update(&marker);
                     section_content.update(&marker);
                     inline_content.update(&marker);
                 }
@@ -1133,7 +1312,7 @@ fn story_fingerprint_in(
                 block_positions.clear();
                 units.push(UnitState {
                     key: Some(properties.para_id.clone()),
-                    digest: std::mem::take(&mut unit).finalize().into(),
+                    digest: std::mem::take(&mut unit).finish(),
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
@@ -1154,15 +1333,14 @@ fn story_fingerprint_in(
         }
     }
     for (at, key, end) in boundaries {
-        let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
+        let marker = unit.marker(at.saturating_sub(start), key, end)?;
         let relative = at.saturating_sub(start);
         let excluded = block_positions.partition_point(|&at| at < relative) as u32;
         markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
-        unit.update(&marker);
         section_content.update(&marker);
         inline_content.update(&marker);
     }
-    let trailing = unit.finalize().into();
+    let trailing = unit.finish();
     let empty: [u8; 32] = Sha256::new().finalize().into();
     if trailing != empty {
         units.push(UnitState {
@@ -2068,7 +2246,6 @@ impl EditingDoc {
     }
 
     /// Whether an opening has written this document's generation.
-    #[cfg(feature = "wasm")]
     pub(crate) fn has_opening(&self) -> bool {
         let txn = self.yrs_doc().transact();
         txn.get_map(SESSION)
@@ -3087,6 +3264,29 @@ fn simple_table_payload(
         })
 }
 
+/// `simple_table_payload` without the merged and offset exclusions: the shape a
+/// merge may produce from a simple table, never a shape it may start from.
+fn shaped_table_payload(
+    payload: &serde_json::Value,
+    stories: &BTreeMap<&String, &StoryState>,
+) -> bool {
+    let Some(rows) = payload["rows"].as_array().filter(|rows| !rows.is_empty()) else {
+        return false;
+    };
+    rows.iter().all(|row| {
+        row["cells"].as_array().is_some_and(|cells| {
+            !cells.is_empty()
+                && cells.iter().all(|cell| {
+                    cell["story"].as_str().is_some_and(|story| {
+                        stories
+                            .get(&story.to_owned())
+                            .is_some_and(|state| state.units.iter().all(|unit| !unit.has_blocks()))
+                    })
+                })
+        })
+    })
+}
+
 fn admit_row_splices(
     was: &UnitState,
     now: &UnitState,
@@ -3109,6 +3309,9 @@ fn admit_row_splices(
             .map(|cell| cell.get("story")?.as_str())
             .collect()
     }
+    let unit_tables_plain = was.block_content.iter().all(|other| {
+        other[0]["embed"] != "table" || simple_table_payload(&other[0]["payload"], before)
+    });
     for (was, now) in was.block_content.iter().zip(&now.block_content) {
         if was == now {
             continue;
@@ -3160,7 +3363,26 @@ fn admit_row_splices(
             ordinals.sort_unstable();
             (!ordinals.is_empty()).then_some(ordinals)
         };
-        if simple {
+        let merged = patch_tables
+            && unit_tables_plain
+            && old_payload == new_payload
+            && old_keys.len() == new_keys.len()
+            && old_keys.iter().zip(&new_keys).all(|(old, new)| {
+                !new.is_empty()
+                    && new.iter().all(|story| old.contains(story))
+                    && new.windows(2).all(|pair| {
+                        old.iter().position(|story| story == &pair[0])
+                            < old.iter().position(|story| story == &pair[1])
+                    })
+            })
+            && simple_table_payload(&was[0]["payload"], before)
+            && shaped_table_payload(&now[0]["payload"], after);
+        if simple || merged {
+            for story in old_keys.iter().flatten() {
+                if !new_keys.iter().flatten().any(|kept| kept == story) {
+                    edits.removed.insert((*story).to_owned());
+                }
+            }
             let ordinals = row_ordinals(&old_keys.iter().flatten().copied().collect::<Vec<_>>())?;
             edits.tables.push(S13TablePatch {
                 ordinal: *ordinals.first()?,
@@ -3283,6 +3505,25 @@ fn spliced_part(
         Some(rows)
     };
     let rows = admit(true).or_else(|| admit(false))?;
+    let seeded_by_key: HashMap<&str, &UnitState> = before
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref().map(|key| (key, unit)))
+        .collect();
+    let seeded_story_by_key: HashMap<&str, &str> = before
+        .iter()
+        .flat_map(|(story, state)| {
+            state
+                .units
+                .iter()
+                .filter_map(move |unit| unit.key.as_deref().map(|key| (key, story.as_str())))
+        })
+        .collect();
+    let live_keys: HashSet<&str> = after
+        .values()
+        .flat_map(|state| state.units.iter())
+        .filter_map(|unit| unit.key.as_deref())
+        .collect();
     let synthetic = |key: &str| by_key.get(key).is_some_and(|pilcrow| pilcrow.synthetic);
     let mut paragraphs = Vec::new();
     let mut changed = Vec::new();
@@ -3299,6 +3540,9 @@ fn spliced_part(
                     return None;
                 }
                 let key = unit.key.as_deref()?;
+                if live_keys.contains(key) {
+                    continue;
+                }
                 match source.view_of(key) {
                     Some(((part_index, ordinal), 0)) if part_index == index => {
                         removed.push(ordinal)
@@ -3360,6 +3604,26 @@ fn spliced_part(
                 }
             }
             let Some(was) = was_keys.get(key) else {
+                if !is.has_blocks()
+                    && let Some(((part_index, ordinal), 0)) = source.view_of(key)
+                    && part_index == index
+                    && seeded_story_by_key
+                        .get(key)
+                        .is_some_and(|origin| !after.keys().any(|story| story.as_str() == *origin))
+                {
+                    let origin = seeded_by_key.get(key)?;
+                    paragraphs.push((ordinal, key.to_owned()));
+                    if origin.content_digest != is.content_digest {
+                        changed.push(ordinal);
+                        if origin.section_digest == is.section_digest {
+                            section_only.push(ordinal);
+                        }
+                    }
+                    inserted.extend(std::iter::repeat_n(SpliceAnchor::Before(ordinal), pending));
+                    pending = 0;
+                    anchor = Some(ordinal);
+                    continue;
+                }
                 if is.has_blocks() || source.view_of(key).is_some() {
                     return None;
                 }
@@ -3386,7 +3650,22 @@ fn spliced_part(
                     pending = 0;
                     anchor = Some(ordinal);
                 }
-                None if same && synthetic(key) => {}
+                None if was.has_blocks()
+                    && !was.inline
+                    && !source.seeded.contains_key(key)
+                    && was.blocks == is.blocks =>
+                {
+                    let ordinal = last_block_paragraph(was, &before, source, index)?;
+                    if !synthetic(key) || is.inline {
+                        inserted.push(SpliceAnchor::After(ordinal));
+                    }
+                    anchor = Some(ordinal);
+                }
+                None if same && synthetic(key) => {
+                    if is.has_blocks() && was.blocks == is.blocks {
+                        anchor = last_block_paragraph(is, &before, source, index);
+                    }
+                }
                 _ => return None,
             }
         }
@@ -3435,6 +3714,63 @@ fn spliced_part(
     })
 }
 
+fn last_block_paragraph(
+    unit: &UnitState,
+    stories: &BTreeMap<&String, &StoryState>,
+    source: &SourceIndex,
+    index: usize,
+) -> Option<u32> {
+    fn visit(
+        unit: &UnitState,
+        stories: &BTreeMap<&String, &StoryState>,
+        source: &SourceIndex,
+        index: usize,
+        visited: &mut HashSet<String>,
+        ordinals: &mut Vec<u32>,
+    ) -> Option<()> {
+        for block in &unit.block_content {
+            let payload = &block[0]["payload"];
+            let children = match block[0]["embed"].as_str()? {
+                "table" => payload["rows"]
+                    .as_array()?
+                    .iter()
+                    .flat_map(|row| row["cells"].as_array().into_iter().flatten())
+                    .map(|cell| cell["story"].as_str())
+                    .collect::<Option<Vec<_>>>()?,
+                "blockSdt" => vec![payload["story"].as_str()?],
+                _ => return None,
+            };
+            for story in children {
+                if !visited.insert(story.to_owned()) {
+                    return None;
+                }
+                for child in &stories.get(&story.to_owned())?.units {
+                    if let Some(key) = child.key.as_deref()
+                        && let Some(((part, ordinal), 0)) = source.view_of(key)
+                    {
+                        if part != index {
+                            return None;
+                        }
+                        ordinals.push(ordinal);
+                    }
+                    visit(child, stories, source, index, visited, ordinals)?;
+                }
+            }
+        }
+        Some(())
+    }
+    let mut ordinals = Vec::new();
+    visit(
+        unit,
+        stories,
+        source,
+        index,
+        &mut HashSet::new(),
+        &mut ordinals,
+    )?;
+    ordinals.into_iter().max()
+}
+
 /// `units` without, and then with, the segments after the last pilcrow.
 fn split_tail(units: &[UnitState]) -> (&[UnitState], Option<&UnitState>) {
     match units.split_last() {
@@ -3459,12 +3795,197 @@ fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FormatPolicy, Position, StoryRange};
+    use crate::{
+        EditHistory, EditOperation, EditRequest, EditSource, EditStep, FormatPolicy,
+        ParagraphInput, ParagraphTarget, Position, StoryRange, TargetEdge, UndoSession,
+    };
 
     const DATE: &str = "2026-09-24T00:00:00Z";
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    #[test]
+    fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
+        let xml = concat!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+            "<w:body><w:p><w:r><w:t>Title</w:t></w:r></w:p><w:tbl><w:tblGrid>",
+            "<w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/>",
+            "</w:tblGrid><w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
+            "<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr><w:tr>",
+            "<w:tc><w:tcPr><w:gridSpan w:val=\"3\"/></w:tcPr>",
+            "<w:p><w:r><w:t>Last</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+            "</w:body></w:document>",
+        );
+        for shaped in [false, true] {
+            let xml = if shaped {
+                xml.to_owned()
+            } else {
+                xml.replace(
+                    "<w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/>",
+                    "<w:gridCol w:w=\"10\"/>",
+                )
+                .replace("<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>", "")
+                .replace("<w:gridSpan w:val=\"2\"/>", "")
+                .replace("<w:gridSpan w:val=\"3\"/>", "")
+            };
+            let parts = [
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+            ];
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let doc = EditingDoc::new(41);
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let target = doc.paragraphs("body").unwrap()[1].para_id.clone();
+            assert!(
+                doc.paragraph_identities()
+                    .paragraphs
+                    .iter()
+                    .any(|identity| {
+                        matches!(
+                            &identity.paragraph,
+                            ParagraphRef::Session { para_id, .. } if para_id == &target
+                        ) && identity.origin == ParagraphOrigin::Synthetic
+                    })
+            );
+            doc.apply_edits(
+                &EditRequest {
+                    expect_version: doc.version(),
+                    source: EditSource::Host,
+                    history: EditHistory::Separate,
+                    steps: vec![EditStep::new(EditOperation::InsertParagraphs {
+                        target: ParagraphTarget {
+                            story: "body".to_owned(),
+                            para_id: target.clone(),
+                        },
+                        at: TargetEdge::End,
+                        paragraphs: vec![ParagraphInput {
+                            text: "Inserted".to_owned(),
+                            style_id: None,
+                        }],
+                    })],
+                },
+                &UndoSession::new(),
+            )
+            .unwrap()
+            .unwrap();
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+            assert_eq!(
+                identities
+                    .paragraphs
+                    .iter()
+                    .filter(|identity| identity.origin == ParagraphOrigin::Authored)
+                    .count(),
+                2
+            );
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+            assert!(part.removed.is_empty());
+            assert_eq!(part.paragraphs.len(), 3);
+            let at = doc.paragraph_mark_position(&target).unwrap();
+            doc.insert_text(&ctx(), at, "Block note", FormatPolicy::Plain)
+                .unwrap();
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+        }
+    }
+
+    #[test]
+    fn paragraph_records_still_promote_an_empty_synthetic_paragraph_at_either_boundary() {
+        for at in [0, 1] {
+            let doc = EditingDoc::new(41);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let target = {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let (_, map) = crate::next_pilcrow(&story, &txn, 0).unwrap();
+                map.insert(&mut txn, PARA_ORIGIN, SYNTHETIC);
+                map_string(&map, &txn, PARA_ID).unwrap()
+            };
+            doc.insert_paragraph_records(
+                "body",
+                at,
+                &[crate::ops::paragraph::ParagraphRecord {
+                    text: "Inserted".to_owned(),
+                    properties: Vec::new(),
+                    run: Vec::new(),
+                }],
+            )
+            .unwrap();
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+        }
+    }
+
+    #[test]
+    fn candidate_unit_digest_matches_save_with_comment_boundaries() {
+        let doc = EditingDoc::new(77114);
+        doc.create_story("body", "A😀B", "Normal", "left").unwrap();
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        let comments = BTreeMap::from([
+            ("alpha".to_owned(), vec![(0, 2), (3, 3)]),
+            ("beta".to_owned(), vec![(4, 5)]),
+        ]);
+        let (_, units) = story_fingerprint(&doc, "body", &comments).unwrap();
+        assert_eq!(units.len(), 2);
+        for unit in units {
+            assert_eq!(
+                run_size_fingerprint(
+                    unit.segments.into_iter(),
+                    unit.markers
+                        .iter()
+                        .map(|(at, key, end)| (*at, key.as_str(), *end)),
+                ),
+                Some(unit.digest),
+            );
+        }
     }
 
     #[test]

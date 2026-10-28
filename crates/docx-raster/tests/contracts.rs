@@ -82,6 +82,35 @@ fn single_glyph_scene() -> DisplayList {
     )
 }
 
+#[test]
+fn native_text_ignores_the_canvas_substitute_scale() {
+    let mut fonts = FontStore::new();
+    let base = fonts.register(LIBERATION.to_vec()).unwrap();
+    let view = fonts
+        .register_named_substitute(base, "Lucida Bright")
+        .unwrap();
+    let chains = FontChains::from([("lucida bright|0|0".to_string(), vec![view])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitive = json!({
+        "kind": "text", "text": "native", "allCaps": true,
+        "x": 10, "baselineY": 30, "width": 110,
+        "font": "400 16px Lucida Bright, sans-serif", "color": "#000000",
+        "horizontalScale": 150
+    });
+    let control = list(160.0, 48.0, vec![primitive.clone()]);
+    let mut browser = primitive;
+    browser["substituteScale"] = json!(1.113);
+    let browser = list(160.0, 48.0, vec![browser]);
+    assert_eq!(
+        serde_json::to_value(&browser).unwrap()["pages"][0]["primitives"][0]["substituteScale"],
+        json!(1.113)
+    );
+    let expected = render_png(&control, 0, &resources).unwrap();
+    assert!(ink_bounds(&expected).is_some());
+    assert_eq!(render_png(&browser, 0, &resources).unwrap(), expected);
+}
+
 /// One glyph id, painted from whichever face the run names.
 fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
     list(

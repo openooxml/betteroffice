@@ -30,7 +30,11 @@ export interface ResidentFontRequirement {
 export interface ResidentMeasurementConfig {
   fontChains: Record<string, number[]>;
   defaults: { fontSize: number; fontFamily: string };
-  compat: { noLeading: boolean; doNotExpandShiftReturn: boolean };
+  compat: {
+    compatibilityMode?: number;
+    noLeading: boolean;
+    doNotExpandShiftReturn: boolean;
+  };
   authoritativeShaping: true;
 }
 
@@ -170,6 +174,7 @@ export function createRustMeasureSource(options: {
         fontChains,
         defaults: { fontSize: 11, fontFamily: 'Calibri' },
         compat: {
+          compatibilityMode: compat?.compatibilityMode ?? 12,
           noLeading: compat?.noLeading ?? false,
           doNotExpandShiftReturn: compat?.doNotExpandShiftReturn ?? false,
         },

@@ -26,7 +26,7 @@ import {
   getCategoryLabel,
   getAllCategories,
 } from './KeyboardShortcutsDialog/data';
-import { ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
+import { localizeKeys, ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
 export { formatKeys as formatShortcutKeys } from './KeyboardShortcutsDialog/ShortcutItem';
 
 // ============================================================================
@@ -55,6 +55,10 @@ export interface KeyboardShortcut {
   nameKey?: TranslationKey;
   /** Translation key for description (used internally) */
   descriptionKey?: TranslationKey;
+  /** Translation key for the primary key name (used internally) */
+  keysKey?: TranslationKey;
+  /** Translation key for the alternative key name (used internally) */
+  altKeysKey?: TranslationKey;
 }
 
 /**
@@ -153,8 +157,11 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
       return (
         name.toLowerCase().includes(query) ||
         description.toLowerCase().includes(query) ||
-        s.keys.toLowerCase().includes(query) ||
-        (s.altKeys && s.altKeys.toLowerCase().includes(query))
+        ([[s.keys, s.keysKey], [s.altKeys, s.altKeysKey]] as const).some(([keys, key]) => {
+          if (!keys) return false;
+          const shown = localizeKeys(key ? t(key) : keys, t);
+          return keys.toLowerCase().includes(query) || shown.toLowerCase().includes(query);
+        })
       );
     });
   }, [allShortcuts, searchQuery, t]);
@@ -369,6 +376,8 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
                       translatedDescription={
                         shortcut.descriptionKey ? t(shortcut.descriptionKey) : shortcut.description
                       }
+                      translatedKeys={shortcut.keysKey ? t(shortcut.keysKey) : undefined}
+                      translatedAltKeys={shortcut.altKeysKey ? t(shortcut.altKeysKey) : undefined}
                     />
                   ))}
                 </div>
@@ -389,8 +398,9 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
           }}
         >
           {(() => {
-            const text = t('dialogs.keyboardShortcuts.pressEscToClose', { key: 'Esc' });
-            const parts = text.split('Esc');
+            const esc = t('dialogs.keyboardShortcuts.keys.escape');
+            const text = t('dialogs.keyboardShortcuts.pressEscToClose', { key: esc });
+            const parts = text.split(esc);
             return (
               <>
                 {parts[0]}
@@ -402,7 +412,7 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
                     border: '1px solid var(--doc-border-light)',
                   }}
                 >
-                  Esc
+                  {esc}
                 </kbd>
                 {parts[1]}
               </>

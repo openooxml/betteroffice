@@ -146,4 +146,9 @@ export type {
   XlsxPluginSnapshot,
 } from './plugins/types';
 
-export type { XlsxSheetVisibility } from '@betteroffice/xlsx';
+export type {
+  XlsxHeaderFooterText,
+  XlsxHeaderFooterPair,
+  XlsxSheetHeaderFooter,
+  XlsxSheetVisibility,
+} from '@betteroffice/xlsx';

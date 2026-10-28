@@ -21,6 +21,12 @@ export const USED_BY: UsedByEntry[] = [
     enabled: true,
   },
   {
+    name: "T3 Code",
+    href: "https://t3.codes",
+    logo: { src: "/logos/t3code.svg", box: [94.3941, 56.96], baseline: 56, xHeight: 41.5 },
+    enabled: true,
+  },
+  {
     name: "atira",
     href: "https://atira.ai",
     logo: { src: "/logos/atira.svg", box: [958, 253], baseline: 236.43, xHeight: 152.94 },

@@ -224,17 +224,18 @@ def slide_comment(author, index, text, thread=''):
             f'<p:text>{text}</p:text>{extension}</p:cm>')
 
 
-def layout_shape(identity, name, placeholder, text=''):
-    body = f'<p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else '<p:txBody><a:bodyPr/><a:p/></p:txBody>'
+def layout_shape(identity, name, placeholder, text='', body_pr='<a:bodyPr/>'):
+    body = f'<p:txBody>{body_pr}<a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>' if text else f'<p:txBody>{body_pr}<a:p/></p:txBody>'
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{identity}" name="{name}"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr>'
             f'<p:spPr/>{body}</p:sp>')
 
 
-def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
+def layout_slide_package(slide_placeholder, layout='slideLayout1.xml', title_body='<a:bodyPr/>', subtitle_body='<a:bodyPr/>',
+                         layout_title_body='<a:bodyPr/>'):
     main = 'application/vnd.openxmlformats-officedocument.presentationml'
     layouts = {
         'slideLayout1.xml': ('Title Only', layout_shape(2, 'Title 1', '<p:ph type="title"/>')),
-        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>')
+        'slideLayout2.xml': ('Title and Content', layout_shape(2, 'Title 1', '<p:ph type="title"/>', body_pr=layout_title_body)
                              + layout_shape(3, 'Content Placeholder 2', '<p:ph idx="1" hasCustomPrompt="1"/>', 'Add notes')),
     }
     parts = {
@@ -246,8 +247,8 @@ def layout_slide_package(slide_placeholder, layout='slideLayout1.xml'):
         'ppt/presentation.xml': f'<p:presentation {P_NS}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
         'ppt/slides/_rels/slide1.xml.rels': relationships([(f'{RELS}/slideLayout', f'../slideLayouts/{layout}')]),
         'ppt/slides/slide1.xml': (f'<p:sld {P_NS}><p:cSld><p:spTree>'
-                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading')
-                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy')
+                                  + layout_shape(2, 'Title 1', '<p:ph type="title"/>', 'Heading', title_body)
+                                  + layout_shape(3, 'Subtitle 2', slide_placeholder, 'Review copy', subtitle_body)
                                   + '</p:spTree></p:cSld></p:sld>'),
     }
     for name, (title, shapes) in layouts.items():
@@ -544,6 +545,66 @@ class OfficeEquivalentTests(unittest.TestCase):
                 f'{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>', parent + reply, threaded), False),
         })
 
+    def test_inserted_paragraph_takes_the_opening_run_formatting(self):
+        task = {'format': 'docx', 'suite': 'v3', 'expected': {'insert_paragraphs': {'heading': 'Foreword', 'texts': ['New note.']}}}
+        heading = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Foreword</w:t></w:r></w:p>'
+        body = ('<w:p>' + text_run('Opening ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>Emphasis</w:t></w:r>'
+                + text_run(' tail.') + '</w:p>')
+        plain = '<w:p><w:r><w:t>New note.</w:t></w:r></w:p>'
+        italic = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>New note.</w:t></w:r></w:p>'
+        field = ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a </w:instrText></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Field result</w:t></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="end"/></w:r>' + text_run(' tail.') + '</w:p>')
+        link = ('<w:p><w:hyperlink w:anchor="a"><w:r><w:rPr><w:i/></w:rPr><w:t>Linked</w:t></w:r></w:hyperlink>'
+                + text_run(' plain ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>later</w:t></w:r></w:p>')
+        boxed = ('<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>'
+                 '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>'
+                 + text_run('Body text.') + '</w:p>')
+        hyphen = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:noBreakHyphen/></w:r>' + text_run('plain rest.') + '</w:p>'
+        deleted = ('<w:p><w:del w:id="9" w:author="A"><w:r><w:rPr><w:i/></w:rPr><w:tab/></w:r></w:del>'
+                   + text_run('Plain text.') + '</w:p>')
+        for name, template, inserted, accepted in (
+                ('plain like the first text after a deleted italic tab', deleted, plain, True),
+                ('italic like a deleted opening tab', deleted, italic, False),
+                ('italic like an opening non-breaking hyphen', hyphen, italic, True),
+                ('plain after an italic opening non-breaking hyphen', hyphen, plain, False),
+                ('plain like the body text after a text box', boxed, plain, True),
+                ('italic like the text box inside the paragraph', boxed, italic, False),
+                ('italic like an opening hyperlink run', link, italic, True),
+                ('plain after an italic opening hyperlink run', link, plain, False),
+                ('plain like the opening run', body, plain, True),
+                ('italic like a later run', body, italic, False),
+                ('italic like a field result that opens the text', field, italic, True),
+                ('plain after field control runs', field, plain, False)):
+            with self.subTest(output=name):
+                source = word_package(heading + template, '', '')
+                output = word_package(heading + inserted + template, '', '')
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, word_package(heading + template, '', ''), output)
+
+    def test_replaced_drawing_text_takes_the_opening_run_formatting(self):
+        body = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t>Plain</a:t></a:r>'
+                             '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(body, 'New text')
+        runs = body.findall('a:p/a:r', runner.checker.NS)
+        self.assertEqual([run.find('a:t', runner.checker.NS).text for run in runs], ['New text'])
+        self.assertIsNone(runs[0].find('a:rPr', runner.checker.NS))
+        empty_first = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t/></a:r>'
+                                    '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(empty_first, 'New text')
+        self.assertEqual(empty_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
+        field_first = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:fld id="{{1}}" type="slidenum"><a:rPr i="1"/><a:t>3</a:t></a:fld>'
+                                    '<a:r><a:t>Plain</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(field_first, 'New text')
+        self.assertEqual(field_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
+        plain_field = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:fld id="{{1}}" type="slidenum"><a:t>3</a:t></a:fld>'
+                                    '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(plain_field, 'New text')
+        self.assertIsNone(plain_field.find('a:p/a:r/a:rPr', runner.checker.NS))
+
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
             tag = 'delText' if kind == 'del' else 't'
@@ -624,6 +685,27 @@ class OfficeEquivalentTests(unittest.TestCase):
             'placeholder on another index': (moved('<p:ph idx="2"/>'), False),
             'placeholder keeps its old type': (moved('<p:ph type="subTitle" idx="1"/>'), False),
         })
+
+    def test_title_moved_onto_an_autofit_layout_may_save_the_powerpoint_fit(self):
+        task = complex_task('pptx', {'layout': [{'slide': 1, 'name': 'Title and Content', 'placeholders': {
+            'Title 1': {'layout_placeholder': 'Title 1', 'text': 'Heading'}}}]})
+        fitted = '<a:bodyPr><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>'
+        for layout_title, outputs in (
+                ('<a:bodyPr><a:normAutofit/></a:bodyPr>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'title saved with the fit': (fitted, '<a:bodyPr/>', True),
+                    'fit on an unmoved placeholder': ('<a:bodyPr/>', fitted, False),
+                    'autofit without a fit': ('<a:bodyPr><a:normAutofit/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with another body change': ('<a:bodyPr wrap="none"><a:normAutofit fontScale="77500" lnSpcReduction="20000"/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'fit with an extra child': ('<a:bodyPr><a:normAutofit fontScale="77500"/><a:scene3d/></a:bodyPr>', '<a:bodyPr/>', False),
+                    'shrink on overflow instead': ('<a:bodyPr><a:spAutoFit/></a:bodyPr>', '<a:bodyPr/>', False)}),
+                ('<a:bodyPr/>', {
+                    'title left without a fit': ('<a:bodyPr/>', '<a:bodyPr/>', True),
+                    'fit on a layout title without autofit': (fitted, '<a:bodyPr/>', False)})):
+            def deck(layout, title='<a:bodyPr/>', subtitle='<a:bodyPr/>', layout_title=layout_title):
+                return lambda: layout_slide_package('<p:ph type="subTitle" idx="1"/>', layout, title, subtitle, layout_title)
+            self.assert_verdicts(task, deck('slideLayout1.xml'), {
+                name: (deck('slideLayout2.xml', title, subtitle), accepted) for name, (title, subtitle, accepted) in outputs.items()})
 
     def test_slide_table_frame_may_refit_its_grid_like_powerpoint(self):
         a, b, c = (1000, 'a'), (2000, 'b'), (3000, 'c')

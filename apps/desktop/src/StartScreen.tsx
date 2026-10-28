@@ -1,4 +1,5 @@
 import type { Configuration, RecentFile } from "./bridge";
+import { t, type DesktopKey } from "./i18n";
 
 export function StartScreen({
   config,
@@ -13,9 +14,12 @@ export function StartScreen({
   dragging: boolean;
   busy: boolean;
 }) {
-  const kind = { docx: "document", xlsx: "spreadsheet", pptx: "presentation" }[
-    config.format
-  ];
+  const headings: Record<Configuration["format"], DesktopKey> = {
+    docx: "start.openDocument",
+    xlsx: "start.openSpreadsheet",
+    pptx: "start.openPresentation",
+  };
+  const heading = headings[config.format];
   return (
     <main className={`start-screen${dragging ? " dragging" : ""}`}>
       <div className="start-content">
@@ -38,18 +42,18 @@ export function StartScreen({
             strokeWidth="1.5"
           />
         </svg>
-        <h1>{dragging ? "Drop your file here" : `Open a ${kind}`}</h1>
-        <p className="intro">Pick up where you left off.</p>
+        <h1>{dragging ? t("start.dropFileHere") : t(heading)}</h1>
+        <p className="intro">{t("start.intro")}</p>
         <button className="open-primary" onClick={open} disabled={busy}>
-          <span>{busy ? "Opening…" : "Open file…"}</span>
+          <span>{busy ? t("start.opening") : t("start.openFile")}</span>
           <kbd>⌘ O</kbd>
         </button>
         <p className="drop-hint">
-          or drop a file here <span>·</span> .{config.format}
+          {t("start.dropHint")} <span>·</span> .{config.format}
         </p>
         {config.recent.length > 0 && (
-          <section className="recent" aria-label="Recent files">
-            <h2>Recent</h2>
+          <section className="recent" aria-label={t("start.recentFiles")}>
+            <h2>{t("start.recent")}</h2>
             {config.recent.map((file) => (
               <button
                 key={file.id}

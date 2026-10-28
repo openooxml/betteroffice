@@ -218,7 +218,7 @@ export function projectCommandEchoContext(
       page, frameEpoch: layout.frame.frameEpoch, layoutRevision: layout.layoutRevision, serializedBytes: 0,
       text, styleRuns: mergeStyleRuns(styleRuns), selection: { anchorGrapheme, focusGrapheme },
       boundaries: offsets.map((utf16, grapheme) => ({ utf16, grapheme,
-        caret: { x: positions.get(utf16)!, y, width: 1, height } })),
+        caret: { x: positions.get(utf16)!, y: caret.y, width: 1, height: caret.height } })),
       transform: [1, 0, 0, 1, 0, 0], shaping: 'simple-ltr',
       damage: [{ page, rect: damageRect,
         backgroundId: `${layout.frame.frameEpoch}:${page.pageId}:echo`,
