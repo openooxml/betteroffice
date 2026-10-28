@@ -341,7 +341,9 @@ describe('loading', () => {
     for (const office of ['powerpoint', 'word'] as const) {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
         for (const bold of [false, true]) {
-          expect(provider.resolve(family, bold, false)?.measureAs).toBe(family === 'Segoe UI Black' ? undefined : family);
+          expect(provider.resolve(family, bold, false)?.measureAs).toBe(
+            family === 'Segoe UI Black' ? undefined : resolveMetricCompatFace(family, bold, false)!.metricCompatWith,
+          );
           const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
           const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, false)!;
           expect(resolveGlyphFallbackFace(family, bold, false, office)).toBe(expected);

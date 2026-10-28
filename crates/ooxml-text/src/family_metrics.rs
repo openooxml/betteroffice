@@ -20393,10 +20393,7 @@ mod tests {
             let name = entry.family;
             assert!(metrics.ascii.iter().all(|&width| width > 0), "{name}");
             assert!(
-                metrics
-                    .extra
-                    .windows(2)
-                    .all(|pair| pair[0].0 < pair[1].0),
+                metrics.extra.windows(2).all(|pair| pair[0].0 < pair[1].0),
                 "{name}"
             );
             assert!(
@@ -20406,7 +20403,10 @@ mod tests {
                     .all(|&(code, width)| code > 0x7e && width > 0),
                 "{name}"
             );
-            assert!(metrics.ascent > 0 && metrics.descent <= 0 && metrics.line_gap >= 0, "{name}");
+            assert!(
+                metrics.ascent > 0 && metrics.descent <= 0 && metrics.line_gap >= 0,
+                "{name}"
+            );
         }
     }
 
