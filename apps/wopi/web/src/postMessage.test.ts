@@ -26,7 +26,7 @@ class FakeWindow implements PostMessageWindow {
     for (const listener of [...this.listeners]) listener(event as MessageEvent);
   }
 
-  parsed(): Array<{ MessageId: string; SendTime: number; Values: Record<string, unknown> }> {
+  parsed(): Array<{ MessageId: string; SendTime: number; Values: unknown }> {
     return this.sent.map((entry) => JSON.parse(entry.message));
   }
 }

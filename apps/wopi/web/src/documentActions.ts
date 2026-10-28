@@ -1,4 +1,5 @@
 import type { SaveOptions } from "./postMessage";
+import type { SaveBarrier, SocketSaveBarrier } from "../../src/relay/sequence";
 
 interface InputEditor {
   flushPendingInput(): Promise<void>;
@@ -7,10 +8,20 @@ interface InputEditor {
 
 interface SaveDocumentOptions extends SaveOptions {
   isModified(): boolean;
+  captureBarrier?(): SocketSaveBarrier | null;
   onFlushed?(): void;
   onProgress?(patch: Record<string, unknown>): void;
   inputTimeoutMs?: number;
   saveTimeoutMs?: number;
+}
+
+interface SaveApi {
+  save(barrier: SaveBarrier, signal?: AbortSignal): Promise<unknown>;
+}
+
+interface CloseDocumentOptions extends SaveDocumentOptions {
+  setInputBlocked(blocked: boolean): void;
+  onFailure?(error: unknown): void;
 }
 
 async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason: string): Promise<T> {
@@ -29,7 +40,7 @@ async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason
 
 export async function saveDocument(
   editor: InputEditor | null,
-  api: { save(stateVector: Uint8Array, signal?: AbortSignal): Promise<unknown> },
+  api: SaveApi,
   options: SaveDocumentOptions,
 ): Promise<void> {
   let step = "started";
@@ -38,6 +49,7 @@ export async function saveDocument(
   progress({
     saveStartedAt: Date.now(), saveFlushedAt: null, saveInputFlushed: null, saveStateVectorBytes: null,
     savePostedAt: null, saveResult: null, saveError: null, saveFailedStep: null,
+    saveConnectionId: null, saveSequence: null,
   });
   try {
     if (!editor) throw new Error("editorNotReady");
@@ -53,12 +65,20 @@ export async function saveDocument(
       progress({ saveResult: "skipped" });
       return;
     }
-    step = "stateVector";
-    const stateVector = await bounded(() => editor.encodeStateVector(), options.inputTimeoutMs ?? 3000, "encodeStateVectorTimeout");
-    progress({ saveStateVectorBytes: stateVector.byteLength });
+    step = "sequence";
+    let barrier: SaveBarrier | null = options.captureBarrier?.() ?? null;
+    if (barrier) {
+      barrier = { connectionId: barrier.connectionId, seq: barrier.seq };
+      progress({ saveConnectionId: barrier.connectionId, saveSequence: barrier.seq });
+    } else {
+      step = "stateVector";
+      barrier = await bounded(() => editor.encodeStateVector(), options.inputTimeoutMs ?? 3000, "encodeStateVectorTimeout");
+      progress({ saveStateVectorBytes: barrier.byteLength });
+    }
+    const capturedBarrier = barrier;
     step = "posted";
     await bounded(() => {
-      const saving = api.save(stateVector, controller.signal);
+      const saving = api.save(capturedBarrier, controller.signal);
       progress({ savePostedAt: Date.now() });
       return saving;
     }, options.saveTimeoutMs ?? 10_000, "saveTimeout");
@@ -74,15 +94,21 @@ export async function saveDocument(
 }
 
 export async function closeDocument(
-  editor: Pick<InputEditor, "flushPendingInput">,
-  actions: { save(): Promise<void>; close(): Promise<void> },
-  isModified: () => boolean,
+  editor: InputEditor | null,
+  api: SaveApi & { close(): Promise<void> },
+  options: CloseDocumentOptions,
   finish: () => void,
 ): Promise<void> {
-  await editor.flushPendingInput();
-  if (isModified()) await actions.save();
-  await actions.close();
-  finish();
+  options.setInputBlocked(true);
+  try {
+    await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+    await api.close();
+    finish();
+  } catch (error) {
+    options.setInputBlocked(false);
+    options.onFailure?.(error);
+    throw error;
+  }
 }
 
 export function finishClose(

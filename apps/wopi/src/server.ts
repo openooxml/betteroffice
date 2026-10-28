@@ -14,7 +14,7 @@ import { extname, resolve, sep } from "node:path";
 import { CollabRelay, findByHandle } from "./relay/relay";
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
-import { decodeSaveStateVector, encodeJoinPayload, requestOrderedSave, SaveSyncError, sourceContentType } from "./sessionApi";
+import { decodeSaveBarrier, encodeJoinPayload, requestOrderedSave, SaveSyncError, sourceContentType } from "./sessionApi";
 
 export interface WopiServerDeps {
   config: WopiConfig;
@@ -343,8 +343,10 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
       try {
-        const stateVector = decodeSaveStateVector(body);
-        const result = await requestOrderedSave(session, user.id, stateVector, { timeoutMs: deps.saveSyncTimeoutMs, signal: request.signal });
+        const barrier = decodeSaveBarrier(body);
+        const result = await requestOrderedSave(session, user.id, barrier, {
+          timeoutMs: deps.saveSyncTimeoutMs, signal: request.signal, relay: ensure().relay,
+        });
         if (!result.saved && session.dirty) return typedError("saveFailed", 502);
         return json({ itemVersion: result.itemVersion }, 200, { "Cache-Control": "no-store" });
       } catch (err) {

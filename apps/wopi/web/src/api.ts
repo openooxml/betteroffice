@@ -1,4 +1,5 @@
 import { SseParser, toSessionEvent, type SessionEvent } from "./sse";
+import type { SaveBarrier } from "../../src/relay/sequence";
 
 /** Join payload as served by /api/session/join. */
 export interface JoinResponse {
@@ -31,9 +32,9 @@ function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Res
 /** Session API client. The handle is only ever sent as a Bearer header. */
 export class SessionApi {
   readonly #handle: string;
-  readonly #fetch: typeof fetch;
+  readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-  constructor(handle: string, fetchFn: typeof fetch = defaultFetch) {
+  constructor(handle: string, fetchFn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = defaultFetch) {
     this.#handle = handle;
     this.#fetch = fetchFn;
   }
@@ -54,13 +55,17 @@ export class SessionApi {
     return decodeJoinResponse(await response.json());
   }
 
-  async save(stateVector: Uint8Array, signal?: AbortSignal): Promise<{ itemVersion: string | null }> {
-    let binary = "";
-    for (const byte of stateVector) binary += String.fromCharCode(byte);
+  async save(barrier: SaveBarrier, signal?: AbortSignal): Promise<{ itemVersion: string | null }> {
+    let body: string;
+    if (barrier instanceof Uint8Array) {
+      let binary = "";
+      for (const byte of barrier) binary += String.fromCharCode(byte);
+      body = JSON.stringify({ stateVector: btoa(binary) });
+    } else body = JSON.stringify(barrier);
     const response = await this.#fetch("/api/session/save", {
       method: "POST",
       headers: { ...this.#headers(), "Content-Type": "application/json" },
-      body: JSON.stringify({ stateVector: btoa(binary) }),
+      body,
       signal,
     });
     if (!response.ok) {

@@ -7,7 +7,7 @@ import { SessionApi, type JoinResponse } from "./api";
 import { displayUserName, randomClientId, readWopiConfig, showCloseButton, type WopiPageConfig } from "./config";
 import { PostMessageBridge, type SaveOptions, type WopiView } from "./postMessage";
 import { closeDocument, finishClose, saveDocument } from "./documentActions";
-import { createWopiTransport } from "./transport";
+import { createWopiTransport, type WopiTransport } from "./transport";
 import "./styles.css";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -52,6 +52,7 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
   const [closed, setClosed] = useState(false);
   const [readOnly, setReadOnly] = useState(!config.canWrite);
   const editorApi = useRef<EditorApi | null>(null);
+  const transportRef = useRef<WopiTransport | null>(null);
   const editorContainer = useRef<HTMLElement | null>(null);
   const loadedSent = useRef(false);
   const modified = useRef(false);
@@ -69,6 +70,7 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
       await saveDocument(editorApi.current, api, {
         ...options,
         isModified: () => modified.current,
+        captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
         onFlushed: () => { version = changeVersion.current; },
         onProgress: wopiDebug,
       });
@@ -90,28 +92,25 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
 
   const close = useCallback((): Promise<void> => {
     if (closing.current) return closing.current;
-    const attempt = async () => {
-      const editor = editorApi.current;
-      if (!editor) throw new Error("editorNotReady");
-      if (editorContainer.current) editorContainer.current.inert = true;
-      await closeDocument(editor, {
-        save: async () => {
-          do { await requestSave({ DontTerminateEdit: true }); } while (modified.current);
-        },
-        close: () => api.close(),
-      }, () => modified.current, () => {
-        setClosed(true);
-        finishClose(config, bridge, window, () => setClosed(true));
-      });
-    };
-    const pending = attempt().catch((error: unknown) => {
-      if (editorContainer.current) editorContainer.current.inert = false;
-      setSaveState("failed");
-      setBanner(error instanceof Error ? error.message : "Could not close the document.");
-    }).finally(() => { closing.current = null; });
+    setSaveState("saving");
+    const pending = closeDocument(editorApi.current, api, {
+      isModified: () => modified.current,
+      captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
+      onProgress: wopiDebug,
+      setInputBlocked: (blocked) => {
+        if (editorContainer.current) editorContainer.current.inert = blocked;
+      },
+      onFailure: (error) => {
+        setSaveState("failed");
+        setBanner(error instanceof Error ? error.message : "Could not close the document.");
+      },
+    }, () => {
+      setClosed(true);
+      finishClose(config, bridge, window, () => setClosed(true));
+    }).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
     return pending;
-  }, [api, bridge, config, requestSave]);
+  }, [api, bridge, config]);
 
   useEffect(() => {
     mounted.current = true;
@@ -170,6 +169,7 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
     (_roomId: string) => {
       wopiDebug({ transportCreated: true });
       const transport = createWopiTransport({ handle: config.sessionHandle, origin: window.location.origin });
+      transportRef.current = transport;
       return {
         ...transport,
         onEvent: (listener: Parameters<typeof transport.onEvent>[0]) =>

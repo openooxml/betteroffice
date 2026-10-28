@@ -80,6 +80,17 @@ test("save posts the client state vector as base64 JSON", async () => {
   expect(JSON.parse(String(request?.body))).toEqual({ stateVector: "AQL/" });
 });
 
+test("save posts the captured socket sequence without a state vector", async () => {
+  let request: RequestInit | undefined;
+  const api = new SessionApi("handle-1", (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    request = init;
+    return Response.json({ itemVersion: "2" });
+  }) as unknown as typeof fetch);
+  const barrier = { connectionId: crypto.randomUUID(), seq: 7 };
+  await api.save(barrier);
+  expect(JSON.parse(String(request?.body))).toEqual(barrier);
+});
+
 test("save exposes a short typed synchronization failure", async () => {
   const api = new SessionApi("handle-1", (async () => Response.json({ error: { kind: "notSynced" } }, { status: 409 })) as unknown as typeof fetch);
   await expect(api.save(Uint8Array.of(0))).rejects.toThrow("notSynced");

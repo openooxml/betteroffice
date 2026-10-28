@@ -1,4 +1,5 @@
 import type { CollaborationTransport, CollaborationTransportEvent } from "../../../../shared/editor-host/collaboration/types";
+import { encodeSequencedFrame, type SocketSaveBarrier } from "../../src/relay/sequence";
 
 /** WebSocket constructor surface, so tests can fake it. */
 export interface WebSocketLike {
@@ -19,6 +20,10 @@ export interface WopiTransportOptions {
   createSocket?: (url: string, protocols: string[]) => WebSocketLike;
 }
 
+export interface WopiTransport extends CollaborationTransport {
+  captureSaveBarrier(): SocketSaveBarrier | null;
+}
+
 const OPEN = 1;
 const CONNECTING = 0;
 const MAX_BUFFERED_BYTES = 1024 * 1024;
@@ -36,13 +41,15 @@ export function collabUrl(origin: string): string {
 }
 
 /** Collaboration transport over /collab with the session handle as subprotocol. */
-export function createWopiTransport(options: WopiTransportOptions): CollaborationTransport {
+export function createWopiTransport(options: WopiTransportOptions): WopiTransport {
   const origin = options.origin ?? (typeof location !== "undefined" ? location.origin : "http://localhost");
   const createSocket = options.createSocket ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols) as unknown as WebSocketLike);
   const url = collabUrl(origin);
   const protocols = ["bo-wopi.v1", options.handle];
   const listeners = new Set<(event: CollaborationTransportEvent) => void>();
   let socket: WebSocketLike | null = null;
+  let connectionId: string | null = null;
+  let seq = 0;
   let wantsConnection = false;
   let retryMs = INITIAL_RETRY_MS;
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
@@ -81,9 +88,12 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
     const next = createSocket(url, protocols);
     next.binaryType = "arraybuffer";
     socket = next;
+    connectionId = crypto.randomUUID();
+    seq = 0;
     next.onopen = () => {
       if (socket !== next) return;
       retryMs = INITIAL_RETRY_MS;
+      next.send(encodeSequencedFrame({ connectionId: connectionId!, seq: 0 }).buffer as ArrayBuffer);
       emit({ type: "open" });
     };
     next.onmessage = (event) => {
@@ -102,6 +112,8 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
       if (socket !== next) return;
       stopDrain();
       socket = null;
+      connectionId = null;
+      seq = 0;
       emit({ type: "close", reason: event.reason });
       scheduleReconnect();
     };
@@ -125,6 +137,8 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
       }
       const current = socket;
       socket = null;
+      connectionId = null;
+      seq = 0;
       current?.close(1000, "Disconnected");
     },
     send(data) {
@@ -133,11 +147,16 @@ export function createWopiTransport(options: WopiTransportOptions): Collaboratio
         watchDrain();
         return false;
       }
-      const owned = new ArrayBuffer(data.byteLength);
-      new Uint8Array(owned).set(data);
-      socket.send(owned);
+      const frame = encodeSequencedFrame({ connectionId: connectionId!, seq: seq + 1 }, data);
+      socket.send(frame.buffer as ArrayBuffer);
+      seq += 1;
       if (socket.bufferedAmount > MAX_BUFFERED_BYTES) watchDrain();
       return true;
+    },
+    captureSaveBarrier() {
+      if (!socket) return null;
+      if (socket.readyState !== OPEN || !connectionId) throw new Error("notSynced");
+      return { connectionId, seq };
     },
     onEvent(listener) {
       listeners.add(listener);

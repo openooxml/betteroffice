@@ -21,6 +21,7 @@ import {
   encodeUpdateFrame,
 } from "./frames";
 import { CollabRelay } from "./relay";
+import { encodeSequencedFrame, type SocketSaveBarrier } from "./sequence";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -102,6 +103,7 @@ class FrameClient {
   ws: WebSocket;
   closeCode: number | null = null;
   closeReason = "";
+  sequence: SocketSaveBarrier | null = null;
   #resolveClosed: () => void = () => {};
   #closed = new Promise<void>((resolve) => {
     this.#resolveClosed = resolve;
@@ -130,19 +132,27 @@ class FrameClient {
     });
   }
 
-  static async connect(s: Setup, handle: string, client: TestClient): Promise<FrameClient> {
+  static async connect(s: Setup, handle: string, client: TestClient, sequenced = false): Promise<FrameClient> {
     const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle]);
     const frameClient = new FrameClient(client, ws);
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => resolve(), { once: true });
       ws.addEventListener("error", () => reject(new Error("websocket error")), { once: true });
     });
+    if (sequenced) {
+      frameClient.sequence = { connectionId: crypto.randomUUID(), seq: 0 };
+      ws.send(encodeSequencedFrame(frameClient.sequence) as unknown as ArrayBuffer);
+    }
     frameClient.send(encodeSyncStep1(client.encodeStateVector()));
     return frameClient;
   }
 
   send(frame: Uint8Array): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(frame as unknown as ArrayBuffer);
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.sequence) {
+      this.sequence = { ...this.sequence, seq: this.sequence.seq + 1 };
+      this.ws.send(encodeSequencedFrame(this.sequence, frame) as unknown as ArrayBuffer);
+    } else this.ws.send(frame as unknown as ArrayBuffer);
   }
 
   editAndSend(marker: string, slot = 0): void {
@@ -325,7 +335,7 @@ describe("collab relay", () => {
     const s = setup("docx");
     const handleA = await joinPage(s, TOKENS[0]!);
     const handleB = await joinPage(s, TOKENS[1]!);
-    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 933001));
+    const a = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 933001), true);
     const b = await FrameClient.connect(s, handleB, await hydrate(s, handleB, 933101));
     cleanups.push(() => { a.client.destroy(); b.client.destroy(); });
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -339,7 +349,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleA}` },
-      body: JSON.stringify({ stateVector: Buffer.from(a.client.encodeStateVector()).toString("base64") }),
+      body: JSON.stringify(a.sequence),
     });
     expect(save.status).toBe(200);
     await save.text();
@@ -357,7 +367,7 @@ describe("collab relay", () => {
     const s = setup("docx");
     const handleP = await joinPage(s, TOKENS[0]!);
     const handleA = await joinPage(s, TOKENS[1]!);
-    const peer = await FrameClient.connect(s, handleP, await hydrate(s, handleP, 935001));
+    const peer = await FrameClient.connect(s, handleP, await hydrate(s, handleP, 935001), true);
     const author = await FrameClient.connect(s, handleA, await hydrate(s, handleA, 935101));
     cleanups.push(() => { peer.client.destroy(); author.client.destroy(); });
     const session = s.h.registry.list()[0]!;
@@ -372,7 +382,7 @@ describe("collab relay", () => {
     const save = await fetch(`${s.base}/api/session/save`, {
       method: "POST",
       headers: { Authorization: `Bearer ${handleP}` },
-      body: JSON.stringify({ stateVector: Buffer.from(peer.client.encodeStateVector()).toString("base64") }),
+      body: JSON.stringify(peer.sequence),
     });
     expect(save.status).toBe(200);
     await save.text();

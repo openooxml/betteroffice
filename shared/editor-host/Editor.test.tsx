@@ -97,7 +97,7 @@ mock.module("@betteroffice/pptx-react", () => ({
     useEffect(() => {
       let dispose: void | (() => void);
       readyPresentation = () => {
-        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {}, flushPendingInput: flushPresentationInput, whenHydrated: () => hydratePresentation() } as PptxAsyncEditorApi);
+        dispose = props.onReady?.({ saveAsync: () => savePresentation(), focus() {}, flushPendingInput: flushPresentationInput, whenHydrated: () => hydratePresentation() } as unknown as PptxAsyncEditorApi);
         disposePresentation = typeof dispose === "function" ? dispose : undefined;
       };
       if (!deferPresentationReady) readyPresentation();
@@ -138,7 +138,7 @@ mock.module("@betteroffice/docx-react", () => ({
     return <span data-testid="docx-mode" data-mode={props.mode} data-readonly={String(props.readOnly ?? false)} />;
   }),
 }));
-const loadFont = mock(async (_face: unknown): Promise<Uint8Array> => Uint8Array.of(1));
+const loadFont = mock(async (_face: unknown, _options?: { baseUrl?: string }): Promise<Uint8Array> => Uint8Array.of(1));
 const openPresentationSession = mock(async (_bytes: Uint8Array, _options: unknown) => ({ dispose: async () => {} }));
 mock.module("@betteroffice/pptx/worker", () => ({ openPresentationSession }));
 

@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { collabUrl, createWopiTransport, type WebSocketLike } from "./transport";
+import { decodeSequencedFrame } from "../../src/relay/sequence";
 
 class FakeSocket implements WebSocketLike {
   binaryType = "";
@@ -63,12 +64,53 @@ describe("createWopiTransport", () => {
     socket.readyState = 1;
     socket.onopen?.();
     expect(transport.send(Uint8Array.of(1, 2))).toBe(true);
-    expect(new Uint8Array(socket.sent[0]!)).toEqual(Uint8Array.of(1, 2));
+    expect(decodeSequencedFrame(new Uint8Array(socket.sent[1]!))?.payload).toEqual(Uint8Array.of(1, 2));
     socket.onmessage?.({ data: new Uint8Array([3]).buffer });
     expect(events).toEqual(["open", "message"]);
     transport.disconnect();
     expect(socket.closedWith).toEqual([[1000, "Disconnected"]]);
   });
+});
+
+test("socket barriers number accepted frames and reset on reconnect", () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createWopiTransport({
+    handle: "h",
+    createSocket: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  expect(transport.captureSaveBarrier()).toBeNull();
+  transport.connect();
+  expect(() => transport.captureSaveBarrier()).toThrow("notSynced");
+  const first = sockets[0]!;
+  first.readyState = 1;
+  first.onopen?.();
+  const initial = transport.captureSaveBarrier()!;
+  expect(initial.seq).toBe(0);
+  expect(decodeSequencedFrame(new Uint8Array(first.sent[0]!))).toEqual({ ...initial, payload: new Uint8Array() });
+  expect(transport.send(Uint8Array.of(0, 2, 2, 0, 0))).toBe(true);
+  const captured = transport.captureSaveBarrier()!;
+  expect(captured).toEqual({ connectionId: initial.connectionId, seq: 1 });
+  expect(decodeSequencedFrame(new Uint8Array(first.sent[1]!))).toEqual({ ...captured, payload: Uint8Array.of(0, 2, 2, 0, 0) });
+  first.bufferedAmount = 1024 * 1024 + 1;
+  expect(transport.send(Uint8Array.of(0, 2, 2, 0, 0))).toBe(false);
+  expect(transport.captureSaveBarrier()).toEqual(captured);
+  transport.disconnect();
+  expect(transport.captureSaveBarrier()).toBeNull();
+  transport.connect();
+  const second = sockets[1]!;
+  second.readyState = 1;
+  second.onopen?.();
+  const reconnected = transport.captureSaveBarrier()!;
+  expect(reconnected.connectionId).not.toBe(captured.connectionId);
+  expect(reconnected.seq).toBe(0);
+  transport.send(Uint8Array.of(0, 2, 2, 0, 0));
+  expect(transport.captureSaveBarrier()).toEqual({ ...reconnected, seq: 1 });
+  expect(captured.seq).toBe(1);
+  transport.disconnect();
 });
 
 test("backpressure polls until drained and stops polling after close or disconnect", () => {

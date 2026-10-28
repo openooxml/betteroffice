@@ -3,10 +3,14 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPair } from "./proof";
 import { startServer } from "./server";
 import { initEngines } from "./replica/engines";
-import { openTestClient, sourceBytes } from "../test/replica/clients";
+import type { Format } from "./replica/replica";
+import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
 import { SessionRegistry } from "./session/registry";
+import { CollabRelay } from "./relay/relay";
+import { encodeSequencedFrame } from "./relay/sequence";
+import { encodeUpdateFrame } from "./relay/frames";
 
 const TOKEN = "SECRETTOKEN-routes-9f8e7d6c";
 const TOKEN_B = "SECRETTOKEN-routes-b-1a2b3c";
@@ -26,19 +30,21 @@ interface Setup {
   base: string;
   bodies: string[];
   headersSeen: string[];
+  relay: CollabRelay;
 }
 
-function setup(options: { fileName?: string; saveSyncTimeoutMs?: number; quirks?: { timestampConflict?: boolean } } = {}): Setup {
-  const h = makeHarness({ fileName: options.fileName, quirks: options.quirks });
-  if (options.fileName) h.host.setFile("file1", sourceBytes("xlsx"), { name: options.fileName });
+function setup(options: { fileName?: string; format?: Format; saveSyncTimeoutMs?: number; quirks?: { timestampConflict?: boolean } } = {}): Setup {
+  const h = makeHarness({ fileName: options.fileName, format: options.format, quirks: options.quirks });
+  if (options.fileName) h.host.setFile("file1", sourceBytes(options.format ?? "xlsx"), { name: options.fileName });
   addToken(h, TOKEN, "user-a", { name: "Alice A" });
   addToken(h, TOKEN_B, "user-b", { name: "Bob B", canWrite: true });
+  const relay = new CollabRelay(h.registry);
   const server = startServer(
-    { config: h.config, currentKey: generateKeyPair(), registry: h.registry, saveSyncTimeoutMs: options.saveSyncTimeoutMs },
+    { config: h.config, currentKey: generateKeyPair(), registry: h.registry, relay, saveSyncTimeoutMs: options.saveSyncTimeoutMs },
     0,
   );
   servers.push(server);
-  return { h, base: `http://127.0.0.1:${server.port}`, bodies: [], headersSeen: [] };
+  return { h, base: `http://127.0.0.1:${server.port}`, bodies: [], headersSeen: [], relay };
 }
 
 async function tracked(setup: Setup, response: Response): Promise<string> {
@@ -78,6 +84,10 @@ interface PageConfig {
   locale: string | null;
   userFriendlyName: string;
   tokenExpiresAt: number | null;
+}
+
+function auth(config: PageConfig): Record<string, string> {
+  return { Authorization: `Bearer ${config.sessionHandle}` };
 }
 
 function pageConfig(html: string): PageConfig {
@@ -233,10 +243,6 @@ describe("session API", () => {
     const response = await postPage(s, "edit");
     expect(response.status).toBe(200);
     return pageConfig(await tracked(s, response));
-  }
-
-  function auth(config: PageConfig): Record<string, string> {
-    return { Authorization: `Bearer ${config.sessionHandle}` };
   }
 
   test("auth is required and the right handle gets source and join", async () => {
@@ -426,6 +432,77 @@ test("save rejects a missing or malformed state vector", async () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { kind: "invalidStateVector" } });
+  }
+  expect(s.h.putCount()).toBe(0);
+});
+
+test.each(["deletion", "insertion"] as const)("HTTP save waits for a delayed %s frame through the socket barrier", async (kind) => {
+  const s = setup({ format: "docx" });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const session = s.h.registry.list()[0]!;
+  const user = session.getUser(config.sessionHandle)!;
+  const client = await openTestClient(session.replica!.joinPayload(), session.sourceBytes!, 995100);
+  const socket = { send() {}, close() {} };
+  const connectionId = crypto.randomUUID();
+  let seq = 0;
+  s.relay.attach(socket, { session, user });
+  s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }));
+  try {
+    const marker = "socket-save-marker ";
+    client.edit(marker, 0);
+    if (kind === "deletion") {
+      seq += 1;
+      s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }, encodeUpdateFrame(client.encodeStateAsUpdate())));
+      await session.requestSave(user.id);
+      const vector = client.encodeStateVector();
+      client.remove(marker);
+      expect(client.encodeStateVector()).toEqual(vector);
+    }
+    const before = s.h.putCount();
+    seq += 1;
+    let completed = false;
+    const saving = fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify({ connectionId, seq }),
+    }).then((response) => { completed = true; return response; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+    expect(s.h.putCount()).toBe(before);
+    s.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }, encodeUpdateFrame(client.encodeStateAsUpdate())));
+    const response = await saving;
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(s.h.putCount()).toBe(before + 1);
+    const saved = await openFreshClient("docx", s.h.host.files.get("file1")!.bytes, 995101);
+    try {
+      expect(saved.contains(marker.trim())).toBe(kind === "insertion");
+    } finally {
+      saved.destroy();
+    }
+  } finally {
+    client.destroy();
+  }
+});
+
+test("HTTP socket save times out without writing when its sequence never arrives", async () => {
+  const s = setup({ saveSyncTimeoutMs: 1 });
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  const response = await fetch(`${s.base}/api/session/save`, {
+    method: "POST", headers: auth(config), body: JSON.stringify({ connectionId: crypto.randomUUID(), seq: 1 }),
+  });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: { kind: "notSynced" } });
+  expect(s.h.putCount()).toBe(0);
+});
+
+test("HTTP save rejects malformed socket barriers", async () => {
+  const s = setup();
+  const config = pageConfig(await (await postPage(s, "edit")).text());
+  for (const barrier of [{ connectionId: "bad", seq: 1 }, { connectionId: crypto.randomUUID(), seq: -1 }, { seq: 1, stateVector: "AA==" }]) {
+    const response = await fetch(`${s.base}/api/session/save`, {
+      method: "POST", headers: auth(config), body: JSON.stringify(barrier),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: { kind: "invalidSaveBarrier" } });
   }
   expect(s.h.putCount()).toBe(0);
 });
