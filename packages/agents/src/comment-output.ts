@@ -362,7 +362,7 @@ const XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space';
 function sameExceptCommentText(left: XmlElement, right: XmlElement, paragraphIdTarget?: XmlElement): boolean {
   const attributes = new Map(left.attributes);
   if (left.name === expanded(W, 't') && right.name === left.name) {
-    if (attributes.get(XML_SPACE) === 'preserve') {
+    if (attributes.get(XML_SPACE) === 'preserve' && left.content.join('') !== right.content.join('')) {
       if (!right.attributes.has(XML_SPACE)) attributes.delete(XML_SPACE);
       else if (right.attributes.get(XML_SPACE) === 'default') attributes.set(XML_SPACE, 'default');
     }

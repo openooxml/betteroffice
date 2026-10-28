@@ -107,6 +107,27 @@ test('replace_comment_text replaces an existing default xml:space value when add
   expect(reopened.list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')!.text).toEndWith('\n alpha ');
 });
 
+for (const space of ['default', undefined]) {
+  test(`replace_comment_text refuses to preserve untouched edge whitespace with ${space ?? 'missing'} xml:space atomically`, async () => {
+    const zip = await JSZip.loadAsync(await commentFixture({ companions: [] }));
+    const comment = `<w:comment w:id="0" w:author="Reviewer" w:initials="R"><w:p w14:paraId="1A2B3C4D"><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha</w:t></w:r><w:r><w:t${space ? ` xml:space="${space}"` : ''}> beta </w:t></w:r></w:p></w:comment>`;
+    const xml = (await zip.file('word/comments.xml')!.async('string')).replace(EXISTING_COMMENT, comment);
+    zip.file('word/comments.xml', xml);
+    const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+    const doc = await open(source);
+    const before = doc.list({ story: 'comments', limit: 100 });
+    const state = doc.session.encodeState();
+    const baseline = await doc.export();
+    const error = await refusal(doc.edit({ version: before.version, edits: [{ op: 'replace_comment_text', comment: '0', find: 'alpha', replace: 'omega' }] }));
+    expect(error.code).toBe('UNSUPPORTED_TARGET');
+    expect(error.message).toContain('Saving comments would rewrite an existing comment.');
+    expect(error.message).toContain('No batch edits were applied.');
+    expect(doc.list({ story: 'comments', limit: 100 })).toEqual(before);
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(await doc.export()).toEqual(baseline);
+  });
+}
+
 for (const op of ['reply_comment', 'resolve_comment'] as const) {
   for (const separate of [false, true]) {
     test(`replace_comment_text and ${op} add only the missing paragraph id in ${separate ? 'separate batches' : 'one batch'}`, async () => {
