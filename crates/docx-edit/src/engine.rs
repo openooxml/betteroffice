@@ -402,6 +402,7 @@ struct PreparedRegionLayout {
     retain_matches: Vec<Option<BlockCertificate>>,
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
+    float_width_policy: FloatWidthPolicy,
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
@@ -499,6 +500,7 @@ impl Drop for MovedArenaGuard<'_> {
             pagination.input = None;
             pagination.measured_spacing.clear();
             pagination.measured_with = None;
+            pagination.measured_float_width_policy = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.retain_matches.clear();
             pagination.moved_blocks.clear();
@@ -2065,13 +2067,14 @@ struct PaginationState {
     moved_blocks: BTreeSet<usize>,
     #[cfg(test)]
     retain_match_calls: u64,
-    /// The widths, table frames and float geometry the arena was measured at,
+    /// The widths, table frames, float geometry and width policy used to measure the arena,
     /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
+    measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
@@ -4859,6 +4862,7 @@ impl EngineSession {
             pagination.measurement_patch = None;
             pagination.input = None;
             pagination.measured_with = None;
+            pagination.measured_float_width_policy = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.checkpoints.clear();
             pagination.block_fingerprints.clear();
@@ -4924,6 +4928,7 @@ impl EngineSession {
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
         pagination.measured_float_geometry = None;
+        pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
         pagination.layout = None;
         pagination.checkpoints = Vec::new();
@@ -7416,6 +7421,7 @@ impl EngineSession {
             retain_matches,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -7490,6 +7496,7 @@ impl EngineSession {
             lowered_generation,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -7795,6 +7802,8 @@ impl EngineSession {
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.measured_float_width_policy =
+            pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
         // Checkpoints of a prefix pass describe a cut document.
         if provisional {
@@ -7847,6 +7856,7 @@ impl EngineSession {
             retain_matches,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -8321,6 +8331,8 @@ impl EngineSession {
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.measured_float_width_policy =
+            pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
         // Checkpoints of a prefix pass describe a cut document.
         if provisional {
@@ -9245,6 +9257,7 @@ impl EngineSession {
             pagination.retain_matches.clear();
         }
         pagination.measured_with = None;
+        pagination.measured_float_width_policy = None;
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.lowered_from = None;
         pagination.lowered_generation = None;
@@ -9642,6 +9655,7 @@ impl EngineSession {
             return Ok(None);
         };
         if pagination.measured_with != Some(measurement_fingerprint)
+            || pagination.measured_float_width_policy != Some(float_width_policy)
             || previous.measured.len() != blocks.len()
             || previous.measured.len() != pagination.block_fingerprints.len()
             || previous.measured.len() != pagination.measured_font_dependencies.len()
@@ -10089,6 +10103,7 @@ impl EngineSession {
             return Ok(None);
         };
         if pagination.measured_with != Some(measurement_fingerprint)
+            || pagination.measured_float_width_policy != Some(float_width_policy)
             || previous.measured.len() != blocks.len()
             || previous.measured.len() != pagination.block_fingerprints.len()
             || previous.measured.len() != pagination.measured_font_dependencies.len()
@@ -10706,6 +10721,7 @@ impl EngineSession {
                 let mut pagination = self.pagination.borrow_mut();
                 pagination.block_fingerprints.clear();
                 pagination.measured_with = None;
+                pagination.measured_float_width_policy = None;
                 pagination.measurement_patch = None;
                 pagination.set_font_dependencies(Vec::new(), None);
             }
@@ -10716,6 +10732,7 @@ impl EngineSession {
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
+        pagination.measured_float_width_policy = Some(FloatWidthPolicy::FirstBlock);
         pagination
             .set_font_dependencies(resident.font_dependencies, Some(&measurement.font_chains));
         pagination.measured_widths = widths;
@@ -17204,6 +17221,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             pagination.block_fingerprints =
                 measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
             pagination.measured_with = Some(prepared.measurement_fingerprint);
+            pagination.measured_float_width_policy =
+                Some(FloatWidthPolicy::for_document(blocks.iter()));
             pagination.measured_widths = vec![300.0];
             pagination.set_font_dependencies(vec![dependencies.clone()], None);
         }
@@ -17523,6 +17542,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 pagination.block_fingerprints =
                     measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
                 pagination.measured_with = Some(prepared.measurement_fingerprint);
+                pagination.measured_float_width_policy =
+                    Some(FloatWidthPolicy::for_document(blocks.iter()));
                 pagination.measured_widths = widths.to_vec();
             }
             blocks[0] = serde_json::from_value(json!({

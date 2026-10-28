@@ -1082,3 +1082,215 @@ fn a_prefix_inside_a_wrapped_cover_with_a_shared_header_matches_full_layout() {
         );
     }
 }
+
+fn late_wrapped_section_float_document() -> Vec<u8> {
+    let mut parts =
+        ooxml_opc::unzip_parts(&wrapped_float_edit_document(690, 624, "paragraph")).unwrap();
+    let document = parts
+        .iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap();
+    let images: Vec<_> = std::str::from_utf8(&document.1)
+        .unwrap()
+        .split("<w:r xmlns:wp=")
+        .skip(1)
+        .map(|image| {
+            let drawing = image.split_once("</w:r>").unwrap().0;
+            format!("<w:r xmlns:wp={drawing}</w:r>")
+        })
+        .collect();
+    assert_eq!(images.len(), 2);
+    let paragraph = |id: u32, properties: &str, content: &str| {
+        p(
+            &format!("{id:08X}"),
+            &format!(
+                concat!(
+                    "<w:pPr><w:spacing w:before=\"0\" w:after=\"0\" ",
+                    "w:line=\"300\" w:lineRule=\"exact\"/>{properties}</w:pPr>{content}"
+                ),
+                properties = properties,
+                content = content,
+            ),
+        )
+    };
+    let tails = (0..24)
+        .map(|index| paragraph(0x3000 + index, "", &r("Following body text")))
+        .collect::<String>();
+    let body = format!(
+        concat!(
+            "{cover}{image}{near}{tails}{reset}<w:sdt><w:sdtPr><w:id w:val=\"7\"/>",
+            "</w:sdtPr><w:sdtContent>{wrapped}</w:sdtContent></w:sdt>{outside}{last}{section}"
+        ),
+        cover = paragraph(
+            1,
+            &section(11790, 15840, 1440, 1440, ""),
+            &format!("{}{}", images[0], r("Cover")),
+        ),
+        image = paragraph(3, "<w:pageBreakBefore/>", &images[1]),
+        near = paragraph(4, "", &r(&"Body words beside the image. ".repeat(12))),
+        tails = tails,
+        reset = paragraph(5, "<w:pageBreakBefore/>", &r("Late section")),
+        wrapped = paragraph(
+            6,
+            &section(10800, 15840, 1440, 1440, ""),
+            &images[0].replace("id=\"2\"", "id=\"3\""),
+        ),
+        outside = paragraph(7, "", &images[0].replace("id=\"2\"", "id=\"4\"")),
+        last = paragraph(8, "", &r("After the moved section")),
+        section = section(10800, 15840, 1440, 1440, ""),
+    );
+    for (name, bytes) in &mut parts {
+        if name == "word/document.xml" {
+            *bytes = format!(
+                concat!(
+                    "<w:document ",
+                    "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+                    "xmlns:r=\"",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+                    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">",
+                    "<w:body>{body}</w:body></w:document>"
+                ),
+                body = body,
+            )
+            .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn retained_float_width_policy(input: &Value) -> docx_layout::measure_blocks::FloatWidthPolicy {
+    let blocks: Vec<docx_layout::types::LayoutBlock> = input["measured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| serde_json::from_value(entry["block"].clone()).unwrap())
+        .collect();
+    docx_layout::measure_blocks::FloatWidthPolicy::for_document(blocks.iter())
+}
+
+#[test]
+fn a_host_batch_moving_a_wrapped_section_break_remeasures_the_document_float_policy() {
+    use docx_layout::measure_blocks::FloatWidthPolicy;
+
+    let bytes = late_wrapped_section_float_document();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let engine = EngineSession::new(75240);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let mut request = region_request(&engine, &bytes, font);
+    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let cover_properties = request["regions"]["sections"][0]["properties"].clone();
+    let body_properties = json!(package.document.final_section_properties);
+    request["regions"]["sections"] = json!([
+        {"properties": cover_properties},
+        {"properties": body_properties},
+        {"properties": body_properties},
+    ]);
+    request["notes"]["contents"] = json!([]);
+    let extras = json!({"fontChains": request["measurement"]["fontChains"]}).to_string();
+    let request = request.to_string();
+    engine
+        .layout_document_with_regions_retained(&request)
+        .unwrap();
+    engine.build_display_list_frame(&extras, 0).unwrap();
+    let peer = docx_edit::EditingDoc::new(75241);
+    peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    peer.insert_text(
+        &docx_edit::EditCtx::local("", ""),
+        peer.paragraph_mark_position("00000004").unwrap(),
+        "x",
+        docx_edit::FormatPolicy::Inherit,
+    )
+    .unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&peer.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .layout_document_with_regions_retained(&request)
+        .unwrap();
+    engine.build_display_list_frame(&extras, 0).unwrap();
+    let warm: Value =
+        serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+    assert_eq!(retained_float_width_policy(&warm), FloatWidthPolicy::PerBlock);
+    assert_wrapped_float_measurements(&warm, false);
+    let owner = peer.paragraph_mark_position("00000006").unwrap().story;
+    let properties = peer
+        .paragraphs(&owner)
+        .unwrap()
+        .into_iter()
+        .find(|paragraph| paragraph.para_id == "00000006")
+        .unwrap()
+        .properties["sectPr"]
+        .clone();
+    for (from, to, policy, interactive) in [
+        ("00000006", "00000007", FloatWidthPolicy::FirstBlock, false),
+        ("00000007", "00000006", FloatWidthPolicy::PerBlock, false),
+        ("00000006", "00000007", FloatWidthPolicy::FirstBlock, true),
+        ("00000007", "00000006", FloatWidthPolicy::PerBlock, true),
+    ] {
+        peer.set_paragraph_attr(from, "sectPr", yrs::Any::Null)
+            .unwrap();
+        peer.set_paragraph_attr(from, "sectionBreakType", yrs::Any::Null)
+            .unwrap();
+        peer.set_paragraph_attr(to, "sectPr", properties.clone())
+            .unwrap();
+        peer.set_paragraph_attr(to, "sectionBreakType", yrs::Any::from("nextPage"))
+            .unwrap();
+        engine
+            .doc()
+            .apply_host_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        let before = engine.stats();
+        if interactive {
+            engine.apply_and_layout("body", 0).unwrap();
+        } else {
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+        }
+        assert_eq!(engine.stats().resident_reused_blocks, before.resident_reused_blocks);
+        let incremental: Value =
+            serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+        assert_eq!(retained_float_width_policy(&incremental), policy);
+        assert_eq!(
+            incremental["measured"].as_array().unwrap().len(),
+            warm["measured"].as_array().unwrap().len()
+        );
+        let image = incremental["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["block"]["id"] == "00000003")
+            .unwrap();
+        let skip = image["measure"]["lines"][0]["floatSkipBefore"]
+            .as_f64()
+            .unwrap_or(0.0);
+        let expected_skip = if policy == FloatWidthPolicy::FirstBlock {
+            512.0
+        } else {
+            0.0
+        };
+        assert_eq!(skip, expected_skip);
+        let fresh = EngineSession::new(75242);
+        fresh
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        fresh
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert_eq!(
+            engine.retained_kernel_inputs_json().unwrap(),
+            fresh.retained_kernel_inputs_json().unwrap()
+        );
+        assert_eq!(
+            engine.retained_layout_json().unwrap(),
+            fresh.retained_layout_json().unwrap()
+        );
+        engine.build_display_list_frame(&extras, 0).unwrap();
+    }
+}
