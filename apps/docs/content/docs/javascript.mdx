@@ -255,9 +255,11 @@ A `{ kind: 'drawing', paragraph, offset }` target answers with the drawn frame
 box of the drawing atom at `offset` in that paragraph, the UTF-16 atom offset a
 story read reports, on every page that paints it, with the first frame as its
 `anchor`. An offset that is not on a drawing atom is `missing-target`, and so
-is a drawing no page paints once the layout is complete. Find a tagged picture
-from a story read, then ask for its frame (`anchorFor` builds the paragraph
-anchor for a story and paragraph id, from paragraph identities or a proposal):
+is a drawing no page paints once the layout is complete; while a page that may
+hold it is not laid out yet it is `layout-unavailable`. A picture's `title`,
+`descr` and `placement` follow edits to its alt text and wrapping. Find a tagged picture
+from a story read, then ask for its frame (`anchorFor` stands for however the
+plugin builds the paragraph anchor it passes to `paragraph` and `search` targets):
 
 ```ts
 const stories = await context.read.readStories({ view: 'accepted' });
