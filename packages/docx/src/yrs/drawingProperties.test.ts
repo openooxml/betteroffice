@@ -103,6 +103,25 @@ describe('drawing properties plumbing', () => {
     }
   });
 
+  test('a deleted paragraph mark before a table keeps its paragraph out of the lookup', () => {
+    const split = {
+      ...reader(),
+      paragraphSpans: () => [{ paraId: 'a', length: 1 }, { paraId: 'p', length: 2 }],
+      storySegments: () => [
+        { kind: 'embed', embedKind: 'image', payload: { docPr: { ...DRAWING, docPrId: 'x' } }, attributes: {} },
+        { kind: 'pilcrow', paraId: 'a', properties: { pPrDel: { revisionId: 7, author: 'Reader' } }, attributes: {} },
+        { kind: 'embed', embedKind: 'table', payload: {}, attributes: {} },
+        { kind: 'embed', embedKind: 'image', payload: { docPr: DRAWING }, attributes: {} },
+        { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+      ],
+    } as unknown as AnchorReader;
+    expect(resolveAnchorTarget(split, { kind: 'drawing', paragraph: PARAGRAPH, offset: 0 }, 'v1')).toMatchObject({
+      ok: true,
+      drawing: true,
+      ranges: [{ start: { story: 'body', paraId: 'p', offset: 1 }, end: { offset: 2 } }],
+    });
+  });
+
   test('a drawing target refuses offsets that are not on a drawing atom', () => {
     for (const offset of [0, 1, 3, -1, 1.5]) {
       expect(

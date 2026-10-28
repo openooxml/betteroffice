@@ -438,7 +438,7 @@ export function resolveAnchorTarget(
       return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
     }
     let first = view?.index ?? 0;
-    while (view && first > 0 && views.list[first - 1]!.joins) first -= 1;
+    while (view && first > 0 && views.list[first - 1]!.joins && views.list[first]!.inlineStart === 0) first -= 1;
     let base = 0;
     let found: { paraId: string; atom: ViewParagraph['atoms'][number] } | undefined;
     for (const part of view ? views.list.slice(first, view.index + 1) : []) {
