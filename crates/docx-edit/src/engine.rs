@@ -20,14 +20,15 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::measure_blocks::{ColumnWidthBand, TableMeasurementFrame};
+use docx_layout::measure_blocks::{ColumnWidthBand, FloatWidthPolicy, TableMeasurementFrame};
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::prescan::SectionLayoutConfig;
 use docx_layout::regions::{
-    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_document_regions_tracked,
-    apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
+    DocumentRegions, RegionLayoutInput, advances_region_section, apply_document_regions,
+    apply_document_regions_tracked, apply_section_geometry, apply_section_geometry_to_blocks,
+    effective_header_footer_refs, section_region_indices,
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Fragment, HeaderFooterRefs, Input as LayoutInput, Layout,
@@ -401,6 +402,7 @@ struct PreparedRegionLayout {
     retain_matches: Vec<Option<BlockCertificate>>,
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
+    float_width_policy: FloatWidthPolicy,
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
@@ -498,6 +500,7 @@ impl Drop for MovedArenaGuard<'_> {
             pagination.input = None;
             pagination.measured_spacing.clear();
             pagination.measured_with = None;
+            pagination.measured_float_width_policy = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.retain_matches.clear();
             pagination.moved_blocks.clear();
@@ -598,6 +601,7 @@ fn region_table_measurement_frames<'a>(
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
+    let region_indices = section_region_indices(blocks.iter().copied());
     let section_breaks: Vec<_> = blocks
         .iter()
         .copied()
@@ -662,10 +666,19 @@ fn region_table_measurement_frames<'a>(
             {
                 column_index = 0;
             }
-            let section = regions
-                .sections
+            let region_index = region_indices
+                .as_ref()
+                .map_or(section_index, |indices| indices[section_index]);
+            let section = section_breaks
                 .get(section_index)
-                .or_else(|| regions.sections.last());
+                .is_none_or(|section| !section.is_self_describing())
+                .then(|| {
+                    regions
+                        .sections
+                        .get(region_index)
+                        .or_else(|| regions.sections.last())
+                })
+                .flatten();
             let fallback = &fallback_sections[section_index];
             let size = section
                 .and_then(|section| section.page_size.as_ref())
@@ -720,7 +733,7 @@ fn region_table_measurement_frames<'a>(
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
-                || regions.sections.get(section_index).is_some())
+                || regions.sections.get(region_index).is_some())
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
                 && width == placement_page_width - placement_margins.left - placement_margins.right;
@@ -981,12 +994,12 @@ fn cut_exact_prefix(pagination: &mut PaginationState, pages: usize) -> bool {
 /// moves the first `pages` pages.
 /// Returns the extents of the measured prefix; all blocks when it never does.
 /// With `anchored` objects the prefix is measured whole each time it grows: a
-/// float applies from its anchor on, and zones are extracted at the body's
-/// first width, which a batch opening in a later section would not use.
+/// float applies from its anchor on, using the complete document's width policy.
 #[allow(clippy::too_many_arguments)]
 fn measure_page_prefix_plain(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
@@ -1002,9 +1015,10 @@ fn measure_page_prefix_plain(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let mut prefix = blocks[..end].to_vec();
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &prefix,
                 &widths[..end],
+                float_width_policy,
                 &table_wrap_frames[..end],
                 measurement,
                 Some(geometry),
@@ -1016,9 +1030,10 @@ fn measure_page_prefix_plain(
                 *block = measured;
             }
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &blocks[start..end],
                 &widths[start..end],
+                float_width_policy,
                 &table_wrap_frames[start..end],
                 measurement,
                 Some(geometry),
@@ -1069,6 +1084,7 @@ fn measure_page_prefix_plain(
 fn measure_page_prefix(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
@@ -1081,6 +1097,7 @@ fn measure_page_prefix(
         return measure_page_prefix_plain(
             blocks,
             widths,
+            float_width_policy,
             table_wrap_frames,
             measurement,
             geometry,
@@ -1097,9 +1114,10 @@ fn measure_page_prefix(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let prefix = &mut blocks[..end];
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 prefix,
                 &widths[..end],
+                float_width_policy,
                 &table_wrap_frames[..end],
                 measurement,
                 Some(geometry),
@@ -1108,9 +1126,10 @@ fn measure_page_prefix(
             dependencies = flow.font_dependencies().to_vec();
             measures = flow.into_extents();
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &blocks[start..end],
                 &widths[start..end],
+                float_width_policy,
                 &table_wrap_frames[start..end],
                 measurement,
                 Some(geometry),
@@ -1307,6 +1326,8 @@ fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
 }
 
 fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<bool> {
+    let region_indices =
+        section_region_indices(input.measured.iter().map(|measured| &measured.block));
     let breaks: Vec<_> = input
         .measured
         .iter()
@@ -1320,9 +1341,14 @@ fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<
         .measured
         .iter()
         .map(|measured| {
-            let columns = regions
-                .sections
+            let region_index = region_indices
+                .as_ref()
+                .map_or(section_index, |indices| indices[section_index]);
+            let columns = breaks
                 .get(section_index)
+                .is_none_or(|section| !section.is_self_describing())
+                .then(|| regions.sections.get(region_index))
+                .flatten()
                 .and_then(|section| section.columns.as_ref())
                 .or_else(|| {
                     breaks
@@ -1794,19 +1820,189 @@ fn extend_input_for_header_footer(
                 || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
         })
         .then_some(float_bands);
-    input.options.margins = extended.first().cloned();
+    input.options.margins = input
+        .measured
+        .iter()
+        .find_map(|measured| match &measured.block {
+            LayoutBlock::SectionBreak(section) => Some(section),
+            _ => None,
+        })
+        .filter(|section| section.is_self_describing())
+        .and_then(|section| section.margins.clone())
+        .or_else(|| extended.first().cloned());
     input.options.final_margins = cut
         .map_or(extended.last(), |section| extended.get(section))
         .cloned();
     let mut section_index = 0;
+    let mut first_break = true;
+    let mut section_size = fallback_size;
+    let mut section_margins = fallback_margins;
+    let mut physical_float_bands =
+        section_region_indices(input.measured.iter().map(|measured| &measured.block))
+            .map(|_| Vec::new());
+    let caller_float_bands = physical_float_bands
+        .as_ref()
+        .and_then(|_| input.options.section_page_float_bands.clone());
+    let mut physical_page_margins = physical_float_bands.as_ref().map(|_| Vec::new());
+    let caller_page_margins = physical_page_margins
+        .as_ref()
+        .and_then(|_| input.options.section_page_margins.clone());
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
         };
+        let ends_first_section = first_break;
+        first_break = false;
+        if let Some(size) = &section_break.page_size {
+            section_size.clone_from(size);
+        }
+        if let Some(margins) = &section_break.margins {
+            section_margins.clone_from(margins);
+        }
+        if section_break.is_self_describing() {
+            let section = regions
+                .sections
+                .get(section_index)
+                .or_else(|| regions.sections.last());
+            let mut margins = section_margins.clone();
+            margins.header = section_break
+                .margins
+                .as_ref()
+                .and_then(|margins| margins.header)
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.header))
+                .or_else(|| section.and_then(|section| section.header_distance))
+                .or(margins.header)
+                .or(Some(margins.top.abs()));
+            margins.footer = section_break
+                .margins
+                .as_ref()
+                .and_then(|margins| margins.footer)
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.footer))
+                .or_else(|| section.and_then(|section| section.footer_distance))
+                .or(margins.footer)
+                .or(Some(margins.bottom.abs()));
+            if let Some(physical_float_bands) = &mut physical_float_bands {
+                let bands = |hf_type| {
+                    let mut bands: Vec<_> = variants
+                        .iter()
+                        .filter(|variant| {
+                            variant.section_index == section_index && variant.hf_type == hf_type
+                        })
+                        .flat_map(|variant| {
+                            header_footer_float_bands(
+                                variant,
+                                HeaderFooterMetrics {
+                                    kind: variant.kind,
+                                    page_size: &section_size,
+                                    margins: &margins,
+                                },
+                            )
+                        })
+                        .collect();
+                    bands.sort_by(|a, b| a.top.total_cmp(&b.top));
+                    bands
+                };
+                physical_float_bands.push(docx_layout::types::SectionPageFloatBands {
+                    default: bands(HeaderFooterType::Default),
+                    first: section
+                        .is_some_and(|section| section.title_pg)
+                        .then(|| bands(HeaderFooterType::First)),
+                    even: (regions.even_and_odd_headers
+                        || section
+                            .is_some_and(|section| section.even_and_odd_headers == Some(true)))
+                    .then(|| bands(HeaderFooterType::Even)),
+                    anchor_margins: Some(margins.clone()),
+                });
+            }
+            let extend = |hf_type| {
+                let height = |kind| {
+                    variants
+                        .iter()
+                        .rfind(|variant| {
+                            variant.section_index == section_index
+                                && variant.kind == kind
+                                && variant.hf_type == hf_type
+                        })
+                        .map_or(0.0, |variant| variant.flow_height)
+                };
+                extend_body_margins(
+                    &section_size,
+                    &margins,
+                    height(HeaderFooterKind::Header),
+                    height(HeaderFooterKind::Footer),
+                )
+            };
+            if let Some(physical_page_margins) = &mut physical_page_margins {
+                physical_page_margins.push(SectionPageMargins {
+                    first: section
+                        .is_some_and(|section| section.title_pg)
+                        .then(|| extend(HeaderFooterType::First)),
+                    even: (regions.even_and_odd_headers
+                        || section
+                            .is_some_and(|section| section.even_and_odd_headers == Some(true)))
+                    .then(|| extend(HeaderFooterType::Even)),
+                    restart: None,
+                });
+            }
+            let extended_margins = extend(HeaderFooterType::Default);
+            section_break.margins = Some(extended_margins.clone());
+            if ends_first_section {
+                input.options.margins = Some(extended_margins);
+            }
+            continue;
+        }
         if let Some(margins) = extended.get(section_index) {
             section_break.margins = Some(margins.clone());
         }
+        if let Some(physical_float_bands) = &mut physical_float_bands {
+            physical_float_bands.push(
+                caller_float_bands
+                    .as_ref()
+                    .and_then(|bands| bands.get(section_index))
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(physical_page_margins) = &mut physical_page_margins {
+            physical_page_margins.push(
+                caller_page_margins
+                    .as_ref()
+                    .and_then(|margins| margins.get(section_index))
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
         section_index += 1;
+    }
+    if let Some(mut physical_float_bands) = physical_float_bands {
+        physical_float_bands.push(
+            caller_float_bands
+                .as_ref()
+                .and_then(|bands| bands.get(section_index))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        input.options.section_page_float_bands = physical_float_bands
+            .iter()
+            .any(|bands| {
+                !bands.default.is_empty()
+                    || bands.first.as_ref().is_some_and(|bands| !bands.is_empty())
+                    || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
+            })
+            .then_some(physical_float_bands);
+    }
+    if let Some(mut physical_page_margins) = physical_page_margins {
+        physical_page_margins.push(
+            caller_page_margins
+                .as_ref()
+                .and_then(|margins| margins.get(section_index))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        input.options.physical_section_page_margins = physical_page_margins
+            .iter()
+            .any(|margins| margins.first.is_some() || margins.even.is_some())
+            .then_some(physical_page_margins);
     }
 }
 
@@ -1888,13 +2084,14 @@ struct PaginationState {
     moved_blocks: BTreeSet<usize>,
     #[cfg(test)]
     retain_match_calls: u64,
-    /// The widths, table frames and float geometry the arena was measured at,
+    /// The widths, table frames, float geometry and width policy used to measure the arena,
     /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
     measured_float_geometry: Option<[f64; 5]>,
+    measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
@@ -2850,7 +3047,7 @@ impl BlockSpacing {
                     block,
                     regions.map(|regions| regions.paragraph_spacing_line_px(section)),
                 );
-                if matches!(block, LayoutBlock::SectionBreak(_)) {
+                if advances_region_section(block) {
                     section += 1;
                 }
                 spacing
@@ -3451,6 +3648,7 @@ fn normalize_measurement_block(
     resolve_line_unit_spacing(&mut owned, regions.paragraph_spacing_line_px(section_index));
     resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
     if let LayoutBlock::SectionBreak(section_break) = &mut owned
+        && !section_break.is_self_describing()
         && let Some(section) = regions.sections.get(section_index)
     {
         if section.page_size.is_some() {
@@ -3667,7 +3865,7 @@ fn certify_retained_blocks(
                         None
                     }
                 };
-            if matches!(source, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(source) {
                 section += 1;
             }
             Ok(certificate)
@@ -3677,15 +3875,20 @@ fn certify_retained_blocks(
 
 fn resident_float_kinds(
     blocks: &SharedBlocks,
-    width: f64,
+    widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
 ) -> Result<(bool, bool), String> {
     let mut kinds = (false, false);
-    for block in blocks.iter() {
-        let next = docx_layout::measure_blocks::floating_zone_kinds(
+    let default_width = widths.first().copied().unwrap_or(0.0);
+    for (index, block) in blocks.iter().enumerate() {
+        let width = widths.get(index).copied().unwrap_or(default_width);
+        let next = docx_layout::measure_blocks::floating_zone_kinds_with_width_policy(
             std::slice::from_ref(block),
-            width,
+            default_width,
+            &[width],
+            float_width_policy,
             measurement,
             Some(geometry),
         )?;
@@ -4676,6 +4879,7 @@ impl EngineSession {
             pagination.measurement_patch = None;
             pagination.input = None;
             pagination.measured_with = None;
+            pagination.measured_float_width_policy = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.checkpoints.clear();
             pagination.block_fingerprints.clear();
@@ -4741,6 +4945,7 @@ impl EngineSession {
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
         pagination.measured_float_geometry = None;
+        pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
         pagination.layout = None;
         pagination.checkpoints = Vec::new();
@@ -6997,6 +7202,7 @@ impl EngineSession {
         let mut retain_matches = Vec::new();
         let mut input_lowering = None;
         let mut has_floats = false;
+        let mut float_width_policy = FloatWidthPolicy::FirstBlock;
         let mut measured_widths = Vec::new();
         let mut measured_font_dependencies = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
@@ -7029,9 +7235,14 @@ impl EngineSession {
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
                         measured_float_geometry = Some(float_geometry_key(&geometry));
-                        let default_width = widths.first().copied().unwrap_or(0.0);
-                        let (floats, margin_floats) =
-                            resident_float_kinds(blocks, default_width, &measurement, &geometry)?;
+                        float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
+                        let (floats, margin_floats) = resident_float_kinds(
+                            blocks,
+                            &widths,
+                            float_width_policy,
+                            &measurement,
+                            &geometry,
+                        )?;
                         has_floats = floats;
                         // margin-relative zones couple the whole flow; re-measure all
                         if margin_floats || (floats && blocks.iter().any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))) {
@@ -7045,6 +7256,7 @@ impl EngineSession {
                                 .get(story)
                                 .map(|lowered| lowered.generation),
                             &widths,
+                            float_width_policy,
                             &table_wrap_frames,
                             &regions,
                             &measurement,
@@ -7092,7 +7304,7 @@ impl EngineSession {
                             block,
                             regions.doc_grid_snap_pitch_px(section_index),
                         );
-                        if matches!(block, LayoutBlock::SectionBreak(_)) {
+                        if advances_region_section(block) {
                             section_index += 1;
                         }
                     }
@@ -7109,15 +7321,23 @@ impl EngineSession {
                                 && (!exact || exact_prefix_body(&regions, &blocks)) =>
                         {
                             let anchored = anchors_objects(&blocks);
+                            let region_indices = section_region_indices(blocks.iter());
+                            let wrapped_sections = region_indices
+                                .as_ref()
+                                .map(|_| BodySections::new(&blocks, &input.options));
                             let sections =
                                 exact.then(|| BodySections::new(&blocks, &input.options));
                             let through = |last: usize| match &sections {
                                 Some(sections) => sections.through(last),
-                                None => options_through_section(&request_options, &regions, last),
+                                None => wrapped_sections.as_ref().map_or_else(
+                                    || options_through_section(&request_options, &regions, last),
+                                    |sections| sections.through(last),
+                                ),
                             };
-                            let (measures, dependencies) = measure_page_prefix(
+                            let (mut measures, mut dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
+                                float_width_policy,
                                 &table_wrap_frames,
                                 &measurement,
                                 &geometry,
@@ -7126,6 +7346,30 @@ impl EngineSession {
                                 anchored,
                                 trigger,
                             )?;
+                            let cut_is_wrapped = blocks[measures.len()..]
+                                .iter()
+                                .find_map(|block| match block {
+                                    LayoutBlock::SectionBreak(section) => {
+                                        Some(section.is_self_describing())
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(false);
+                            if cut_is_wrapped {
+                                let mut flow =
+                                    docx_layout::measure_blocks::FloatFlow::with_width_policy(
+                                        &blocks,
+                                        &widths,
+                                        float_width_policy,
+                                        &table_wrap_frames,
+                                        &measurement,
+                                        Some(&geometry),
+                                    )?;
+                                let end = blocks.len();
+                                flow.measure_until(&mut blocks, &widths, &measurement, end)?;
+                                dependencies = flow.font_dependencies().to_vec();
+                                measures = flow.into_extents();
+                            }
                             measured_font_dependencies = dependencies;
                             #[cfg(test)]
                             BODY_MEASUREMENT_WORK.with(|work| {
@@ -7145,7 +7389,12 @@ impl EngineSession {
                                             section: (last < sections.ended.len()).then_some(last),
                                         });
                                     }
-                                    None => regions.sections.truncate(last + 1),
+                                    None => {
+                                        let last = region_indices
+                                            .as_ref()
+                                            .map_or(last, |indices| indices[last]);
+                                        regions.sections.truncate(last + 1);
+                                    }
                                 }
                             }
                             input.measured = blocks
@@ -7155,9 +7404,10 @@ impl EngineSession {
                                 .collect();
                         }
                         _ => {
-                            let flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+                            let flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                                 &blocks,
                                 &widths,
+                                float_width_policy,
                                 &table_wrap_frames,
                                 &measurement,
                                 Some(&geometry),
@@ -7201,6 +7451,7 @@ impl EngineSession {
             retain_matches,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -7275,6 +7526,7 @@ impl EngineSession {
             lowered_generation,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -7338,6 +7590,8 @@ impl EngineSession {
         // Placement only zeroes contextual spacing, which every pass applies
         // again, so the note passes replay the body arena in place. Page-side
         // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let physical_note_widths =
+            section_region_indices(input.measured.iter().map(|entry| &entry.block)).is_some();
         let mut separator_heights = input
             .options
             .note_separator_heights
@@ -7379,6 +7633,7 @@ impl EngineSession {
                 &mut notes.contents,
                 &refs,
                 &initial_layout,
+                physical_note_widths,
                 &regions,
                 &measurement,
                 parsed_render_env
@@ -7391,6 +7646,12 @@ impl EngineSession {
             separator_heights
                 .endnote
                 .extend(measured_separator_heights.endnote);
+            separator_heights
+                .footnote_widths
+                .extend(measured_separator_heights.footnote_widths);
+            separator_heights
+                .endnote_widths
+                .extend(measured_separator_heights.endnote_widths);
         }
         if separator_heights != NoteSeparatorHeights::default() {
             for input in base_input.iter_mut().chain(arena.iter_mut()) {
@@ -7580,6 +7841,8 @@ impl EngineSession {
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.measured_float_width_policy =
+            pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
         // Checkpoints of a prefix pass describe a cut document.
         if provisional {
@@ -7632,6 +7895,7 @@ impl EngineSession {
             retain_matches,
             input_lowering,
             has_floats,
+            float_width_policy,
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
@@ -7732,6 +7996,8 @@ impl EngineSession {
         // Placement only zeroes contextual spacing, which every pass applies
         // again, so the note passes replay the body arena in place. Page-side
         // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let physical_note_widths =
+            section_region_indices(input.measured.iter().map(|entry| &entry.block)).is_some();
         let mut separator_heights = input
             .options
             .note_separator_heights
@@ -7782,6 +8048,7 @@ impl EngineSession {
                 &mut notes.contents,
                 &refs,
                 &initial_layout,
+                physical_note_widths,
                 &regions,
                 &measurement,
                 parsed_render_env
@@ -7794,6 +8061,12 @@ impl EngineSession {
             separator_heights
                 .endnote
                 .extend(measured_separator_heights.endnote);
+            separator_heights
+                .footnote_widths
+                .extend(measured_separator_heights.footnote_widths);
+            separator_heights
+                .endnote_widths
+                .extend(measured_separator_heights.endnote_widths);
         }
         if separator_heights != NoteSeparatorHeights::default() {
             for input in base_input.iter_mut().chain(arena.iter_mut()) {
@@ -8106,6 +8379,8 @@ impl EngineSession {
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_float_geometry = measured_float_geometry;
+        pagination.measured_float_width_policy =
+            pagination.measured_with.map(|_| float_width_policy);
         pagination.measured_with_floats = has_floats;
         // Checkpoints of a prefix pass describe a cut document.
         if provisional {
@@ -8255,6 +8530,7 @@ impl EngineSession {
         &self,
         contents: &[docx_layout::footnotes::NoteContent],
         layout: &Layout,
+        physical_widths: bool,
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
@@ -8274,6 +8550,18 @@ impl EngineSession {
         for page in &layout.pages {
             first_pages.entry(page.region_section_index).or_insert(page);
         }
+        let mut frames: Vec<_> = sections
+            .iter()
+            .map(|&section| (section, first_pages.get(&section).copied(), false))
+            .collect();
+        if physical_widths {
+            frames.extend(
+                layout
+                    .pages
+                    .iter()
+                    .map(|page| (page.region_section_index, Some(page), true)),
+            );
+        }
         for (kind, name) in [
             (NoteKind::Footnote, "footnote"),
             (NoteKind::Endnote, "endnote"),
@@ -8285,8 +8573,7 @@ impl EngineSession {
                 continue;
             };
             let mut measured_heights = HashMap::new();
-            for &section_index in &sections {
-                let page = first_pages.get(&section_index).copied();
+            for &(section_index, page, physical) in &frames {
                 let section = regions
                     .sections
                     .get(section_index)
@@ -8345,27 +8632,39 @@ impl EngineSession {
                     measured_heights.insert(key, height);
                     height
                 };
-                match kind {
-                    NoteKind::Footnote => &mut heights.footnote,
-                    NoteKind::Endnote => &mut heights.endnote,
+                if physical {
+                    heights.insert_for_width(kind, section_index, width, height);
+                } else {
+                    match kind {
+                        NoteKind::Footnote => &mut heights.footnote,
+                        NoteKind::Endnote => &mut heights.endnote,
+                    }
+                    .insert(section_index, height);
                 }
-                .insert(section_index, height);
             }
         }
         Ok(heights)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn measure_resident_notes(
         &self,
         contents: &mut [docx_layout::footnotes::NoteContent],
         refs: &[docx_layout::footnotes::NoteRefLocation],
         layout: &Layout,
+        physical_widths: bool,
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
     ) -> Result<NoteSeparatorHeights, String> {
-        let separator_heights =
-            self.measure_note_separators(contents, layout, regions, measurement, render_env)?;
+        let separator_heights = self.measure_note_separators(
+            contents,
+            layout,
+            physical_widths,
+            regions,
+            measurement,
+            render_env,
+        )?;
         let anchors = map_note_anchors_to_pages(&layout.pages, refs);
         for content in contents {
             let Some(page_number) = anchors
@@ -8474,6 +8773,11 @@ impl EngineSession {
         render_env: &RenderEnv,
         cut: Option<usize>,
     ) -> Result<Option<HeaderFooterPayload>, String> {
+        let cut = cut.map(|cut| {
+            section_region_indices(input.measured.iter().map(|measured| &measured.block))
+                .and_then(|indices| indices.get(cut).copied())
+                .unwrap_or(cut)
+        });
         let mut variants = Vec::new();
         let sections = regions.sections.len();
         let measured = cut.map_or(sections, |cut| (cut + 1).min(sections));
@@ -9025,6 +9329,7 @@ impl EngineSession {
             pagination.retain_matches.clear();
         }
         pagination.measured_with = None;
+        pagination.measured_float_width_policy = None;
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.lowered_from = None;
         pagination.lowered_generation = None;
@@ -9394,6 +9699,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
+        float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
@@ -9406,6 +9712,7 @@ impl EngineSession {
                 blocks,
                 lowered_generation,
                 widths,
+                float_width_policy,
                 table_wrap_frames,
                 regions,
                 measurement,
@@ -9420,6 +9727,7 @@ impl EngineSession {
             return Ok(None);
         };
         if pagination.measured_with != Some(measurement_fingerprint)
+            || pagination.measured_float_width_policy != Some(float_width_policy)
             || previous.measured.len() != blocks.len()
             || previous.measured.len() != pagination.block_fingerprints.len()
             || previous.measured.len() != pagination.measured_font_dependencies.len()
@@ -9665,7 +9973,7 @@ impl EngineSession {
                     BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(index));
                 }
             }
-            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(next_block) {
                 section_index += 1;
             }
         }
@@ -9695,10 +10003,11 @@ impl EngineSession {
                         })
                         .collect();
                     let Some((extents, reads)) =
-                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
+                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
                             &mut segment,
                             &widths[start..end],
                             default_width,
+                            float_width_policy,
                             &table_wrap_frames[start..end],
                             measurement,
                             Some(geometry),
@@ -9832,6 +10141,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
+        float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
@@ -9850,6 +10160,7 @@ impl EngineSession {
                 blocks,
                 lowered_generation,
                 widths,
+                float_width_policy,
                 table_wrap_frames,
                 regions,
                 measurement,
@@ -9864,6 +10175,7 @@ impl EngineSession {
             return Ok(None);
         };
         if pagination.measured_with != Some(measurement_fingerprint)
+            || pagination.measured_float_width_policy != Some(float_width_policy)
             || previous.measured.len() != blocks.len()
             || previous.measured.len() != pagination.block_fingerprints.len()
             || previous.measured.len() != pagination.measured_font_dependencies.len()
@@ -9994,6 +10306,7 @@ impl EngineSession {
                 );
                 resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
                 if let LayoutBlock::SectionBreak(section_break) = &mut owned
+                    && !section_break.is_self_describing()
                     && let Some(section) = regions.sections.get(section_index)
                 {
                     if section.page_size.is_some() {
@@ -10094,7 +10407,7 @@ impl EngineSession {
                         }
                     };
             }
-            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(next_block) {
                 section_index += 1;
             }
         }
@@ -10129,6 +10442,7 @@ impl EngineSession {
                         );
                         resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section));
                         if let LayoutBlock::SectionBreak(section_break) = block
+                            && !section_break.is_self_describing()
                             && let Some(section) = regions.sections.get(section)
                         {
                             if section.page_size.is_some() {
@@ -10143,10 +10457,11 @@ impl EngineSession {
                         }
                     }
                     let extents =
-                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
+                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
                             &mut segment,
                             &widths[start..end],
                             default_width,
+                            float_width_policy,
                             &table_wrap_frames[start..end],
                             measurement,
                             Some(geometry),
@@ -10406,6 +10721,7 @@ impl EngineSession {
                         )
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
+                    let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
                     if !self.lays_out_as_one_section(
                         &regions,
                         blocks
@@ -10421,7 +10737,8 @@ impl EngineSession {
                         })
                         || resident_float_kinds(
                             blocks,
-                            default_width,
+                            &widths,
+                            float_width_policy,
                             measurement.as_ref(),
                             &geometry,
                         )?
@@ -10476,6 +10793,7 @@ impl EngineSession {
                 let mut pagination = self.pagination.borrow_mut();
                 pagination.block_fingerprints.clear();
                 pagination.measured_with = None;
+                pagination.measured_float_width_policy = None;
                 pagination.measurement_patch = None;
                 pagination.set_font_dependencies(Vec::new(), None);
             }
@@ -10486,6 +10804,7 @@ impl EngineSession {
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
+        pagination.measured_float_width_policy = Some(FloatWidthPolicy::FirstBlock);
         pagination
             .set_font_dependencies(resident.font_dependencies, Some(&measurement.font_chains));
         pagination.measured_widths = widths;
@@ -15085,10 +15404,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
         let (options, regions) = (&prepared.input.options, &prepared.regions);
         let through = |last: usize| options_through_section(options, regions, last);
+        let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
         let mut expected_blocks = blocks.clone();
         let (expected, _) = measure_page_prefix_plain(
             &mut expected_blocks,
             &widths,
+            float_width_policy,
             &frames,
             &prepared.measurement,
             &geometry,
@@ -15108,6 +15429,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let (actual, _) = measure_page_prefix(
                 &mut actual_blocks,
                 &widths,
+                float_width_policy,
                 &frames,
                 &prepared.measurement,
                 &geometry,
@@ -16971,6 +17293,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             pagination.block_fingerprints =
                 measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
             pagination.measured_with = Some(prepared.measurement_fingerprint);
+            pagination.measured_float_width_policy =
+                Some(FloatWidthPolicy::for_document(blocks.iter()));
             pagination.measured_widths = vec![300.0];
             pagination.set_font_dependencies(vec![dependencies.clone()], None);
         }
@@ -16979,6 +17303,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &blocks,
                 None,
                 &[300.0],
+                FloatWidthPolicy::for_document(blocks.iter()),
                 &[],
                 &prepared.regions,
                 &prepared.measurement,
@@ -17006,6 +17331,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     &blocks,
                     None,
                     &[300.0],
+                    FloatWidthPolicy::for_document(blocks.iter()),
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -17288,6 +17614,8 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 pagination.block_fingerprints =
                     measured_fingerprints(pagination.input.as_ref().unwrap()).unwrap();
                 pagination.measured_with = Some(prepared.measurement_fingerprint);
+                pagination.measured_float_width_policy =
+                    Some(FloatWidthPolicy::for_document(blocks.iter()));
                 pagination.measured_widths = widths.to_vec();
             }
             blocks[0] = serde_json::from_value(json!({
@@ -17299,6 +17627,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     &blocks,
                     None,
                     &widths,
+                    FloatWidthPolicy::for_document(blocks.iter()),
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
