@@ -423,7 +423,9 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         }
         const body = await readBody(request);
         if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
-        if (existing && suggested && !overwrite) {
+        const current = [...files.values()].find((entry) => entry.name === targetName);
+        if (current && relative && !overwrite) return json({ error: "target exists" }, 412);
+        if (current && suggested && !overwrite) {
           const ext = extensionOf(targetName);
           const stem = ext ? targetName.slice(0, -ext.length) : targetName;
           let counter = 1;

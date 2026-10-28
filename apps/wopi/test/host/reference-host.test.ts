@@ -309,6 +309,22 @@ describe("reference host file identity and body length", () => {
     expect(byName("renamed.docx")[0]?.id).not.toBe(byName("copy.docx")[0]?.id);
   });
 
+  test("concurrent copies to one name get distinct names or a conflict", async () => {
+    const { host, client } = setup();
+    const body = () => new TextEncoder().encode("copy");
+    const suggested = await Promise.all([
+      client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: body(), suggestedTarget: "race.docx" }),
+      client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: body(), suggestedTarget: "race.docx" }),
+    ]);
+    expect(new Set(suggested.map((copy) => copy.name)).size).toBe(2);
+    const relative = await Promise.allSettled([
+      client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: body(), relativeTarget: "exact.docx" }),
+      client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: body(), relativeTarget: "exact.docx" }),
+    ]);
+    expect(relative.filter((result) => result.status === "fulfilled").length).toBe(1);
+    expect([...host.files.values()].filter((entry) => entry.name === "exact.docx").length).toBe(1);
+  });
+
   test("a body longer than its declared Content-Length is rejected and not stored", async () => {
     const { host, signer, nowMs } = setup();
     let step = 0;
