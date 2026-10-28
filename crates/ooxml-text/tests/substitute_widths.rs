@@ -111,6 +111,47 @@ fn japanese_substitutes_apply_width_tables_without_scaling_cjk_outlines() {
 }
 
 #[test]
+fn japanese_combining_marks_use_the_composed_kana_width() {
+    let mut store = FontStore::new();
+    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    for family in [
+        "ms mincho",
+        "ms gothic",
+        "ms pmincho",
+        "ms pgothic",
+        "ms ui gothic",
+    ] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        let metrics = family_metrics(family, false, false).unwrap();
+        for (decomposed, composed) in [
+            ("か\u{3099}", 'が'),
+            ("き\u{3099}", 'ぎ'),
+            ("は\u{3099}", 'ば'),
+            ("は\u{309a}", 'ぱ'),
+            ("ヒ\u{309a}", 'ピ'),
+            ("ワ\u{3099}", 'ヷ'),
+        ] {
+            let expected = family_advance(metrics, composed).unwrap_or(1.0) * 16.0;
+            assert!(
+                (shaped_width(&store, view, decomposed, 16.0) - expected).abs() < 1e-3,
+                "{family} {decomposed}"
+            );
+            assert!(
+                (shaped_width(&store, view, &composed.to_string(), 16.0) - expected).abs() < 1e-3,
+                "{family} {composed}"
+            );
+        }
+        for text in ["あ\u{3099}", "あ\u{309a}"] {
+            let expected = family_advance(metrics, 'あ').unwrap_or(1.0) * 16.0;
+            assert!(
+                (shaped_width(&store, view, text, 16.0) - expected).abs() < 1e-3,
+                "{family} {text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn synthetic_japanese_styles_measure_ascii_at_half_an_em() {
     for (bold, italic) in [(true, false), (false, true), (true, true)] {
         let mut bytes = LIBERATION_SANS.to_vec();

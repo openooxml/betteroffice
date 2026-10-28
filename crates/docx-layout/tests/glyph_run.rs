@@ -443,6 +443,25 @@ fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
                 let run = browser_text_run(&store, family, view, text, formatting);
                 assert!(run.substitute_scale.is_none(), "{family} {bold} {italic}");
                 assert!(run.horizontal_scale.is_none(), "{family} {bold} {italic}");
+                assert_eq!(run.attrs.canvas_clusters.len(), 13, "{family}");
+                for (index, cluster) in run.attrs.canvas_clusters.iter().take(11).enumerate() {
+                    assert_eq!(
+                        cluster.offset.as_f64(),
+                        Some(index as f64 * 8.0),
+                        "{family}"
+                    );
+                }
+                assert_eq!(
+                    run.attrs.canvas_clusters[11].offset.as_f64(),
+                    Some(96.0),
+                    "{family}"
+                );
+                let katakana_x = 96.0 + shaped_width(&store, view, "あ");
+                assert!(
+                    (run.attrs.canvas_clusters[12].offset.as_f64().unwrap() - katakana_x).abs()
+                        < 0.001,
+                    "{family}"
+                );
                 assert!(
                     (run.width.as_f64().unwrap() - width).abs() < 0.002,
                     "{family} {bold} {italic}"

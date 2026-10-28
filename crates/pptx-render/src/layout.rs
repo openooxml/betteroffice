@@ -12,7 +12,7 @@ use ooxml_drawingml::{
     style_outline, style_reference_color,
 };
 use ooxml_text::family_metrics::{
-    FamilyMetrics, family_advance, family_metrics, runs_at_own_widths,
+    FamilyMetrics, family_advance, family_cluster_advance, family_metrics, runs_at_own_widths,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -3445,12 +3445,7 @@ fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox
 /// have widths but no face for. `None` for anything the table cannot measure,
 /// which keeps the substitute's own advance.
 fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
-    let metrics = style.face.widths?;
-    let mut total = 0.0;
-    for character in text.chars() {
-        total += family_advance(metrics, character)?;
-    }
-    Some(total * size_px)
+    family_cluster_advance(style.face.widths?, text).map(|advance| advance * size_px)
 }
 
 /// Optional ligatures are off once glyphs are tracked apart or advanced by the
@@ -11705,6 +11700,42 @@ mod tests {
         for (character, x) in text.chars().zip(&positions) {
             assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
             pen += family_advance(metrics, character).unwrap() * size;
+        }
+    }
+
+    #[test]
+    fn named_japanese_clusters_use_composed_kana_advances() {
+        const NOTO_SANS_JP: &[u8] =
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(family, false, false, NOTO_SANS_JP)
+                .unwrap();
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            let metrics = family_metrics(&family.to_lowercase(), false, false).unwrap();
+            for (text, composed) in [("か\u{3099}中", 'が'), ("は\u{309a}中", 'ぱ')] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                let size = points_to_px(paragraph.runs[0].style.font_size_pt);
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let expected = (family_advance(metrics, composed).unwrap() + 1.0) * size;
+                assert_eq!(lines.len(), 1);
+                assert!((lines[0].width - expected).abs() < 1e-3, "{family} {text}");
+            }
         }
     }
 

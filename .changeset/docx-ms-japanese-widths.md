@@ -4,4 +4,4 @@
 "@betteroffice/pptx": patch
 ---
 
-MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese family names. CJK substitute outlines keep their original size.
+MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese names and decomposed voiced kana. CJK substitute outlines keep their original size during canvas painting.

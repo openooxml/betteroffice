@@ -282,6 +282,13 @@ pub enum Primitive {
     Decoration(DecorationPrimitive),
 }
 
+/// One browser text cluster at an offset from its run's pen origin.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CanvasTextCluster {
+    pub text: String,
+    pub offset: Number,
+}
+
 /// Everything a primitive carries about the document content it came from:
 /// its position range, block and paragraph identity, enclosing table cell,
 /// content-control ancestry, revision and comment state, and the per-class
@@ -442,6 +449,9 @@ pub struct DocAttrs {
     /// so the fallback keeps the measured face instead of generic sans-serif.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_font: Option<String>,
+    /// Browser text clusters positioned without scaling their outlines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvas_clusters: Vec<CanvasTextCluster>,
     /// Text/GlyphRun-only member: modern w14 text effects payload
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
@@ -4713,6 +4723,105 @@ fn text_substitute_scale(
     ratio.and_then(Number::from_f64)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn text_canvas_clusters(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+    word_spacing: f64,
+    auto_space: ooxml_text::AutoSpace,
+) -> Option<Vec<CanvasTextCluster>> {
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    if !ooxml_text::word_fonts::requested_line_metrics(family)?.east_asian {
+        return None;
+    }
+    let fonts = fonts?;
+    let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+    let font = *chain.first()?;
+    fonts.store.family_widths(font).ok()??;
+    let text = if fmt.all_caps == Some(true) {
+        text.to_uppercase()
+    } else {
+        text.to_owned()
+    };
+    if text
+        .chars()
+        .any(|ch| !fonts.store.covers(font, ch).unwrap_or(false))
+    {
+        return None;
+    }
+    let size = effective_font_px_of(fmt);
+    let language = fmt.language.as_ref().and_then(|language| {
+        if ooxml_text::level_is_rtl(bidi_level) {
+            language.bidi.as_deref().or(language.latin.as_deref())
+        } else {
+            language.east_asia.as_deref().or(language.latin.as_deref())
+        }
+    });
+    let glyphs = ooxml_text::shape::shape_with_properties(
+        fonts.store,
+        font,
+        &text,
+        size as f32,
+        &kern_features_of(fmt, size),
+        shape_direction_for_level(bidi_level),
+        language,
+    )
+    .ok()?;
+    let mut advances = std::collections::BTreeMap::<usize, f64>::new();
+    let mut order = Vec::new();
+    for glyph in glyphs {
+        let offset = glyph.cluster as usize;
+        *advances.entry(offset).or_insert_with(|| {
+            order.push(offset);
+            0.0
+        }) += f64::from(glyph.x_advance);
+    }
+    let bounds: Vec<_> = advances
+        .keys()
+        .copied()
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
+        .into_iter()
+        .map(|boundary| boundary.byte_index)
+        .collect();
+    let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
+    let mut pen = 0.0;
+    let mut clusters = Vec::new();
+    for start in order {
+        let index = bounds.binary_search(&start).ok()?;
+        let end = *bounds.get(index + 1)?;
+        let cluster = text.get(start..end)?;
+        clusters.push(CanvasTextCluster {
+            text: cluster.to_owned(),
+            offset: px(pen),
+        });
+        pen += if fmt.small_caps == Some(true) {
+            painted_text_width(fonts, font, cluster, fmt, bidi_level, authoritative)?
+        } else {
+            advances[&start]
+        };
+        if horizontal > 0.0 {
+            pen +=
+                word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
+            if end < text.len() && !breaks.contains(&end) {
+                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
+            }
+            if !ooxml_text::level_is_rtl(bidi_level)
+                && let (Some(left), Some(right)) =
+                    (cluster.chars().next_back(), text[end..].chars().next())
+            {
+                pen += f64::from(auto_space.extra_px(left, right, size as f32, size as f32))
+                    / horizontal;
+            }
+        }
+    }
+    Some(clusters)
+}
+
 fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     let Some(columns) = &page.columns else { return };
     if columns.separator != Some(true) || columns.count <= 1 {
@@ -7658,6 +7767,16 @@ fn emit_text_segment(
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
         text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+        text_attrs.canvas_clusters = text_canvas_clusters(
+            shape,
+            text,
+            fmt,
+            bidi_level,
+            exact_advance,
+            word_spacing.as_ref().map(num_f64).unwrap_or(0.0),
+            auto_space,
+        )
+        .unwrap_or_default();
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),

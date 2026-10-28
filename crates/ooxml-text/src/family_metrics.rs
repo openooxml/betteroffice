@@ -59,6 +59,45 @@ pub fn family_advance(metrics: &FamilyMetrics, character: char) -> Option<f32> {
     (width > 0).then(|| f32::from(width) / 1000.0)
 }
 
+/// The named family's advance for a shaped cluster, in em.
+pub fn family_cluster_advance(widths: &FamilyMetrics, cluster: &str) -> Option<f32> {
+    let mut chars = cluster
+        .chars()
+        .filter(|&ch| !crate::shape::is_default_ignorable(ch))
+        .peekable();
+    let mut total = 0.0;
+    let mut has_base = false;
+    while let Some(mut ch) = chars.next() {
+        if let Some(&mark) = chars.peek()
+            && let Some(composed) = compose_kana(ch, mark)
+        {
+            ch = composed;
+            chars.next();
+        }
+        let advance = family_advance(widths, ch)?;
+        if unicode_bidi::bidi_class(ch) != unicode_bidi::BidiClass::NSM {
+            total += (advance * 1000.0).round();
+            has_base = true;
+        }
+    }
+    has_base.then_some(total / 1000.0)
+}
+
+fn compose_kana(base: char, mark: char) -> Option<char> {
+    let (bases, composed) = match mark {
+        '\u{3099}' => (
+            "うかきくけこさしすせそたちつてとはひふへほゝウカキクケコサシスセソタチツテトハヒフヘホワヰヱヲヽ",
+            "ゔがぎぐげござじずぜぞだぢづでどばびぶべぼゞヴガギグゲゴザジズゼゾダヂヅデドバビブベボヷヸヹヺヾ",
+        ),
+        '\u{309a}' => ("はひふへほハヒフヘホ", "ぱぴぷぺぽパピプペポ"),
+        _ => return None,
+    };
+    bases
+        .chars()
+        .zip(composed.chars())
+        .find_map(|(candidate, composed)| (candidate == base).then_some(composed))
+}
+
 /// Metrics at the requested style, or regular metrics for synthetic styles.
 pub fn family_metrics(family: &str, bold: bool, italic: bool) -> Option<&'static FamilyMetrics> {
     let family = crate::word_fonts::requested_family_name(family);
@@ -23816,7 +23855,7 @@ mod tests {
                 for ch in ['中', '日', '語', '\u{20000}'] {
                     assert_eq!(family_advance(metrics, ch), None, "{alias} {ch}");
                 }
-                for ch in ['！', 'Ａ', '０', '～'] {
+                for ch in ['！', '～'] {
                     assert_eq!(family_advance(metrics, ch), Some(1.0), "{alias} {ch}");
                 }
                 assert!(family_advance(metrics, '、').is_some(), "{alias}");
@@ -23837,6 +23876,9 @@ mod tests {
             }
             for ch in ['｡', 'ｱ', 'ﾞ'] {
                 assert_eq!(family_advance(metrics, ch), Some(0.5), "{family} {ch}");
+            }
+            for ch in ['Ａ', '０'] {
+                assert_eq!(family_advance(metrics, ch), Some(1.0), "{family} {ch}");
             }
         }
     }
@@ -23889,14 +23931,16 @@ mod tests {
 
     #[test]
     fn proportional_japanese_tables_retain_the_office_kana_and_latin_widths() {
-        for (family, letter, kana) in [
-            ("ms pmincho", 0.242, 0.883),
-            ("ms pgothic", 0.211, 0.941),
-            ("ms ui gothic", 0.211, 0.816),
+        for (family, letter, kana, full_letter, full_digit) in [
+            ("ms pmincho", 0.242, 0.883, 0.805, 0.621),
+            ("ms pgothic", 0.211, 0.941, 0.715, 0.684),
+            ("ms ui gothic", 0.211, 0.816, 0.715, 0.684),
         ] {
             let metrics = family_metrics(family, false, false).unwrap();
             assert_eq!(family_advance(metrics, 'i'), Some(letter), "{family}");
             assert_eq!(family_advance(metrics, 'あ'), Some(kana), "{family}");
+            assert_eq!(family_advance(metrics, 'Ａ'), Some(full_letter), "{family}");
+            assert_eq!(family_advance(metrics, '０'), Some(full_digit), "{family}");
         }
     }
 
