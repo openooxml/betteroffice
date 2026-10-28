@@ -94,7 +94,7 @@ pub(crate) fn paragraph_sizes(
         fn close(&mut self) {
             match self.fields.pop() {
                 None => self.closed = true,
-                Some(field) if self.fields.is_empty() && field.kind("TOC") => self.closed = true,
+                Some(field) if field.kind("TOC") => self.closed = true,
                 Some(_) => {}
             }
         }
@@ -106,7 +106,7 @@ pub(crate) fn paragraph_sizes(
                 instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
                 result: true,
             };
-            if scan.fields.is_empty() && field.kind("TOC") && scan.outside_text {
+            if field.kind("TOC") && scan.outside_text {
                 return false;
             }
             scan.fields.push(field);
@@ -126,10 +126,9 @@ pub(crate) fn paragraph_sizes(
                             if scan.fields.is_empty() {
                                 scan.fields.push(Field::default());
                             }
-                            let outermost = scan.fields.len() == 1;
                             let field = scan.fields.last_mut().unwrap();
                             field.result = true;
-                            if outermost && field.kind("TOC") && scan.outside_text {
+                            if field.kind("TOC") && scan.outside_text {
                                 return false;
                             }
                         }
@@ -152,14 +151,14 @@ pub(crate) fn paragraph_sizes(
                     text = true;
                 }
             }
-            if control || !text || !scan.fields.last().is_none_or(Field::entry_result) {
-                return true;
-            }
-            if scan.fields.is_empty() {
+            if text && !control && !scan.fields.iter().any(|field| field.kind("TOC")) {
                 if scan.closed {
                     return false;
                 }
                 scan.outside_text = true;
+            }
+            if control || !text || !scan.fields.last().is_none_or(Field::entry_result) {
+                return true;
             }
             scan.found = true;
             let properties = node.child("w", "rPr");
@@ -504,6 +503,16 @@ mod tests {
         let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
         let body = r#"<w:hyperlink w:anchor="body"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Body link</w:t></w:r></w:hyperlink>"#;
         let title = r#"<w:r><w:t>Contents</w:t></w:r>"#;
+        let reference = format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText> REF body </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                "{body}",
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            body = body,
+        );
         for (content, eligible) in [
             (format!("{begin}{entry}{end}"), true),
             (format!("{begin}{entry}"), true),
@@ -511,6 +520,10 @@ mod tests {
             (format!("{begin}{entry}{end}{body}"), false),
             (format!("{entry}{end}{body}"), false),
             (format!("{title}{begin}{entry}"), false),
+            (format!("{begin}{entry}{end}{reference}"), false),
+            (format!("{entry}{end}{reference}"), false),
+            (format!("{reference}{begin}{entry}"), false),
+            (format!("{reference}{entry}"), true),
         ] {
             let xml = format!(
                 r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{content}</w:p>"#
