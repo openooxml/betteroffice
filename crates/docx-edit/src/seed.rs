@@ -231,7 +231,6 @@ struct StoryOptions {
 struct LoweringContext {
     styles: StyleResolver,
     theme: Option<Value>,
-    source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
     compatibility_mode: u8,
     /// The root story being lowered, for [`Self::paragraphs`].
@@ -428,9 +427,7 @@ impl SourceMetadata {
         let style = paragraph_style_formatting(&paragraph, &self.styles, None);
         let run_style = self.styles.run_style_own(string(field(control, "styleId")));
         let inherited = merge_style_run_formatting(style.as_deref(), run_style);
-        let merged = self
-            .styles
-            .seed_formatting(merge_text_formatting(inherited.as_ref(), control));
+        let merged = merge_text_formatting(inherited.as_ref(), control);
         payload(marks_to_attrs(&formatting_to_marks(merged.as_ref())))
     }
 
@@ -723,8 +720,6 @@ pub struct StyleResolver {
     table_paragraph_formatting: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     table_run_formatting: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    font_theme: Option<docx_parse::Theme>,
     #[serde(skip)]
     memo: StyleMemo,
 }
@@ -1101,12 +1096,126 @@ fn needs_source_json(value: &Value) -> bool {
     }
 }
 
-fn source_json(value: &Value, values: &BTreeMap<String, String>) -> String {
+fn font_families<'a>(value: &'a Value, output: &mut Vec<&'a Value>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                font_families(value, output);
+            }
+        }
+        Value::Object(values) => {
+            if let Some(fonts) = values.get("fontFamily") {
+                output.push(fonts);
+            }
+            for value in values.values() {
+                font_families(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+struct AuthoredFonts<'a> {
+    parsed: &'a Value,
+    originals: HashMap<usize, Value>,
+}
+
+impl<'a> AuthoredFonts<'a> {
+    fn resolve(parsed: &'a mut Value, theme: &docx_parse::Theme) -> Self {
+        let originals = {
+            let mut fonts = Vec::new();
+            font_families(parsed, &mut fonts);
+            fonts.into_iter().cloned().collect::<Vec<_>>()
+        };
+        resolve_seed_font_names(parsed, theme);
+        let mut fonts = Vec::new();
+        font_families(parsed, &mut fonts);
+        Self {
+            parsed,
+            originals: fonts
+                .into_iter()
+                .zip(originals)
+                .map(|(fonts, authored)| (fonts as *const Value as usize, authored))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SeedSource<'a> {
+    ordered: BTreeMap<String, String>,
+    fonts: Option<AuthoredFonts<'a>>,
+}
+
+impl SeedSource<'_> {
+    fn snapshot_field(&self, value: &Value, key: &str) -> Value {
+        let snapshot = match key {
+            "formatting" => "_originalFormatting",
+            "propertyChanges" => "_originalPropertyChanges",
+            _ => unreachable!(),
+        };
+        value
+            .get(snapshot)
+            .cloned()
+            .unwrap_or_else(|| self.snapshot(value.get(key).unwrap_or(&Value::Null)))
+    }
+
+    fn retained(&self, value: &Value) -> Value {
+        match value {
+            Value::Array(values) => {
+                Value::Array(values.iter().map(|value| self.retained(value)).collect())
+            }
+            Value::Object(values) => {
+                let mut retained: Map<String, Value> = values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), self.retained(value)))
+                    .collect();
+                for (key, saved) in [
+                    ("formatting", "_originalFormatting"),
+                    ("propertyChanges", "_originalPropertyChanges"),
+                ] {
+                    if let Some(current) = values.get(key) {
+                        let original = self.snapshot_field(value, key);
+                        if original != *current {
+                            retained.insert(saved.to_owned(), original);
+                        }
+                    }
+                }
+                Value::Object(retained)
+            }
+            value => value.clone(),
+        }
+    }
+
+    fn snapshot(&self, value: &Value) -> Value {
+        if let Some(fonts) = self
+            .fonts
+            .as_ref()
+            .and_then(|fonts| fonts.originals.get(&(value as *const Value as usize)))
+        {
+            return fonts.clone();
+        }
+        match value {
+            Value::Array(values) => {
+                Value::Array(values.iter().map(|value| self.snapshot(value)).collect())
+            }
+            Value::Object(values) => Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), self.snapshot(value)))
+                    .collect(),
+            ),
+            value => value.clone(),
+        }
+    }
+}
+
+fn source_json(value: &Value, source: &SeedSource<'_>) -> String {
     let mut value = value.clone();
     strip_source_ordinals(&mut value);
     serde_json::to_string(&value)
         .ok()
-        .and_then(|key| values.get(&key).cloned())
+        .and_then(|key| source.ordered.get(&key).cloned())
         .unwrap_or_else(|| js_json(&value))
 }
 
@@ -1115,6 +1224,8 @@ fn strip_source_ordinals(value: &mut Value) {
         Value::Array(values) => values.iter_mut().for_each(strip_source_ordinals),
         Value::Object(values) => {
             values.remove(SOURCE_ORDINAL);
+            values.remove("_originalFormatting");
+            values.remove("_originalPropertyChanges");
             values.values_mut().for_each(strip_source_ordinals);
         }
         _ => {}
@@ -1403,21 +1514,10 @@ pub(crate) fn package_styles(
 }
 
 impl StyleResolver {
-    fn seed_formatting(&self, mut formatting: Option<Value>) -> Option<Value> {
-        if let Some(theme) = &self.font_theme
-            && let Some(formatting) = formatting.as_mut()
-        {
-            resolve_seed_font_names(formatting, theme);
-        }
-        formatting
-    }
-
     /// Reads paragraph and character inheritance from package parts.
     pub fn from_parts(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
-        let (theme, definitions) = package_styles(parts)?;
-        let mut resolver = Self::new(definitions.as_ref());
-        resolver.font_theme = Some(theme);
-        Ok(resolver)
+        let (_, definitions) = package_styles(parts)?;
+        Ok(Self::new(definitions.as_ref()))
     }
 
     pub(crate) fn run_attrs(
@@ -1444,10 +1544,7 @@ impl StyleResolver {
         let resolved = self.resolve_paragraph_style(paragraph_style);
         let direct = run_style.map(|id| json!({ "styleId": id }));
         let direct = resolved_text_formatting(direct.as_ref(), self);
-        let formatting = self.seed_formatting(merge_text_formatting(
-            resolved.default_run.as_deref(),
-            direct.as_ref(),
-        ));
+        let formatting = merge_text_formatting(resolved.default_run.as_deref(), direct.as_ref());
         object(formatting.as_ref())
             .and_then(|value| {
                 payload(
@@ -1698,7 +1795,7 @@ impl StyleResolver {
     ) -> Option<Value> {
         let style_id = string(field(direct, "styleId"));
         let inherited = merge_style_run_formatting(paragraph_run, self.run_style_own(style_id));
-        self.seed_formatting(merge_text_formatting_owned(inherited, direct))
+        merge_text_formatting_owned(inherited, direct)
     }
 
     pub(crate) fn effective_run_formatting(
@@ -2172,7 +2269,7 @@ impl RunInheritance {
     }
 
     pub(crate) fn table_attrs(&self, table: &Value) -> Value {
-        let projected = project_table(table, &self.0, None, 12);
+        let projected = project_table(table, &self.0, None, 12, &SeedSource::default());
         let rows: Vec<Vec<Value>> = projected
             .rows
             .into_iter()
@@ -2316,11 +2413,11 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
     }))
 }
 
-fn shape_payload(shape: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+fn shape_payload(shape: &Value, source: &SeedSource<'_>) -> JsonObject {
     map_from_value(json!({ "shapeJson": source_json(shape, source) }))
 }
 
-pub(crate) fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+pub(crate) fn chart_payload(chart: &Value, source: &SeedSource<'_>) -> JsonObject {
     let size = field(Some(chart), "size");
     map_from_value(json!({
         "chartJson": source_json(chart, source),
@@ -2341,8 +2438,7 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
-    styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
     let runs = if kind == "simpleField" {
@@ -2370,7 +2466,7 @@ fn field_payload(
             .then(|| field(Some(field_value), "formatting"))
             .flatten()
     });
-    let merged = styles.seed_formatting(merge_text_formatting(style_formatting, formatting));
+    let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
             "fieldType": nullish(field(Some(field_value), "fieldType")),
@@ -2635,7 +2731,7 @@ fn run_content_width(content: &Value) -> u32 {
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
 ) -> Vec<InlineUnit> {
     match string(field(Some(content), "type")).unwrap_or_default() {
         "text" => run_content_text(content)
@@ -2770,7 +2866,7 @@ fn run_to_units(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     extra_marks: &[Mark],
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
 ) -> Vec<InlineUnit> {
     let marks: Vec<Mark> = run_marks(run, style_formatting, styles)
         .into_iter()
@@ -2815,7 +2911,7 @@ fn hyperlink_to_units(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     extra_marks: &[Mark],
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     let mut units = Vec::new();
@@ -2836,7 +2932,7 @@ fn hyperlink_to_units(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, styles, source);
+                let (payload, marks) = field_payload(child, style_formatting, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
                     .chain(extra_marks.iter().cloned())
@@ -2880,7 +2976,7 @@ fn field_to_units(
     value: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     projection_id: usize,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
@@ -2907,7 +3003,7 @@ fn field_to_units(
         })
     {
         opaque_sequences.extend(nested_sequence_names(value));
-        let (payload, marks) = field_payload(value, style_formatting, styles, source);
+        let (payload, marks) = field_payload(value, style_formatting, source);
         return vec![embed_unit("field", payload, &marks, 1)];
     }
     let mut units = Vec::new();
@@ -2927,7 +3023,7 @@ fn field_to_units(
             }
             Some("simpleField") => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, styles, source);
+                let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
@@ -2953,7 +3049,7 @@ fn field_to_units(
             .cloned()
             .collect(),
     );
-    let (mut payload, marks) = field_payload(&visible, style_formatting, styles, source);
+    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
     let sequence_owner = string(field(Some(value), "instruction"))
         .and_then(docx_layout::sequence_fields::sequence_name)
         .is_some();
@@ -2990,7 +3086,7 @@ fn tracked_to_units(
     content: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
     tracked_to_units_in_control(
@@ -3007,7 +3103,7 @@ fn tracked_to_units_in_control(
     content: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     opaque_sequences: &mut Vec<String>,
     in_control: bool,
 ) -> Vec<InlineUnit> {
@@ -3073,7 +3169,7 @@ fn inline_container_units(
     child: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     opaque_sequences: &mut Vec<String>,
     in_control: bool,
 ) -> Vec<InlineUnit> {
@@ -3092,7 +3188,7 @@ fn inline_container_units(
         }
         "simpleField" | "complexField" => {
             opaque_sequences.extend(nested_sequence_names(child));
-            let (payload, marks) = field_payload(child, style_formatting, styles, source);
+            let (payload, marks) = field_payload(child, style_formatting, source);
             vec![embed_unit("field", payload, &marks, 1)]
         }
         "inlineSdt" => vec![embed_unit(
@@ -3114,7 +3210,7 @@ fn inline_container_units(
     }
 }
 
-fn sdt_properties_attrs(properties: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+fn sdt_properties_attrs(properties: &Value, source: &SeedSource<'_>) -> JsonObject {
     map_from_value(json!({
         "sdtType": nullish(field(Some(properties), "sdtType")),
         "id": nullish(field(Some(properties), "id")),
@@ -3137,7 +3233,7 @@ fn sdt_payload(
     sdt: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     opaque_sequences: &mut Vec<String>,
 ) -> JsonObject {
     let mut content = Vec::new();
@@ -3198,7 +3294,7 @@ fn sdt_payload(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, styles, source);
+                let (payload, marks) = field_payload(child, style_formatting, source);
                 append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(
@@ -3299,7 +3395,7 @@ fn flow_break_type(content: &Value) -> Option<&'static str> {
 
 /// Where a run's flow breaks sit in its text. They occupy no story unit, so
 /// the save projection rebuilds them from these offsets.
-fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Value> {
+fn flow_break_offsets(run: &Value, source: &SeedSource<'_>) -> Vec<Value> {
     let contents = array(field(Some(run), "content"));
     if !contents.iter().any(|item| flow_break_type(item).is_some()) {
         return Vec::new();
@@ -3318,11 +3414,7 @@ fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Val
     breaks
 }
 
-fn run_boundary(
-    run: &Value,
-    units: &[InlineUnit],
-    source: &BTreeMap<String, String>,
-) -> Option<Value> {
+fn run_boundary(run: &Value, units: &[InlineUnit], source: &SeedSource<'_>) -> Option<Value> {
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -3349,11 +3441,17 @@ fn run_boundary(
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
     }
-    if let Some(formatting) = field(Some(run), "formatting") {
-        boundary.insert("formatting".to_owned(), formatting.clone());
+    if field(Some(run), "formatting").is_some() {
+        boundary.insert(
+            "formatting".to_owned(),
+            source.snapshot_field(run, "formatting"),
+        );
     }
-    if let Some(changes) = field(Some(run), "propertyChanges") {
-        boundary.insert("propertyChanges".to_owned(), changes.clone());
+    if field(Some(run), "propertyChanges").is_some() {
+        boundary.insert(
+            "propertyChanges".to_owned(),
+            source.snapshot_field(run, "propertyChanges"),
+        );
     }
     Some(Value::Object(boundary))
 }
@@ -3371,6 +3469,24 @@ fn paragraph_attrs(
     units: &[InlineUnit],
     unit_counts: &[usize],
     run_boundaries: Option<Vec<Value>>,
+) -> JsonObject {
+    paragraph_attrs_with_source(
+        paragraph,
+        styles,
+        units,
+        unit_counts,
+        run_boundaries,
+        &SeedSource::default(),
+    )
+}
+
+fn paragraph_attrs_with_source(
+    paragraph: &Value,
+    styles: &StyleResolver,
+    units: &[InlineUnit],
+    unit_counts: &[usize],
+    run_boundaries: Option<Vec<Value>>,
+    source: &SeedSource<'_>,
 ) -> JsonObject {
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
@@ -3413,7 +3529,14 @@ fn paragraph_attrs(
         ("cnfStyle", field(formatting, "cnfStyle")),
     ] {
         if let Some(value) = value.filter(|value| !value.is_null()) {
-            attrs.insert(key.to_owned(), drop_nulls(value.clone()));
+            attrs.insert(
+                key.to_owned(),
+                drop_nulls(if key == "_originalFormatting" {
+                    source.snapshot_field(paragraph, "formatting")
+                } else {
+                    value.clone()
+                }),
+            );
         }
     }
     for (key, value) in [
@@ -3562,11 +3685,6 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
     }
-    let defaults = attrs.remove("defaultTextFormatting");
-    attrs.insert(
-        "defaultTextFormatting".to_owned(),
-        styles.seed_formatting(defaults).unwrap_or(Value::Null),
-    );
     if field(formatting, "frame").is_some_and(|frame| !frame.is_null())
         || (styles.enabled
             && field(
@@ -3609,7 +3727,7 @@ fn paragraph_attrs(
     if !array(field(Some(paragraph), "propertyChanges")).is_empty() {
         attrs.insert(
             "pPrChange".to_owned(),
-            field(Some(paragraph), "propertyChanges").unwrap().clone(),
+            source.snapshot_field(paragraph, "propertyChanges"),
         );
     }
     let mut bookmarks = Vec::new();
@@ -3779,7 +3897,7 @@ fn units_width(units: &[InlineUnit]) -> u32 {
 fn control_break_offsets(
     sdt: &Value,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
 ) -> (Vec<Vec<u32>>, usize) {
     let mut offsets = Vec::new();
     let mut count = 0usize;
@@ -3875,7 +3993,7 @@ fn content_breaks(
     content: &Value,
     start: usize,
     styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
     output: &mut Vec<FlowBreak>,
     positions: bool,
     in_control: bool,
@@ -4048,7 +4166,7 @@ fn paragraph_units(
     paragraph: &Value,
     styles: &StyleResolver,
     extra_run_formatting: Option<&Value>,
-    source: &BTreeMap<String, String>,
+    source: &SeedSource<'_>,
 ) -> ParagraphUnits {
     let mut units = Vec::new();
     let mut omitted = Vec::new();
@@ -4157,7 +4275,14 @@ fn paragraph_units(
         }
         unit_counts.push(units.len() - start);
     }
-    let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
+    let attrs = paragraph_attrs_with_source(
+        paragraph,
+        styles,
+        &units,
+        &unit_counts,
+        boundaries,
+        source,
+    );
     ParagraphUnits {
         ppr: para_attrs_to_ppr(attrs),
         units,
@@ -4489,6 +4614,7 @@ struct CellOptions<'a> {
     default_margins: Option<&'a Value>,
     theme: Option<&'a Value>,
     table_bidi: bool,
+    source: &'a SeedSource<'a>,
 }
 
 fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
@@ -4531,6 +4657,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
     } else {
         options.default_margins.cloned()
     };
+    let original_formatting = formatting.map(|_| options.source.snapshot_field(cell, "formatting"));
     let mut attrs = map_from_value(json!({
         "colspan": number(field(formatting, "gridSpan")).unwrap_or(1.0),
         "rowspan": options.rowspan,
@@ -4549,7 +4676,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
         "margins": margins,
         "textDirection": nullish(field(formatting, "textDirection")),
         "noWrap": boolean(field(formatting, "noWrap")).unwrap_or(false),
-        "_originalFormatting": nullish(formatting),
+        "_originalFormatting": original_formatting,
         "_originalResolvedFill": background
     }));
     if let Some(change) = field(Some(cell), "structuralChange") {
@@ -4589,7 +4716,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
     if !array(field(Some(cell), "propertyChanges")).is_empty() {
         attrs.insert(
             "tcPrChange".to_owned(),
-            field(Some(cell), "propertyChanges").unwrap().clone(),
+            options.source.snapshot_field(cell, "propertyChanges"),
         );
     }
     let mut attrs = structural_attrs(attrs, &[]);
@@ -4615,6 +4742,7 @@ struct TableStyleContext<'a> {
     borders: Option<&'a Value>,
     margins: Option<&'a Value>,
     theme: Option<&'a Value>,
+    source: &'a SeedSource<'a>,
 }
 
 fn table_column_count(table: &Value) -> usize {
@@ -4747,11 +4875,13 @@ fn project_row<'a>(
     style_context: &TableStyleContext<'_>,
 ) -> ProjectedRow<'a> {
     let formatting = field(Some(row), "formatting");
+    let original_formatting =
+        formatting.map(|_| style_context.source.snapshot_field(row, "formatting"));
     let mut attrs = map_from_value(json!({
         "height": nullish(field(field(formatting, "height"), "value")),
         "heightRule": nullish(field(formatting, "heightRule")),
         "isHeader": truthy(field(formatting, "header")),
-        "_originalFormatting": nullish(formatting)
+        "_originalFormatting": original_formatting
     }));
     if let Some(change) = field(Some(row), "structuralChange") {
         let value = revision_attrs(field(Some(change), "info").unwrap_or(&Value::Null));
@@ -4768,7 +4898,7 @@ fn project_row<'a>(
     if !array(field(Some(row), "propertyChanges")).is_empty() {
         attrs.insert(
             "trPrChange".to_owned(),
-            field(Some(row), "propertyChanges").unwrap().clone(),
+            style_context.source.snapshot_field(row, "propertyChanges"),
         );
     }
     if let Some(attributes) = field(Some(row), "extraAttributes") {
@@ -4827,6 +4957,7 @@ fn project_row<'a>(
                 table_borders: style_context.borders,
                 default_margins: style_context.margins,
                 theme: style_context.theme,
+                source: style_context.source,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
         );
@@ -4880,6 +5011,7 @@ fn project_row<'a>(
                 table_borders: style_context.borders,
                 default_margins: style_context.margins,
                 theme: style_context.theme,
+                source: style_context.source,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
         );
@@ -4917,6 +5049,7 @@ fn project_table<'a>(
     styles: &StyleResolver,
     theme: Option<&Value>,
     compatibility_mode: u8,
+    source: &SeedSource<'_>,
 ) -> ProjectedTable<'a> {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
@@ -4967,7 +5100,8 @@ fn project_table<'a>(
         based_on.insert(0, Value::String(parent_id.to_owned()));
         inherited = styles.style(parent_id);
     }
-    let mut original_formatting = object(formatting).cloned().unwrap_or_default();
+    let authored = formatting.map(|_| source.snapshot_field(table, "formatting"));
+    let mut original_formatting = object(authored.as_ref()).cloned().unwrap_or_default();
     original_formatting.insert(
         "styleCascade".to_owned(),
         drop_nulls(json!({
@@ -4999,7 +5133,7 @@ fn project_table<'a>(
     if !array(field(Some(table), "propertyChanges")).is_empty() {
         attrs.insert(
             "tblPrChange".to_owned(),
-            field(Some(table), "propertyChanges").unwrap().clone(),
+            source.snapshot_field(table, "propertyChanges"),
         );
     }
     let row_spans = calculate_row_spans(table);
@@ -5019,6 +5153,7 @@ fn project_table<'a>(
                     borders,
                     margins: default_margins.as_ref(),
                     theme,
+                    source,
                 },
             )
         })
@@ -5474,6 +5609,7 @@ fn visit_story(
     story_id: String,
     source_blocks: &[Value],
     options: StoryOptions,
+    source_json: &SeedSource<'_>,
 ) {
     if context.styles.table_paragraph_formatting.is_some()
         || context.styles.table_run_formatting.is_some()
@@ -5588,7 +5724,7 @@ fn visit_story(
                     omitted,
                     breaks,
                     opaque_sequences,
-                } = paragraph_units(block, &context.styles, None, &context.source_json);
+                } = paragraph_units(block, &context.styles, None, source_json);
                 context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
@@ -5693,6 +5829,7 @@ fn visit_story(
                     &context.styles,
                     context.theme.as_ref(),
                     context.compatibility_mode,
+                    source_json,
                 );
                 let payload_rows = rows
                     .iter_mut()
@@ -5793,6 +5930,7 @@ fn visit_story(
                                 append_body_tail: false,
                                 seed_comments: options.seed_comments,
                             },
+                            source_json,
                         );
                     }
                 }
@@ -5806,7 +5944,7 @@ fn visit_story(
                 let child_story = block_id;
                 let mut properties = sdt_properties_attrs(
                     field(Some(block), "properties").unwrap_or(&Value::Null),
-                    &context.source_json,
+                    source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
                 context.plans[plan_index]
@@ -5826,6 +5964,7 @@ fn visit_story(
                         append_body_tail: false,
                         seed_comments: options.seed_comments,
                     },
+                    source_json,
                 );
                 last_kind = Some("blockSdt");
             }
@@ -6186,6 +6325,48 @@ fn resolve_seed_font_names(value: &mut Value, theme: &docx_parse::Theme) {
     }
 }
 
+fn resolve_seed_ordered_fonts(value: &mut OrderedValue, theme: &docx_parse::Theme) {
+    match value {
+        OrderedValue::Array(values) => {
+            for value in values {
+                resolve_seed_ordered_fonts(value, theme);
+            }
+        }
+        OrderedValue::Object(values) => {
+            for (key, value) in values {
+                if key == "fontFamily" && matches!(value, OrderedValue::Object(_)) {
+                    let mut wrapper = json!({ "fontFamily": value.value() });
+                    resolve_seed_font_names(&mut wrapper, theme);
+                    *value = serde_json::from_value(wrapper["fontFamily"].take())
+                        .expect("font family remains valid JSON");
+                    if let OrderedValue::Object(fonts) = value {
+                        let order = [
+                            "ascii",
+                            "hAnsi",
+                            "eastAsia",
+                            "cs",
+                            "asciiTheme",
+                            "hAnsiTheme",
+                            "eastAsiaTheme",
+                            "csTheme",
+                            "hint",
+                        ];
+                        fonts.sort_by_key(|(key, _)| {
+                            order
+                                .iter()
+                                .position(|name| *name == key.as_str())
+                                .unwrap_or(order.len())
+                        });
+                    }
+                } else {
+                    resolve_seed_ordered_fonts(value, theme);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn lower_docx_with(
     mut envelope: docx_parse::S9WireEnvelope,
     parts: Option<&SourceParts>,
@@ -6197,29 +6378,32 @@ fn lower_docx_with(
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
-    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
-    let opaque_total = opaque_xml_bytes(&parsed);
+    let mut parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let fonts = AuthoredFonts::resolve(&mut parsed, &envelope.document.package.theme);
+    let resolved = fonts.parsed;
+    let mut source_json = SeedSource {
+        fonts: Some(fonts),
+        ..SeedSource::default()
+    };
+    let opaque_total = opaque_xml_bytes(resolved);
     if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
         return Err(opaque_seed_budget_exceeded(opaque_total));
     }
-    collect_fonts_from_value(&parsed, &mut referenced_fonts);
-    let source_json = if payloads && needs_source_json(&parsed) {
+    collect_fonts_from_value(resolved, &mut referenced_fonts);
+    if payloads && needs_source_json(resolved) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let ordered: OrderedValue =
+        let mut ordered: OrderedValue =
             serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
-        let mut values = BTreeMap::new();
-        ordered.collect_source_json(&mut values);
-        values
-    } else {
-        BTreeMap::new()
-    };
-    let theme = std::mem::take(&mut envelope.document.package.theme);
+        resolve_seed_ordered_fonts(&mut ordered, &envelope.document.package.theme);
+        ordered.collect_source_json(&mut source_json.ordered);
+    }
     drop(envelope);
     let package =
-        field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
-    let mut read = read_source(package, &parsed, parts);
-    let (mut context, roots) = lower_package(package, source_json, Some(theme));
+        field(Some(resolved), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let mut read = read_source(package, resolved, parts, &source_json);
+    let (mut context, roots) = lower_package(package, &source_json);
+    drop(source_json);
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
@@ -6380,7 +6564,13 @@ fn comment_raw_sources(styles: &StyleResolver, read: &ReadSource) -> Vec<RawSour
         context
             .locators
             .insert(story.clone(), vec![Step::Comment(comment.id.clone())]);
-        visit_story(&mut context, story, &comment.body, scratch_options());
+        visit_story(
+            &mut context,
+            story,
+            &comment.body,
+            scratch_options(),
+            &SeedSource::default(),
+        );
     }
     context.provenance.raw_sources
 }
@@ -6389,7 +6579,6 @@ fn scratch_context(styles: StyleResolver) -> LoweringContext {
     LoweringContext {
         styles,
         theme: None,
-        source_json: Arc::new(BTreeMap::new()),
         plans: Vec::new(),
         compatibility_mode: 12,
         root: String::new(),
@@ -6452,11 +6641,51 @@ fn represented_controls(plans: &[StoryPlan], read: &ReadSource) -> Represented {
     represented
 }
 
-fn read_source(package: &Value, parsed: &Value, parts: Option<&SourceParts>) -> ReadSource {
+fn read_source(
+    package: &Value,
+    parsed: &Value,
+    parts: Option<&SourceParts>,
+    source: &SeedSource<'_>,
+) -> ReadSource {
     let document = parts.map_or(crate::structured::source::DOCUMENT_PART, |parts| {
         parts.document.as_str()
     });
-    ReadSource::from_package(package, document, warnings(parsed))
+    let mut read = ReadSource::from_package(package, document, warnings(parsed));
+    let comments = array(field(field(Some(package), "document"), "comments"))
+        .iter()
+        .filter(|comment| match field(Some(comment), "id") {
+            Some(Value::String(id)) => !id.is_empty(),
+            Some(Value::Number(_)) => true,
+            _ => false,
+        });
+    for (stored, comment) in read.comments.iter_mut().zip(comments) {
+        let blocks = array(field(Some(comment), "blockContent"));
+        let blocks = if blocks.is_empty() {
+            array(field(Some(comment), "content"))
+        } else {
+            blocks
+        };
+        stored.body = blocks.iter().map(|block| source.retained(block)).collect();
+    }
+    for (key, kind) in [
+        ("footnoteSeparators", "footnote"),
+        ("endnoteSeparators", "endnote"),
+    ] {
+        let Some(note) = array(field(Some(package), key))
+            .iter()
+            .find(|note| string(field(Some(note), "noteType")) == Some("separator"))
+        else {
+            continue;
+        };
+        if let Some(paragraphs) = read.note_separator_paragraphs.get_mut(kind) {
+            *paragraphs = array(field(Some(note), "content"))
+                .iter()
+                .filter(|block| string(field(Some(block), "type")) == Some("paragraph"))
+                .map(|block| source.retained(block))
+                .collect();
+        }
+    }
+    read
 }
 
 fn seeded_comments(plans: &[StoryPlan]) -> HashSet<String> {
@@ -6487,7 +6716,13 @@ pub(crate) fn seed_blocks(
             .unwrap_or_default(),
     );
     for (story, blocks) in stories {
-        visit_story(&mut context, story.clone(), blocks, scratch_options());
+        visit_story(
+            &mut context,
+            story.clone(),
+            blocks,
+            scratch_options(),
+            &SeedSource::default(),
+        );
     }
     doc.create_empty_stories(
         &context
@@ -6552,22 +6787,12 @@ pub(crate) fn replica_source(
 
 fn lower_package(
     package: &Value,
-    source_json: BTreeMap<String, String>,
-    theme: Option<docx_parse::Theme>,
+    source_json: &SeedSource<'_>,
 ) -> (LoweringContext, Vec<SourceRoot>) {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
-    let mut definitions = field(Some(package), "styles").cloned();
-    if let Some(theme) = &theme
-        && let Some(definitions) = definitions.as_mut()
-    {
-        resolve_seed_font_names(definitions, theme);
-    }
-    let mut styles = StyleResolver::new(definitions.as_ref());
-    styles.font_theme = theme;
     let mut context = LoweringContext {
-        styles,
+        styles: StyleResolver::new(field(Some(package), "styles")),
         theme: field(Some(package), "theme").cloned(),
-        source_json: Arc::new(source_json),
         plans: Vec::new(),
         compatibility_mode,
         root: "body".to_owned(),
@@ -6587,6 +6812,7 @@ fn lower_package(
             append_body_tail: true,
             seed_comments: true,
         },
+        source_json,
     );
     for (key, kind) in [
         ("headerEntries", SourceStoryKind::Header),
@@ -6612,6 +6838,7 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
+                source_json,
             );
         }
     }
@@ -6638,6 +6865,7 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
+                source_json,
             );
         }
     }
@@ -7107,10 +7335,7 @@ mod tests {
                 panic!("missing paragraph mark");
             };
             assert_eq!(kind, "pilcrow");
-            assert_eq!(
-                &payload["_originalRunBoundaries"][1]["formatting"],
-                authored
-            );
+            assert_eq!(&payload["_originalRunBoundaries"][1]["formatting"], authored);
             assert_eq!(
                 payload["_originalRunBoundaries"][1]["marksKey"],
                 marks_key(&plan.units[1].marks)
@@ -7123,6 +7348,107 @@ mod tests {
                 payload["defaultTextFormatting"]["fontFamily"]["ascii"],
                 "Calibri Light"
             );
+        }
+    }
+
+    #[test]
+    fn seed_table_font_snapshots_distinguish_authored_pairs_with_the_same_live_names() {
+        let runs: String = [Some("Cambria"), Some("Garamond"), None]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let names = name.map_or_else(String::new, |name| {
+                    format!(r#"w:ascii="{name}" w:hAnsi="{name}" "#)
+                });
+                format!(
+                    r#"<w:r><w:rPr><w:rFonts {names}w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:t>{index}</w:t></w:r>"#
+                )
+            })
+            .collect();
+        let body = format!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:p>{runs}</w:p></w:tc></w:tr></w:tbl>"#
+        );
+        let bytes = fixture::Package::new(&body).bytes();
+        let envelope = parse_docx_for_edit(&bytes).unwrap();
+        let parsed = serde_json::to_value(&envelope.document).unwrap();
+        let paragraph =
+            &parsed["package"]["document"]["content"][0]["rows"][0]["cells"][0]["content"][0];
+        let lowered = lower_docx(envelope, None).unwrap();
+        let plan = lowered
+            .context
+            .plans
+            .iter()
+            .find(|plan| plan.story_id == "body:t0:r0c0")
+            .unwrap();
+        let UnitContent::Embed { payload, .. } = &plan.units.last().unwrap().content else {
+            panic!("missing paragraph mark");
+        };
+        let boundaries = payload["_originalRunBoundaries"].as_array().unwrap();
+        assert_eq!(boundaries.len(), 3);
+        for (index, boundary) in boundaries.iter().enumerate() {
+            assert_eq!(plan.units[index].attrs["fontFamily"]["ascii"], "Calibri Light");
+            assert_eq!(plan.units[index].attrs["fontFamily"]["hAnsi"], "Calibri Light");
+            assert_eq!(boundary["formatting"], paragraph["content"][index]["formatting"]);
+            assert_eq!(boundary["marksKey"], marks_key(&plan.units[index].marks));
+        }
+    }
+
+    #[test]
+    fn retained_source_font_snapshots_survive_cloning() {
+        for names in [r#"w:ascii="Cambria" w:hAnsi="Cambria" "#, ""] {
+            let fonts = format!(
+                r#"<w:rFonts {names}w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#
+            );
+            let paragraph = format!(
+                r#"<w:p><w:pPr><w:rPr>{fonts}</w:rPr></w:pPr><w:r><w:rPr>{fonts}</w:rPr><w:t>Title</w:t></w:r></w:p>"#
+            );
+            let comments = format!(
+                r#"<w:comments {}><w:comment w:id="1">{paragraph}</w:comment></w:comments>"#,
+                fixture::NS
+            );
+            let footnotes = format!(
+                r#"<w:footnotes {}><w:footnote w:id="-1" w:type="separator">{paragraph}</w:footnote></w:footnotes>"#,
+                fixture::NS
+            );
+            let bytes = fixture::Package::new(&paragraph)
+                .part("comments.xml", "rIdC", "comments", "comments", &comments)
+                .part("footnotes.xml", "fn", "footnotes", "footnotes", &footnotes)
+                .bytes();
+            let envelope = parse_docx_for_edit(&bytes).unwrap();
+            let parsed = serde_json::to_value(&envelope.document).unwrap();
+            let authored = &parsed["package"]["document"]["content"][0];
+            let lowered = lower_docx(envelope, None).unwrap();
+            let read: ReadSource =
+                serde_json::from_value(serde_json::to_value(lowered.read).unwrap()).unwrap();
+            for blocks in [
+                read.comments[0].body.clone(),
+                read.note_separator_paragraphs["footnote"].clone(),
+            ] {
+                let paragraph = paragraph_units(
+                    &blocks[0],
+                    &StyleResolver::new(None),
+                    None,
+                    &Default::default(),
+                );
+                assert_eq!(paragraph.units[0].attrs["fontFamily"]["ascii"], "Calibri Light");
+                assert_eq!(paragraph.units[0].attrs["fontFamily"]["hAnsi"], "Calibri Light");
+                assert_eq!(
+                    paragraph.ppr["_originalRunBoundaries"][0]["formatting"],
+                    authored["content"][0]["formatting"]
+                );
+                assert_eq!(
+                    paragraph.ppr["_originalFormatting"]["runProperties"],
+                    authored["formatting"]["runProperties"]
+                );
+                assert_eq!(
+                    paragraph.ppr["_originalRunBoundaries"][0]["marksKey"],
+                    marks_key(&paragraph.units[0].marks)
+                );
+                let live = source_json(&blocks[0], &Default::default());
+                assert!(!live.contains("_originalFormatting"));
+                assert!(!live.contains("_originalPropertyChanges"));
+                assert!(live.contains("Calibri Light"));
+            }
         }
     }
 
@@ -7617,7 +7943,7 @@ mod tests {
                 &json!({"type": "paragraph", "content": [content]}),
                 &StyleResolver::new(None),
                 None,
-                &BTreeMap::new(),
+                &SeedSource::default(),
             );
             assert_eq!(paragraph.opaque_sequences, ["figure"]);
             for unit in paragraph.units {
@@ -7636,7 +7962,6 @@ mod tests {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
             theme: None,
-            source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
             root: "body".to_owned(),
@@ -7655,6 +7980,7 @@ mod tests {
                 append_body_tail: false,
                 seed_comments: false,
             },
+            &SeedSource::default(),
         );
         let document = EditingDoc::new(74101);
         document
@@ -7705,7 +8031,13 @@ mod tests {
                     {"type": "tableCell", "formatting": formatting, "content": []}
                 ]}]
             });
-            let projected = project_table(&table, &StyleResolver::new(None), None, 12);
+            let projected = project_table(
+                &table,
+                &StyleResolver::new(None),
+                None,
+                12,
+                &SeedSource::default(),
+            );
             for (cell, width) in projected.rows[0].cells.iter().zip([25.0, 75.0]) {
                 assert_eq!(cell.attrs.get("width").and_then(Value::as_f64), Some(width));
                 assert_eq!(
@@ -8090,8 +8422,13 @@ mod tests {
         let styles = StyleResolver::new(Some(
             &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
         ));
-        let units =
-            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new()).units;
+        let units = paragraph_units(
+            &json!({"content":[value]}),
+            &styles,
+            None,
+            &SeedSource::default(),
+        )
+        .units;
         assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
         assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
         assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
@@ -8143,7 +8480,7 @@ mod tests {
                     "content": [{ "type": "text", "text": "x" }]
                 }]
             });
-            let units = paragraph_units(&paragraph, &styles, None, &BTreeMap::new()).units;
+            let units = paragraph_units(&paragraph, &styles, None, &SeedSource::default()).units;
             let mut seeded = units[0].attrs.clone();
             seeded.remove("runStyle");
             assert_eq!(inheritance.run_attrs(paragraph_style, run_style), seeded);
@@ -8229,7 +8566,7 @@ mod tests {
             units,
             comment_marks,
             ..
-        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        } = paragraph_units(&paragraph, &styles, None, &SeedSource::default());
         assert_eq!(units.len(), 6);
         for (unit, kind) in
             units[..5]
@@ -8277,7 +8614,7 @@ mod tests {
             units,
             comment_marks,
             ..
-        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        } = paragraph_units(&paragraph, &styles, None, &SeedSource::default());
         assert_eq!(units.len(), 2);
         assert_eq!(
             comment_marks,
@@ -8342,7 +8679,6 @@ mod tests {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
             theme: None,
-            source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
             root: "body".to_owned(),
@@ -8365,6 +8701,7 @@ mod tests {
                 append_body_tail: true,
                 seed_comments: true,
             },
+            &SeedSource::default(),
         );
         assert_eq!(context.plans.len(), 1);
         assert_eq!(context.plans[0].units.len(), 2);
@@ -8383,7 +8720,7 @@ mod tests {
             ]}),
             &StyleResolver::new(None),
             None,
-            &BTreeMap::new(),
+            &SeedSource::default(),
         )
         .ppr;
         assert_eq!(
@@ -9053,7 +9390,7 @@ mod tests {
             let package = json!({ "document": { "content": [
                 table, continuation, { "type": "table", "rows": [] }
             ] } });
-            let (context, _) = lower_package(&package, BTreeMap::new(), None);
+            let (context, _) = lower_package(&package, &SeedSource::default());
             assert_eq!(
                 context
                     .plans
@@ -9082,7 +9419,8 @@ mod tests {
                 ("body", 1, &continuation),
                 ("body", 2, &package["document"]["content"][2]),
             ] {
-                let projected = project_table(source, &context.styles, None, 12);
+                let projected =
+                    project_table(source, &context.styles, None, 12, &SeedSource::default());
                 let plan = context
                     .plans
                     .iter()
@@ -9104,7 +9442,8 @@ mod tests {
                     serde_json::to_vec(&expected).unwrap()
                 );
             }
-            let projected = project_table(&table, &context.styles, None, 12);
+            let projected =
+                project_table(&table, &context.styles, None, 12, &SeedSource::default());
             let source_content = table["rows"][0]["cells"][0]["content"].as_array().unwrap();
             let Cow::Borrowed(content) = &projected.rows[0].cells[0].content else {
                 panic!("nonempty source content must be borrowed");
@@ -9155,7 +9494,7 @@ mod tests {
             let expected = batches(context);
             for _ in 0..2 {
                 assert_eq!(
-                    batches(lower_package(&package, BTreeMap::new(), None).0),
+                    batches(lower_package(&package, &SeedSource::default()).0),
                     expected
                 );
             }
@@ -9677,6 +10016,10 @@ mod tests {
                 ),
             ]),
         ] {
+            let source = SeedSource {
+                ordered: source,
+                ..SeedSource::default()
+            };
             for marks in [&[][..], marks.as_slice()] {
                 for content in array(Some(&contents)) {
                     let units = run_content_to_units(content, marks, &source);
@@ -9762,8 +10105,8 @@ mod tests {
         let ordered: OrderedValue =
             serde_json::from_str(r#"{"type":"shape","z":1.0,"nested":{"b":2,"a":3}}"#).unwrap();
         let value = ordered.value();
-        let mut source = BTreeMap::new();
-        ordered.collect_source_json(&mut source);
+        let mut source = SeedSource::default();
+        ordered.collect_source_json(&mut source.ordered);
 
         assert_eq!(
             source_json(&value, &source),
@@ -9776,15 +10119,15 @@ mod tests {
         let wire = r#"{"type":"shape","textBody":{"content":[{"type":"paragraph","sourceOrdinal":4}]},"z":1.0}"#;
         let ordered: OrderedValue = serde_json::from_str(wire).unwrap();
         let parsed: Value = serde_json::from_str(wire).unwrap();
-        let mut source = BTreeMap::new();
-        ordered.collect_source_json(&mut source);
+        let mut source = SeedSource::default();
+        ordered.collect_source_json(&mut source.ordered);
 
         assert_eq!(
             source_json(&parsed, &source),
             r#"{"type":"shape","textBody":{"content":[{"type":"paragraph"}]},"z":1}"#
         );
         assert_eq!(
-            source_json(&parsed, &BTreeMap::new()),
+            source_json(&parsed, &SeedSource::default()),
             r#"{"textBody":{"content":[{"type":"paragraph"}]},"type":"shape","z":1}"#
         );
     }
@@ -9905,9 +10248,9 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
+            let units = run_to_units(&run, None, &styles, &[], &SeedSource::default());
             assert!(units.is_empty());
-            let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+            let boundary = run_boundary(&run, &units, &SeedSource::default()).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
@@ -9927,9 +10270,9 @@ mod tests {
                 { "type": "break", "breakType": "textWrapping" },
             ],
         });
-        let units = run_to_units(&wrapping, None, &styles, &[], &BTreeMap::new());
+        let units = run_to_units(&wrapping, None, &styles, &[], &SeedSource::default());
         // A wrapping break is an inline unit, so the run keeps no boundary.
-        assert!(run_boundary(&wrapping, &units, &BTreeMap::new()).is_none());
+        assert!(run_boundary(&wrapping, &units, &SeedSource::default()).is_none());
 
         let run = json!({
             "type": "run",
@@ -9940,8 +10283,8 @@ mod tests {
                 { "type": "break", "breakType": "column" },
             ],
         });
-        let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
-        let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+        let units = run_to_units(&run, None, &styles, &[], &SeedSource::default());
+        let boundary = run_boundary(&run, &units, &SeedSource::default()).unwrap();
         assert_eq!(boundary.get("text"), Some(&json!("ABC")));
         assert_eq!(
             boundary.get("breaks"),
@@ -9972,7 +10315,7 @@ mod tests {
             ]}),
             &StyleResolver::new(None),
             None,
-            &BTreeMap::new(),
+            &SeedSource::default(),
         );
         assert_eq!(units.len(), 4);
         assert_eq!(
@@ -10008,7 +10351,7 @@ mod tests {
             &paragraph,
             &StyleResolver::new(None),
             None,
-            &BTreeMap::new(),
+            &SeedSource::default(),
         );
         assert_eq!(units.len(), 1);
         let UnitContent::Embed { kind, payload } = &units[0].content else {
@@ -10064,7 +10407,7 @@ mod tests {
             ]}),
             &StyleResolver::new(None),
             None,
-            &BTreeMap::new(),
+            &SeedSource::default(),
         );
         assert_eq!(units.len(), 3);
         assert_eq!(units_text(&units), "See the link");
@@ -10095,7 +10438,6 @@ mod tests {
         let mut context = LoweringContext {
             styles: StyleResolver::new(None),
             theme: None,
-            source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
             root: "body".to_owned(),
@@ -10143,6 +10485,7 @@ mod tests {
                 append_body_tail: false,
                 seed_comments: true,
             },
+            &SeedSource::default(),
         );
         assert_eq!(context.plans.len(), 1);
         assert_eq!(
@@ -10168,7 +10511,7 @@ mod tests {
             None,
             &styles,
             &[],
-            &BTreeMap::new(),
+            &SeedSource::default(),
         );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].pm_size, 1);

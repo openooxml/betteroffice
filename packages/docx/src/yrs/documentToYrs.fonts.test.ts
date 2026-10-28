@@ -27,11 +27,47 @@ function fontPackage(latin: string | undefined, fonts: string, prefix = ''): Uin
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)]))));
 }
 
+function textBox(kind: 'drawingml' | 'vml', fonts: string): string {
+  const content = `<w:p><w:r><w:rPr>${fonts}</w:rPr><w:t>Box</w:t></w:r></w:p>`;
+  if (kind === 'vml') {
+    return `<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word"><v:shape id="Text Box 1" o:spid="_x0000_s1026" style="position:absolute;margin-left:36pt;margin-top:72pt;width:144pt;height:72pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page;v-text-anchor:top" filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent>${content}</w:txbxContent></v:textbox><w10:wrap type="none"/></v:shape></w:pict></w:r>`;
+  }
+  return `<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Text Box 41"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>${content}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+}
+
 beforeAll(() => preloadEditWasm(new Uint8Array(
   readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))
 )));
 
 for (const path of ['native', 'typescript'] as const) {
+  for (const kind of ['drawingml', 'vml'] as const) {
+    for (const [authored, fonts] of [
+      ['paired', FONTS],
+      ['theme-only', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>'],
+    ] as const) {
+      test(`${path} ${kind} ${authored} text box fonts resolve through the theme`, async () => {
+        const bytes = fontPackage('Times New Roman', fonts, textBox(kind, fonts));
+        const session = await createYrsSession();
+        try {
+          if (path === 'native') session.seedFromDocx(bytes);
+          else documentToYrs(session, await parseDocx(bytes.buffer, { preloadFonts: false }));
+          const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+          const runs = blocks.flatMap(block => block.kind === 'shape'
+            ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
+            : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : []);
+          const labels = runs.filter(run => run.kind === 'text' && run.text === 'Box');
+          expect(labels).toHaveLength(1);
+          expect(labels[0]).toMatchObject({
+            fontFamily: 'Times New Roman',
+            fontSlots: { ascii: 'Times New Roman', hAnsi: 'Times New Roman' },
+          });
+        } finally {
+          session.destroy();
+        }
+      });
+    }
+  }
+
   for (const [theme, latin] of [['resolved', 'Calibri Light'], ['default', undefined]] as const) {
     for (const [authored, authoredFonts] of [
       ['paired', FONTS],

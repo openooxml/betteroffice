@@ -4,7 +4,8 @@ use docx_parse::{
     FontFamily, RunProjection, Theme, parse_run, parse_style_definitions, parse_styles, parse_theme,
 };
 
-const PAIRED_FONTS: &str = r#"w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi""#;
+const PAIRED_FONTS: &str =
+    r#"w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi""#;
 
 fn parse_direct_fonts(fonts: &str, theme: Option<&Theme>) -> RunProjection {
     let limits = ParseLimits::default();
@@ -257,11 +258,8 @@ fn direct_explicit_fonts_override_inherited_theme_fonts() {
 
 #[test]
 fn direct_ascii_name_replaces_a_character_style_theme_reference() {
-    let projection = parse_inherited_fonts(
-        "",
-        r#"w:asciiTheme="minorHAnsi""#,
-        r#"w:ascii="Arial""#,
-    );
+    let projection =
+        parse_inherited_fonts("", r#"w:asciiTheme="minorHAnsi""#, r#"w:ascii="Arial""#);
     let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
     assert_eq!(resolved.ascii.as_deref(), Some("Arial"));
     assert_eq!(resolved.ascii_theme, None);
@@ -269,11 +267,8 @@ fn direct_ascii_name_replaces_a_character_style_theme_reference() {
 
 #[test]
 fn direct_ascii_theme_replaces_a_character_style_name() {
-    let projection = parse_inherited_fonts(
-        "",
-        r#"w:ascii="Arial""#,
-        r#"w:asciiTheme="majorHAnsi""#,
-    );
+    let projection =
+        parse_inherited_fonts("", r#"w:ascii="Arial""#, r#"w:asciiTheme="majorHAnsi""#);
     let resolved = projection.resolved_formatting.unwrap().font_family.unwrap();
     assert_eq!(resolved.ascii.as_deref(), Some("Theme Serif"));
     assert_eq!(resolved.ascii_theme.as_deref(), Some("majorHAnsi"));
