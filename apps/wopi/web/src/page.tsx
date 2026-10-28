@@ -124,6 +124,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
       await saveDocument(editorApi.current, api, {
         ...options,
         signal: lifetime.signal,
+        hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
         captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
         onFlushed: () => { version = changeVersion.current; },
         onProgress: wopiDebug,
@@ -138,7 +139,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
       if (!lifetime.signal.aborted) setSaveState("failed");
       throw error;
     }
-  }, [api, bridge, lifetime]);
+  }, [api, bridge, config.canWrite, lifetime]);
 
   const onSaveRequest = useCallback(async (): Promise<boolean> => {
     await requestSave();
@@ -151,6 +152,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
     setSaveState("saving");
     const pending = closeDocument(editorApi.current, api, {
       signal: lifetime.signal,
+      hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
       onProgress: wopiDebug,
       setInputBlocked: (blocked) => {

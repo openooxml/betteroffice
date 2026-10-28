@@ -10,7 +10,7 @@ import { decodeSequencedFrame } from "../../src/relay/sequence";
 import type { WebSocketLike } from "./transport";
 import type { Loaded } from "./page";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
-import { classifyFrame, encodeUpdateFrame } from "../../src/relay/frames";
+import { classifyFrame, encodeSyncStep1, encodeSyncStep2, encodeUpdateFrame } from "../../src/relay/frames";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -32,6 +32,9 @@ mock.module("../../../../shared/editor-host/Editor", () => ({
       publish = (update) => transport.send(encodeUpdateFrame(update));
       const unsubscribe = transport.onEvent((event) => {
         if (event.type === "open") transport.send(Uint8Array.of(8));
+        if (event.type === "message" && classifyFrame(event.data).messages.some((message) => message.type === "sync-step-1")) {
+          transport.send(encodeSyncStep2(Uint8Array.of(0, 0)));
+        }
       });
       transport.connect();
       const api: EditorApi = {
@@ -84,6 +87,7 @@ class TestSocket implements WebSocketLike {
     }
     this.readyState = 1;
     this.onopen?.();
+    this.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
   }
   drop(code: number) { this.readyState = 3; this.onclose?.({ code, reason: "rejoin from source" }); }
 }
@@ -122,6 +126,7 @@ async function mount(replaceBeforeAttach = false) {
   let failSource = false;
   let generation = 1;
   let hostText = "";
+  let closeRequest = async (_signal?: AbortSignal | null): Promise<Response> => Response.json({ closed: true });
   const api = new SessionApi("same-handle", async (input, init) => {
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer same-handle");
     const path = String(input);
@@ -141,7 +146,7 @@ async function mount(replaceBeforeAttach = false) {
       }));
     }
     if (path.endsWith("/save")) { hostText = serverDoc.getText("body").toString(); return Response.json({ itemVersion: "2" }); }
-    if (path.endsWith("/close")) return Response.json({ closed: true });
+    if (path.endsWith("/close")) return closeRequest(init?.signal);
     throw new Error(`Unexpected request: ${path}`);
   });
   const config = parseWopiConfig({
@@ -166,6 +171,7 @@ async function mount(replaceBeforeAttach = false) {
   return {
     calls, messages, loaded, view,
     get hostText() { return hostText; },
+    setCloseRequest(request: typeof closeRequest) { closeRequest = request; },
     blockSource() { let release!: () => void; sourceGate = new Promise((resolve) => { release = resolve; }); return release; },
     failSource() { failSource = true; },
     event() { streams.at(-1)!.enqueue(new TextEncoder().encode('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n')); },
@@ -280,6 +286,49 @@ test("deleting while disconnected then Close reports notSynced and keeps the edi
     expect(h.view.getByTestId("editor")).toBeDefined();
     expect(h.view.container.querySelector("main")!.inert).toBe(false);
   } finally { doc.destroy(); warning.mockRestore(); }
+});
+
+test("a stalled Close restores input and clears the shared promise so another Close retries", async () => {
+  const h = await mount();
+  const signals: Array<AbortSignal | null | undefined> = [];
+  h.setCloseRequest((signal) => {
+    signals.push(signal);
+    return signals.length === 1 ? new Promise<Response>(() => {}) : Promise.resolve(Response.json({ closed: true }));
+  });
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay !== 10_000) return schedule(callback, delay);
+    const timer = schedule(() => {}, delay);
+    deadlines.set(timer, callback);
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  try {
+    let first!: Promise<void>;
+    await act(async () => { first = h.loaded.actions.close!(); });
+    expect(h.loaded.actions.close!()).toBe(first);
+    expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    expect(deadlines.size).toBe(1);
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(h.view.container.querySelector("main")!.inert).toBe(false);
+    expect(h.view.getByRole("alert").textContent).toBe("closeTimeout");
+    expect(h.view.getByTestId("editor")).toBeDefined();
+    await act(async () => { await h.loaded.actions.close!(); });
+    expect(signals).toHaveLength(2);
+    expect(signals[1]).not.toBe(signals[0]);
+    expect(h.view.queryByTestId("editor")).toBeNull();
+  } finally {
+    for (const timer of deadlines.keys()) cancel(timer);
+    timers.mockRestore();
+    cancellations.mockRestore();
+  }
 });
 
 test("Action_Save with DontSaveIfUnmodified saves before idle change notifications", async () => {

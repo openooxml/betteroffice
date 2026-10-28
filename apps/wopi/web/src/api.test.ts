@@ -122,3 +122,17 @@ test("close rejects unsuccessful responses", async () => {
   const api = new SessionApi("handle-1", (async () => new Response(null, { status: 502 })) as unknown as typeof fetch);
   await expect(api.close()).rejects.toThrow("Close failed");
 });
+
+test("close forwards the request cancellation signal", async () => {
+  const controller = new AbortController();
+  let request: RequestInit | undefined;
+  const api = new SessionApi("handle-1", async (input, init) => {
+    expect(String(input)).toBe("/api/session/close");
+    request = init;
+    return Response.json({ closed: true });
+  });
+  await api.close(controller.signal);
+  expect(request?.signal).toBe(controller.signal);
+  expect(request?.method).toBe("POST");
+  expect(new Headers(request?.headers).get("Authorization")).toBe("Bearer handle-1");
+});

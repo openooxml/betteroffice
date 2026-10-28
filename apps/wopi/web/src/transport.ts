@@ -1,6 +1,7 @@
 import type { CollaborationTransport, CollaborationTransportEvent } from "../../../../shared/editor-host/collaboration/types";
 import { encodeSequencedFrame, type SocketSaveBarrier } from "../../src/relay/sequence";
 import { BASELINE_GENERATION_PROTOCOL } from "../../src/baseline";
+import { SYNC_STEP_2, TOP_LEVEL_SYNC } from "../../src/relay/frames";
 
 /** WebSocket constructor surface, so tests can fake it. */
 export interface WebSocketLike {
@@ -23,6 +24,7 @@ export interface WopiTransportOptions {
 }
 
 export interface WopiTransport extends CollaborationTransport {
+  hasPendingResync(): boolean;
   captureSaveBarrier(): SocketSaveBarrier | null;
 }
 
@@ -52,6 +54,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
   let socket: WebSocketLike | null = null;
   let connectionId: string | null = null;
   let seq = 0;
+  let resynced = false;
   let wantsConnection = false;
   let rejoinRequired = false;
   let retryMs = INITIAL_RETRY_MS;
@@ -93,6 +96,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
     socket = next;
     connectionId = crypto.randomUUID();
     seq = 0;
+    resynced = false;
     next.onopen = () => {
       if (socket !== next) return;
       retryMs = INITIAL_RETRY_MS;
@@ -107,9 +111,6 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
       } else if (event.data instanceof Uint8Array) {
         emit({ type: "message", data: event.data });
       }
-    };
-    next.onerror = (error) => {
-      if (socket === next) emit({ type: "error", error });
     };
     next.onclose = (event) => {
       if (socket !== next) return;
@@ -158,8 +159,12 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
       const frame = encodeSequencedFrame({ connectionId: connectionId!, seq: seq + 1 }, data);
       socket.send(frame.buffer as ArrayBuffer);
       seq += 1;
+      if (data[0] === TOP_LEVEL_SYNC && data[1] === SYNC_STEP_2) resynced = true;
       if (socket.bufferedAmount > MAX_BUFFERED_BYTES) watchDrain();
       return true;
+    },
+    hasPendingResync() {
+      return socket !== null && !resynced;
     },
     captureSaveBarrier() {
       if (!socket) return null;

@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { closeDocument, finishClose, saveDocument } from "./documentActions";
 import type { SaveBarrier } from "../../src/relay/sequence";
 
-test("a provider drain shares the input flush deadline and never captures after timeout", async () => {
+test.each(["resync", "drain"])("provider %s shares the input flush deadline and never captures after timeout", async (stage) => {
   const h = setup();
   let captures = 0;
   let now = 0;
@@ -10,8 +10,9 @@ test("a provider drain shares the input flush deadline and never captures after 
   h.editor.flushPendingInput = async () => { now = 40; };
   const warning = spyOn(console, "error").mockImplementation(() => {});
   try {
-    await expect(saveDocument({ ...h.editor, hasPendingUpdates: () => true }, h.api, {
+    await expect(saveDocument({ ...h.editor, hasPendingUpdates: () => stage === "drain" }, h.api, {
       ...h.saveOptions, inputTimeoutMs: 40,
+      hasPendingResync: () => stage === "resync",
       captureBarrier() { captures += 1; return { connectionId: crypto.randomUUID(), seq: 0 }; },
     })).rejects.toThrow("notSynced");
     expect(captures).toBe(0);
@@ -19,7 +20,7 @@ test("a provider drain shares the input flush deadline and never captures after 
   } finally { warning.mockRestore(); clock.mockRestore(); }
 });
 
-test.each(["flush", "drain", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
+test.each(["flush", "resync", "drain", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
   const h = setup();
   const controller = new AbortController();
   let entered!: () => void;
@@ -37,7 +38,10 @@ test.each(["flush", "drain", "save"])("rejoining rejects a pending %s without wa
     },
   };
   const warning = spyOn(console, "error").mockImplementation(() => {});
-  const pending = saveDocument(h.editor, api, { ...h.saveOptions, signal: controller.signal });
+  const pending = saveDocument(h.editor, api, {
+    ...h.saveOptions, signal: controller.signal,
+    hasPendingResync: () => { if (stage !== "resync") return false; entered(); return true; },
+  });
   const outcome = pending.then(() => "saved", (error: Error) => error.message);
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -200,6 +204,49 @@ test("a failed close request leaves the host open", async () => {
     async close() { h.calls.push("close"); throw new Error("Close failed"); },
   }, h.closeOptions, () => { h.calls.push("host-close"); })).rejects.toThrow("Close failed");
   expect(h.calls).toEqual(["flush", "sequence", "save", "close"]);
+});
+
+test.each(["timeout", "abort"])("a stalled close request restores input after %s and a retry starts a new request", async (reason) => {
+  const h = setup();
+  const signals: AbortSignal[] = [];
+  const blocked: boolean[] = [];
+  const failures: unknown[] = [];
+  const controller = new AbortController();
+  let started!: () => void;
+  const requested = new Promise<void>((resolve) => { started = resolve; });
+  const api = {
+    save: h.api.save,
+    close(signal?: AbortSignal) {
+      signals.push(signal!);
+      started();
+      return signals.length === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+    },
+  };
+  const options = {
+    ...h.closeOptions, closeTimeoutMs: reason === "timeout" ? 5 : 500,
+    setInputBlocked: (value: boolean) => { blocked.push(value); },
+    onFailure: (error: unknown) => { failures.push(error); },
+  };
+  const closing = closeDocument(h.editor, api, { ...options, signal: controller.signal }, () => { h.calls.push("host-close"); });
+  const outcome = closing.then(() => "closed", (error: Error) => error.message);
+  await requested;
+  if (reason === "abort") controller.abort(new Error("rejoinRequired"));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    expect(await Promise.race([
+      outcome,
+      new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still pending"), 50); }),
+    ])).toBe(reason === "timeout" ? "closeTimeout" : "rejoinRequired");
+    expect(signals[0]?.aborted).toBe(true);
+    expect(blocked).toEqual([true, false]);
+    expect(failures).toHaveLength(1);
+    expect(h.calls).not.toContain("host-close");
+    await closeDocument(h.editor, api, options, () => { h.calls.push("host-close"); });
+    expect(signals).toHaveLength(2);
+    expect(signals[1]).not.toBe(signals[0]);
+    expect(signals[1]!.aborted).toBe(false);
+    expect(h.calls.at(-1)).toBe("host-close");
+  } finally { clearTimeout(timer); }
 });
 
 test("save captures the socket barrier immediately after input flush", async () => {

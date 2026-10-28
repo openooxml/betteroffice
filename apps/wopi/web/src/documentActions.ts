@@ -9,6 +9,7 @@ interface InputEditor {
 interface SaveDocumentOptions extends SaveOptions {
   signal?: AbortSignal;
   captureBarrier?(): SocketSaveBarrier | null;
+  hasPendingResync?(): boolean;
   onFlushed?(): void;
   onProgress?(patch: Record<string, unknown>): void;
   inputTimeoutMs?: number;
@@ -20,6 +21,7 @@ interface SaveApi {
 }
 
 interface CloseDocumentOptions extends SaveDocumentOptions {
+  closeTimeoutMs?: number;
   setInputBlocked(blocked: boolean): void;
   onFailure?(error: unknown): void;
 }
@@ -74,7 +76,7 @@ export async function saveDocument(
     step = "flushed";
     progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
     step = "drain";
-    while (editor.hasPendingUpdates()) {
+    while (options.hasPendingResync?.() || editor.hasPendingUpdates()) {
       const remaining = flushDeadline - Date.now();
       if (remaining <= 0) throw new Error("notSynced");
       await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "notSynced", options.signal);
@@ -106,18 +108,20 @@ export async function saveDocument(
 
 export async function closeDocument(
   editor: InputEditor | null,
-  api: SaveApi & { close(): Promise<void> },
+  api: SaveApi & { close(signal?: AbortSignal): Promise<void> },
   options: CloseDocumentOptions,
   finish: () => void,
 ): Promise<void> {
   options.setInputBlocked(true);
+  const controller = new AbortController();
   try {
     await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
     options.signal?.throwIfAborted();
-    await api.close();
+    await bounded(() => api.close(controller.signal), options.closeTimeoutMs ?? 10_000, "closeTimeout", options.signal);
     options.signal?.throwIfAborted();
     finish();
   } catch (error) {
+    controller.abort();
     options.setInputBlocked(false);
     options.onFailure?.(error);
     throw error;

@@ -78,8 +78,8 @@ export class SessionApi {
     return { itemVersion: typeof result.itemVersion === "string" ? result.itemVersion : null };
   }
 
-  async close(): Promise<void> {
-    const response = await this.#fetch("/api/session/close", { method: "POST", headers: this.#headers() });
+  async close(signal?: AbortSignal): Promise<void> {
+    const response = await this.#fetch("/api/session/close", { method: "POST", headers: this.#headers(), signal });
     if (!response.ok) throw new Error(`Close failed (${response.status}).`);
   }
 

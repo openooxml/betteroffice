@@ -2,9 +2,11 @@ import { describe, expect, spyOn, test } from "bun:test";
 
 import { collabUrl, createWopiTransport, type WebSocketLike } from "./transport";
 import { decodeSequencedFrame } from "../../src/relay/sequence";
-import { saveDocument } from "./documentActions";
+import { closeDocument, saveDocument } from "./documentActions";
 import { CollaborationProvider } from "../../../../packages/xlsx/src/collaboration/provider";
 import type { CollaborationReplica } from "../../../../packages/xlsx/src/collaboration/types";
+import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
+import { classifyFrame, encodeSyncStep1, encodeSyncStep2 } from "../../src/relay/frames";
 
 class FakeSocket implements WebSocketLike {
   binaryType = "";
@@ -27,6 +29,158 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
+test.each([false, true])("Close waits for an offline deletion to resync after reconnect, timeout=%s", async (timeout) => {
+  const local = new Doc();
+  const server = new Doc();
+  local.getText("body").insert(0, "before");
+  applyUpdate(server, encodeStateAsUpdate(local));
+  const vector = encodeStateVector(local);
+  const sockets: FakeSocket[] = [];
+  const transport = createWopiTransport({
+    handle: "h", baselineGeneration: 1, origin: "https://office.example",
+    createSocket() {
+      const socket = new FakeSocket();
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        send(data);
+        const frame = decodeSequencedFrame(new Uint8Array(data))!;
+        if (frame.seq === 0) return;
+        for (const message of classifyFrame(frame.payload).messages) {
+          if (message.type === "sync-step-2" || message.type === "update") applyUpdate(server, message.update);
+        }
+      };
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const provider = new CollaborationProvider({
+    clientId: local.clientID,
+    encodeStateVector: () => encodeStateVector(local),
+    encodeStateAsUpdate: (vector) => encodeStateAsUpdate(local, vector),
+    applyUpdate: (update) => { applyUpdate(local, update, "remote"); },
+    onUpdate(listener) {
+      const onUpdate = (update: Uint8Array, origin: unknown) => listener(update, origin === "remote" ? "remote" : "local");
+      local.on("update", onUpdate);
+      return () => local.off("update", onUpdate);
+    },
+  }, transport);
+  const blocked: boolean[] = [];
+  const calls: string[] = [];
+  let hostText = "before";
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  const receive = (socket: FakeSocket, frame: Uint8Array) => socket.onmessage?.({ data: frame });
+  try {
+    provider.connect();
+    const first = sockets[0]!;
+    first.readyState = 1;
+    first.onopen?.();
+    receive(first, encodeSyncStep2(encodeStateAsUpdate(server, encodeStateVector(local))));
+    receive(first, encodeSyncStep1(encodeStateVector(server)));
+    expect(provider.synced).toBe(true);
+    first.readyState = 3;
+    first.onclose?.({ code: 1006 });
+    local.getText("body").delete(0, 6);
+    expect(encodeStateVector(local)).toEqual(vector);
+    expect(server.getText("body").toString()).toBe("before");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const second = sockets[1]!;
+    second.readyState = 1;
+    second.onopen?.();
+    receive(second, encodeSyncStep2(encodeStateAsUpdate(server, encodeStateVector(local))));
+    expect(provider.synced).toBe(true);
+    expect(provider.pendingBytes).toBe(0);
+    const closing = closeDocument({
+      flushPendingInput: async () => {}, hasPendingUpdates: () => provider.pendingBytes > 0,
+    }, {
+      async save(barrier) {
+        expect(barrier).toEqual(transport.captureSaveBarrier());
+        hostText = server.getText("body").toString();
+        calls.push("save");
+      },
+      async close() { calls.push("close"); },
+    }, {
+      inputTimeoutMs: timeout ? 5 : 500,
+      hasPendingResync: () => transport.hasPendingResync(),
+      captureBarrier: () => { calls.push("sequence"); return transport.captureSaveBarrier(); },
+      setInputBlocked: (value) => { blocked.push(value); },
+    }, () => { calls.push("host-close"); });
+    const outcome = closing.then(() => "closed", (error: Error) => error.message);
+    await new Promise((resolve) => setTimeout(resolve, timeout ? 15 : 0));
+    expect(calls).toEqual([]);
+    if (timeout) {
+      expect(await outcome).toBe("notSynced");
+      expect(blocked).toEqual([true, false]);
+    } else {
+      expect(blocked).toEqual([true]);
+    }
+    receive(second, encodeSyncStep1(encodeStateVector(server)));
+    if (timeout) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls).toEqual([]);
+    } else {
+      expect(await outcome).toBe("closed");
+      expect(hostText).toBe("");
+      expect(calls).toEqual(["sequence", "save", "close", "host-close"]);
+    }
+  } finally {
+    provider.destroy();
+    transport.disconnect();
+    local.destroy();
+    server.destroy();
+    warning.mockRestore();
+  }
+});
+
+test("socket errors followed by close reconnect a real provider and sync local edits", async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, origin: "https://office.example", createSocket() {
+    const socket = new FakeSocket();
+    sockets.push(socket);
+    return socket;
+  } });
+  const doc = new Doc();
+  const provider = new CollaborationProvider({
+    clientId: doc.clientID, encodeStateVector: () => encodeStateVector(doc),
+    encodeStateAsUpdate: (vector) => encodeStateAsUpdate(doc, vector),
+    applyUpdate: (update) => { applyUpdate(doc, update); }, onUpdate: () => () => {},
+  }, transport);
+  const errors: Error[] = [];
+  provider.onError((error) => { errors.push(error); });
+  try {
+    provider.connect();
+    const first = sockets[0]!;
+    first.onerror?.(new Error("network unavailable"));
+    first.readyState = 3;
+    first.onclose?.({ code: 1006 });
+    expect(provider.status).toBe("disconnected");
+    expect(errors).toEqual([]);
+    doc.getText("body").insert(0, "offline edit");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(sockets).toHaveLength(2);
+    const second = sockets[1]!;
+    second.readyState = 1;
+    second.onopen?.();
+    second.onmessage?.({ data: encodeSyncStep2(Uint8Array.of(0, 0)) });
+    second.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
+    expect(provider.synced).toBe(true);
+    expect(provider.status).toBe("connected");
+    const server = new Doc();
+    try {
+      for (const data of second.sent.slice(1)) {
+        for (const message of classifyFrame(decodeSequencedFrame(new Uint8Array(data))!.payload).messages) {
+          if (message.type === "sync-step-2" || message.type === "update") applyUpdate(server, message.update);
+        }
+      }
+      expect(server.getText("body").toString()).toBe("offline edit");
+      expect(errors).toEqual([]);
+    } finally { server.destroy(); }
+  } finally {
+    provider.destroy();
+    transport.disconnect();
+    doc.destroy();
+  }
+});
+
 test.each([false, true])("save waits for provider backpressure, timeout=%s", async (timeout) => {
   const socket = new FakeSocket();
   const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, origin: "https://office.example", createSocket: () => socket });
@@ -42,6 +196,8 @@ test.each([false, true])("save waits for provider backpressure, timeout=%s", asy
     provider.connect();
     socket.readyState = 1;
     socket.onopen?.();
+    socket.onmessage?.({ data: encodeSyncStep2(Uint8Array.of(0, 0)) });
+    socket.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
     const before = transport.captureSaveBarrier()!.seq;
     socket.bufferedAmount = 2 * 1024 * 1024;
     update(Uint8Array.of(1, 2, 3), "local");
@@ -51,6 +207,7 @@ test.each([false, true])("save waits for provider backpressure, timeout=%s", asy
       hasPendingUpdates: () => provider.pendingBytes > 0,
     }, { async save(barrier) { saves.push(barrier.seq); } }, {
       inputTimeoutMs: timeout ? 5 : 500,
+      hasPendingResync: () => transport.hasPendingResync(),
       captureBarrier() { const barrier = transport.captureSaveBarrier(); captures.push(barrier!.seq); return barrier; },
     });
     const outcome = pending.then(() => "saved", (error: Error) => error.message);
