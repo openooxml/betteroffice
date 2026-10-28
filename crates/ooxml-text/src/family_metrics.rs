@@ -83,6 +83,11 @@ pub fn family_cluster_advance(widths: &FamilyMetrics, cluster: &str) -> Option<f
     has_base.then_some(total / 1000.0)
 }
 
+/// The named family's width for a composed kana pair, in em.
+pub fn family_composed_kana_advance(widths: &FamilyMetrics, base: char, mark: char) -> Option<f32> {
+    family_advance(widths, compose_kana(base, mark)?)
+}
+
 fn compose_kana(base: char, mark: char) -> Option<char> {
     let (bases, composed) = match mark {
         '\u{3099}' => (

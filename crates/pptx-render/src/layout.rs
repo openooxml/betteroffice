@@ -12,7 +12,8 @@ use ooxml_drawingml::{
     style_outline, style_reference_color,
 };
 use ooxml_text::family_metrics::{
-    FamilyMetrics, family_advance, family_cluster_advance, family_metrics, runs_at_own_widths,
+    FamilyMetrics, family_advance, family_cluster_advance, family_composed_kana_advance,
+    family_metrics, runs_at_own_widths,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -4545,13 +4546,10 @@ fn shape_face(
             x_offset: 0.0,
             y_offset: 0.0,
         });
-        let kana = matches!(character,
-            '\u{3041}'..='\u{3096}' | '\u{309d}'..='\u{309f}' |
-            '\u{30a1}'..='\u{30fa}' | '\u{30fd}'..='\u{30ff}' |
-            '\u{ff66}'..='\u{ff9d}');
-        if kana
-            && let Some(&(next, mark)) = characters.peek()
-            && matches!(mark, '\u{3099}' | '\u{309a}')
+        if let Some(&(_, mark)) = characters.peek()
+            && let Some(advance) = face
+                .widths
+                .and_then(|metrics| family_composed_kana_advance(metrics, character, mark))
         {
             characters.next();
             glyphs.push(ShapedGlyph {
@@ -4561,11 +4559,7 @@ fn shape_face(
                 x_offset: 0.0,
                 y_offset: 0.0,
             });
-            if let Some(advance) = face.widths.and_then(|metrics| {
-                family_cluster_advance(metrics, &text[index..next + mark.len_utf8()])
-            }) {
-                glyphs[first].x_advance = advance * size_px;
-            }
+            glyphs[first].x_advance = advance * size_px;
         }
     }
     Ok(glyphs)
@@ -11818,6 +11812,42 @@ mod tests {
     }
 
     #[test]
+    fn unregistered_fixed_japanese_faces_keep_decomposed_kana_scalar_widths() {
+        let renderer = SlideRenderer::new();
+        for family in ["MS Gothic", "ＭＳ ゴシック", "MS Mincho", "ＭＳ 明朝"] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+            for text in ["か\u{3099}", "は\u{309a}", "ヒ\u{309a}"] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                paragraph.runs[0].style.font_size_pt = 12.0;
+                paragraph.runs[0].style.line_font_size_pt = 12.0;
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].width, 16.0, "{family} {text}");
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), 2);
+                assert_eq!(glyphs[0].cluster, 0);
+                assert_eq!(glyphs[1].cluster, 3);
+                assert!(glyphs.iter().all(|glyph| glyph.x_advance == 8.0));
+            }
+        }
+    }
+
+    #[test]
     fn unregistered_faces_preserve_scalar_advances_outside_kana_voicing() {
         let renderer = SlideRenderer::new();
         for family in ["MS UI Gothic", "MS Mincho", "MS Gothic", "Aptos"] {
@@ -11837,6 +11867,9 @@ mod tests {
                 "\u{200d}",
                 "か\u{fe0f}",
                 "か\u{0301}",
+                "あ\u{3099}",
+                "あ\u{309a}",
+                "ｶ\u{3099}",
                 "x\u{3099}",
                 "x\u{309a}",
                 "\u{3099}\u{309a}",
