@@ -68,7 +68,9 @@ pub fn parse_smart_art_from_drawing(
     {
         let parsed = parse_diagram_drawing_scene(drawing_xml, "SmartArt drawing", budget)?;
         if !parsed.shapes.is_empty() {
-            return Ok(Some(diagram_group(size, parsed.shapes, parsed.scene)));
+            let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
+            shape.drawing_xml = Some(drawing.to_raw_inline_xml());
+            return Ok(Some(shape));
         }
     }
 
@@ -87,7 +89,11 @@ pub fn parse_smart_art_from_drawing(
         return Ok(None);
     };
     let fallback = layout_basic_diagram(&data_xml, layout_xml.as_deref(), &size, context, budget)?;
-    Ok((!fallback.is_empty()).then(|| diagram_group(size, fallback, None)))
+    Ok((!fallback.is_empty()).then(|| {
+        let mut shape = diagram_group(size, fallback, None);
+        shape.drawing_xml = Some(drawing.to_raw_inline_xml());
+        shape
+    }))
 }
 
 pub struct DiagramDrawing {

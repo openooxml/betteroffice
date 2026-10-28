@@ -1213,6 +1213,25 @@ fn parse_run_with_context(
         }
     }
     run.content = content;
+    if element
+        .child_elements()
+        .all(|child| matches!(child.local_name(), "rPr" | "drawing"))
+    {
+        match run.content.as_mut_slice() {
+            [RunContent::Shape { shape, .. }] if shape.drawing_xml.is_some() => {
+                shape.drawing_run_xml = Some(element.to_raw_inline_xml());
+            }
+            [RunContent::OpaqueDrawing { kind, xml, .. }]
+                if element
+                    .child_by_local_name("drawing")
+                    .is_some_and(is_smart_art_drawing) =>
+            {
+                *kind = "drawingRun".to_owned();
+                *xml = element.to_raw_inline_xml();
+            }
+            _ => {}
+        }
+    }
     Ok(run)
 }
 
@@ -1326,16 +1345,23 @@ fn parse_drawing_owned_inner(
             )?,
             None => None,
         };
-        return Ok(shape
-            .map(|mut shape| {
+        return Ok(vec![match shape {
+            Some(mut shape) => {
                 apply_shape_metadata(&mut shape, element);
                 RunContent::Shape {
                     shape: Box::new(shape),
                     drawing_properties: None,
                 }
-            })
-            .into_iter()
-            .collect());
+            }
+            None => RunContent::OpaqueDrawing {
+                kind: "drawing".to_owned(),
+                xml: element.to_raw_inline_xml(),
+                preview: None,
+                previews: Vec::new(),
+                text_box: None,
+                drawing_properties: None,
+            },
+        }]);
     }
     if is_shape_drawing(element) {
         if let Some(mut shape) = parse_shape_from_drawing(element) {

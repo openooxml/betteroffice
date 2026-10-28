@@ -213,7 +213,15 @@ pub(super) fn lower(source: &str, context: &PatchContext) -> Result<Lowered, Fai
     if !xml.nodes[0].word("p") {
         return Err(Failure::structure("paragraph is not an editable w:p"));
     }
+    let mut drawing_end = 0;
     for node in &xml.nodes {
+        if node.span.start < drawing_end {
+            continue;
+        }
+        if super::drawing::is_smart_art(source, &xml, node) {
+            drawing_end = node.span.end;
+            continue;
+        }
         #[cfg(test)]
         super::work::add(1);
         let unsupported_word = node.namespace == WORD
@@ -366,6 +374,11 @@ fn lower_run(source: &str, at: usize, scope: usize, result: &mut Lowered) -> Res
                 };
                 let payload = BTreeMap::from([(key.to_owned(), json!(id))]);
                 push_atom(result, run, child, "noteRef", payload);
+                continue;
+            }
+            "drawing" if super::drawing::is_smart_art(source, &result.xml, node) => {
+                let payload = super::drawing::payload(source, node)?;
+                push_atom(result, run, child, "shape", payload);
                 continue;
             }
             "commentReference" => {

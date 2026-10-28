@@ -163,8 +163,38 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
 
 /// Serialize one run, consuming any active rendered-page-break markers.
 pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
+    let rendered_page_breaks = context.take_rendered_page_breaks();
+    let raw_run = match run.content.as_slice() {
+        [RunContent::Shape { shape, .. }] => shape.drawing_run_xml.as_deref(),
+        [RunContent::OpaqueDrawing { kind, xml, .. }] if kind == "drawingRun" => Some(xml.as_str()),
+        _ => None,
+    };
+    if let Some(xml) = raw_run {
+        validate_replayed_fragment(xml)?;
+        let mut output = xml.to_owned();
+        if rendered_page_breaks > 0 {
+            let root = super::splice::root_tag(xml)
+                .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
+            if root.empty {
+                output.replace_range(
+                    root.range.end - 2..root.range.end,
+                    &format!(
+                        ">{}</{}>",
+                        "<w:lastRenderedPageBreak/>".repeat(rendered_page_breaks),
+                        root.name
+                    ),
+                );
+            } else {
+                output.insert_str(
+                    root.range.end,
+                    &"<w:lastRenderedPageBreak/>".repeat(rendered_page_breaks),
+                );
+            }
+        }
+        return Ok(output);
+    }
     let mut output = String::from("<w:r>");
-    for _ in 0..context.take_rendered_page_breaks() {
+    for _ in 0..rendered_page_breaks {
         output.push_str("<w:lastRenderedPageBreak/>");
     }
     output.push_str(&serialize_run_properties(
@@ -383,8 +413,21 @@ fn serialize_run_content(
             ));
             return Ok(String::new());
         }
-        RunContent::OpaqueDrawing { xml, .. } => {
+        RunContent::OpaqueDrawing { kind, xml, .. } => {
             validate_replayed_fragment(xml)?;
+            if kind == "drawingRun" {
+                let limits = crate::xml::ParseLimits::default();
+                let parsed = crate::xml::parse_xml(
+                    xml.as_bytes(),
+                    "drawing run",
+                    &mut crate::xml::ParseBudget::new(&limits),
+                )?;
+                return Ok(parsed
+                    .root()
+                    .and_then(|run| run.child_by_local_name("drawing"))
+                    .map(|drawing| drawing.to_raw_inline_xml())
+                    .unwrap_or_default());
+            }
             return Ok(xml.clone());
         }
     }
@@ -500,6 +543,10 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(xml) = shape.drawing_xml.as_deref() {
+        validate_replayed_fragment(xml)?;
+        return Ok(xml.to_owned());
+    }
     let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
@@ -1295,6 +1342,120 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn smart_art_model_serializer_replays_the_graphic_frame_and_run() {
+        use crate::paragraph::{DrawingContext, parse_run_composed};
+        use crate::relationships::{Relationship, RelationshipMap};
+        use crate::serializer::canonical_xml_events;
+        use crate::smart_art::SmartArtContext;
+
+        for anchored in [false, true] {
+            for preview in ["cached", "basic", "unsupported"] {
+                let container = if anchored { "anchor" } else { "inline" };
+                let drawing = format!(
+                    r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:{container} distL="114300"><wp:extent cx="5486400" cy="3200400"/><wp:effectExtent l="19050" t="0" r="0" b="38100"/><wp:docPr id="71" name="Diagram &amp; process"><a:extLst><a:ext uri="urn:test"><keep:metadata xmlns:keep="urn:keep"/></a:ext></a:extLst></wp:docPr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rId10" r:lo="rId11" r:qs="rId12" r:cs="rId13"/><a:extLst><a:ext uri="urn:keep"/></a:extLst></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+                );
+                let drawing = if anchored {
+                    drawing
+                        .replace("w:drawing", "x:drawing")
+                        .replace("xmlns:w=", "xmlns:x=")
+                } else {
+                    drawing
+                };
+                let run_name = if anchored {
+                    "x:r xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+                } else {
+                    "w:r"
+                };
+                let closing_name = if anchored { "x:r" } else { "w:r" };
+                let source = format!(
+                    r#"<{run_name} w:rsidR="0099AABB"><w:rPr><w:noProof/><w:lang w:val="en-US"/></w:rPr>{drawing}</{closing_name}>"#
+                );
+                let relationships = RelationshipMap::from_iter(
+                    [
+                        ("rId10", "diagramData", "diagrams/data1.xml"),
+                        ("rId11", "diagramLayout", "diagrams/layout1.xml"),
+                    ]
+                    .map(|(id, kind, target)| {
+                        (
+                            id.to_owned(),
+                            Relationship {
+                                id: id.to_owned(),
+                                relationship_type: kind.to_owned(),
+                                target: target.to_owned(),
+                                target_mode: None,
+                            },
+                        )
+                    }),
+                );
+                let mut smart_art = SmartArtContext::default();
+                if preview != "unsupported" {
+                    smart_art.parts.insert("word/diagrams/data1.xml".to_owned(),
+                        br#"<dgm:dataModel><dgm:ptLst><dgm:pt modelId="0" type="doc"/><dgm:pt modelId="1"><a:t>Plan</a:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#.to_vec());
+                    smart_art.parts.insert(
+                        "word/diagrams/layout1.xml".to_owned(),
+                        b"<layout name=\"Basic Process\"/>".to_vec(),
+                    );
+                }
+                if preview == "cached" {
+                    smart_art.parts.insert("word/diagrams/drawing1.xml".to_owned(),
+                        br#"<dsp:drawing><dsp:spTree><dsp:sp><dsp:nvSpPr><dsp:cNvPr id="2" name="Plan"/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="960000"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom></dsp:spPr><dsp:txBody><a:p><a:r><a:t>Plan</a:t></a:r></a:p></dsp:txBody></dsp:sp></dsp:spTree></dsp:drawing>"#.to_vec());
+                }
+                let media = Default::default();
+                let charts = Default::default();
+                let mut drawing_context = DrawingContext {
+                    media: &media,
+                    charts: &charts,
+                    smart_art: &mut smart_art,
+                };
+                let limits = ParseLimits::default();
+                let mut budget = ParseBudget::new(&limits);
+                let run = parse_run_composed(
+                    &drawing_root(&source),
+                    Some(&relationships),
+                    None,
+                    None,
+                    None,
+                    &mut budget,
+                    Some(&mut drawing_context),
+                    false,
+                )
+                .unwrap();
+                if preview != "unsupported" {
+                    let [RunContent::Shape { shape, .. }] = run.content.as_slice() else {
+                        panic!("SmartArt preview missing")
+                    };
+                    assert!(!shape.children.as_ref().unwrap().is_empty());
+                    assert_eq!(
+                        canonical_xml_events(
+                            &serialize_shape_content(shape, &mut context()).unwrap(),
+                            true
+                        )
+                        .unwrap(),
+                        canonical_xml_events(&drawing, true).unwrap()
+                    );
+                }
+                let written = serialize_run(&run, &mut context()).unwrap();
+                assert_eq!(
+                    canonical_xml_events(&written, true).unwrap(),
+                    canonical_xml_events(&source, true).unwrap(),
+                    "{preview}: {written}"
+                );
+                assert!(!written.contains("wps:wsp"));
+                let mut with_break = context();
+                with_break.enter_paragraph(true);
+                let written = serialize_run(&run, &mut with_break).unwrap();
+                let mut expected = source.clone();
+                let root = super::super::splice::root_tag(&source).unwrap();
+                expected.insert_str(root.range.end, "<w:lastRenderedPageBreak/>");
+                assert_eq!(
+                    canonical_xml_events(&written, true).unwrap(),
+                    canonical_xml_events(&expected, true).unwrap()
+                );
+            }
+        }
     }
 
     #[test]

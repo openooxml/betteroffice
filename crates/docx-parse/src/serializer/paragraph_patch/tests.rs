@@ -1827,3 +1827,76 @@ fn paragraph_patch_refuses_inserted_breaks_and_symbol_scalars() {
         assert!(write(source, &plan).is_err(), "{insert:?}");
     }
 }
+
+#[test]
+fn smart_art_text_patch_keeps_the_drawing_run_and_checks_its_source() {
+    for container in ["inline", "anchor"] {
+        let drawing = format!(
+            r#"<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:{container}><wp:extent cx="1000" cy="500"/><wp:effectExtent l="1" t="2" r="3" b="4"/><wp:docPr id="71" name="Keep"><a:extLst><a:ext uri="urn:keep"/></a:extLst></wp:docPr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="dm" r:lo="lo" r:qs="qs" r:cs="cs"/></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+        );
+        let drawing_run =
+            format!(r#"<w:r w:rsidR="AABBCCDD"><w:rPr><w:noProof/></w:rPr>{drawing}</w:r>"#);
+        let source = format!(
+            "<w:p><w:r><w:t xml:space=\"preserve\">before </w:t></w:r>{drawing_run}<w:r><w:t xml:space=\"preserve\"> after</w:t></w:r></w:p>"
+        );
+        let atom = UnitV1::Atom {
+            atom_kind: "shape".to_owned(),
+            payload: attrs(
+                json!({"shapeJson": json!({"drawingXml": drawing, "drawingRunXml": drawing_run}).to_string()}),
+            ),
+            attrs: Attrs::new(),
+        };
+        let seed = vec![
+            text("before ", json!({})),
+            atom.clone(),
+            text(" after", json!({})),
+        ];
+        let result = vec![
+            text("ahead of ", json!({})),
+            atom.clone(),
+            text(" after", json!({})),
+        ];
+        let mut plan = patch(seed.clone(), result);
+        replace(&mut plan, 0, 6, "ahead of", json!({}));
+        let written = write(&source, &plan).unwrap();
+        assert_eq!(written, source.replace(">before <", ">ahead of <"));
+        assert!(written.contains(&drawing_run));
+        let corrupted = source.replace("id=\"71\"", "id=\"72\"");
+        assert_eq!(
+            write(&corrupted, &plan).unwrap_err().code,
+            PatchErrorCode::SeedMismatch
+        );
+        plan.run_edits.push(RunEditV1 {
+            from: 7,
+            to: 8,
+            deltas: vec![delta("bold", None, Some(json!(true)))],
+            inherit: Attrs::new(),
+            target: attrs(json!({"bold": true})),
+        });
+        let error = write(&source, &plan).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedStructure);
+        assert_eq!(error.detail, "drawing: formatting touches SmartArt");
+    }
+}
+
+#[test]
+fn smart_art_patch_refuses_text_replacement_across_source_runs() {
+    let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+    let atom = UnitV1::Atom {
+        atom_kind: "shape".to_owned(),
+        payload: attrs(json!({"shapeJson": json!({"drawingXml": drawing}).to_string()})),
+        attrs: Attrs::new(),
+    };
+    let mut plan = patch(
+        vec![text("before", json!({})), atom.clone()],
+        vec![text("ahead of", json!({})), atom],
+    );
+    replace(&mut plan, 0, 6, "ahead of", json!({}));
+    let source = format!(
+        "<w:p><w:r><w:t>be</w:t></w:r><w:r><w:t>fore</w:t></w:r><w:r>{drawing}</w:r></w:p>"
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap_err().detail,
+        "drawing: text edit crosses source runs"
+    );
+}

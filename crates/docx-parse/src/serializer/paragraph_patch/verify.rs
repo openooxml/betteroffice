@@ -55,7 +55,19 @@ pub(super) fn markers(
 ) -> Result<(), Failure> {
     let mut bookmarks = Vec::new();
     let mut comments = Vec::new();
+    let drawings: Vec<_> = lowered
+        .cells
+        .iter()
+        .filter(|cell| lowered.xml.nodes[cell.node].word("drawing"))
+        .map(|cell| &cell.raw)
+        .collect();
     for node in &lowered.xml.nodes {
+        if drawings
+            .iter()
+            .any(|span| span.start <= node.span.start && node.span.end <= span.end)
+        {
+            continue;
+        }
         if node.namespace != WORD
             || !matches!(
                 node.local.as_str(),
@@ -157,6 +169,9 @@ pub(super) fn seed(
     for (cell, unit) in lowered.cells.iter().zip(flatten(units)) {
         let attrs = unit_attrs(&unit);
         let node = &lowered.xml.nodes[cell.node];
+        if node.word("drawing") {
+            continue;
+        }
         if node.word("commentReference") {
             if !attrs.is_empty() {
                 return Err(mismatch("commentReference"));
