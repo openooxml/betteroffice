@@ -15589,6 +15589,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
         let through =
             |last: usize| options_through_section(&prepared.input.options, &prepared.regions, last);
+        let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
         let inner_measures = |blocks: &[LayoutBlock]| {
             let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
                 panic!("paragraph");
@@ -15607,6 +15608,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let (extents, dependencies) = measure_page_prefix(
                 &mut measured,
                 &widths,
+                float_width_policy,
                 &frames,
                 &measurement,
                 &geometry,
@@ -15631,6 +15633,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let (warm, dependencies) = measure_page_prefix(
                 &mut measured,
                 &widths,
+                float_width_policy,
                 &frames,
                 &measurement,
                 &geometry,
@@ -15646,6 +15649,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let (cold, _) = measure_page_prefix(
                 &mut fresh,
                 &widths,
+                float_width_policy,
                 &frames,
                 &measurement,
                 &geometry,
