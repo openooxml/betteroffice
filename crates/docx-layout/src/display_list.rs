@@ -608,7 +608,7 @@ pub struct ChartA11yAttrs {
     pub label: String,
     /// The placed chart box every primitive of the chart paints inside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frame: Option<ContentFrame>,
+    pub frame: Option<Box<ContentFrame>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -9428,12 +9428,12 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     };
     attrs.chart = Some(ChartA11yAttrs {
         label: chart_aria_label(&chart),
-        frame: Some(ContentFrame {
+        frame: Some(Box::new(ContentFrame {
             x: Some(px(frag.x)),
             y: Some(px(frag.y)),
             w: Some(px(width)),
             h: Some(px(height)),
-        }),
+        })),
     });
     attrs.aria_label = block.chart.title.clone();
     attrs.aria_description = block.chart.description.clone();
@@ -9531,7 +9531,6 @@ impl PlotSink for PrimitiveSink<'_> {
                 color,
                 dash: None,
                 role: None,
-                attrs: attrs.clone(),
                 ..LinePrimitive::contract_defaults()
             })),
             PlotOp::Path {
@@ -11480,18 +11479,14 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                 rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
             }
         }
-        let attrs = match primitive {
-            Primitive::Line(line) => Some(&mut line.attrs),
-            other => doc_attrs_mut(other),
-        };
         if let Some(ContentFrame {
             x: Some(x),
             y: Some(y),
             w: Some(w),
             h: Some(h),
-        }) = attrs
+        }) = doc_attrs_mut(primitive)
             .and_then(|attrs| attrs.chart.as_mut())
-            .and_then(|chart| chart.frame.as_mut())
+            .and_then(|chart| chart.frame.as_deref_mut())
         {
             rect(x, y, w, h);
         }
@@ -11989,10 +11984,6 @@ fn doc_attrs_mut(p: &mut Primitive) -> Option<&mut DocAttrs> {
 /// vmerge continuation slices are re-paints of content owned by another
 /// fragment — visible but not selectable, so their doc positions are stripped
 fn strip_doc_positions(p: &mut Primitive) {
-    if let Primitive::Line(line) = p {
-        line.attrs.doc_start = None;
-        line.attrs.doc_end = None;
-    }
     if let Some(attrs) = doc_attrs_mut(p) {
         attrs.doc_start = None;
         attrs.doc_end = None;
@@ -17182,12 +17173,12 @@ mod tests {
         let attrs = DocAttrs {
             chart: Some(ChartA11yAttrs {
                 label: "Chart".to_owned(),
-                frame: Some(ContentFrame {
+                frame: Some(Box::new(ContentFrame {
                     x: Some(px(10.0)),
                     y: Some(px(20.0)),
                     w: Some(px(40.0)),
                     h: Some(px(30.0)),
-                }),
+                })),
             }),
             ..DocAttrs::default()
         };
@@ -17200,9 +17191,13 @@ mod tests {
                 fill: "#000000".to_owned(),
                 attrs: attrs.clone(),
             }),
-            Primitive::Line(LinePrimitive {
+            Primitive::Rect(RectPrimitive {
+                x: px(15.0),
+                y: px(25.0),
+                w: px(10.0),
+                h: px(5.0),
+                fill: "#ffffff".to_owned(),
                 attrs,
-                ..LinePrimitive::contract_defaults()
             }),
         ];
         rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), 90.0);
@@ -17217,10 +17212,8 @@ mod tests {
         );
         assert_ne!(expected.0, Some(px(10.0)));
         for primitive in &prims {
-            let attrs = match primitive {
-                Primitive::Rect(rect) => &rect.attrs,
-                Primitive::Line(line) => &line.attrs,
-                _ => unreachable!(),
+            let Primitive::Rect(RectPrimitive { attrs, .. }) = primitive else {
+                unreachable!()
             };
             let frame = attrs.chart.as_ref().unwrap().frame.as_ref().unwrap();
             assert_eq!(

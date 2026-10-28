@@ -185,25 +185,6 @@ describe('findDrawingRectsByDocPos', () => {
     ]);
   });
 
-  test('finds a chart that paints only lines by its frame', () => {
-    const chart = { label: 'Chart', frame: { x: 20, y: 30, w: 60, h: 40 } };
-    const lines = {
-      pages: [
-        {
-          pageIndex: 0,
-          width: 100,
-          height: 200,
-          primitives: [
-            { kind: 'line', x1: 25, y1: 60, x2: 70, y2: 35, strokeWidth: 1, color: '#000', docStart: 5, chart },
-          ],
-        },
-      ],
-    } as unknown as DisplayList;
-    expect(findDrawingRectsByDocPos(lines, 5)).toEqual([
-      { pageIndex: 0, x: 20, y: 30, width: 60, height: 40 },
-    ]);
-  });
-
   test('unions chart rects and shapes when a display list carries no chart frame', () => {
     const chart = { label: 'Chart' };
     const pie = {
