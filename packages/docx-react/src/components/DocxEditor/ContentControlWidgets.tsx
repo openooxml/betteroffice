@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react';
 import type { YrsContentControlValue } from '@betteroffice/docx/yrs';
+import { useTranslation } from '../../i18n';
 
 const WIDGET_SELECTOR = '.layout-sdt-widget, .layout-inline-sdt-widget';
 
@@ -68,6 +69,7 @@ export function ContentControlWidgets({
   containerRef,
   applyYrsValue,
 }: ContentControlWidgetsProps): React.ReactElement | null {
+  const { t } = useTranslation();
   const [popup, setPopup] = useState<Popup | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
@@ -214,7 +216,7 @@ export function ContentControlWidgets({
     >
       {popup.kind === 'dropdown' ? (
         popup.items.length === 0 ? (
-          <div className="layout-sdt-widget-empty">No options</div>
+          <div className="layout-sdt-widget-empty">{t('contentControls.noOptions')}</div>
         ) : (
           popup.items.map((item) => (
             <button

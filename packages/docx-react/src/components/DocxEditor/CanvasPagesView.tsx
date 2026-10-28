@@ -35,6 +35,7 @@ import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA1
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { ParseError } from '../DocxEditorHelpers';
+import { useTranslation } from '../../i18n';
 import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
@@ -67,6 +68,7 @@ export function CanvasPagedArea({
   interactive?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   return (
     <>
       {renderer.status === 'ready' && renderer.displayList ? (
@@ -87,7 +89,7 @@ export function CanvasPagedArea({
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
-          <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
+          <ParseError message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
         </div>
       ) : null}
       {children}

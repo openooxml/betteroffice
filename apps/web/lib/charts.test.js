@@ -12,7 +12,7 @@ const BASIC = parseAgentEvals(README, ["basic"]);
 const COMPLEX = parseAgentEvals(README, ["complex"]);
 const FORMATS = parseFidelity(README);
 
-const altOf = (name) => README.match(new RegExp(`<img src="https://betteroffice\\.dev/api/charts/${name}\\.svg" alt="([^"]+)" width="100%">`))?.[1];
+const altOf = (name) => README.match(new RegExp(`<img src="https://betteroffice\\.dev/api/charts/${name}\\.svg" alt="([^"]+)" width="70%">`))?.[1];
 
 const SVGS = () => {
   const out = [];
@@ -133,6 +133,14 @@ describe("chart SVGs", () => {
       const time = format.rows.filter((row) => /time/i.test(row.label)).map((row) => at(row.label));
       const quality = format.rows.filter((row) => !/time/i.test(row.label) && !TABLE_ONLY.test(row.label)).map((row) => at(row.label));
       expect(Math.max(...quality)).toBeLessThan(Math.min(...time));
+    }
+  });
+
+  test("SSIM is the first row of every format that reports it", () => {
+    const rows = tableRows(FORMATS);
+    for (const format of FORMATS) {
+      const labels = rows.filter((row) => row.format === format.format).map((row) => row.label);
+      if (labels.includes("SSIM")) expect(labels[0]).toBe("SSIM");
     }
   });
 
