@@ -832,6 +832,7 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut output, seed.source),
             Vec::new(),
+            false,
         );
         if current
             .attrs
@@ -923,6 +924,7 @@ impl LocalLowering {
             &mut ListState::default(),
             (&mut replacement, source),
             Vec::new(),
+            false,
         );
         let LayoutBlock::Paragraph(old) = blocks.get(slot)?.as_ref() else {
             return None;

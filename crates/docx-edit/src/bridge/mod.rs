@@ -691,6 +691,8 @@ fn walk_story_chunks<T: ReadTxn>(
     mut hidden_field_blocks: BTreeSet<String>,
     mut recording: Option<&mut preview::UnitRecorder>,
 ) -> Result<(Vec<LayoutBlock>, preview::WalkPosition, BTreeSet<String>), BridgeError> {
+    let toc_paragraphs = toc_field_paragraphs(txn, chunks, story_id);
+    local.block(!toc_paragraphs.is_empty());
     let starts_at_boundary =
         initial.at_block_boundary && initial.paragraph_start == initial.story_index;
     let preview::WalkPosition {
@@ -973,6 +975,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     revealable,
                     segments,
                     placed.hides_mark,
+                    toc_paragraphs.contains(&para_id),
                 );
                 suppress_cell_edge_spacing(
                     &mut paragraph_blocks,
@@ -1940,6 +1943,7 @@ impl FieldJoin {
             revealable,
             self.segments,
             false,
+            false,
         );
         suppress_cell_edge_spacing(
             &mut blocks,
@@ -1959,6 +1963,70 @@ fn hidden_field_result_blocks<T: ReadTxn>(field: &MapRef, txn: &T) -> BTreeSet<S
         return BTreeSet::new();
     };
     ids.iter().filter_map(any_str).map(str::to_owned).collect()
+}
+
+fn toc_field_paragraphs<T: ReadTxn>(
+    txn: &T,
+    chunks: &[yrs::types::text::Diff<YChange>],
+    story_id: &str,
+) -> BTreeSet<String> {
+    let mut paragraphs = Vec::new();
+    let mut fields = Vec::new();
+    for chunk in chunks {
+        let Out::YMap(map) = &chunk.insert else {
+            continue;
+        };
+        if is_pilcrow(map, txn) {
+            paragraphs.push(shared_map_string(map, txn, "paraId").unwrap_or_default());
+        } else if shared_map_string(map, txn, "_kind").as_deref() == Some("field")
+            && shared_map_string(map, txn, "instruction").is_some_and(|instruction| {
+                instruction
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC"))
+            })
+            && let Some(data) = shared_map_string(map, txn, "fieldData")
+                .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        {
+            fields.push((paragraphs.len(), data));
+        }
+    }
+    let mut members = BTreeSet::new();
+    for (owner, field) in fields {
+        let following: Vec<_> = ["structuredCode", "structuredResult"]
+            .into_iter()
+            .flat_map(|key| field[key]["blocks"].as_array().into_iter().flatten())
+            .filter(|block| block["type"] == "paragraph")
+            .collect();
+        if following.is_empty() || owner >= paragraphs.len() {
+            continue;
+        }
+        let end_id = following
+            .last()
+            .and_then(|block| block["paraId"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                let prefix = format!("{story_id}:p");
+                let ordinal = paragraphs[owner]
+                    .strip_prefix(&prefix)?
+                    .parse::<usize>()
+                    .ok()?;
+                Some(format!("{prefix}{}", ordinal + following.len()))
+            });
+        let end = end_id
+            .as_ref()
+            .and_then(|id| {
+                paragraphs[owner..]
+                    .iter()
+                    .position(|paragraph| paragraph == id)
+            })
+            .map_or_else(
+                || (owner + following.len()).min(paragraphs.len() - 1),
+                |offset| owner + offset,
+            );
+        members.extend(paragraphs[owner..=end].iter().cloned());
+    }
+    members
 }
 
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {
@@ -3640,6 +3708,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     mut carried: Vec<(u32, Vec<RawRun>)>,
     hides_mark: bool,
+    in_toc_field: bool,
 ) -> Vec<LayoutBlock> {
     let source = map.paragraph_count();
     map.paragraphs.push((
@@ -3694,6 +3763,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             list_state,
             (map, source),
             carried,
+            in_toc_field,
         );
         if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
             paragraph
@@ -3741,6 +3811,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                     list_state,
                     (map, source),
                     Vec::new(),
+                    in_toc_field,
                 ),
                 segment_start,
                 &mut first_part,
@@ -3768,6 +3839,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 list_state,
                 (map, source),
                 Vec::new(),
+                in_toc_field,
             ),
             segment_start,
             &mut first_part,
@@ -3791,6 +3863,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             &mut list_state.clone(),
             (&mut preview::LoweringOutput::default(), 0),
             Vec::new(),
+            in_toc_field,
         )));
     }
     for block in &mut blocks {
@@ -3837,6 +3910,7 @@ fn flush_paragraph<T: ReadTxn>(
     list_state: &mut ListState,
     (map, source): (&mut preview::LoweringOutput, u32),
     carried: Vec<(u32, Vec<RawRun>)>,
+    in_toc_field: bool,
 ) -> ParagraphBlock {
     #[cfg(test)]
     PARAGRAPHS_FLUSHED.with(|flushed| flushed.set(flushed.get() + 1));
@@ -3858,8 +3932,10 @@ fn flush_paragraph<T: ReadTxn>(
             if instruction.split_whitespace().next()
                 .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC")))
     });
-    let toc_entry =
-        semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
+    let toc_entry = in_toc_field
+        || semantic_toc
+        || style_id.as_deref().is_some_and(is_toc_style)
+        || toc_field_result;
     for run in &mut raw_runs {
         if toc_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);

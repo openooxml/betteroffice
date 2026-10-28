@@ -1,10 +1,4 @@
-//! A TOC entry takes its line height from its entry text at the TOC style
-//! size. Word renders the leader tab and the PAGEREF page number at that
-//! size even when the tab run, the field result run or the paragraph mark
-//! carries a larger one, and it does not apply a Hyperlink character style
-//! size to entry text inside the TOC field result. Measured against the
-//! Word reference PDFs of the corpus TOC documents (Arial 10pt entries
-//! whose tab and mark runs carry 11 to 12pt sit on a 10pt line).
+//! TOC entry line heights and paragraph style font sizes.
 
 use docx_edit::{
     EditCtx, EngineSession, FormatPolicy, ParaSelector, Position, StyleResolver, seed_from_docx,
@@ -252,9 +246,6 @@ fn a_hyperlink_style_size_does_not_raise_a_toc_entry() {
     assert_height(heights[0], 10.0);
 }
 
-/// Red test: a 12pt TOC1 entry whose Hyperlink style is 14pt stays at
-/// the 12pt chain size Word uses, not the 10pt fallback the stripped
-/// Hyperlink size would leave behind.
 #[test]
 fn a_hyperlink_style_size_does_not_drop_a_toc_entry_below_its_chain() {
     let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#;
@@ -263,9 +254,6 @@ fn a_hyperlink_style_size_does_not_drop_a_toc_entry_below_its_chain() {
     assert_height(heights[0], 12.0);
 }
 
-/// Red test: an entry with no size in its chain, a 14pt mark and a
-/// 14pt PAGEREF result stays at the 10pt default. The field result is
-/// capped even when no entry text run carries a size.
 #[test]
 fn a_larger_field_result_does_not_raise_an_unsized_toc_entry() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#;
@@ -292,7 +280,6 @@ fn toc_entries_stay_at_the_entry_size_down_a_page() {
     }
 }
 
-/// Control: tab and text at the same size already agree with Word.
 #[test]
 fn a_tab_at_the_entry_size_keeps_its_line_height() {
     let body = entry("Entry one", Some(24), None);
@@ -300,8 +287,6 @@ fn a_tab_at_the_entry_size_keeps_its_line_height() {
     assert_height(heights[0], 12.0);
 }
 
-/// Control: larger entry text still drives the line; only the auxiliary
-/// runs are capped, so a 14pt entry keeps its 14pt line.
 #[test]
 fn larger_entry_text_still_drives_a_toc_line() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#.to_owned();
@@ -309,8 +294,6 @@ fn larger_entry_text_still_drives_a_toc_line() {
     assert_height(heights[0], 14.0);
 }
 
-/// Control: outside a TOC entry a larger tab run keeps the taller line it
-/// has on main; the cap is scoped to TOC entries.
 #[test]
 fn a_larger_tab_run_still_raises_a_body_line() {
     let body = r#"<w:p><w:r><w:t>Body text</w:t></w:r><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:p>"#.to_owned();
@@ -318,9 +301,6 @@ fn a_larger_tab_run_still_raises_a_body_line() {
     assert_height(heights[0], 14.0);
 }
 
-/// Body control: outside a TOC field result Word applies a Hyperlink
-/// character style size, so a body hyperlink at 14pt keeps its 14pt line
-/// on main and after the fix.
 #[test]
 fn a_hyperlink_style_size_still_applies_in_body_text() {
     let body = r#"<w:p><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Body link text</w:t></w:r></w:hyperlink></w:p>"#.to_owned();
@@ -328,9 +308,6 @@ fn a_hyperlink_style_size_still_applies_in_body_text() {
     assert_height(heights[0], 14.0);
 }
 
-/// Body red test: a larger paragraph mark does not size body runs
-/// either. Word takes unsized runs at the document default, so this
-/// fails on main, where the mark size fills the runs.
 #[test]
 fn a_larger_paragraph_mark_does_not_raise_a_body_paragraph() {
     let body = r#"<w:p><w:pPr><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Body text</w:t></w:r></w:p>"#.to_owned();
@@ -338,7 +315,6 @@ fn a_larger_paragraph_mark_does_not_raise_a_body_paragraph() {
     assert_height(heights[0], 10.0);
 }
 
-/// Control: a plain paragraph at the default size is unchanged.
 #[test]
 fn a_plain_paragraph_keeps_its_line_height() {
     let body = r#"<w:p><w:r><w:t>Body text</w:t></w:r></w:p>"#.to_owned();
@@ -370,10 +346,6 @@ fn properties(
         .properties
 }
 
-/// After a style switch the unsized run measures at the new style
-/// chain: 16pt Heading1, not the 10pt Normal chain it was seeded with
-/// and not the 14pt mark. The seeded state carries no chain defaults
-/// key; the bridge reads the mark size from the original formatting.
 #[test]
 fn a_style_switch_measures_the_new_style_size() {
     let (bytes, styles) = marked_paragraph();
@@ -467,11 +439,6 @@ fn pageref_in_hyperlink_body() -> &'static str {
     r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#
 }
 
-/// Red test: a Word shaped TOC entry whose page number is a PAGEREF
-/// field inside the hyperlink, its result run carrying the 14pt
-/// Hyperlink style, takes the 10pt TOC chain size. On 7b99f08c the
-/// field result size is captured before the Hyperlink strip and written
-/// back onto the entry text, so the line measures 14pt.
 #[test]
 fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
     let heights = heights_with_env(
@@ -481,8 +448,6 @@ fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
     assert_height(heights[0], 10.0);
 }
 
-/// Red test: the same Word shaped entry in a 12pt TOC1 paragraph takes
-/// the 12pt chain size, not the 14pt Hyperlink field result size.
 #[test]
 fn a_pageref_field_inside_the_hyperlink_takes_the_12pt_toc_chain_size() {
     let heights = heights_with_env(
@@ -492,9 +457,6 @@ fn a_pageref_field_inside_the_hyperlink_takes_the_12pt_toc_chain_size() {
     assert_height(heights[0], 12.0);
 }
 
-/// Red test: a 12pt TOC1 entry with a 14pt paragraph mark and no field
-/// run stays at the 12pt chain size. On 7b99f08c the mark size forces
-/// the unsized run fill to the 10pt fallback.
 #[test]
 fn a_12pt_toc1_entry_with_a_14pt_mark_and_no_field_run_stays_12pt() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
@@ -505,10 +467,6 @@ fn a_12pt_toc1_entry_with_a_14pt_mark_and_no_field_run_stays_12pt() {
     assert_height(heights[0], 12.0);
 }
 
-/// Red test: restyling a paragraph whose mark carries 14pt and whose
-/// initial chain has no size to the 16pt Heading1 style measures the
-/// text at 16pt. On 7b99f08c the stale mark size in the original
-/// formatting forces the fill to 10pt.
 #[test]
 fn a_restyle_to_heading1_measures_the_new_16pt_chain_size() {
     let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#;
@@ -534,9 +492,6 @@ fn a_restyle_to_heading1_measures_the_new_16pt_chain_size() {
     assert_height(heights[0], 16.0);
 }
 
-/// Red test: typing plain text into an empty 12pt TOC1 paragraph whose
-/// mark carries 14pt measures at the 12pt chain size, not the mark size
-/// and not the 10pt fallback the mark forced on 7b99f08c.
 #[test]
 fn typing_into_an_empty_12pt_toc1_paragraph_takes_the_chain_size() {
     let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
@@ -559,11 +514,6 @@ fn typing_into_an_empty_12pt_toc1_paragraph_takes_the_chain_size() {
     assert_height(heights[0], 12.0);
 }
 
-/// Red test: splitting a paragraph whose mark carries 14pt and whose
-/// unsized text sits in a chain with no explicit size keeps both halves
-/// at the 10pt chain default. On 7b99f08c the second paragraph loses
-/// the original formatting the mark check reads, so its text jumps to
-/// the 14pt mark size.
 #[test]
 fn a_split_keeps_both_halves_at_the_chain_size() {
     let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Body text</w:t></w:r></w:p>"#;
@@ -585,11 +535,6 @@ fn a_split_keeps_both_halves_at_the_chain_size() {
 
 const NORMAL11_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="22"/></w:rPr></w:style></w:styles>"#;
 
-/// Red test: a paragraph with no style id takes the default paragraph
-/// style chain size Word applies to it. Normal is 11pt over a 10pt
-/// docDefaults size and the mark carries 14pt, so plain typed text
-/// measures 11pt. Before the default style fallback the chain
-/// resolution went straight to the docDefaults size and measured 10pt.
 #[test]
 fn a_paragraph_without_a_style_takes_the_default_style_chain_size() {
     let body =
@@ -613,9 +558,6 @@ fn a_paragraph_without_a_style_takes_the_default_style_chain_size() {
     assert_height(heights[0], 11.0);
 }
 
-/// Red test: a paragraph whose style id the host did not resolve takes
-/// the same default paragraph style chain size, 11pt here, not the
-/// docDefaults 10pt.
 #[test]
 fn a_paragraph_with_an_unknown_style_takes_the_default_style_chain_size() {
     let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="UnknownStyle"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
@@ -638,11 +580,6 @@ fn a_paragraph_with_an_unknown_style_takes_the_default_style_chain_size() {
     assert_height(heights[0], 11.0);
 }
 
-/// Red test: a style with no basedOn over a 12pt Normal, in a styles
-/// part whose docDefaults has no size, measures at the 10pt Word
-/// default. The fixed builders give every paragraph style a chain
-/// entry, so Plain resolves 10pt and does not take Normal 12pt through
-/// the default style fallback.
 #[test]
 fn a_style_without_basedon_over_a_12pt_normal_measures_10pt() {
     let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style></w:styles>"#;
@@ -655,9 +592,6 @@ fn a_style_without_basedon_over_a_12pt_normal_measures_10pt() {
     assert_height(heights[0], 10.0);
 }
 
-/// Red test: with no chain sizes in the env at all, an unsized run
-/// beside a directly sized 18pt run stays at the merged paragraph
-/// default size, as on main, not at the larger run size.
 #[test]
 fn an_unsized_run_beside_a_larger_direct_run_keeps_the_paragraph_default_size() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:t>Small </w:t></w:r><w:r><w:rPr><w:sz w:val="36"/></w:rPr><w:t>Big</w:t></w:r></w:p>"#;
@@ -667,8 +601,6 @@ fn an_unsized_run_beside_a_larger_direct_run_keeps_the_paragraph_default_size() 
 
 const CS_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/><w:szCs w:val="28"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#;
 
-/// Red test: a style chain with sz 20 and szCs 28 sizes an unsized
-/// complex script run at the 14pt cs size, not the 10pt chain size.
 #[test]
 fn an_unsized_complex_script_run_takes_the_cs_chain_size() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:rPr><w:cs/></w:rPr><w:t>Complex</w:t></w:r></w:p>"#;
@@ -679,9 +611,6 @@ fn an_unsized_complex_script_run_takes_the_cs_chain_size() {
     assert_eq!(run["fontSizeCs"], 14.0);
 }
 
-/// Red test: a run with a direct sz 32 and no szCs keeps the cs size
-/// main computed from the merged defaults, 14pt here, instead of
-/// taking the 10pt chain size as its cs size.
 #[test]
 fn a_directly_sized_run_without_szcs_keeps_the_main_cs_size() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:rPr><w:sz w:val="32"/><w:cs/></w:rPr><w:t>Complex</w:t></w:r></w:p>"#;
@@ -693,8 +622,6 @@ fn a_directly_sized_run_without_szcs_keeps_the_main_cs_size() {
     assert_eq!(run["fontSizeCs"], 14.0);
 }
 
-/// A split at the end rebuilds the second paragraph from the caret
-/// formatting: no chain defaults key appears in its properties.
 #[test]
 fn a_split_at_the_end_has_no_chain_defaults_key() {
     let (bytes, _styles) = marked_paragraph();
@@ -711,8 +638,6 @@ fn a_split_at_the_end_has_no_chain_defaults_key() {
     );
 }
 
-/// A save round trip carries no trace of a chain defaults key, and
-/// the unchanged document part stays byte identical to the source.
 #[test]
 fn a_save_round_trip_never_writes_a_chain_defaults_key() {
     let (bytes, _styles) = marked_paragraph();
@@ -769,7 +694,7 @@ fn a_save_round_trip_never_writes_a_chain_defaults_key() {
     assert_eq!(saved_xml, source_xml);
 }
 
-fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
+fn lowered_blocks(bytes: &[u8], render_env: Value) -> Value {
     let doc = docx_edit::EditingDoc::new(77109);
     seed_from_docx(&doc, bytes).unwrap();
     let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
@@ -778,10 +703,86 @@ fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
         &serde_json::from_value(render_env).unwrap(),
     )
     .unwrap();
-    serde_json::to_value(blocks).unwrap()[0]["runs"]
+    serde_json::to_value(blocks).unwrap()
+}
+
+fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
+    lowered_blocks(bytes, render_env)[0]["runs"]
         .as_array()
         .unwrap()
         .clone()
+}
+
+#[test]
+fn a_toc_field_sizes_all_three_custom_style_entries_and_stops_at_its_end() {
+    for with_ids in [true, false] {
+        let paragraph = |index: usize, text: &str, begin: bool, end: bool| {
+            let id = if with_ids {
+                format!(r#" w14:paraId="{index:08X}""#)
+            } else {
+                String::new()
+            };
+            let begin = if begin {
+                concat!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                    r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
+                    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                )
+            } else {
+                ""
+            };
+            let end = if end {
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            } else {
+                ""
+            };
+            format!(
+                concat!(
+                    r#"<w:p{id}><w:pPr><w:pStyle w:val="ContentsEntry"/></w:pPr>{begin}"#,
+                    r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+                    r#"<w:rStyle w:val="Hyperlink"/></w:rPr><w:t>{text}</w:t></w:r>"#,
+                    r#"<w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:tab/></w:r>"#,
+                    r#"<w:fldSimple w:instr=" PAGEREF entry "><w:r><w:rPr>"#,
+                    r#"<w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple>"#,
+                    r#"</w:hyperlink>{end}</w:p>"#,
+                ),
+                id = id,
+                begin = begin,
+                text = text,
+                end = end,
+            )
+        };
+        let body = [
+            paragraph(1, "Before", false, false),
+            paragraph(2, "Entry one", true, false),
+            paragraph(3, "Entry two", false, false),
+            paragraph(4, "Entry three", false, true),
+            paragraph(5, "After", false, false),
+        ]
+        .concat();
+        let styles = styles(Some(20), Some(28))
+            .replace("TOC1", "ContentsEntry")
+            .replace("toc 1", "Contents Entry");
+        let bytes = document(&body, &styles);
+        let blocks = lowered_blocks(&bytes, chain_env(&bytes));
+        assert_eq!(blocks.as_array().unwrap().len(), 5);
+        for index in 1..=3 {
+            let runs = blocks[index]["runs"].as_array().unwrap();
+            let text = ["Entry one", "Entry two", "Entry three"][index - 1];
+            assert!(runs.iter().any(|run| run["text"] == text));
+            for run in runs {
+                assert_eq!(run["fontSize"], 10.0, "{run}");
+            }
+        }
+        for index in [0, 4] {
+            assert_eq!(blocks[index]["runs"][0]["fontSize"], 14.0);
+        }
+        let heights = line_heights(&bytes);
+        assert_eq!(heights.len(), 5);
+        for (height, size) in heights.into_iter().zip([14.0, 10.0, 10.0, 10.0, 14.0]) {
+            assert_height(height, size);
+        }
+    }
 }
 
 #[test]
