@@ -2316,6 +2316,13 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
 }
 
+fn with_doc_pr(mut payload: JsonObject, content: &Value) -> JsonObject {
+    if let Some(properties) = field(Some(content), "drawing").filter(|value| value.is_object()) {
+        payload.insert("docPr".to_owned(), properties.clone());
+    }
+    payload
+}
+
 pub(crate) fn image_payload(image: &Value) -> JsonObject {
     let size = field(Some(image), "size");
     let wrap = field(Some(image), "wrap");
@@ -2809,7 +2816,10 @@ fn run_content_to_units(
         }
         "drawing" => vec![embed_unit(
             "image",
-            image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+            with_doc_pr(
+                image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+                content,
+            ),
             &drawing_marks(marks),
             1,
         )],
@@ -2821,18 +2831,24 @@ fn run_content_to_units(
         )],
         "shape" => vec![embed_unit(
             "shape",
-            shape_payload(
-                field(Some(content), "shape").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                shape_payload(
+                    field(Some(content), "shape").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
         )],
         "chart" => vec![embed_unit(
             "chart",
-            chart_payload(
-                field(Some(content), "chart").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                chart_payload(
+                    field(Some(content), "chart").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
@@ -2862,7 +2878,7 @@ fn run_content_to_units(
             }
             vec![embed_unit(
                 "opaqueDrawing",
-                payload,
+                with_doc_pr(payload, content),
                 &drawing_marks(marks),
                 1,
             )]

@@ -32,6 +32,8 @@ use crate::{
     PPR_INS, RawOp, StoryRange, map_string, story_ref,
 };
 
+pub use docx_parse::image::DrawingProperties;
+
 /// Paragraphs one read may return.
 const READ_PARAGRAPH_LIMIT: usize = 65_536;
 /// UTF-16 units of text one read may return.
@@ -123,6 +125,64 @@ pub enum AtomKind {
 pub struct TextAtom {
     pub offset: u32,
     pub kind: AtomKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<DrawingProperties>,
+}
+
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
+fn drawing_properties<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+) -> Option<DrawingProperties> {
+    let map = map?;
+    let Out::Any(Any::Map(properties)) = map.get(txn, "docPr")? else {
+        return None;
+    };
+    let text = |key: &str| match properties.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let live = |key: &str| match map.get(txn, key) {
+        Some(Out::Any(Any::String(value))) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if kind == "image" {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
+    };
+    let wrap = if kind == "image" {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
+    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
+    let placement = match (wrap.as_deref(), text("placement").as_deref()) {
+        (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+        (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
+        _ => docx_parse::image::DrawingPlacement::Inline,
+    };
+    let drawing_type = match text("type").as_deref() {
+        Some("picture") => docx_parse::image::DrawingType::Picture,
+        Some("shape") => docx_parse::image::DrawingType::Shape,
+        Some("textBox") => docx_parse::image::DrawingType::TextBox,
+        Some("group") => docx_parse::image::DrawingType::Group,
+        Some("chart") => docx_parse::image::DrawingType::Chart,
+        Some("diagram") => docx_parse::image::DrawingType::Diagram,
+        _ => docx_parse::image::DrawingType::Other,
+    };
+    Some(DrawingProperties {
+        doc_pr_id: text("docPrId"),
+        name: text("name"),
+        title,
+        descr,
+        hidden: flag("hidden"),
+        decorative: flag("decorative"),
+        placement,
+        drawing_type,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -786,6 +846,7 @@ impl StoryView {
                         current.atoms.push(TextAtom {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
+                            drawing: drawing_properties(&kind, map.as_ref(), txn),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);
