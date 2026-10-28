@@ -4459,7 +4459,9 @@ fn flush_paragraph<T: ReadTxn>(
         .flat_map(|(_, runs)| runs)
         .chain(raw_runs)
         .collect();
-    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    let can_start_page = story_id == "body" || story_id.starts_with("body:");
+    let mut attrs =
+        lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state, can_start_page);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();
@@ -5058,6 +5060,7 @@ fn lower_paragraph_attrs(
     pilcrow_attributes: Option<&Attrs>,
     env: &RenderEnv,
     list_state: &mut ListState,
+    can_start_page: bool,
 ) -> ParagraphAttrs {
     let alignment =
         value_string(values.get("alignment")).and_then(|alignment| match alignment.as_str() {
@@ -5082,7 +5085,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env);
+    lower_paragraph_spacing(values, &mut result, env, can_start_page);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -5309,13 +5312,18 @@ fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
     env: &RenderEnv,
+    can_start_page: bool,
 ) {
     let line_px = env
         .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
-    let suppress_before = env.compatibility_flags.suppress_sp_bf_after_pg_brk
-        && true_property(values, "pageBreakBeforeRun") == Some(true);
+    let suppress_before = (env.compatibility_flags.suppress_sp_bf_after_pg_brk
+        && true_property(values, "pageBreakBeforeRun") == Some(true))
+        || (can_start_page
+            && env.compatibility_flags.compatibility_mode >= 15
+            && (true_property(values, "pageBreakBeforeRun") == Some(true)
+                || true_property(values, "pageBreakBefore") == Some(true)));
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
@@ -6061,10 +6069,10 @@ mod tests {
             ..RenderEnv::default()
         };
         let mut attrs = ParagraphAttrs::default();
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         assert_eq!(attrs.spacing.as_ref().unwrap().before, Some(64.0));
         env.compatibility_flags.suppress_sp_bf_after_pg_brk = true;
-        lower_paragraph_spacing(&values, &mut attrs, &env);
+        lower_paragraph_spacing(&values, &mut attrs, &env, true);
         let spacing = attrs.spacing.unwrap();
         assert_eq!(spacing.before, Some(0.0));
         assert_eq!(spacing.before_lines, None);
@@ -6159,7 +6167,7 @@ mod tests {
                 "shading".to_owned(),
                 Any::from_json(&shading.to_string()).unwrap(),
             )]);
-            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default());
+            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default(), true);
             assert_eq!(attrs.shading.as_deref(), expected, "{shading}");
         }
         assert_eq!(
@@ -6190,6 +6198,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
@@ -6221,6 +6230,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(false));
         assert_eq!(attrs.list_marker_italic, Some(false));
@@ -6251,6 +6261,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(true));
