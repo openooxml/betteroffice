@@ -1252,6 +1252,13 @@ def accept_revisions(root):
                 raise ValueError('unsupported table revision in fixture')
 
 
+def opening_run_props(paragraph, prefix):
+    for run in paragraph.findall(f'{prefix}:r', NS):
+        if any(node.text for node in run.findall(f'{prefix}:t', NS)):
+            return run.find(f'{prefix}:rPr', NS)
+    return paragraph.find(f'{prefix}:r/{prefix}:rPr', NS)
+
+
 def real_expected_package(package, spec, fmt):
     prefix = 'w' if fmt == 'docx' else 'a'
     if spec.get('accept_changes'):
@@ -1273,8 +1280,7 @@ def real_expected_package(package, spec, fmt):
             if props is not None:
                 paragraph.append(copy.deepcopy(props))
             run = ET.SubElement(paragraph, w('r'))
-            opening = template.find('w:r', NS)
-            props = opening.find('w:rPr', NS) if opening is not None else None
+            props = opening_run_props(template, 'w')
             if props is not None:
                 run.append(copy.deepcopy(props))
             ET.SubElement(run, w('t')).text = text
@@ -2530,8 +2536,7 @@ def drawing_text(body, text):
     paragraphs = body.findall('a:p', NS)
     require(paragraphs, 'text body has no paragraph template')
     template = copy.deepcopy(paragraphs[0])
-    opening = template.find('a:r', NS)
-    props = opening.find('a:rPr', NS) if opening is not None else None
+    props = opening_run_props(template, 'a')
     template[:] = [n for n in template if n.tag in (q('a', 'pPr'), q('a', 'endParaRPr'))]
     for paragraph in paragraphs:
         body.remove(paragraph)

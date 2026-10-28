@@ -550,17 +550,24 @@ class OfficeEquivalentTests(unittest.TestCase):
         heading = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Foreword</w:t></w:r></w:p>'
         body = ('<w:p>' + text_run('Opening ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>Emphasis</w:t></w:r>'
                 + text_run(' tail.') + '</w:p>')
-        def package(inserted=''):
-            return word_package(heading + inserted + body, '', '')
-        for name, inserted, accepted in (
-                ('plain like the opening run', '<w:p><w:r><w:t>New note.</w:t></w:r></w:p>', True),
-                ('italic like a later run', '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>New note.</w:t></w:r></w:p>', False)):
+        plain = '<w:p><w:r><w:t>New note.</w:t></w:r></w:p>'
+        italic = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>New note.</w:t></w:r></w:p>'
+        field = ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a </w:instrText></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Field result</w:t></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="end"/></w:r>' + text_run(' tail.') + '</w:p>')
+        for name, template, inserted, accepted in (
+                ('plain like the opening run', body, plain, True),
+                ('italic like a later run', body, italic, False),
+                ('italic like a field result that opens the text', field, italic, True),
+                ('plain after field control runs', field, plain, False)):
             with self.subTest(output=name):
+                source = word_package(heading + template, '', '')
+                output = word_package(heading + inserted + template, '', '')
                 if accepted:
-                    runner.checker.check_real(task, package(), package(inserted))
+                    runner.checker.check_real(task, source, output)
                 else:
                     with self.assertRaises(ValueError):
-                        runner.checker.check_real(task, package(), package(inserted))
+                        runner.checker.check_real(task, word_package(heading + template, '', ''), output)
 
     def test_replaced_drawing_text_takes_the_opening_run_formatting(self):
         body = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t>Plain</a:t></a:r>'
@@ -569,6 +576,10 @@ class OfficeEquivalentTests(unittest.TestCase):
         runs = body.findall('a:p/a:r', runner.checker.NS)
         self.assertEqual([run.find('a:t', runner.checker.NS).text for run in runs], ['New text'])
         self.assertIsNone(runs[0].find('a:rPr', runner.checker.NS))
+        empty_first = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t/></a:r>'
+                                    '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(empty_first, 'New text')
+        self.assertEqual(empty_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
 
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
