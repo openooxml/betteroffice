@@ -1135,6 +1135,53 @@ test('custom fonts fetch bytes for worker faces without global CSS and wait for 
   expect(document.head.innerHTML).toBe(original);
 });
 
+test('a script typed after open loads its fallback face once and a covered script loads nothing', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
+    let chains: Record<string, number[]> = {};
+    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+      async prepareFontRequirements(requirements) {
+        chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
+          .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
+        return true;
+      },
+      measurementConfigForRequirements: () => ({ fontChains: chains, defaults: { fontFamily: 'Calibri', fontSize: 11 },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }) };
+  });
+  restorers.push(() => measure.mockRestore());
+  render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  const sent: yrs.DocxCommandPayloads['setFontEnvironment'][] = [];
+  const post = worker.postMessage.bind(worker);
+  worker.postMessage = (message) => {
+    if ('id' in message && message.type === 'edit' && message.command.kind === 'setFontEnvironment') {
+      sent.push(structuredClone(message.command.payload as yrs.DocxCommandPayloads['setFontEnvironment']));
+    }
+    post(message);
+  };
+  const environments = () => sent;
+  const asked = () => requests.filter(request => request.type === 'fontRequirements').length;
+  const hint = () => act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+  });
+  const opened = environments().length;
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false, scripts: ['cjk-jp'] }];
+  await hint();
+  await waitFor(() => expect(environments()).toHaveLength(opened + 1));
+  const { faces, chains } = environments().at(-1)!;
+  expect(chains['calibri|0|0']!.map(slot => {
+    const face = faces[slot]!;
+    return 'data' in face ? new TextDecoder().decode(face.data).trim() : null;
+  })).toEqual(['calibri|0|0', 'cjk-jp']);
+  const before = asked();
+  await hint();
+  await waitFor(() => expect(asked()).toBe(before + 1));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+  expect(environments()).toHaveLength(opened + 1);
+});
+
 test('peerless shell ref and plugin readiness use worker state', async () => {
   const ref = createRef<DocxEditorRef>();
   const setup = mock(() => {});

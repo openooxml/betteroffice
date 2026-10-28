@@ -23,7 +23,7 @@ import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequ
 import { decodeDocxHostJson } from './yrsSessionFacade';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
-import { ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
+import { commandMayNeedNewFonts, ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
 import type {
   DocxCommandApplyContext,
   DocxCommandAck,
@@ -712,6 +712,10 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
             throw projectionFailure = new SessionFailure('message', `Projection failed after ${command.command.kind}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
+        if (result.status === 'applied' && !fontRequirementsHinted && commandMayNeedNewFonts(command.command.kind, command.command.payload)) {
+          fontRequirementsHinted = true;
+          reply({ id: 0, ok: true, fontRequirementsHint: { session: init.session, incarnation: init.incarnation, epoch: init.epoch } });
+        }
         return result;
       },
       async frame({ coversThroughSeq, full }) {
@@ -1237,6 +1241,8 @@ let requirementsCache: {
 } | null = null;
 /** The layout input of the host's last font requirements request. */
 let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string } | null = null;
+/** Whether the host heard, since its last font requirements request, that an edit may need new fonts. */
+let fontRequirementsHinted = false;
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
@@ -1872,6 +1878,7 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
     if (!session) throw new Error('Document worker is not initialized');
     const requirementsJson = layoutFontRequirements(session, request.layoutInput);
     requestedRequirements = { owner: session, layoutInput: request.layoutInput };
+    fontRequirementsHinted = false;
     fontRequirements = {
       version: session.proposalEngine.version(),
       layoutInput: request.layoutInput,
