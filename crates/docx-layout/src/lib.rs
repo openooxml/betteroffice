@@ -978,6 +978,14 @@ pub(crate) fn docx_space_shrink_limit(
 ) -> f32 {
     let attrs = block.attrs.as_ref();
     let runs = &block.runs;
+    let has_text = runs.iter().any(|run| {
+        run.kind != "lineBreak"
+            && run
+                .text
+                .as_deref()
+                .or(run.fallback.as_deref())
+                .is_some_and(|text| !text.is_empty())
+    });
     let measured_latin = !attrs.is_some_and(|attrs| {
         attrs.bidi
             || attrs
@@ -985,19 +993,26 @@ pub(crate) fn docx_space_shrink_limit(
                 .as_deref()
                 .is_some_and(|mode| mode != "both")
     }) && runs.iter().all(|run| {
+        let text = run
+            .text
+            .as_deref()
+            .or(run.fallback.as_deref())
+            .unwrap_or("");
+        if has_text && (run.kind == "lineBreak" || text.is_empty()) {
+            return true;
+        }
         !run.rtl
             && run.kind != "lineBreak"
-            && run
-                .text
-                .as_deref()
-                .or(run.fallback.as_deref())
-                .unwrap_or("")
-                .chars()
-                .all(|ch| {
-                    ch <= '\u{024f}'
-                        || ch.is_whitespace()
-                        || ('\u{2000}'..='\u{206f}').contains(&ch)
-                })
+            && text.chars().all(|ch| {
+                ch <= '\u{024f}'
+                    || ch.is_whitespace()
+                    || ('\u{0300}'..='\u{036f}').contains(&ch)
+                    || ('\u{1ab0}'..='\u{1aff}').contains(&ch)
+                    || ('\u{1dc0}'..='\u{1dff}').contains(&ch)
+                    || ('\u{2000}'..='\u{206f}').contains(&ch)
+                    || ('\u{20d0}'..='\u{20ff}').contains(&ch)
+                    || ('\u{fe20}'..='\u{fe2f}').contains(&ch)
+            })
     });
     if !measured_latin || compat["compatibilityMode"].as_u64().unwrap_or(12) >= 15 {
         0.25

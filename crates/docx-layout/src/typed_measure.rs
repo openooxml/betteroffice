@@ -541,6 +541,165 @@ mod parity_tests {
     }
 
     #[test]
+    fn compatibility_mode_controls_latin_soft_break_space_shrink() {
+        let fixture = fixture();
+        let paragraph = paragraph(
+            vec![
+                text_run("000 000 000 000"),
+                Run::LineBreak(crate::types::LineBreakRun {
+                    pm_start: None,
+                    pm_end: None,
+                }),
+                text_run("000"),
+            ],
+            Some(crate::types::ParagraphAttrs {
+                alignment: Some("justify".to_owned()),
+                justification_mode: Some("both".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let width = 12.0 * (1139.0 / 128.0) + 0.85 * 3.0 * (569.0 / 128.0);
+        for (mode, expected, limit) in [(14, 3, 0.0), (15, 2, 0.25)] {
+            let config = MeasurementConfig {
+                compat: json!({"compatibilityMode": mode}),
+                ..fixture.config.clone()
+            };
+            let block = block_in(&paragraph, width).unwrap();
+            assert_eq!(
+                compat_in(&config.compat, &block)
+                    .unwrap()
+                    .space_shrink_limit,
+                Some(limit)
+            );
+            let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+            assert_eq!(typed.lines.len(), expected, "mode {mode}");
+            assert_eq!(typed.lines.last().unwrap().head_run, 2);
+            assert_eq!(
+                typed,
+                legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+            );
+            if mode == 15 {
+                assert!((typed.lines[0].width - width).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_mode_controls_decomposed_latin_space_shrink() {
+        let fixture = fixture();
+        for (name, runs, old_lines, old_limit) in [
+            (
+                "decomposed",
+                vec![text_run("e\u{0301}00 000 000 000")],
+                2,
+                0.0,
+            ),
+            (
+                "split accent",
+                vec![text_run("e"), text_run("\u{0301}00 000 000 000")],
+                2,
+                0.0,
+            ),
+            (
+                "non Latin run",
+                vec![text_run("000 000 000 "), text_run("\u{03b1}00")],
+                1,
+                0.25,
+            ),
+        ] {
+            let paragraph = paragraph(
+                runs,
+                Some(crate::types::ParagraphAttrs {
+                    alignment: Some("justify".to_owned()),
+                    justification_mode: Some("both".to_owned()),
+                    ..Default::default()
+                }),
+            );
+            let natural =
+                measure_paragraph(&paragraph, 1000.0, &fixture.config, None, 0.0).unwrap();
+            assert_eq!(natural.lines.len(), 1);
+            let width = natural.lines[0].width - 0.15 * 3.0 * (569.0 / 128.0);
+            for (mode, expected, limit) in [(14, old_lines, old_limit), (15, 1, 0.25)] {
+                let config = MeasurementConfig {
+                    compat: json!({"compatibilityMode": mode}),
+                    ..fixture.config.clone()
+                };
+                let block = block_in(&paragraph, width).unwrap();
+                assert_eq!(
+                    compat_in(&config.compat, &block)
+                        .unwrap()
+                        .space_shrink_limit,
+                    Some(limit),
+                    "{name}, mode {mode}"
+                );
+                let typed = measure_paragraph(&paragraph, width, &config, None, 0.0).unwrap();
+                assert_eq!(typed.lines.len(), expected, "{name}, mode {mode}");
+                assert_eq!(
+                    typed,
+                    legacy_measure(&paragraph, width, &config, None, 0.0).unwrap()
+                );
+                if expected == 1 {
+                    assert!((typed.lines[0].width - width).abs() < 0.001);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn latin_space_shrink_accepts_combining_mark_ranges() {
+        for (start, end) in [
+            ('\u{0300}', '\u{036f}'),
+            ('\u{1ab0}', '\u{1aff}'),
+            ('\u{1dc0}', '\u{1dff}'),
+            ('\u{20d0}', '\u{20ff}'),
+            ('\u{fe20}', '\u{fe2f}'),
+        ] {
+            for mark in [start, end] {
+                let paragraph = paragraph(vec![text_run(&format!("e{mark}"))], None);
+                let block = block_in(&paragraph, 1000.0).unwrap();
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&json!({"compatibilityMode": 14}), &block),
+                    0.0,
+                    "{mark:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn latin_space_shrink_skips_textless_runs_only_when_text_is_present() {
+        let compat = json!({"compatibilityMode": 14});
+        for kind in ["lineBreak", "tab", "fieldBegin", "fieldEnd", "text"] {
+            for rtl in [false, true] {
+                let mut run = bare_run(kind);
+                run.rtl = rtl;
+                let mut block = BlockIn {
+                    kind: "paragraph".to_owned(),
+                    runs: vec![run],
+                    attrs: None,
+                };
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&compat, &block),
+                    if kind == "lineBreak" || rtl {
+                        0.25
+                    } else {
+                        0.0
+                    },
+                    "textless {kind}, rtl {rtl}"
+                );
+                block.runs.push(run_in(&text_run("Latin")).unwrap());
+                assert_eq!(
+                    crate::docx_space_shrink_limit(&compat, &block),
+                    0.0,
+                    "Latin with {kind}, rtl {rtl}"
+                );
+                block.runs.last_mut().unwrap().rtl = true;
+                assert_eq!(crate::docx_space_shrink_limit(&compat, &block), 0.25);
+            }
+        }
+    }
+
+    #[test]
     fn mode_14_scout_wraps_before_scenario() {
         crate::clear_measure_fonts();
         let id = crate::register_measure_font(include_bytes!(
