@@ -70,6 +70,7 @@ pub(crate) fn paragraph_sizes(
             direct_cs: bool,
         },
         Tab,
+        Empty,
         Begin,
         Separate,
         End,
@@ -125,7 +126,7 @@ pub(crate) fn paragraph_sizes(
             _ => (None, children.as_slice()),
         };
         if content.is_empty() {
-            return None;
+            return Some(Run::Empty);
         }
         if content.len() == 1 && content[0].name == "w:fldChar" {
             if !content[0].children.is_empty() {
@@ -205,11 +206,19 @@ pub(crate) fn paragraph_sizes(
         }
         let mut cursor = start + 1;
         let mut instruction = String::new();
-        while let Some(Run::Instruction(part)) = nodes.get(cursor).and_then(|node| run(node)) {
-            instruction.push_str(&part);
+        let mut instructed = false;
+        loop {
+            match nodes.get(cursor).and_then(|node| run(node)) {
+                Some(Run::Instruction(part)) => {
+                    instruction.push_str(&part);
+                    instructed = true;
+                }
+                Some(Run::Empty) => {}
+                _ => break,
+            }
             cursor += 1;
         }
-        if cursor == start + 1 || !matches!(run(nodes.get(cursor)?), Some(Run::Separate)) {
+        if !instructed || !matches!(run(nodes.get(cursor)?), Some(Run::Separate)) {
             return None;
         }
         Some((instruction, cursor + 1))
@@ -220,7 +229,10 @@ pub(crate) fn paragraph_sizes(
         if !kind(&instruction, "PAGEREF") {
             return None;
         }
-        while matches!(nodes.get(cursor).and_then(|node| run(node)), Some(Run::Entry { .. })) {
+        while matches!(
+            nodes.get(cursor).and_then(|node| run(node)),
+            Some(Run::Entry { .. } | Run::Empty)
+        ) {
             cursor += 1;
         }
         matches!(run(nodes.get(cursor)?), Some(Run::End)).then_some(cursor + 1)
@@ -250,7 +262,7 @@ pub(crate) fn paragraph_sizes(
             }
             return elements(node)?
                 .iter()
-                .all(|child| matches!(run(child), Some(Run::Entry { .. })))
+                .all(|child| matches!(run(child), Some(Run::Entry { .. } | Run::Empty)))
                 .then_some(cursor + 1);
         }
         match run(node)? {
@@ -262,7 +274,7 @@ pub(crate) fn paragraph_sizes(
                 entries.direct_cs |= direct_cs;
                 Some(cursor + 1)
             }
-            Run::Tab => Some(cursor + 1),
+            Run::Tab | Run::Empty => Some(cursor + 1),
             Run::Begin => complex_page(nodes, cursor),
             _ => None,
         }
@@ -574,6 +586,23 @@ mod tests {
         );
         for (label, content) in [
             ("first", format!("{toc}{link}")),
+            (
+                "empty run before the page separator",
+                format!(
+                    concat!(
+                        "<w:hyperlink>{entry}{tab}",
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:instrText> PAGEREF _Toc1 \h </w:instrText></w:r>"#,
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr></w:r>"#,
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:t>3</w:t></w:r>"#,
+                        r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+                        "</w:hyperlink>",
+                    ),
+                    entry = ENTRY,
+                    tab = tab,
+                ),
+            ),
             ("middle", link.clone()),
             ("last", format!("{link}{END}")),
             ("single", format!("{toc}{link}{END}")),
