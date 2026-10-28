@@ -381,7 +381,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     requirements: ResidentFontRequirement[]; signature: string | null; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
   const fontAbort = useRef<AbortController | null>(null);
   const fontJob = useRef<{ signature: string; provider: DocxEditorProps['measurementFontProvider'] } | null>(null);
-  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; picking: number }>({ pending: false, picking: 0 });
+  const fontRefresh = useRef<{ timer?: ReturnType<typeof setTimeout>; pending: boolean; pick: AbortSignal | null }>({ pending: false, pick: null });
   const refreshFonts = useRef(() => {});
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
     theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
@@ -717,7 +717,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const current = active.current;
     const client = worker.current;
     const opened = fontSource.current;
-    if (!current || !client || !opened || (requirementsChanged && (fontJob.current || fontRefresh.current.picking))) {
+    if (!current || !client || !opened || (requirementsChanged && (fontJob.current || fontRefresh.current.pick?.aborted === false))) {
       if (requirementsChanged) fontRefresh.current.pending = true;
       return;
     }
@@ -795,7 +795,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     const abort = new AbortController();
     fontAbort.current = abort;
     const refresh = fontRefresh.current;
-    refresh.picking += 1;
+    refresh.pick = abort.signal;
     try {
       await current.binding.admission.whenCompositionSettled?.();
       await current.binding.session.flush();
@@ -814,8 +814,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       opened.requirements = requirements;
       return payload;
     } finally {
-      refresh.picking -= 1;
-      if (!refresh.picking && refresh.pending && !fontJob.current) { refresh.pending = false; refreshFonts.current(); }
+      if (refresh.pick === abort.signal) {
+        refresh.pick = null;
+        if (refresh.pending && !fontJob.current) { refresh.pending = false; refreshFonts.current(); }
+      }
     }
   };
   const onReady = useCallback((binding: PeerlessEditSessionBinding) => {
