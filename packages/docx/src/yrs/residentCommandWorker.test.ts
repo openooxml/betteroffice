@@ -3898,6 +3898,11 @@ test('showing hidden text in a script without a fallback face hints, and require
     await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: true } as never));
     expect(hints).toHaveLength(1);
     expect(await scripts()).toContain('cjk-jp');
+    await client.edit(intent(2, 0, 'setRenderEnvironment', { themeColors: { accent1: 'FF0000' }, showHiddenText: true } as never));
+    expect(hints).toHaveLength(1);
+    await client.edit(intent(3, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false } as never));
+    expect(hints).toHaveLength(2);
+    expect(await scripts()).toEqual([]);
   } finally {
     client.destroy();
   }
