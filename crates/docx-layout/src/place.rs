@@ -164,32 +164,62 @@ fn is_floating_drawing(block: &LayoutBlock) -> bool {
     }
 }
 
-fn chart_anchor_owner(measured: &[MeasuredBlock], index: usize) -> Option<usize> {
-    if !is_floating_drawing(&measured[index].block) {
-        return None;
-    }
-    let end =
-        (index..measured.len()).find(|&index| !is_floating_drawing(&measured[index].block))?;
-    let LayoutBlock::Paragraph(paragraph) = &measured[end].block else {
-        return None;
-    };
-    let (Some(start), Some(stop)) = (paragraph.pm_start, paragraph.pm_end) else {
+fn chart_anchor_owner(
+    measured: &[MeasuredBlock],
+    index: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let LayoutBlock::Paragraph(paragraph) = &measured.get(end)?.block else {
         return None;
     };
-    if !measured[index]
-        .block
-        .pm_start()
-        .is_some_and(|position| position > start && position < stop)
+    let (Some(mut start), Some(mut stop)) = (paragraph.pm_start, paragraph.pm_end) else {
+        return None;
+    };
+    if let Some((from, to)) = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.anchor_paragraph_offsets)
     {
-        return None;
+        stop = start + to;
+        start += from;
     }
-    measured[index..end]
-        .iter()
-        .any(|measured| {
-            matches!(&measured.block, LayoutBlock::Chart(chart)
-                if chart.pm_start.is_some_and(|position| position > start && position < stop))
-        })
-        .then_some(end)
+    let mut first = None;
+    let mut has_chart = false;
+    for (offset, measured) in measured[index..end].iter().enumerate() {
+        if measured
+            .block
+            .pm_start()
+            .is_some_and(|position| position > start && position < stop)
+        {
+            first.get_or_insert(index + offset);
+            has_chart |= matches!(measured.block, LayoutBlock::Chart(_));
+        }
+    }
+    has_chart.then_some((first?, end))
+}
+
+#[derive(Default)]
+struct FloatingGroupOwner {
+    end: usize,
+    owner: Option<(usize, usize)>,
+}
+
+impl FloatingGroupOwner {
+    fn at(&mut self, measured: &[MeasuredBlock], index: usize) -> Option<usize> {
+        if index >= self.end {
+            self.end = index + 1;
+            self.owner = None;
+            if is_floating_drawing(&measured[index].block) {
+                self.end = (index + 1..measured.len())
+                    .find(|&next| !is_floating_drawing(&measured[next].block))
+                    .unwrap_or(measured.len());
+                self.owner = chart_anchor_owner(measured, index, self.end);
+            }
+        }
+        self.owner
+            .filter(|&(first, _)| index >= first)
+            .map(|(_, owner)| owner)
+    }
 }
 
 fn is_anchored_image(image: &ImageBlock) -> bool {
@@ -996,6 +1026,7 @@ fn place<F: PartialEq>(
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
     let mut prepared_paragraph = None;
+    let mut floating_group_owner = FloatingGroupOwner::default();
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -1047,7 +1078,7 @@ fn place<F: PartialEq>(
         let fragments_before = paginator.page_fragment_counts();
         let decision_index = prepared_paragraph
             .filter(|&owner| i <= owner)
-            .or_else(|| chart_anchor_owner(measured, i))
+            .or_else(|| floating_group_owner.at(measured, i))
             .unwrap_or(i);
         let prepare = prepared_paragraph != Some(decision_index);
         let decision = &measured[decision_index];
@@ -2494,6 +2525,100 @@ mod pagination_rule_tests {
             assert_eq!(charts.len(), 2, "{attrs}");
             assert_eq!(charts[0].y, charts[1].y, "{attrs}");
             assert_eq!(charts[0].y, 10.0, "{attrs}");
+        }
+    }
+
+    #[test]
+    fn many_anchors_with_and_without_a_split_paragraph_chart_owner_lay_out() {
+        const ANCHORS: usize = 4096;
+        for with_chart in [false, true] {
+            let mut measured = vec![paragraph(0, 1, 20.0, json!({}))];
+            measured.extend((0..ANCHORS).map(|index| {
+                let position = json!({
+                    "horizontal": {"relativeTo": "paragraph", "posOffset": 0},
+                    "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                });
+                if index % 2 == 0 {
+                    json!({
+                        "block": {
+                            "kind": "shape", "id": format!("shape-{index}"), "shapeType": "rect",
+                            "width": 1, "height": 1, "geometryPath": [], "children": [],
+                            "position": position, "wrapType": "none", "pmStart": index + 1,
+                            "pmEnd": index + 2
+                        },
+                        "measure": {"kind": "shape", "width": 1, "height": 1}
+                    })
+                } else {
+                    json!({
+                        "block": {
+                            "kind": "image", "id": format!("picture-{index}"), "src": "",
+                            "width": 1, "height": 1, "pmStart": index + 1, "pmEnd": index + 2,
+                            "anchor": {"isAnchored": true, "position": position}
+                        },
+                        "measure": {"kind": "image", "width": 1, "height": 1}
+                    })
+                }
+            }));
+            if with_chart {
+                measured.push(json!({
+                    "block": {
+                        "kind": "chart", "id": "chart", "chart": {}, "width": 20, "height": 20,
+                        "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}},
+                        "wrapType": "none", "pmStart": ANCHORS + 3, "pmEnd": ANCHORS + 4
+                    },
+                    "measure": {"kind": "chart", "width": 20, "height": 20}
+                }));
+            }
+            let attrs = json!({
+                "pageBreakBefore": true, "anchorParagraphOffsets": [0, ANCHORS + 5]
+            });
+            let mut owner = paragraph(1, 1, 10.0, attrs);
+            owner["block"]["pmStart"] = json!(0);
+            owner["block"]["pmEnd"] = json!(ANCHORS + 3);
+            measured.push(owner);
+            measured.push(json!({
+                "block": {
+                    "kind": "shape", "id": "inline-box", "shapeType": "rect",
+                    "width": 20, "height": 20, "geometryPath": [], "children": [],
+                    "pmStart": ANCHORS + 2, "pmEnd": ANCHORS + 3
+                },
+                "measure": {"kind": "shape", "width": 20, "height": 20}
+            }));
+            let result = layout(measured);
+            assert_eq!(result.pages.len(), 2);
+            let anchor_page = usize::from(with_chart);
+            let anchors = &result.pages[anchor_page].fragments;
+            assert_eq!(
+                anchors
+                    .iter()
+                    .filter(|fragment| match fragment {
+                        Fragment::Shape(shape) => shape.is_anchored == Some(true),
+                        _ => false,
+                    })
+                    .count(),
+                ANCHORS / 2
+            );
+            assert_eq!(
+                anchors
+                    .iter()
+                    .filter(|fragment| match fragment {
+                        Fragment::Image(image) => image.is_anchored == Some(true),
+                        _ => false,
+                    })
+                    .count(),
+                ANCHORS / 2
+            );
+            assert_eq!(
+                anchors
+                    .iter()
+                    .filter(|fragment| matches!(fragment, Fragment::Chart(_)))
+                    .count(),
+                usize::from(with_chart)
+            );
+            assert!(result.pages[1].fragments.iter().any(|fragment| {
+                matches!(fragment, Fragment::Paragraph(paragraph)
+                    if paragraph.block_id == BlockId::Num(1.0))
+            }));
         }
     }
 

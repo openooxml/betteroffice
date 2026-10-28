@@ -909,6 +909,45 @@ fn matching_choice_doc_pr_drops_its_picture_twin() {
 }
 
 #[test]
+fn converting_a_text_box_keeps_an_unsupported_charts_grouped_fallback() {
+    let fallback = concat!(
+        r#"<w:pict><v:group coordsize="1000,1000" style="width:100pt;height:50pt">"#,
+        r#"<v:shape id="box-preview" style="position:absolute;left:0;top:0;width:500;height:1000">"#,
+        r#"<v:imagedata r:id="rIdPicture"/></v:shape>"#,
+        r#"<v:shape id="chart-preview" style="position:absolute;left:500;top:0;width:500;height:1000">"#,
+        r#"<v:imagedata r:id="rIdPicture"/></v:shape></v:group></w:pict>"#
+    );
+    let drawing = text_box_with_opaque_picture_fallback(fallback);
+    let body = paragraph(
+        "60000001",
+        &format!(
+            "{}{}",
+            run(&drawing),
+            text_run("After the grouped fallback")
+        ),
+    );
+    let (layout, display) = render(&document_with_picture(&body), 78228);
+    assert!(
+        layout["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["block"]["runs"].as_array().into_iter().flatten())
+            .any(|run| run["inlineShape"].is_object()),
+        "the supported text box converts: {layout}"
+    );
+    assert_eq!(
+        primitives(&display)
+            .iter()
+            .filter(|primitive| primitive["kind"] == "image")
+            .count(),
+        2,
+        "the grouped fallback keeps the unsupported chart visible: {display}"
+    );
+    let _ = text_origin(&display, "Selected Choice text");
+}
+
+#[test]
 fn unrelated_vml_box_before_matching_inline_box_survives() {
     let unrelated = vml_fallback("444.75", "240", "Independent VML box");
     let body = paragraph(
@@ -1020,6 +1059,45 @@ fn page_break_before_moves_the_paragraph_and_its_trailing_anchored_chart() {
         .expect("chart on its owner's page");
     let owner = paragraph_fragment(&layout, "40000005").unwrap();
     near(num(chart, "y"), num(owner, "y"), 2.0, "chart owner origin");
+}
+
+#[test]
+fn split_paragraph_page_break_moves_its_trailing_anchored_chart() {
+    let body = format!(
+        r#"{}<w:p w14:paraId="60000003"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}{}</w:p>"#,
+        paragraph("60000002", &text_run("Previous page")),
+        text_run("Before the inline box"),
+        run(&text_box_drawing()),
+        run(&anchored_chart_drawing()),
+    );
+    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78229);
+    let pages = layout["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2, "one paragraph page break: {layout}");
+    assert!(
+        pages[0]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|fragment| fragment["kind"] != "chart"),
+        "the chart leaves the previous page: {layout}"
+    );
+    let fragments = pages[1]["fragments"].as_array().unwrap();
+    let chart = fragments
+        .iter()
+        .find(|fragment| fragment["kind"] == "chart")
+        .expect("chart on the owning paragraph's page");
+    let text = paragraph_fragment(&layout, "60000003").unwrap();
+    let boxed = fragments
+        .iter()
+        .find(|fragment| fragment["kind"] == "shape")
+        .expect("the inline text box keeps its block path");
+    near(
+        num(chart, "y"),
+        num(text, "y"),
+        2.0,
+        "original paragraph origin",
+    );
+    assert!(num(boxed, "y") >= num(text, "y") + num(text, "height") - 1.0);
 }
 
 #[test]

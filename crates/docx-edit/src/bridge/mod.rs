@@ -690,7 +690,7 @@ fn walk_story_chunks<T: ReadTxn>(
     let mut blocks = Vec::new();
     let mut paragraph_runs = Vec::new();
     let mut paragraph_drawings: Vec<DrawingMarker> = Vec::new();
-    let mut alternate_content_sources = HashMap::<u64, Vec<(u32, Vec<DrawingProvenance>)>>::new();
+    let mut alternate_content_sources = HashMap::<u64, Vec<AlternateContentSource>>::new();
     let mut pending_hidden_field_blocks = BTreeSet::new();
     let mut pending_code_join: Option<(Vec<FieldCodeParagraph>, String)> = None;
     let mut field_join: Option<FieldJoin> = None;
@@ -1538,7 +1538,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         formatting: formatting.clone(),
                         inline_text_box: text_box,
                         from_opaque: false,
-                        fallback_pm_offset: alternate_content_fallback(
+                        fallback_twin: alternate_content_fallback(
                             alternate_content_sources
                                 .get(&paragraph_pm_start)
                                 .map(Vec::as_slice),
@@ -1560,7 +1560,13 @@ fn walk_story_chunks<T: ReadTxn>(
                     alternate_content_sources
                         .entry(paragraph_pm_start)
                         .or_default()
-                        .push((paragraph_pm_units, alternate_content_choices(&source)));
+                        .push(AlternateContentSource {
+                            offset: paragraph_pm_units,
+                            choices: alternate_content_choices(&source),
+                            grouped: values.get("previews").is_some_and(|previews| {
+                                matches!(previews, Any::Array(images) if !images.is_empty())
+                            }),
+                        });
                 }
                 if let Some(block) = opaque_text_box(
                     &values,
@@ -1578,7 +1584,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         formatting: lower_run_formatting(attributes, env),
                         inline_text_box: false,
                         from_opaque: true,
-                        fallback_pm_offset: None,
+                        fallback_twin: None,
                     });
                 }
                 for preview in opaque_image_previews(&values) {
@@ -1627,7 +1633,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     formatting: lower_run_formatting(attributes, env),
                     inline_text_box: false,
                     from_opaque: false,
-                    fallback_pm_offset: alternate_content_fallback(
+                    fallback_twin: alternate_content_fallback(
                         alternate_content_sources
                             .get(&paragraph_pm_start)
                             .map(Vec::as_slice),
@@ -2816,6 +2822,19 @@ enum DrawingContent {
     Chart(String),
 }
 
+struct AlternateContentSource {
+    offset: u32,
+    choices: Vec<Option<DrawingProvenance>>,
+    grouped: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FallbackTwin {
+    offset: u32,
+    choice: usize,
+    required: usize,
+}
+
 fn shape_drawing_provenance(shape: &Value) -> Option<DrawingProvenance> {
     fn collect(value: &Value, text: &mut Vec<String>) {
         if value.get("type").and_then(Value::as_str) == Some("text")
@@ -2898,7 +2917,7 @@ fn chart_drawing_provenance(chart: &Value) -> Option<DrawingProvenance> {
         .then_some(provenance)
 }
 
-fn alternate_content_choices(source: &str) -> Vec<DrawingProvenance> {
+fn alternate_content_choices(source: &str) -> Vec<Option<DrawingProvenance>> {
     let limits = docx_parse::xml::ParseLimits::default();
     let Ok(document) = docx_parse::xml::parse_xml(
         source.as_bytes(),
@@ -2916,19 +2935,19 @@ fn alternate_content_choices(source: &str) -> Vec<DrawingProvenance> {
     root.child_elements()
         .filter(|branch| branch.local_name() == "Choice")
         .flat_map(|branch| branch.child_elements())
-        .filter_map(xml_drawing_provenance)
+        .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+        .map(xml_drawing_provenance)
         .collect()
 }
 
 fn alternate_content_fallback(
-    sources: Option<&[(u32, Vec<DrawingProvenance>)]>,
+    sources: Option<&[AlternateContentSource]>,
     drawing: Option<&DrawingProvenance>,
-) -> Option<u32> {
+) -> Option<FallbackTwin> {
     let drawing = drawing?;
-    let mut matches = sources?.iter().filter_map(|(offset, choices)| {
-        choices
-            .iter()
-            .any(|choice| {
+    let mut matches = sources?.iter().filter_map(|source| {
+        let choice = source.choices.iter().position(|choice| {
+            choice.as_ref().is_some_and(|choice| {
                 choice.id == drawing.id
                     && choice
                         .name
@@ -2936,10 +2955,19 @@ fn alternate_content_fallback(
                         .is_none_or(|name| drawing.name.as_ref() == Some(name))
                     && choice.content == drawing.content
             })
-            .then_some(*offset)
+        })?;
+        Some(FallbackTwin {
+            offset: source.offset,
+            choice,
+            required: if source.grouped {
+                source.choices.len()
+            } else {
+                1
+            },
+        })
     });
-    let offset = matches.next()?;
-    matches.next().is_none().then_some(offset)
+    let twin = matches.next()?;
+    matches.next().is_none().then_some(twin)
 }
 
 /// Whether a chart drawing is anchored (floating): its chart object
@@ -3612,7 +3640,7 @@ struct DrawingMarker {
     /// drawing this is the fallback representation of the same drawing
     /// a neighbouring typed shape or chart embed also lowers.
     from_opaque: bool,
-    fallback_pm_offset: Option<u32>,
+    fallback_twin: Option<FallbackTwin>,
 }
 
 impl DrawingMarker {
@@ -4016,18 +4044,26 @@ fn inline_shared_drawings(
             return;
         }
     }
-    let mut converted_fallbacks = BTreeSet::new();
+    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>)>::new();
     let mut kept = Vec::new();
     for drawing in drawings.drain(..) {
         if convertible(&drawing) {
-            if let Some(offset) = drawing.fallback_pm_offset {
-                converted_fallbacks.insert(offset);
+            if let Some(twin) = drawing.fallback_twin {
+                converted_choices
+                    .entry(twin.offset)
+                    .or_insert_with(|| (twin.required, BTreeSet::new()))
+                    .1
+                    .insert(twin.choice);
             }
             raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
         } else {
             kept.push(drawing);
         }
     }
+    let converted_fallbacks: BTreeSet<_> = converted_choices
+        .into_iter()
+        .filter_map(|(offset, (required, choices))| (choices.len() == required).then_some(offset))
+        .collect();
     if !converted_fallbacks.is_empty() {
         kept.retain(|drawing| {
             !(drawing.from_opaque && converted_fallbacks.contains(&drawing.pm_offset))
@@ -4106,6 +4142,9 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
+    let mut anchor_ownership_pending = anchored
+        .iter()
+        .any(|drawing| matches!(drawing.block, LayoutBlock::Chart(_)));
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
@@ -4222,10 +4261,16 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
     for block in &mut blocks {
         if let LayoutBlock::Paragraph(paragraph) = block {
-            paragraph
-                .attrs
-                .get_or_insert_with(Default::default)
-                .has_source_content = Some(true);
+            let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+            attrs.has_source_content = Some(true);
+            if anchor_ownership_pending {
+                let start = paragraph.pm_start.expect("paragraph position");
+                attrs.anchor_paragraph_offsets = Some((
+                    paragraph_pm_start as f64 - start,
+                    (paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64 - start,
+                ));
+                anchor_ownership_pending = false;
+            }
         }
     }
     blocks
