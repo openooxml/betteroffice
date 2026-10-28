@@ -2670,7 +2670,7 @@ mod pagination_rule_tests {
                             0.7,
                             1.1,
                         );
-                        if let Some((actual_current, actual_fresh)) = actual {
+                        if let Some((actual_current, actual_fresh, _)) = actual {
                             assert_eq!(actual_current.to_bits(), current.to_bits());
                             assert_eq!(actual_fresh.to_bits(), fresh.to_bits());
                         } else {
@@ -4960,7 +4960,7 @@ mod pagination_rule_tests {
                 &mut paginator,
                 false,
                 0.0,
-                (index == 1).then_some(20.0),
+                (index == 1).then_some((20.0, 0.0)),
             )
             .unwrap();
         }
