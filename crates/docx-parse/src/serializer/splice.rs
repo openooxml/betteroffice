@@ -1401,15 +1401,15 @@ fn splice_story_part_inner(
             edits.push((range.start + at..range.start + at, 0, tag.to_owned()));
         }
     }
+    let structural = rows.inserted.union(&tables.inserted).copied().collect();
+    let offsets = insertion_offsets(&source, serialized, recorded, &inserted, &structural)?;
     for (at, (anchor, xml)) in inserted.iter().enumerate() {
         if rows.inserted.contains(&at) || tables.inserted.contains(&at) {
             continue;
         }
-        let range = span(anchor.ordinal())?;
-        edits.push(match anchor {
-            S13SpliceAnchor::After(_) => (range.end..range.end, 0, (*xml).to_owned()),
-            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, (*xml).to_owned()),
-        });
+        let offset = offsets[at]?;
+        let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
+        edits.push((offset..offset, rank, (*xml).to_owned()));
     }
     let edits = edits
         .iter()
@@ -1482,7 +1482,8 @@ fn insertion_offsets(
     serialized: &str,
     recorded: &RecordedParagraphs,
     inserted: &[(S13SpliceAnchor, &str)],
-) -> Option<Vec<usize>> {
+    structural: &BTreeSet<usize>,
+) -> Option<Vec<Option<usize>>> {
     if inserted.is_empty() {
         return Some(Vec::new());
     }
@@ -1507,7 +1508,11 @@ fn insertion_offsets(
     inserted
         .iter()
         .zip(added)
-        .map(|((anchor, _), paragraph)| {
+        .enumerate()
+        .map(|(at, ((anchor, _), paragraph))| {
+            if structural.contains(&at) {
+                return Some(None);
+            }
             let parent = target.elements[paragraph].2?;
             if !PARENTS.contains(&target.elements[parent].0) {
                 return None;
@@ -1538,7 +1543,9 @@ fn insertion_offsets(
             if original != original_paragraph
                 && (!matches!(source.elements[original].0, "w:tbl" | "w:sdt")
                     || recorded.written.keys().any(|ordinal| {
-                        let at = source.elements[source.paragraphs[*ordinal as usize]].1.start;
+                        let at = source.elements[source.paragraphs[*ordinal as usize]]
+                            .1
+                            .start;
                         span.contains(&at)
                             && if after {
                                 *ordinal > anchor.ordinal()
@@ -1549,7 +1556,7 @@ fn insertion_offsets(
             {
                 return None;
             }
-            Some(if after { span.end } else { span.start })
+            Some(Some(if after { span.end } else { span.start }))
         })
         .collect()
 }
@@ -1725,6 +1732,33 @@ pub(crate) fn splice_source_direct(
         }
         end = span.end;
     }
+    let source_markers = marker_counts(source)?;
+    for (&ordinal, xml) in &recorded.written {
+        let paragraph = patched
+            .get(&ordinal)
+            .map_or(&source[spans[&ordinal].clone()], String::as_str);
+        let mut retained = marks(paragraph)?;
+        let mut written = marks(xml)?;
+        let mut comments = BTreeMap::new();
+        for (kind, id, _) in &written.comments {
+            *comments.entry((kind.clone(), id.clone())).or_insert(0) += 1;
+        }
+        for (kind, id, _) in &retained.comments {
+            if let Some(count) = comments.get_mut(&(kind.clone(), id.clone())) {
+                *count -= 1;
+            }
+        }
+        if comments.iter().any(|(marker, count)| {
+            *count > 0 && source_markers.get(marker).copied().unwrap_or(0) < *count
+        }) {
+            return None;
+        }
+        retained.comments.clear();
+        written.comments.clear();
+        if !retained.admit(&written) {
+            return None;
+        }
+    }
     let anchors: BTreeSet<u32> = inserted
         .iter()
         .map(|(anchor, _)| anchor.ordinal())
@@ -1824,8 +1858,9 @@ pub(crate) fn splice_source_direct(
     for &ordinal in &removed {
         edits.push((span(ordinal)?, 2, String::new()));
     }
-    let offsets = insertion_offsets(&source, serialized, recorded, &inserted)?;
+    let offsets = insertion_offsets(&source, serialized, recorded, &inserted, &BTreeSet::new())?;
     for ((anchor, xml), at) in inserted.iter().zip(offsets) {
+        let at = at?;
         let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
         edits.push((at..at, rank, (*xml).to_owned()));
     }
@@ -2047,7 +2082,8 @@ mod tests {
 
     #[test]
     fn direct_insertion_keeps_a_body_bookmark_end_beside_an_empty_anchor() {
-        let first = "<w:p><w:bookmarkStart w:id=\"0\" w:name=\"Range\"/><w:r><w:t>Title</w:t></w:r></w:p>";
+        let first =
+            "<w:p><w:bookmarkStart w:id=\"0\" w:name=\"Range\"/><w:r><w:t>Title</w:t></w:r></w:p>";
         let empty = "<w:p w:rsidR=\"00112233\"><w:pPr><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:pPr></w:p>";
         let end = "<w:bookmarkEnd w:id=\"0\"/>";
         let source = body(&format!("{first}{empty}{end}{RETAINED}"));
@@ -2068,7 +2104,9 @@ mod tests {
         let first = "<w:p><w:r><w:rPr><w:lang w:val=\"en-CA\"/></w:rPr><w:t>Anchor</w:t><w:br w:type=\"page\"/></w:r></w:p>";
         let entry = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:hyperlink w:anchor=\"_Toc1\"><w:r><w:rPr><w:webHidden/></w:rPr><w:t>Entry</w:t></w:r></w:hyperlink></w:p>";
         let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
-        let sdt = format!("<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val=\"Table of Contents\"/></w:docPartObj></w:sdtPr><w:sdtContent>{entry}{RETAINED}{closing}</w:sdtContent></w:sdt>");
+        let sdt = format!(
+            "<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val=\"Table of Contents\"/></w:docPartObj></w:sdtPr><w:sdtContent>{entry}{RETAINED}{closing}</w:sdtContent></w:sdt>"
+        );
         let source = body(&format!("{first}{sdt}"));
         let serialized = body(&format!("{first}{INSERTED}{sdt}"));
         assert_eq!(
@@ -2117,7 +2155,9 @@ mod tests {
     #[test]
     fn direct_insertion_lifts_a_cell_anchor_to_its_unchanged_offset_table_edge() {
         let cell = "<w:p w:rsidR=\"00112233\"><w:r><w:rPr><w:color w:val=\"auto\"/><w:lang w:val=\"en-US\"/></w:rPr><w:t>Cell</w:t></w:r></w:p>";
-        let table = format!("<w:tbl><w:tblPr><w:tblStyle w:val=\"Tabellenraster\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/></w:tblGrid><w:tr><w:trPr><w:gridAfter w:val=\"1\"/><w:wAfter w:w=\"10\" w:type=\"dxa\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>");
+        let table = format!(
+            "<w:tbl><w:tblPr><w:tblStyle w:val=\"Tabellenraster\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/></w:tblGrid><w:tr><w:trPr><w:gridAfter w:val=\"1\"/><w:wAfter w:w=\"10\" w:type=\"dxa\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>"
+        );
         let source = body(&format!("{RETAINED}{table}"));
         let serialized = body(&format!("{RETAINED}{table}{INSERTED}"));
         assert_eq!(
@@ -2129,6 +2169,107 @@ mod tests {
             ),
             Some(serialized)
         );
+    }
+
+    #[test]
+    fn precise_insertion_after_a_table_uses_the_block_edge_for_each_added_paragraph() {
+        let cell = "<w:p><w:r><w:t>Cell</w:t></w:r></w:p>";
+        let table = format!("<w:tbl><w:tr><w:tc>{cell}</w:tc></w:tr></w:tbl>");
+        let source = body(&format!("{RETAINED}{table}"));
+        let promoted = "<w:p w14:paraId=\"00000001\"></w:p>";
+        let serialized = body(&format!("{RETAINED}{table}{promoted}{INSERTED}"));
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, RETAINED.to_owned()), (2, cell.to_owned())]),
+            inserted: vec![promoted.to_owned(), INSERTED.to_owned()],
+            order: vec![Some(0), Some(2), None, None],
+            ..RecordedParagraphs::default()
+        };
+        let part = S13SplicedPart {
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: vec![0, 2],
+            changed: Vec::new(),
+            inserted: vec![S13SpliceAnchor::After(2); 2],
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        assert_eq!(
+            splice_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &mut Vec::new(),
+            ),
+            Some(serialized)
+        );
+    }
+
+    #[test]
+    fn direct_splice_declines_writer_added_comment_and_note_markers() {
+        let paragraph = "<w:p><w:r><w:t>Plain</w:t></w:r></w:p>";
+        let source = body(&format!("{paragraph}{RETAINED}"));
+        for marker in [
+            "<w:commentRangeStart w:id=\"2\"/><w:commentRangeEnd w:id=\"2\"/><w:r><w:commentReference w:id=\"2\"/></w:r>",
+            "<w:r><w:footnoteRef/></w:r>",
+            "<w:r><w:endnoteRef/></w:r>",
+            "<w:r><w:footnoteReference w:id=\"2\"/></w:r>",
+            "<w:r><w:endnoteReference w:id=\"2\"/></w:r>",
+        ] {
+            let written = paragraph.replace("</w:p>", &format!("{marker}</w:p>"));
+            let serialized = body(&format!("{written}{INSERTED}{RETAINED}"));
+            assert!(
+                direct_insert(
+                    &source,
+                    &serialized,
+                    &[(0, &written), (1, RETAINED)],
+                    S13SpliceAnchor::After(0),
+                )
+                .is_none(),
+                "{marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_splice_declines_writer_note_numbering_missing_from_a_precise_patch() {
+        let source = body("<w:p><w:r><w:t>Old</w:t></w:r></w:p>");
+        let patched = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+        for kind in ["footnote", "endnote"] {
+            let written = format!("<w:p><w:r><w:{kind}Ref/><w:t>New</w:t></w:r></w:p>");
+            let serialized = body(&written);
+            let recorded = RecordedParagraphs {
+                written: HashMap::from([(0, written)]),
+                order: vec![Some(0)],
+                ..RecordedParagraphs::default()
+            };
+            let part = S13SplicedPart {
+                part: format!("word/{kind}s.xml"),
+                sha256: String::new(),
+                paragraphs: vec![0],
+                changed: vec![0],
+                inserted: Vec::new(),
+                removed: Vec::new(),
+                paragraph_patches: Vec::new(),
+                legacy_paragraphs: Vec::new(),
+                table_patches: Vec::new(),
+            };
+            assert!(
+                splice_source_direct(
+                    &source,
+                    &serialized,
+                    &recorded,
+                    &part,
+                    &BTreeMap::new(),
+                    &BTreeMap::from([(0, patched.to_owned())]),
+                )
+                .is_none()
+            );
+        }
     }
 
     fn body(paragraphs: &str) -> String {

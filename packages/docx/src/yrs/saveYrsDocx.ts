@@ -260,7 +260,9 @@ function withoutSyntheticParagraphs(
   return mapStoryParagraphs(document, (paragraph) => {
     const key = projectedSessionKey(paragraph);
     const empty = paragraph.content.every(node =>
-      node.type === 'run' && node.content.every(content => content.type === 'break')
+      node.type === 'run' && node.content.every(content =>
+        content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column')
+      )
     );
     return empty && key !== undefined && synthetic.has(key)
       ? null

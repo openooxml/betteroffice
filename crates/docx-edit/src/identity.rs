@@ -3584,7 +3584,14 @@ fn last_block_paragraph(
         Some(())
     }
     let mut ordinals = Vec::new();
-    visit(unit, stories, source, index, &mut HashSet::new(), &mut ordinals)?;
+    visit(
+        unit,
+        stories,
+        source,
+        index,
+        &mut HashSet::new(),
+        &mut ordinals,
+    )?;
     ordinals.into_iter().max()
 }
 
@@ -3613,8 +3620,8 @@ fn holder_ref(scan: &Scan, source: Option<&SourceIndex>, holder: Holder) -> Opti
 mod tests {
     use super::*;
     use crate::{
-        EditHistory, EditOperation, EditRequest, EditSource, EditStep, FormatPolicy, ParagraphInput,
-        ParagraphTarget, Position, StoryRange, TargetEdge, UndoSession,
+        EditHistory, EditOperation, EditRequest, EditSource, EditStep, FormatPolicy,
+        ParagraphInput, ParagraphTarget, Position, StoryRange, TargetEdge, UndoSession,
     };
 
     const DATE: &str = "2026-09-24T00:00:00Z";

@@ -113,8 +113,10 @@ async function expectInsertedBody(body: string, anchorText: string | null) {
     }
     expect(textNodes(xml).filter(text => text !== 'Inserted paragraph.')).toEqual(textNodes(source.xml));
     expect(textNodes(xml).filter(text => text === 'Inserted paragraph.')).toHaveLength(1);
+    const inserted = paragraphsOf(xml).find(paragraph => textNodes(paragraph).includes('Inserted paragraph.'))!;
+    expect(inserted).not.toMatch(/<w:(?:br|drawing|pict)\b/);
     const reopened = await openDocx(bytes);
-    try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
+    try { expect(reopened.list().items.map(entry => entry.text.replace(/^\ufffc+/, ''))).toContain('Inserted paragraph.'); } finally { reopened.close(); }
     return xml;
   } finally { doc.close(); }
 }

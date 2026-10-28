@@ -1297,23 +1297,23 @@ impl StoryParts<'_> {
                 &mut reasons,
             )
         } else {
-            super::splice::splice_source_direct(
+            super::splice::splice_story_part(
                 source,
                 &serialized,
                 &written,
                 part,
                 assignments,
                 patches,
+                &mut reasons,
             )
             .or_else(|| {
-                super::splice::splice_story_part(
+                super::splice::splice_source_direct(
                     source,
                     &serialized,
                     &written,
                     part,
                     assignments,
                     patches,
-                    &mut reasons,
                 )
             })
         };
