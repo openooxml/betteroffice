@@ -3473,6 +3473,18 @@ fn spliced_part(
                     pending = 0;
                     anchor = Some(ordinal);
                 }
+                None
+                    if was.has_blocks()
+                        && !was.inline
+                        && !source.seeded.contains_key(key)
+                        && was.blocks == is.blocks =>
+                {
+                    let ordinal = last_block_paragraph(was, &before, source, index)?;
+                    if !synthetic(key) || is.inline {
+                        inserted.push(SpliceAnchor::After(ordinal));
+                    }
+                    anchor = Some(ordinal);
+                }
                 None if same && synthetic(key) => {
                     if is.has_blocks() && was.blocks == is.blocks {
                         anchor = last_block_paragraph(is, &before, source, index);
@@ -3612,7 +3624,7 @@ mod tests {
     }
 
     #[test]
-    fn insertion_after_an_unchanged_block_uses_its_last_source_paragraph() {
+    fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
         let xml = concat!(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
             "<w:body><w:p><w:r><w:t>Title</w:t></w:r></w:p><w:tbl><w:tblGrid>",
@@ -3624,53 +3636,143 @@ mod tests {
             "<w:p><w:r><w:t>Last</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
             "</w:body></w:document>",
         );
-        let parts = [
-            (
-                "[Content_Types].xml".to_owned(),
-                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
-            ),
-            (
-                "_rels/.rels".to_owned(),
-                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
-            ),
-            ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
-        ];
-        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
-        let doc = EditingDoc::new(41);
-        crate::seed_from_docx(&doc, &bytes).unwrap();
-        let target = doc.paragraphs("body").unwrap()[1].para_id.clone();
-        doc.apply_edits(
-            &EditRequest {
-                expect_version: doc.version(),
-                source: EditSource::Host,
-                history: EditHistory::Separate,
-                steps: vec![EditStep::new(EditOperation::InsertParagraphs {
-                    target: ParagraphTarget {
-                        story: "body".to_owned(),
-                        para_id: target,
-                    },
-                    at: TargetEdge::End,
-                    paragraphs: vec![ParagraphInput {
-                        text: "Inserted".to_owned(),
-                        style_id: None,
-                    }],
-                })],
-            },
-            &UndoSession::new(),
-        )
-        .unwrap()
-        .unwrap();
-        let part = doc
-            .paragraph_save_plan()
-            .spliced_parts
-            .into_iter()
-            .find(|part| part.part == "word/document.xml")
+        for shaped in [false, true] {
+            let xml = if shaped {
+                xml.to_owned()
+            } else {
+                xml.replace(
+                    "<w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/>",
+                    "<w:gridCol w:w=\"10\"/>",
+                )
+                .replace("<w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>", "")
+                .replace("<w:gridSpan w:val=\"2\"/>", "")
+                .replace("<w:gridSpan w:val=\"3\"/>", "")
+            };
+            let parts = [
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), xml.as_bytes().to_vec()),
+            ];
+            let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+            let doc = EditingDoc::new(41);
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let target = doc.paragraphs("body").unwrap()[1].para_id.clone();
+            assert!(doc.paragraph_identities().paragraphs.iter().any(|identity| {
+                matches!(
+                    &identity.paragraph,
+                    ParagraphRef::Session { para_id, .. } if para_id == &target
+                ) && identity.origin == ParagraphOrigin::Synthetic
+            }));
+            doc.apply_edits(
+                &EditRequest {
+                    expect_version: doc.version(),
+                    source: EditSource::Host,
+                    history: EditHistory::Separate,
+                    steps: vec![EditStep::new(EditOperation::InsertParagraphs {
+                        target: ParagraphTarget {
+                            story: "body".to_owned(),
+                            para_id: target.clone(),
+                        },
+                        at: TargetEdge::End,
+                        paragraphs: vec![ParagraphInput {
+                            text: "Inserted".to_owned(),
+                            style_id: None,
+                        }],
+                    })],
+                },
+                &UndoSession::new(),
+            )
+            .unwrap()
             .unwrap();
-        assert_eq!(part.inserted, vec![SpliceAnchor::After(2)]);
-        assert!(part.changed.is_empty());
-        assert!(part.table_patches.is_empty());
-        assert!(part.removed.is_empty());
-        assert_eq!(part.paragraphs.len(), 3);
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+            assert_eq!(
+                identities
+                    .paragraphs
+                    .iter()
+                    .filter(|identity| identity.origin == ParagraphOrigin::Authored)
+                    .count(),
+                2
+            );
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+            assert!(part.removed.is_empty());
+            assert_eq!(part.paragraphs.len(), 3);
+            let at = doc.paragraph_mark_position(&target).unwrap();
+            doc.insert_text(&ctx(), at, "Block note", FormatPolicy::Plain)
+                .unwrap();
+            let part = doc
+                .paragraph_save_plan()
+                .spliced_parts
+                .into_iter()
+                .find(|part| part.part == "word/document.xml")
+                .unwrap();
+            assert_eq!(part.inserted, vec![SpliceAnchor::After(2); 2]);
+            assert!(part.changed.is_empty());
+            assert!(part.table_patches.is_empty());
+        }
+    }
+
+    #[test]
+    fn paragraph_records_still_promote_an_empty_synthetic_paragraph_at_either_boundary() {
+        for at in [0, 1] {
+            let doc = EditingDoc::new(41);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            let target = {
+                let mut txn = doc.yrs_doc().transact_mut();
+                let story = story_ref(&txn, "body").unwrap();
+                let (_, map) = crate::next_pilcrow(&story, &txn, 0).unwrap();
+                map.insert(&mut txn, PARA_ORIGIN, SYNTHETIC);
+                map_string(&map, &txn, PARA_ID).unwrap()
+            };
+            doc.insert_paragraph_records(
+                "body",
+                at,
+                &[crate::ops::paragraph::ParagraphRecord {
+                    text: "Inserted".to_owned(),
+                    properties: Vec::new(),
+                    run: Vec::new(),
+                }],
+            )
+            .unwrap();
+            let identities = doc.paragraph_identities();
+            let anchor = identities
+                .paragraphs
+                .iter()
+                .find(|identity| {
+                    matches!(
+                        &identity.paragraph,
+                        ParagraphRef::Session { para_id, .. } if para_id == &target
+                    )
+                })
+                .unwrap();
+            assert_eq!(anchor.origin, ParagraphOrigin::Authored);
+            assert!(anchor.ooxml_para_id.is_some());
+        }
     }
 
     #[test]

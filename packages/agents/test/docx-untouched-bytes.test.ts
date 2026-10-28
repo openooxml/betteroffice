@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx } from '../src';
-import { bodyMarkerBody, offsetTableBody, orphanTableMarkersBody, paragraphsOf, textNodes, tocSdtBody, V, WPS } from '../../docx/src/yrs/__fixtures__/untouchedBytes';
+import { bodyMarkerBody, offsetTableBody, orphanTableMarkersBody, paragraphsOf, plainTableBody, textNodes, tocSdtBody, V, WPS } from '../../docx/src/yrs/__fixtures__/untouchedBytes';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
@@ -99,7 +99,15 @@ async function expectInsertedBody(body: string, anchorText: string | null) {
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
     expectUntouched(source.xml, xml);
-    expect(paragraphsOf(xml)).toHaveLength(paragraphsOf(source.xml).length + 1);
+    const sourceParagraphs = paragraphsOf(source.xml);
+    expect(paragraphsOf(xml)).toHaveLength(sourceParagraphs.length + (anchorText === null ? 2 : 1));
+    if (anchorText === null) {
+      const added = paragraphsOf(xml).filter(paragraph => !sourceParagraphs.includes(paragraph));
+      expect(added).toHaveLength(2);
+      const empty = added.filter(paragraph => textNodes(paragraph).length === 0);
+      expect(empty).toHaveLength(1);
+      expect(empty[0]).toMatch(/^<w:p\b[^>]*w14:paraId=/);
+    }
     for (const tag of ['w:txbxContent', 'mc:AlternateContent', 'mc:Fallback', 'w:bookmarkStart', 'w:bookmarkEnd']) {
       expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0).toBe(source.xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0);
     }
@@ -138,6 +146,18 @@ test('gridAfter and spanned rows keep every source paragraph on table and cell i
   const sample = cellXml.indexOf('<w:t>sample</w:t>');
   expect(cellXml.indexOf('Inserted paragraph.')).toBeGreaterThan(sample);
   expect(cellXml.indexOf('Inserted paragraph.')).toBeLessThan(cellXml.indexOf('</w:tc>', sample));
+});
+
+test.each([
+  { name: 'plain', body: plainTableBody },
+  { name: 'gridAfter/gridSpan', body: offsetTableBody },
+])('insert directly after a $name table keeps every source byte', async ({ body }) => {
+  const source = body();
+  const xml = await expectInsertedBody(source, null);
+  const end = xml.indexOf('</w:tbl>') + '</w:tbl>'.length;
+  expect(xml).toContain(source.slice(source.indexOf('<w:tbl>')));
+  expect(xml.slice(end)).toMatch(/^<w:p\b[^>]*>/);
+  expect(xml.indexOf('Inserted paragraph.')).toBeGreaterThan(end);
 });
 
 test('edited footnote keeps direct color auto and untouched runs byte for byte', async () => {

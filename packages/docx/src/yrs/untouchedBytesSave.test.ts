@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { SAVE_PATHS, setupStructuralSaves } from './structuralSaveTestSupport';
-import { bodyMarkerBody, MC, offsetTableBody, orphanTableMarkersBody, paragraphsOf, textNodes, tocSdtBody, V, W, W14, WPS } from './__fixtures__/untouchedBytes';
+import { bodyMarkerBody, MC, offsetTableBody, orphanTableMarkersBody, paragraphsOf, plainTableBody, textNodes, tocSdtBody, V, W, W14, WPS } from './__fixtures__/untouchedBytes';
 import type { YrsSession } from './index';
 
 const save = setupStructuralSaves();
@@ -49,6 +49,7 @@ describe.each([...SAVE_PATHS])('%s source boundaries keep untouched XML', (path)
     { name: 'body bookmark end next to an empty anchor', body: bodyMarkerBody, story: 'body', anchor: '' },
     { name: 'TOC sdt after a paragraph with a page break', body: tocSdtBody, story: 'body', anchor: 'Contents anchor' },
     { name: 'orphan bookmark ends between rows and cells', body: orphanTableMarkersBody, story: 'body', anchor: 'Table anchor' },
+    { name: 'body insertion directly after a plain table', body: plainTableBody, story: 'body', anchor: null },
     { name: 'synthetic table paragraph with offset and spanned rows', body: offsetTableBody, story: 'body', anchor: null },
     { name: 'cell paragraph with offset and spanned rows', body: offsetTableBody, story: 'body:t0:r0c0', anchor: 'sample' },
   ])('$name', async ({ body, story, anchor }) => {
@@ -56,6 +57,10 @@ describe.each([...SAVE_PATHS])('%s source boundaries keep untouched XML', (path)
     const xml = await save(path, fixture(source), (engine) => {
       const read = engine.readParagraphs({ story, view: 'accepted' });
       if (!read.ok) throw new Error(JSON.stringify(read));
+      if (anchor === null) {
+        expect(read.paragraphs).toHaveLength(2);
+        expect(read.paragraphs[1]?.text).toBe('');
+      }
       const target = anchor === null ? read.paragraphs[1]!
         : read.paragraphs.find(({ text }) => anchor === '' ? text === '' : anchor !== null && text.startsWith(anchor))!;
       expect(target).toBeDefined();
@@ -65,16 +70,23 @@ describe.each([...SAVE_PATHS])('%s source boundaries keep untouched XML', (path)
       });
       if (!result.ok) throw new Error(JSON.stringify(result));
     });
-    for (const paragraph of paragraphsOf(source)) expect(xml).toContain(paragraph);
-    expect(paragraphsOf(xml)).toHaveLength(paragraphsOf(source).length + 1);
+    const sourceParagraphs = paragraphsOf(source);
+    for (const paragraph of sourceParagraphs) expect(xml).toContain(paragraph);
+    expect(paragraphsOf(xml)).toHaveLength(sourceParagraphs.length + (anchor === null ? 2 : 1));
     for (const tag of ['w:txbxContent', 'mc:AlternateContent', 'mc:Fallback', 'w:bookmarkStart', 'w:bookmarkEnd']) {
       expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0).toBe(source.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0);
     }
     expect(textNodes(xml).filter(text => text !== 'inserted')).toEqual(textNodes(source));
     expect(textNodes(xml).filter(text => text === 'inserted')).toHaveLength(1);
     if (anchor === null) {
+      const added = paragraphsOf(xml).filter(paragraph => !sourceParagraphs.includes(paragraph));
+      expect(added).toHaveLength(2);
+      const empty = added.filter(paragraph => textNodes(paragraph).length === 0);
+      expect(empty).toHaveLength(1);
+      expect(empty[0]).toMatch(/^<w:p\b[^>]*w14:paraId=/);
       expect(xml).toContain(source.slice(source.indexOf('<w:tbl>')));
       expect(xml.indexOf('<w:t>inserted</w:t>')).toBeGreaterThan(xml.indexOf('</w:tbl>'));
+      expect(xml.slice(xml.indexOf('</w:tbl>') + '</w:tbl>'.length)).toMatch(/^<w:p\b[^>]*>/);
     } else if (story === 'body:t0:r0c0') {
       const sample = xml.indexOf('<w:t>sample</w:t>');
       expect(xml.indexOf('<w:t>inserted</w:t>')).toBeGreaterThan(sample);

@@ -43,6 +43,11 @@ export function offsetTableBody(): string {
   return `${protectedParagraph}<w:tbl><w:tblPr><w:tblStyle w:val="Tabellenraster"/><w:tblW w:w="14430" w:type="dxa"/></w:tblPr><w:tblGrid>${'<w:gridCol w:w="887"/>'.repeat(17)}</w:tblGrid>${first}${spanned}${last}</w:tbl>`;
 }
 
+export function plainTableBody(): string {
+  const cell = (id: string, text: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${rich(id, text)}</w:tc>`;
+  return `${protectedParagraph}<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>${cell('20000001', 'First cell')}${cell('20000002', 'Second cell')}</w:tr><w:tr>${cell('20000003', 'Third cell')}${cell('20000004', 'Last cell')}</w:tr></w:tbl>`;
+}
+
 export function paragraphsOf(xml: string): string[] {
   const found: Array<[number, string]> = [];
   const open: number[] = [];
