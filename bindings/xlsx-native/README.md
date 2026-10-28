@@ -37,3 +37,8 @@ zero-based, so A1 is row 0, column 0.
 | `await wb.set(0, 'A1', v)` | `wb.editCell(0, row, col, v)` |
 | `await wb.setStyle(0, 'A1:B1', patch)` | `wb.patchRangeStyle(0, 'A1:B1', patch)` |
 | `await wb.save()` (Buffer) | `wb.save()` (Uint8Array) |
+
+The facade keeps the cached formula values unless `recalculate` is true;
+`@betteroffice/xlsx` always recalculates on open, so formula values that were
+stale in the file can change. A `calculation` context needs both `nowSerial`
+and `randSeed`; without one, `NOW()` and `TODAY()` use the current time.
