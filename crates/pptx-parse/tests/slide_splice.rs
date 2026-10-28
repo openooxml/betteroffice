@@ -617,25 +617,27 @@ fn a_large_table_of_identical_rows_splices_and_scales() {
 
 #[test]
 fn deleting_one_of_two_shapes_in_an_alternate_content_choice_keeps_the_other() {
-    let deleted = kept_shape(2, "Deleted", "Deleted text");
-    let kept = kept_shape(3, "Kept", "Kept text");
-    let fallback = shape(4, "Fallback", "Fallback text");
-    let slide = slide_xml(&sp_tree(&format!(
-        r#"<mc:AlternateContent><mc:Choice xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" Requires="a">{deleted}<!-- inside wrapper -->{kept}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
-    )));
-    let saved = save(
-        &deck(&slide),
-        vec![ShapeWrite::Keep { source_index: 1 }],
-        None,
-    );
-    let xml = saved_slide(&saved);
-    assert!(
-        xml.contains(kept.as_str()),
-        "kept shape bytes require the splice: {xml}"
-    );
-    assert!(xml.contains("<!-- inside wrapper -->"), "{xml}");
-    assert!(!xml.contains("Deleted"), "{xml}");
-    assert_eq!(parse_pptx(&saved).unwrap().slides.len(), 1);
+    for fallback_id in [4, 3] {
+        let deleted = kept_shape(2, "Deleted", "Deleted text");
+        let kept = kept_shape(3, "Kept", "Kept text");
+        let fallback = shape(fallback_id, "Fallback", "Fallback text");
+        let slide = slide_xml(&sp_tree(&format!(
+            r#"<mc:AlternateContent><mc:Choice xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" Requires="a">{deleted}<!-- inside wrapper -->{kept}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+        )));
+        let saved = save(
+            &deck(&slide),
+            vec![ShapeWrite::Keep { source_index: 1 }],
+            None,
+        );
+        let xml = saved_slide(&saved);
+        assert!(
+            xml.contains(kept.as_str()),
+            "kept shape bytes require the splice (fallback id {fallback_id}): {xml}"
+        );
+        assert!(xml.contains("<!-- inside wrapper -->"), "{xml}");
+        assert!(!xml.contains("Deleted"), "{xml}");
+        assert_eq!(parse_pptx(&saved).unwrap().slides.len(), 1);
+    }
 }
 
 #[test]

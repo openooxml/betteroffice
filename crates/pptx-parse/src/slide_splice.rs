@@ -255,8 +255,7 @@ fn align(
         before[i].name == after[j].name
             && match (before_ids[i], after_ids[j]) {
                 (Some(left), Some(right)) => left == right,
-                (Some(_), None) | (None, Some(_)) => false,
-                (None, None) => true,
+                _ => true,
             }
     };
     let mut ops = Vec::new();
