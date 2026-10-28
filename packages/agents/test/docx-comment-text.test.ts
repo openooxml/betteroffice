@@ -150,17 +150,20 @@ test('replace_comment_text refuses to preserve existing edge whitespace in an ed
 for (const space of ['default', undefined]) {
   test(`replace_comment_text allows neutral preserve on untouched internal whitespace with ${space ?? 'missing'} xml:space during whole-part writing`, async () => {
     const zip = await JSZip.loadAsync(await commentFixture({ companions: [] }));
-    const comment = `<w:comment w:id="0" w:author="Reviewer" w:initials="R"><w:p w14:paraId="1A2B3C4D"><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t><![CDATA[alpha]]></w:t></w:r><w:r><w:t${space ? ` xml:space="${space}"` : ''}>beta  gamma</w:t></w:r></w:p></w:comment>`;
+    const comment = `<w:comment w:id="0" w:author="Reviewer" w:initials="R"><w:p w14:paraId="1A2B3C4D"><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>alpha<![CDATA[]]></w:t></w:r><w:r><w:t${space ? ` xml:space="${space}"` : ''}>beta  gamma</w:t></w:r></w:p></w:comment>`;
     const xml = (await zip.file('word/comments.xml')!.async('string')).replace(EXISTING_COMMENT, comment);
     zip.file('word/comments.xml', xml);
     const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    expect(doc.list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')!.text).toBe('alphabeta  gamma');
     const receipt = await doc.edit({ version: doc.list().version, edits: [{ op: 'replace_comment_text', comment: '0', find: 'alpha', replace: 'omega' }] });
     expect(receipt.applied).toBe(true);
     expect(receipt.results).toEqual([{ index: 0, op: 'replace_comment_text', comment: '0', replacements: 1 }]);
     const bytes = await doc.export();
-    const expected = comment.replace('<![CDATA[alpha]]>', 'omega')
+    const expected = comment.replace('alpha<![CDATA[]]>', 'omega')
       .replace(`<w:t${space ? ` xml:space="${space}"` : ''}>beta  gamma</w:t>`, '<w:t xml:space="preserve">beta  gamma</w:t>');
-    expect(await part(bytes, 'word/comments.xml')).toContain(expected);
+    const saved = (await part(bytes, 'word/comments.xml'))!;
+    expect(saved).toContain(expected);
+    expect(saved).not.toContain('<![CDATA[');
     const reopened = await open(bytes);
     expect(reopened.list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')!.text).toBe('omegabeta  gamma');
   });
