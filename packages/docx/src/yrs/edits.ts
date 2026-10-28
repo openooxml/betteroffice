@@ -233,7 +233,7 @@ export interface DocxTextAtom {
   kind: DocxAtomKind;
   /** The drawing's `wp:docPr` properties, on atoms whose embed carries them. */
   drawing?: DocxDrawing;
-  /** Drawings inside a content control, in document order for the requested view. */
+  /** Drawings inside content-control and field atoms, in document order for the requested view. */
   drawings?: DocxDrawing[];
 }
 

@@ -201,12 +201,93 @@ pub(crate) fn drawing_from_payload(
     })
 }
 
-fn control_drawings<T: ReadTxn>(
+pub(crate) fn field_result_nodes(data: &serde_json::Value) -> &[serde_json::Value] {
+    let nodes = if data.get("type").and_then(serde_json::Value::as_str) == Some("simpleField") {
+        data.get("content")
+    } else {
+        data.pointer("/structuredResult/inline")
+            .filter(|nodes| nodes.is_array())
+            .or_else(|| data.get("fieldResult"))
+    };
+    nodes
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn field_drawings(data: Option<&Any>, view: EditTextView) -> Vec<DrawingProperties> {
+    let Some(Any::String(data)) = data else {
+        return Vec::new();
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(data) else {
+        return Vec::new();
+    };
+    let mut pending: Vec<_> = field_result_nodes(&data).iter().rev().collect();
+    let mut drawings = Vec::new();
+    while let Some(node) = pending.pop() {
+        let kind = node
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if !visible(
+            view,
+            matches!(kind, "insertion" | "moveTo"),
+            matches!(kind, "deletion" | "moveFrom"),
+        ) {
+            continue;
+        }
+        if let Some(properties) = node.get("drawing").filter(|value| value.is_object()) {
+            let image = kind == "drawing";
+            let mut payload = serde_json::json!({"docPr": properties});
+            if image {
+                for (key, path) in [
+                    ("title", "/image/title"),
+                    ("alt", "/image/alt"),
+                    ("wrapType", "/image/wrap/type"),
+                ] {
+                    payload[key] = node
+                        .pointer(path)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                }
+            }
+            if let Ok(Any::Map(payload)) = crate::seed::any_from_value(payload)
+                && let Some(drawing) = drawing_from_payload(&payload, image)
+            {
+                drawings.push(drawing);
+            }
+            continue;
+        }
+        let children = match kind {
+            "simpleField" | "complexField" => field_result_nodes(node),
+            "hyperlink" => node
+                .get("structuredChildren")
+                .and_then(serde_json::Value::as_array)
+                .or_else(|| node.get("children").and_then(serde_json::Value::as_array))
+                .map_or(&[][..], Vec::as_slice),
+            "run" | "inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo" => node
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .map_or(&[][..], Vec::as_slice),
+            _ => &[],
+        };
+        pending.extend(children.iter().rev());
+    }
+    drawings
+}
+
+fn atom_drawings<T: ReadTxn>(
     kind: &str,
     map: Option<&MapRef>,
     txn: &T,
     view: EditTextView,
 ) -> Vec<DrawingProperties> {
+    if kind == "field" {
+        let data = map.and_then(|map| map.get(txn, "fieldData"));
+        return match data {
+            Some(Out::Any(data)) => field_drawings(Some(&data), view),
+            _ => Vec::new(),
+        };
+    }
     if kind != "sdt" {
         return Vec::new();
     }
@@ -238,6 +319,8 @@ fn control_drawings<T: ReadTxn>(
             if let Some(Any::Array(content)) = payload.get("content") {
                 pending.extend(content.iter().rev());
             }
+        } else if matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "field") {
+            drawings.extend(field_drawings(payload.get("fieldData"), view));
         } else if let Some(drawing) = drawing_from_payload(
             payload,
             matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "image"),
@@ -914,7 +997,7 @@ impl StoryView {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
                             drawing: drawing_properties(&kind, map.as_ref(), txn),
-                            drawings: control_drawings(&kind, map.as_ref(), txn, view),
+                            drawings: atom_drawings(&kind, map.as_ref(), txn, view),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);

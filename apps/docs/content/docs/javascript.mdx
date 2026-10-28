@@ -229,9 +229,9 @@ An atom whose embed is a drawing carries `drawing`: the drawing's own `wp:docPr`
 properties (`docPrId`, `name`, `title` and `descr`, each null when the attribute
 is absent or empty, plus `hidden` and `decorative`), its `placement` (`inline`
 or `anchor`) and its `type` (`picture`, `shape`, `textBox`, `group`, `chart`,
-`diagram` or `other`). Content-control atoms carry `drawings` when nonempty,
-listing the same properties for drawings inside the control in document order,
-including nested controls and hyperlinks, projected to the requested revision view.
+`diagram` or `other`). Content-control and field atoms carry `drawings` when nonempty,
+listing the same properties in document order, including nested controls,
+hyperlinks and cached field results, projected to the requested revision view.
 Structured export image and unsupported inlines carry
 the same object as `drawing`, null when the drawing has none, and an image
 inline's `altText` is its `descr`, falling back to its `title`. Sessions seeded
@@ -264,6 +264,9 @@ story read reports, on every page that paints it, with the first frame as its
 `anchor`. Add `index` to address the zero-based entry of `drawings` from an
 accepted-view read on a content-control atom at that offset: `{ kind: 'drawing', paragraph, offset, index: 0 }`.
 An index outside that list or on another atom is `missing-target`.
+Cached field-result drawings have no individual display position and are not
+painted individually, so indexing one returns `missing-target`, including within
+a content control.
 An offset that is not on a drawing atom is `missing-target`, and so
 is a drawing no page paints once the layout is complete; while a page that may
 hold it is not laid out yet it is `layout-unavailable`. A picture's `title`,

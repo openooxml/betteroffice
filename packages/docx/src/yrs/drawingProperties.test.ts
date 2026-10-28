@@ -269,3 +269,61 @@ test('indexed drawings reuse expanded control positions including hidden and nes
     { ok: true, drawing: true, ranges: [{ from: 10, to: 11 }] },
   ]);
 });
+
+test('field and control atoms read cached drawings in revision view order', async () => {
+  const session = await createYrsSession({ clientId: 76204 });
+  try {
+    session.openDocx(storiesDocx(), true);
+    const drawing = (id: string) => ({ type: 'drawing', drawing: { ...DRAWING, docPrId: id }, image: { title: 'Live title', alt: 'Live alt', wrap: { type: 'square' } } });
+    const data = { type: 'complexField', fieldResult: [{ type: 'run', content: [drawing('ignored')] }], structuredResult: { inline: [
+      { type: 'run', content: [drawing('1')] },
+      { type: 'hyperlink', children: [{ type: 'run', content: [drawing('2')] }] },
+      { type: 'deletion', content: [{ type: 'run', content: [drawing('3')] }] },
+      { type: 'insertion', content: [{ type: 'inlineSdt', content: [{ type: 'simpleField', content: [{ type: 'run', content: [drawing('4')] }] }] }] },
+    ] } };
+    const payload = { fieldData: JSON.stringify(data) };
+    session.applyRawOps('body', [
+      { op: 'insertEmbed', index: 0, kind: 'field', payload },
+      { op: 'insertEmbed', index: 1, kind: 'sdt', payload: { content: [{ kind: 'field', payload, attrs: {} }] } },
+    ]);
+    for (const view of ['accepted', 'original'] as const) {
+      const read = session.readStories({ stories: ['body'], view });
+      if (!read.ok) throw new Error(read.failure.message);
+      const story = read.stories[0]!;
+      if (!story.ok) throw new Error(story.failure.message);
+      const atoms = story.paragraphs[0]!.atoms;
+      expect(atoms[0]!.kind).toBe('field');
+      expect(atoms[1]!.kind).toBe('contentControl');
+      for (const atom of atoms.slice(0, 2)) {
+        expect(atom.drawings?.map(({ docPrId }) => docPrId)).toEqual(view === 'accepted' ? ['1', '2', '4'] : ['1', '2', '3']);
+        expect(atom.drawings?.[0]).toMatchObject({ title: 'Live title', descr: 'Live alt', placement: 'anchor' });
+      }
+    }
+  } finally {
+    session.destroy();
+  }
+});
+
+test('field result drawing indices are missing without shifting later control drawings', () => {
+  const fieldData = JSON.stringify({ type: 'simpleField', content: [{ type: 'run', content: [
+    { type: 'drawing', drawing: DRAWING },
+    { type: 'drawing', drawing: DRAWING },
+  ] }, { type: 'deletion', content: [{ type: 'run', content: [{ type: 'drawing', drawing: DRAWING }] }] }] });
+  const field = { fieldData };
+  const control = { content: [
+    { kind: 'image', payload: { docPr: DRAWING }, attrs: {} },
+    { kind: 'field', payload: field, attrs: {} },
+    { kind: 'image', payload: { docPr: DRAWING }, attrs: {} },
+  ] };
+  const r = { ...reader(), storySegments: () => [
+    { kind: 'embed', embedKind: 'sdt', payload: control, attributes: {} },
+    { kind: 'embed', embedKind: 'field', payload: field, attributes: {} },
+    { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+  ] } as unknown as AnchorReader;
+  expect(resolveAnchorTarget(r, { kind: 'drawing', paragraph: PARAGRAPH, offset: 0, index: 0 }, 'v1')).toMatchObject({ ok: true, drawingOffset: 1 });
+  for (const index of [1, 2]) {
+    expect(resolveAnchorTarget(r, { kind: 'drawing', paragraph: PARAGRAPH, offset: 0, index }, 'v1')).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  }
+  expect(resolveAnchorTarget(r, { kind: 'drawing', paragraph: PARAGRAPH, offset: 0, index: 3 }, 'v1')).toMatchObject({ ok: true, drawingOffset: 3 });
+  expect(resolveAnchorTarget(r, { kind: 'drawing', paragraph: PARAGRAPH, offset: 1, index: 0 }, 'v1')).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+});

@@ -1191,22 +1191,29 @@ fn parse_run_with_context(
                 replacements.push(parsed);
             }
             "AlternateContent" if contains_drawing_owned_content(child) => {
-                let parsed = parse_alternate_content(
+                let selected = parse_alternate_content(
                     child,
                     relationships,
                     budget,
                     drawing.as_deref_mut(),
                     in_header_footer,
+                    in_control,
                 )?;
+                let (branch, parsed) = match selected {
+                    Some((branch, parsed)) => (Some(branch), parsed),
+                    None => (None, Vec::new()),
+                };
                 let modeled = parsed.iter().any(|content| match content {
                     RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
                     _ => true,
                 });
                 let has_text_box = alternate_content_has_text_box(child);
-                let control_text_box = in_control && has_text_box;
+                let control_text_box = in_control
+                    && branch
+                        .is_some_and(|branch| branch.child_elements().any(is_text_box_drawing));
                 if control_text_box || (!modeled && !has_text_box) {
                     let fallback_properties = if control_text_box {
-                        child.child_elements().find_map(|branch| {
+                        branch.and_then(|branch| {
                             branch.child_elements().find_map(|drawing| {
                                 is_text_box_drawing(drawing)
                                     .then(|| crate::image::parse_drawing_properties(drawing))
@@ -1422,22 +1429,22 @@ fn parse_drawing_owned_inner(
         .collect())
 }
 
-fn parse_alternate_content(
-    element: &XmlElement,
+fn parse_alternate_content<'a>(
+    element: &'a XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut ComposedDrawingContext<'_>>,
     in_header_footer: bool,
-) -> Result<Vec<RunContent>, ParseError> {
-    Ok(parse_alternate_content_branch_with_context(
+    preserve_text_box: bool,
+) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
+    parse_alternate_content_branch_with_context(
         element,
         relationships,
         budget,
         drawing,
         in_header_footer,
-    )?
-    .map(|(_, parsed)| parsed)
-    .unwrap_or_default())
+        preserve_text_box,
+    )
 }
 
 pub fn parse_alternate_content_branch<'a>(
@@ -1454,6 +1461,7 @@ pub fn parse_alternate_content_branch<'a>(
         budget,
         drawing.as_mut(),
         in_header_footer,
+        false,
     )
 }
 
@@ -1463,12 +1471,14 @@ fn parse_alternate_content_branch_with_context<'a>(
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     in_header_footer: bool,
+    preserve_text_box: bool,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
     let has_media = drawing.is_some();
     let is_resolved_image = |image: &crate::image::Image| {
         image.src.is_some() || (!has_media && !image.relationship_id.is_empty())
     };
     let mut saw_text_box = false;
+    let mut text_box_branch = None;
     let mut unsupported = None;
     for branch_name in ["Choice", "Fallback"] {
         for branch in element
@@ -1544,7 +1554,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                     };
                     if preview.is_some() || !previews.is_empty() {
                         return Ok(Some((
-                            branch,
+                            text_box_branch.unwrap_or(branch),
                             vec![RunContent::OpaqueDrawing {
                                 kind: "alternateContent".to_owned(),
                                 xml: element.to_raw_inline_xml(),
@@ -1560,6 +1570,10 @@ fn parse_alternate_content_branch_with_context<'a>(
                 } else {
                     unsupported = Some((branch, parsed));
                 }
+            }
+            if preserve_text_box && branch_text_box && text_box_branch.is_none() {
+                text_box_branch = Some(branch);
+                unsupported = Some((branch, Vec::new()));
             }
             saw_text_box |= branch_text_box;
         }

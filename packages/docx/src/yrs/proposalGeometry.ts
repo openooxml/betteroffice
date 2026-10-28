@@ -350,8 +350,46 @@ export function hiddenRangesForPreview(
     }));
 }
 
-function controlDrawingOffsets(payload: Record<string, unknown>, start = 1): number[] {
-  const offsets: number[] = [];
+function fieldDrawingCount(payload: Record<string, unknown>): number {
+  if (typeof payload.fieldData !== 'string') return 0;
+  let data: unknown;
+  try {
+    data = JSON.parse(payload.fieldData);
+  } catch {
+    return 0;
+  }
+  const result = (node: Record<string, unknown>): unknown[] => {
+    const structured = node.structuredResult as { inline?: unknown[] } | undefined;
+    const inline = structured?.inline;
+    const nodes = node.type === 'simpleField' ? node.content
+      : Array.isArray(inline) ? inline : node.fieldResult;
+    return Array.isArray(nodes) ? nodes : [];
+  };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return 0;
+  const pending = [...result(data as Record<string, unknown>)];
+  let count = 0;
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const node = value as Record<string, unknown>;
+    const kind = typeof node.type === 'string' ? node.type : '';
+    if (kind === 'deletion' || kind === 'moveFrom') continue;
+    if (node.drawing && typeof node.drawing === 'object' && !Array.isArray(node.drawing)) {
+      count++;
+      continue;
+    }
+    const children = kind === 'simpleField' || kind === 'complexField' ? result(node)
+      : kind === 'hyperlink' ? (Array.isArray(node.structuredChildren) ? node.structuredChildren : node.children)
+      : ['run', 'inlineSdt', 'insertion', 'moveTo'].includes(kind) ? node.content : [];
+    if (Array.isArray(children)) {
+      for (const child of children) pending.push(child);
+    }
+  }
+  return count;
+}
+
+function controlDrawingOffsets(payload: Record<string, unknown>, start = 1): (number | undefined)[] {
+  const offsets: (number | undefined)[] = [];
   let at = start;
   if (!Array.isArray(payload.content)) return offsets;
   for (const child of payload.content as unknown[]) {
@@ -364,7 +402,9 @@ function controlDrawingOffsets(payload: Record<string, unknown>, start = 1): num
     const attrs = item.attrs as Record<string, unknown> | undefined;
     if (attrs?.del == null && nested) {
       if (item.kind === 'sdt') offsets.push(...controlDrawingOffsets(nested, at + 1));
-      else if (nested.docPr && typeof nested.docPr === 'object' && !Array.isArray(nested.docPr)) {
+      else if (item.kind === 'field') {
+        for (let count = fieldDrawingCount(nested); count > 0; count--) offsets.push(undefined);
+      } else if (nested.docPr && typeof nested.docPr === 'object' && !Array.isArray(nested.docPr)) {
         offsets.push(at);
       }
     }
@@ -460,6 +500,9 @@ export function resolveAnchorTarget(
     if (!atom) return anchorFailure('missing-target', 'The offset is not on a drawing');
     let drawingOffset: number | undefined;
     if (target.index !== undefined) {
+      if (atom.embedKind === 'field') {
+        return anchorFailure('missing-target', 'Cached field drawings have no individual display position');
+      }
       if (atom.embedKind !== 'sdt' || !Number.isInteger(target.index) || target.index < 0) {
         return anchorFailure('missing-target', 'The index is not on a control drawing');
       }

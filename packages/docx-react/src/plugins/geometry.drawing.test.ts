@@ -66,12 +66,14 @@ function harness({
   complete = true,
   unbuilt = false,
   control = false,
+  cachedField = false,
 }: {
   docPr?: Record<string, unknown>;
   painted?: boolean;
   complete?: boolean;
   unbuilt?: boolean;
   control?: boolean;
+  cachedField?: boolean;
 } = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
@@ -86,7 +88,7 @@ function harness({
   });
   void canvases;
   const frame = { pageIndex: 0, x: 30, y: 40, width: 50, height: 20 };
-  const drawingPosition = control ? 6 : 3;
+  const drawingPosition = control ? (cachedField ? 7 : 6) : 3;
   const headerFrame = { x: 5, y: 6, w: 70, h: 10, docStart: drawingPosition };
   const source = {
     pageSize: () => PAGE,
@@ -139,6 +141,9 @@ function harness({
     kind: 'embed', embedKind: 'sdt', attributes: {},
     payload: { content: [
       { kind: 'text', text: 'xy', attrs: {} },
+      ...(cachedField ? [{ kind: 'field', payload: { fieldData: JSON.stringify({
+        type: 'simpleField', content: [{ type: 'run', content: [{ type: 'drawing', drawing: docPr }] }],
+      }) }, attrs: {} }] : []),
       { kind: 'image', payload: { docPr }, attrs: {} },
     ] },
   };
@@ -297,4 +302,10 @@ test('a footer control drawing answers on every page that paints it', () => {
   }));
   expect(result.rects.map((rect) => rect.pageIndex)).toEqual([0, 1]);
   expect(result.rects[0]).toMatchObject({ x: 5, y: 6, width: 70, height: 10 });
+});
+
+test('a cached field drawing is missing while a later control drawing keeps its index', () => {
+  const { geometry, frame } = harness({ control: true, cachedField: true });
+  expect(geometry.getAnchorGeometry({ kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2, index: 0 })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  expect(anchored(geometry.getAnchorGeometry({ kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2, index: 1 })).rects).toEqual([{ ...frame, pageIndex: 0 }]);
 });

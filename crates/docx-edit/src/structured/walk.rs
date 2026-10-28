@@ -21,7 +21,9 @@ use crate::queries::revision_parts;
 use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
 use crate::seed::{SourceMetadata, numeric_field_instruction};
 use crate::sticky_positions::sticky_offset;
-use crate::target::{EditTextView, StoryView, TextPosition, Views, drawing_from_payload};
+use crate::target::{
+    EditTextView, StoryView, TextPosition, Views, drawing_from_payload, field_result_nodes,
+};
 use crate::{
     COMMENTS, DEL, EditingDoc, INS, KIND_KEY, TextRange, decode_anchor, map_string, story_ref,
 };
@@ -3433,7 +3435,10 @@ impl<'a> Exporter<'a> {
             }
             None => matches!(payload.get("hasCachedResult"), Some(Any::Bool(true))),
         } || present(payload.get("resultProjection")).is_some();
-        let nodes = data.as_ref().map(result_nodes).unwrap_or_default();
+        let nodes = data
+            .as_ref()
+            .map(|data| field_result_nodes(data).to_vec())
+            .unwrap_or_default();
         let projected = self.projected_result.take();
         let hides_blocks = numeric_field_instruction(&instruction)
             && matches!(payload.get("fieldResultBlocks"), Some(Any::Array(ids)) if !ids.is_empty());
@@ -4023,24 +4028,6 @@ fn run_marks_changed(properties: &BTreeMap<String, Any>) -> bool {
         }
     }
     !compared
-}
-
-/// The inline nodes of a field's cached result.
-fn result_nodes(data: &Value) -> Vec<Value> {
-    let nodes = |key: &str| {
-        data.get(key)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let structured = data
-        .pointer("/structuredResult/inline")
-        .and_then(Value::as_array)
-        .cloned();
-    match data.get("type").and_then(Value::as_str) {
-        Some("simpleField") => nodes("content"),
-        _ => structured.unwrap_or_else(|| nodes("fieldResult")),
-    }
 }
 
 /// Anchors an inline and everything inside it to `anchor`.

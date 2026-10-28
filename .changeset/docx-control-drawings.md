@@ -3,4 +3,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls.
+Reads now include `drawings` on content-control and field atoms by default, including cached field results. Drawing geometry targets accept `index` for control drawings; cached field-result drawings return `missing-target` because they have no individual display position.
