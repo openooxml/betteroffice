@@ -74,6 +74,34 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
+test('worker handles without retained source still edit and save but cannot fork', () => {
+  const source = openPresentation(fixture, { clientId: 9301, retainSource: false });
+  try {
+    expect(source.snapshot().slides.length).toBeGreaterThan(0);
+    expect(() => source.fork()).toThrow('Presentation source is unavailable for fork');
+    expect(() => source.layouts()).toThrow('Presentation source is unavailable for layouts');
+    const slide = source.snapshot().slides[0]!;
+    const content = source.readContent();
+    if (!content.ok) throw new Error(content.failure.message);
+    const story = content.stories[0]!;
+    source.insertText(story.storyId, 0, 'Worker edit ', {});
+    source.setSlideNotes(slide.id, 'Worker notes');
+    const reopened = openPresentation(source.save(), { clientId: 9303 });
+    try {
+      const saved = reopened.readContent();
+      if (!saved.ok) throw new Error(saved.failure.message);
+      expect(saved.stories.some((item) => item.text === `Worker edit ${story.text}`)).toBe(true);
+      expect(reopened.snapshot().slides[0]!.notes).toBe('Worker notes');
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); }
+  const retained = openPresentation(fixture, { clientId: 9302 });
+  try {
+    const forked = retained.fork();
+    try { expect(forked.snapshot()).toEqual(retained.snapshot()); } finally { forked.dispose(); }
+    expect(retained.layouts().length).toBeGreaterThan(0);
+  } finally { retained.dispose(); }
+});
+
 test('ordinary text deletion refuses paragraph joins without changing state or history', () => {
   const source = openPresentation(fixture, { clientId: 9210 });
   try {

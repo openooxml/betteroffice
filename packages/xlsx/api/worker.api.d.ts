@@ -603,7 +603,31 @@ export interface XlsxReadRequest {
     /** Empty reads only the sheet catalog. */
     ranges: readonly XlsxRangeTarget[];
 }
+/** Stored text with xstring escapes decoded; printable sections use dialog field tokens and normalized line breaks. */
+export interface XlsxHeaderFooterText {
+    raw: string;
+    left: string;
+    center: string;
+    right: string;
+}
+/** Absent or empty header and footer parts are null. */
+export interface XlsxHeaderFooterPair {
+    header: XlsxHeaderFooterText | null;
+    footer: XlsxHeaderFooterText | null;
+}
+/** Printable variants; even and first are null unless their respective flags are enabled. */
+export interface XlsxSheetHeaderFooter {
+    differentFirst: boolean;
+    differentOddEven: boolean;
+    scaleWithDoc: boolean;
+    alignWithMargins: boolean;
+    odd: XlsxHeaderFooterPair;
+    even: XlsxHeaderFooterPair | null;
+    first: XlsxHeaderFooterPair | null;
+}
 export interface XlsxSheetEntry {
+    /** Null means known absent or empty; omitted means source facts are unknown. */
+    headerFooter?: XlsxSheetHeaderFooter | null;
     visibility?: XlsxSheetVisibility;
     sheetId: string;
     name: string;
@@ -883,6 +907,7 @@ export type XlsxExportResult<T> = {
     version: string;
     content: T;
 } | OperationRefusal<XlsxExportFailure>;
+export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
 // ---- selection/types.d.ts ----
 /**

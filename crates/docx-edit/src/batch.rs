@@ -1671,16 +1671,10 @@ fn plan_style<T: ReadTxn>(
     let next = source
         .styled_paragraph(Some(style_id))
         .map_err(|message| invalid(message, &requested))?;
-    if paragraph.mark.numbering() {
-        return Err(unsupported(
-            format!("v1 batches do not restyle numbered paragraphs; {NUMBERING_FOLLOW_UP}"),
-            &requested,
-        ));
-    }
     if next.properties.iter().any(|(key, _)| key == "numPr") {
         return Err(unsupported(
             format!(
-                "style {style_id:?} defines list numbering, which v1 batches do not apply; {NUMBERING_FOLLOW_UP}"
+                "style {style_id:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
             ),
             &requested,
         ));
@@ -1707,7 +1701,12 @@ fn plan_style<T: ReadTxn>(
         &previous,
         &next,
         style_id,
-    );
+        source,
+        &target.story,
+        &text,
+        views.txn(),
+    )
+    .map_err(|message| unsupported(message, &requested))?;
     Ok(Planned {
         index,
         story: target.story.clone(),

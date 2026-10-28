@@ -191,6 +191,9 @@ export type {
   XlsxReadRequest,
   XlsxReadResult,
   XlsxSheetEntry,
+  XlsxHeaderFooterText,
+  XlsxHeaderFooterPair,
+  XlsxSheetHeaderFooter,
   XlsxValidationResult,
 } from './edits';
 export type {

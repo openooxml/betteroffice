@@ -131,4 +131,4 @@ export type {
   PptxPluginSnapshot,
 } from './plugins/types';
 
-export type { PptxExportList, SlideLayoutSnapshot } from '@betteroffice/pptx';
+export type { PptxExportList, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter } from '@betteroffice/pptx';

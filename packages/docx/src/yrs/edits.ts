@@ -7,6 +7,8 @@ import type { SectionPropertyPatch, SectionStartKind } from './sections';
  * (hard break, image, content control, note reference, field or other embed) occupies one
  * U+FFFC, tabs stay `\t`, and paragraph marks are not part of the text. The accepted view shows
  * pending insertions and hides pending deletions; the original view does the reverse.
+ * Reads project paragraph-mark revisions as accepted or rejected, keeping the following
+ * paragraph's id on joins; edits still refuse them.
  */
 
 import type {
@@ -25,6 +27,7 @@ export type {
 
 import type { DocxContentControlSelector } from './contentControls';
 import type { DocxAnchor } from './readTypes';
+import type { DocxDrawing } from '../types/content/run';
 
 import type { DocxStoryInfoKind } from './stories';
 
@@ -222,10 +225,17 @@ export type DocxAtomKind =
   | 'field'
   | 'other';
 
+export type { DocxDrawing } from '../types/content/run';
+
 /** One U+FFFC in projected text that stands for an inline atom. */
 export interface DocxTextAtom {
   offset: number;
   kind: DocxAtomKind;
+  /** The drawing's `wp:docPr` properties, on atoms whose embed carries them. */
+  drawing?: DocxDrawing;
+  /** Drawings inside content-control atoms in the requested view;
+   * drawings inside field results are not listed. */
+  drawings?: DocxDrawing[];
 }
 
 /** Numbering in the requested view, counted from the start of the root story. */

@@ -352,7 +352,9 @@ export function ImagePositionDialog({
 
           {/* Distance from text */}
           <div style={sectionStyle}>
-            <div style={sectionLabelStyle}>Distance from text (px)</div>
+            <div style={sectionLabelStyle}>
+              {t('dialogs.imagePosition.distanceFromText', { unit: t('common.units.px') })}
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <div style={rowStyle}>
                 <label style={{ ...labelStyle, width: 45 }}>

@@ -8,7 +8,10 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
-use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
+use yrs::{
+    Any, Array as _, Assoc, BranchID, ID, IndexedSequence, Map as YrsMap, Out, ReadTxn,
+    StickyIndex, Text as _, TextRef, Transact,
+};
 
 use crate::control_source::safety_key;
 use crate::identity::{
@@ -176,6 +179,7 @@ struct InlineUnit {
     attrs: JsonObject,
     pm_size: u32,
     marks: Vec<Mark>,
+    direct_formatting: Option<Arc<Value>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -278,6 +282,14 @@ struct SourceStructure {
     /// Paragraphs whose runs carry tracked formatting changes.
     #[serde(with = "crate::peer_bootstrap::sorted_set")]
     run_revisions: HashSet<(String, String)>,
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "crate::peer_bootstrap::sorted_map"
+    )]
+    restyle_runs: HashMap<(String, String), Vec<Value>>,
+    #[serde(skip)]
+    seeded_content: HashMap<String, (u32, u32)>,
     #[serde(skip)]
     patch_table_styles: PatchTableStyles,
 }
@@ -339,6 +351,96 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn seed_identities(&self) -> BTreeMap<String, (u32, u32)> {
+        self.structure
+            .seeded_content
+            .iter()
+            .map(|(story, range)| (story.clone(), *range))
+            .collect()
+    }
+
+    pub(crate) fn restore_seed_identities(
+        &mut self,
+        identities: BTreeMap<String, (u32, u32)>,
+    ) -> Result<(), String> {
+        let mut ranges = HashMap::new();
+        for (story, (clock, len)) in identities {
+            if len == 0 || clock.checked_add(len).is_none() {
+                return Err("invalid seeded content identity".to_owned());
+            }
+            ranges.insert(story, (clock, len));
+        }
+        self.structure.seeded_content = ranges;
+        Ok(())
+    }
+
+    pub(crate) fn paragraph_content_unchanged<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story: &TextRef,
+        story_id: &str,
+        start: u32,
+        pilcrow: u32,
+    ) -> bool {
+        let Some(&(clock, len)) = self.structure.seeded_content.get(story_id) else {
+            return false;
+        };
+        let BranchID::Nested(origin) = AsRef::<yrs::branch::Branch>::as_ref(story).id() else {
+            return false;
+        };
+        if origin.clock >= clock {
+            return false;
+        }
+        let Some(end) = clock.checked_add(len) else {
+            return false;
+        };
+        let Some(mark) = story
+            .sticky_index(txn, pilcrow, Assoc::After)
+            .and_then(|index| index.id().copied())
+        else {
+            return false;
+        };
+        if mark.client != origin.client || mark.clock >= end {
+            return false;
+        }
+        let Some(first) = pilcrow
+            .checked_sub(start)
+            .and_then(|len| mark.clock.checked_sub(len))
+        else {
+            return false;
+        };
+        if first < clock {
+            return false;
+        }
+        let snapshot = txn.snapshot();
+        if snapshot.state_map.get(&mark.client) < end
+            || snapshot
+                .delete_set
+                .get(&mark.client)
+                .is_some_and(|deleted| {
+                    deleted
+                        .ranges()
+                        .any(|range| range.start <= mark.clock && first < range.end)
+                })
+        {
+            return false;
+        }
+        StickyIndex::from_id(ID::new(mark.client, first), Assoc::After)
+            .get_offset(txn)
+            .is_some_and(|offset| {
+                offset.index == start
+                    && offset.branch.id() == AsRef::<yrs::branch::Branch>::as_ref(story).id()
+            })
+    }
+
+    pub(crate) fn restyle_run_boundaries(&self, story: &str, para_id: &str) -> Option<Any> {
+        let runs = self
+            .structure
+            .restyle_runs
+            .get(&(story.to_owned(), para_id.to_owned()))?;
+        any_from_value(Value::Array(runs.clone())).ok()
+    }
+
     pub(crate) fn patch_table_styles(&self) -> &PatchTableStyles {
         &self.structure.patch_table_styles
     }
@@ -390,6 +492,38 @@ impl SourceMetadata {
         self.structure
             .run_revisions
             .contains(&(story.to_owned(), key.to_owned()))
+    }
+
+    pub(crate) fn seeded_run_attrs(
+        &self,
+        story: &str,
+        paragraph_style: Option<&str>,
+        formatting: Option<&Any>,
+    ) -> Result<Vec<(String, Any)>, String> {
+        let table_context = self.structure.patch_table_styles.get(story).or_else(|| {
+            self.peer_patch_table_styles
+                .get()
+                .and_then(|styles| styles.get(story))
+        });
+        let mut table_styles;
+        let styles = if let Some((paragraph, run)) = table_context {
+            table_styles = self.styles.clone();
+            table_styles.set_table_paragraph_formatting(paragraph.clone());
+            table_styles.set_table_run_formatting(run.clone());
+            &table_styles
+        } else {
+            &self.styles
+        };
+        let paragraph =
+            json!({ "type": "paragraph", "formatting": { "styleId": paragraph_style } });
+        let formatting = formatting
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| json!({}));
+        let run = json!({ "type": "run", "formatting": formatting });
+        let style = paragraph_style_formatting(&paragraph, styles, None);
+        payload(marks_to_attrs(&run_marks(&run, style.as_deref(), styles)))
     }
 
     pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
@@ -2049,6 +2183,7 @@ fn text_unit(text: String, marks: &[Mark]) -> InlineUnit {
         content: UnitContent::Text(text),
         attrs: marks_to_attrs(marks),
         marks: marks.to_vec(),
+        direct_formatting: None,
     }
 }
 
@@ -2061,6 +2196,7 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
         attrs: marks_to_attrs(marks),
         pm_size,
         marks: marks.to_vec(),
+        direct_formatting: None,
     }
 }
 
@@ -2178,6 +2314,13 @@ fn is_hyperlink_style_name(name: &str) -> bool {
 
 fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
+}
+
+fn with_doc_pr(mut payload: JsonObject, content: &Value) -> JsonObject {
+    if let Some(properties) = field(Some(content), "drawing").filter(|value| value.is_object()) {
+        payload.insert("docPr".to_owned(), properties.clone());
+    }
+    payload
 }
 
 pub(crate) fn image_payload(image: &Value) -> JsonObject {
@@ -2673,7 +2816,10 @@ fn run_content_to_units(
         }
         "drawing" => vec![embed_unit(
             "image",
-            image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+            with_doc_pr(
+                image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+                content,
+            ),
             &drawing_marks(marks),
             1,
         )],
@@ -2685,18 +2831,24 @@ fn run_content_to_units(
         )],
         "shape" => vec![embed_unit(
             "shape",
-            shape_payload(
-                field(Some(content), "shape").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                shape_payload(
+                    field(Some(content), "shape").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
         )],
         "chart" => vec![embed_unit(
             "chart",
-            chart_payload(
-                field(Some(content), "chart").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                chart_payload(
+                    field(Some(content), "chart").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
@@ -2726,7 +2878,7 @@ fn run_content_to_units(
             }
             vec![embed_unit(
                 "opaqueDrawing",
-                payload,
+                with_doc_pr(payload, content),
                 &drawing_marks(marks),
                 1,
             )]
@@ -2754,9 +2906,14 @@ fn run_to_units(
         .into_iter()
         .chain(extra_marks.iter().cloned())
         .collect();
+    let direct = field(Some(run), "formatting").map(|formatting| Arc::new(formatting.clone()));
     array(field(Some(run), "content"))
         .iter()
         .flat_map(|content| run_content_to_units(content, &marks, source))
+        .map(|mut unit| {
+            unit.direct_formatting = direct.clone();
+            unit
+        })
         .collect()
 }
 
@@ -2803,14 +2960,18 @@ fn hyperlink_to_units(
     for child in array(children) {
         match string(field(Some(child), "type")).unwrap_or_default() {
             "run" => {
-                let marks: Vec<Mark> = run_marks(child, style_formatting, styles)
-                    .into_iter()
-                    .chain(extra_marks.iter().cloned())
+                let marks: Vec<Mark> = extra_marks
+                    .iter()
+                    .cloned()
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, source));
-                }
+                units.extend(run_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &marks,
+                    source,
+                ));
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
@@ -3262,6 +3423,13 @@ fn units_text(units: &[InlineUnit]) -> String {
         .collect()
 }
 
+fn unit_story_text(unit: &InlineUnit) -> &str {
+    match &unit.content {
+        UnitContent::Text(text) => text,
+        UnitContent::Embed { .. } => "\u{fffc}",
+    }
+}
+
 /// `w:br w:type="page"|"column"`, which the story carries as a block embed
 /// beside the paragraph instead of as an inline unit.
 fn flow_break_type(content: &Value) -> Option<&'static str> {
@@ -3317,7 +3485,12 @@ fn run_boundary(
     let note_marks = note_ref_mark_types(run);
     let breaks = flow_break_offsets(run, source);
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(units_text(units)));
+    let text = units_text(units);
+    let story_text: String = units.iter().map(unit_story_text).collect();
+    if story_text != text {
+        boundary.insert("storyText".to_owned(), Value::String(story_text));
+    }
+    boundary.insert("text".to_owned(), Value::String(text));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
     }
@@ -4149,6 +4322,21 @@ fn run_prefix_units(run: &Value) -> usize {
         .sum()
 }
 
+fn floating_run_content(content: &Value) -> bool {
+    match string(field(Some(content), "type")) {
+        Some("drawing") => {
+            let wrap = field(field(Some(content), "image"), "wrap");
+            string(field(wrap, "type")).is_some_and(|kind| kind != "inline")
+        }
+        Some("shape") => {
+            let shape = field(Some(content), "shape");
+            field(shape, "wrap").is_some_and(|wrap| !wrap.is_null())
+                || field(shape, "position").is_some_and(|position| !position.is_null())
+        }
+        _ => false,
+    }
+}
+
 fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
     for content in array(field(Some(run), "content")) {
         if string(field(Some(content), "type")) == Some("break")
@@ -4164,6 +4352,8 @@ fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
                     "pageBreak"
                 },
             );
+        } else if floating_run_content(content) {
+            tokens.push("floating");
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -4213,15 +4403,33 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<&'static str>) {
     }
 }
 
-fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
+/// A paragraph's flow tokens. Floating content before the first break takes
+/// no line room, so it drops out; after a break it is content on the next page.
+fn paragraph_tokens(paragraph: &Value) -> Vec<&'static str> {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let first_break = tokens
+        .iter()
+        .position(|token| matches!(*token, "pageBreak" | "columnBreak"));
+    tokens
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, token)| match token {
+            "floating" => first_break
+                .is_some_and(|first| index > first)
+                .then_some("visible"),
+            _ => Some(token),
+        })
+        .collect()
+}
+
+fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
+    let tokens = paragraph_tokens(paragraph);
     tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
 }
 
 fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
-    let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let tokens = paragraph_tokens(paragraph);
     if !tokens.contains(&"visible") {
         let split = tokens
             .iter()
@@ -5399,8 +5607,7 @@ fn record_breaks(
     breaks: Vec<FlowBreak>,
     embeds: Vec<u32>,
 ) {
-    let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let tokens = paragraph_tokens(paragraph);
     let expected = tokens
         .iter()
         .filter(|token| matches!(**token, "pageBreak" | "columnBreak"))
@@ -5562,6 +5769,18 @@ fn visit_story(
                     breaks,
                     opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
+                if ppr.contains_key("numPr") && !ppr.contains_key("_originalRunBoundaries") {
+                    let runs = units
+                        .iter()
+                        .map(|unit| {
+                            json!({"text": unit_story_text(unit), "formatting": unit.direct_formatting.as_deref()})
+                        })
+                        .collect();
+                    context
+                        .source
+                        .restyle_runs
+                        .insert((story_id.clone(), block_id.clone()), runs);
+                }
                 context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)
@@ -6024,7 +6243,6 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
 }
 
 /// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
-#[cfg(feature = "wasm")]
 pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
     if digest.len() == 64
         && digest
@@ -6040,7 +6258,6 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
@@ -6350,6 +6567,22 @@ fn seed_lowered(
     seed_opaque_sequences(document, &context.opaque_sequences, seeded);
     document.set_media_sources(sources);
     read.pin(document, &ranges);
+    let mut structure = context.source;
+    {
+        let txn = document.yrs_doc().transact();
+        structure.seeded_content = ranges
+            .into_iter()
+            .filter_map(|(story, range)| {
+                let text = crate::story_ref(&txn, &story).ok()?;
+                match AsRef::<yrs::branch::Branch>::as_ref(&text).id() {
+                    BranchID::Nested(id) if id.client == range.client && id.clock < range.clock => {
+                        Some((story, (range.clock, range.len)))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+    }
     read.comment_writes = CommentWrites::watch(document);
     if let Some(index) = index {
         document.retain_source(SourcePackage::Ready(Arc::new(index)));
@@ -6357,7 +6590,7 @@ fn seed_lowered(
     document.install_source(
         SourceMetadata {
             styles: context.styles,
-            structure: context.source,
+            structure,
             read,
             peer_patch_table_styles: OnceLock::new(),
         },
@@ -6523,7 +6756,6 @@ pub(crate) fn seed_blocks(
 
 /// Source metadata, identity index and referenced fonts for a package whose stories arrive
 /// another way, such as shared state, from one lowering.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
@@ -7103,6 +7335,20 @@ mod tests {
                 pin.unit
             );
         }
+    }
+
+    #[test]
+    fn restyle_provenance_requires_locally_recorded_seed_ids() {
+        let bytes = fixture::Package::new(&fixture::para("00000001", &fixture::run("aa"))).bytes();
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let source = doc.source_metadata().unwrap();
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        assert!(source.paragraph_content_unchanged(&txn, &story, "body", 0, 2));
+        let shared: SourceMetadata =
+            serde_json::from_value(serde_json::to_value(source.as_ref()).unwrap()).unwrap();
+        assert!(!shared.paragraph_content_unchanged(&txn, &story, "body", 0, 2));
     }
 
     #[test]
@@ -7778,6 +8024,110 @@ mod tests {
 
     fn run(text: &str) -> Value {
         json!({"type":"run","content":[{"type":"text","text":text}]})
+    }
+
+    fn drawing_run(wrap: &str) -> Value {
+        json!({"type":"run","content":[{"type":"drawing","image":{
+            "type":"image","rId":"rIdImage",
+            "size":{"width":914400,"height":457200},
+            "wrap":{"type":wrap}
+        }}]})
+    }
+
+    fn page_break_run() -> Value {
+        json!({"type":"run","content":[{"type":"break","breakType":"page"}]})
+    }
+
+    #[test]
+    fn anchored_drawing_before_page_break_makes_the_break_leading() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inFront"),
+            page_break_run(),
+            run("Version Control Table")
+        ]});
+        assert_eq!(paragraph_flow_breaks(&paragraph), (Vec::new(), Vec::new()));
+        assert!(paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_after_a_leading_page_break_stays_on_the_next_page() {
+        let paragraph = json!({"type":"paragraph","content":[
+            page_break_run(),
+            drawing_run("inFront")
+        ]});
+        assert_eq!(paragraph_flow_breaks(&paragraph), (Vec::new(), Vec::new()));
+        assert!(paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn inline_drawing_before_page_break_keeps_the_break_trailing() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inline"),
+            page_break_run(),
+            run("Version Control Table")
+        ]});
+        assert_eq!(
+            paragraph_flow_breaks(&paragraph),
+            (Vec::new(), vec!["pageBreak"])
+        );
+        assert!(!paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_and_page_break_without_text_stays_trailing() {
+        let paragraph = json!({"type":"paragraph","content":[
+            drawing_run("inFront"),
+            page_break_run()
+        ]});
+        assert_eq!(
+            paragraph_flow_breaks(&paragraph),
+            (Vec::new(), vec!["pageBreak"])
+        );
+        assert!(!paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_before_page_break_keeps_saved_run_order() {
+        let anchored = r#"<w:r><w:drawing><wp:anchor relativeHeight="0"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="1" name="Picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+        let bytes = fixture::Package::new(&fixture::para(
+            "00000001",
+            &format!(
+                "{anchored}<w:r><w:br w:type=\"page\"/></w:r>{}",
+                fixture::run("Version Control Table")
+            ),
+        ))
+        .rel("rIdImage", "image", "media/image1.png")
+        .bytes();
+        let lowered = lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let breaks: Vec<_> = lowered
+            .read
+            .provenance
+            .inline
+            .iter()
+            .filter(|record| matches!(record.content, InlineSource::Break { .. }))
+            .collect();
+        assert_eq!(breaks.len(), 1);
+        assert!(matches!(breaks[0].witness, Witness::Leading));
+        assert_eq!(breaks[0].pin.unit, 1);
+        assert!(lowered.read.provenance.relocated.is_empty());
+        let document = EditingDoc::new(74105);
+        crate::seed_from_docx(&document, &bytes).unwrap();
+        let exported = document
+            .export_structured(&crate::structured::ExportOptions::new(
+                crate::structured::RevisionView::Accepted,
+            ))
+            .unwrap();
+        let value = serde_json::to_value(&exported.content).unwrap();
+        let inlines = value["stories"][0]["blocks"][0]["paragraph"]["inlines"]
+            .as_array()
+            .unwrap();
+        let kinds: Vec<_> = inlines
+            .iter()
+            .map(|inline| inline["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["image", "break", "text"]);
+        assert_eq!(inlines[1]["breakType"], json!("page"));
+        assert_eq!(inlines[2]["text"], json!("Version Control Table"));
     }
 
     fn block_field(instruction: &str, blocks: &[Value]) -> Value {
@@ -9781,6 +10131,17 @@ mod tests {
             Some(Value::Bool(false)),
             "a direct off overrides a style that turns the toggle back on"
         );
+    }
+
+    #[test]
+    fn note_reference_boundaries_keep_source_text_and_story_placeholders() {
+        for kind in ["footnoteRef", "endnoteRef"] {
+            let run = json!({"type": "run", "content": [{"type": kind, "id": 12}]});
+            let units = run_to_units(&run, None, &StyleResolver::new(None), &[], &BTreeMap::new());
+            let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+            assert_eq!(boundary["text"], "12");
+            assert_eq!(boundary["storyText"], "\u{fffc}");
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ import { layoutIdOf } from '../../plugins/geometry';
 import type { YrsInputRef } from './YrsInput';
 import { presentedWorkerFrame } from './internals/layoutProvenance';
 import { ViewerSelectionController, type ViewerSelectionChange } from './internals/viewerSelectionController';
+import { useTranslation } from '../../i18n';
 
 const STYLE: CSSProperties = {
   position: 'fixed',
@@ -53,6 +54,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
   { read, story, queries, document: documentKey, onSelectionChange, onFocusChange },
   ref
 ) {
+  const { t } = useTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const primedRef = useRef<string | null>(null);
   const queriesRef = useRef(queries);
@@ -203,7 +205,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
       className="paged-editor__yrs-input paged-editor__hidden-pm ProseMirror"
       data-testid="yrs-input"
       data-yrs-story={story}
-      aria-label="Document input"
+      aria-label={t('editor.documentInput')}
       readOnly
       rows={1}
       style={STYLE}

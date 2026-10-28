@@ -25,6 +25,12 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('  CAMBRIA ')).toBe('Caladea');
     expect(resolveMetricCompatFamily('Helvetica')).toBe('Liberation Sans');
     expect(resolveMetricCompatFamily('Times')).toBe('Liberation Serif');
+    for (const family of ['Tms Rmn', 'Times Roman', 'TimesNewRomanPSMT', 'TimesNewRoman']) {
+      expect(resolveMetricCompatFamily(family)).toBe('Liberation Serif');
+    }
+    for (const family of ['Helv', 'Arial MT', 'ArialMT']) {
+      expect(resolveMetricCompatFamily(family)).toBe('Liberation Sans');
+    }
     expect(resolveMetricCompatFamily('Nonesuch')).toBeUndefined();
   });
 
@@ -101,6 +107,29 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Garamond', false, false, 'word').family).toBe('Liberation Serif');
     expect(resolveLastResortFace('Consolas', false, false, 'word').file).toBe('LiberationMono-Regular.ttf');
   });
+
+  for (const office of ['word', 'powerpoint'] as const) {
+    test(`${office} keeps sans serif family names on the sans base`, () => {
+      const sans = office === 'word' ? 'Arial' : 'Calibri';
+      for (const family of [
+        'Microsoft Sans Serif',
+        'MS Sans Serif',
+        'MS Reference Sans Serif',
+        'Unknown Sans-Serif',
+        'Unknown SansSerif',
+        'UNKNOWN SANS SERIF',
+      ]) {
+        for (const [bold, italic] of [[false, false], [true, false], [false, true], [true, true]]) {
+          expect(resolveLastResortFace(family, bold, italic, office)).toEqual(
+            resolveMetricCompatFace(sans, bold, italic)!
+          );
+        }
+      }
+      for (const family of ['Garamond', 'Book Antiqua']) {
+        expect(resolveLastResortFace(family, false, false, office).family).toBe('Liberation Serif');
+      }
+    });
+  }
 
   test('a typewriter or old-style name lands on a face of its own kind', () => {
     expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
@@ -318,7 +347,9 @@ describe('loading', () => {
     for (const office of ['powerpoint', 'word'] as const) {
       for (const family of ['Segoe UI', 'Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI Semibold', 'Segoe UI Black']) {
         for (const bold of [false, true]) {
-          expect(provider.resolve(family, bold, false)?.measureAs).toBe(family === 'Segoe UI Black' ? undefined : 'Segoe UI');
+          expect(provider.resolve(family, bold, false)?.measureAs).toBe(
+            family === 'Segoe UI Black' ? undefined : resolveMetricCompatFace(family, bold, false)!.metricCompatWith,
+          );
           const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
           const expected = resolveMetricCompatFace(office === 'word' ? 'Arial' : 'Calibri', coverageBold, false)!;
           expect(resolveGlyphFallbackFace(family, bold, false, office)).toBe(expected);

@@ -32,6 +32,7 @@ weezl = { version = "0.1", optional = true }
 libm.workspace = true
 
 [dev-dependencies]
+libm.workspace = true
 png = "0.18"
 proptest = "1"
 tiff = { version = "0.11" }

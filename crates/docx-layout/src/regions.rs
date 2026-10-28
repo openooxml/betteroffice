@@ -294,6 +294,20 @@ impl DocumentRegions {
 }
 
 impl RegionSection {
+    pub fn page_number_start(&self) -> Option<u64> {
+        let start = self.page_numbering.as_ref()?.start?;
+        let odd = match self.section_start {
+            Some(crate::types::SectionBreakType::OddPage) => true,
+            Some(crate::types::SectionBreakType::EvenPage) => false,
+            _ => return Some(start),
+        };
+        Some(if (start % 2 != 0) == odd {
+            start
+        } else {
+            start.checked_add(1).unwrap_or_else(|| start - 1)
+        })
+    }
+
     fn normalize_authored(&mut self) {
         let Some(properties) = self.properties.as_ref() else {
             return;
@@ -459,6 +473,19 @@ impl RegionLayoutInput {
         Option<String>,
     ) {
         self.regions.normalize_authored();
+        let mode = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            .and_then(|compat| compat.get("compatibilityMode"))
+            .or_else(|| self.measurement.compat.get("compatibilityMode"))
+            .cloned()
+            .unwrap_or(serde_json::json!(12));
+        if !self.measurement.compat.is_object() {
+            self.measurement.compat = serde_json::json!({});
+        }
+        self.measurement.compat["compatibilityMode"] = mode;
         if let Some(compatibility) = self
             .regions
             .settings
@@ -487,6 +514,36 @@ pub fn apply_section_geometry(input: &mut Input, regions: &DocumentRegions) {
     apply_section_geometry_to_blocks(&mut input.measured, &mut input.options, regions);
 }
 
+/// Maps physical sections to caller entries only when block SDTs add sections.
+pub fn section_region_indices<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+) -> Option<Vec<usize>> {
+    let mut indices: Option<Vec<usize>> = None;
+    let mut region_index = 0;
+    for block in blocks {
+        let LayoutBlock::SectionBreak(section_break) = block else {
+            continue;
+        };
+        if let Some(indices) = &mut indices {
+            indices.push(region_index);
+        }
+        if section_break.is_self_describing() {
+            indices.get_or_insert_with(|| (0..=region_index).collect());
+        } else {
+            region_index += 1;
+        }
+    }
+    if let Some(indices) = &mut indices {
+        indices.push(region_index);
+    }
+    indices
+}
+
+/// Whether a block closes an entry supplied by the caller.
+pub fn advances_region_section(block: &LayoutBlock) -> bool {
+    matches!(block, LayoutBlock::SectionBreak(section) if !section.is_self_describing())
+}
+
 pub fn apply_section_geometry_to_blocks<T>(
     blocks: &mut [T],
     options: &mut crate::types::LayoutOptions,
@@ -502,19 +559,14 @@ pub fn apply_section_geometry_to_blocks<T>(
         .iter()
         .map(|section| {
             Some(crate::types::SectionPageRestart {
-                start: section.page_numbering.as_ref()?.start?,
+                start: section.page_number_start()?,
                 align_parity: section
                     .even_and_odd_headers
                     .unwrap_or(regions.even_and_odd_headers),
             })
         })
         .collect();
-    options.section_page_restarts = restarts
-        .iter()
-        .skip(1)
-        .flatten()
-        .any(|restart| restart.align_parity)
-        .then_some(restarts);
+    options.section_page_restarts = restarts.iter().any(Option::is_some).then_some(restarts);
     if first.page_size.is_some() {
         options.page_size.clone_from(&first.page_size);
     }
@@ -535,10 +587,24 @@ pub fn apply_section_geometry_to_blocks<T>(
         options.body_break_type = last.section_start;
     }
     let mut section_index = 0;
+    let mut first_break = true;
     for item in blocks {
         let LayoutBlock::SectionBreak(section_break) = item.block_mut() else {
             continue;
         };
+        let ends_first_section = first_break;
+        first_break = false;
+        if section_break.is_self_describing() {
+            if ends_first_section {
+                if section_break.page_size.is_some() {
+                    options.page_size.clone_from(&section_break.page_size);
+                }
+                if section_break.margins.is_some() {
+                    options.margins.clone_from(&section_break.margins);
+                }
+            }
+            continue;
+        }
         let Some(section) = regions.sections.get(section_index) else {
             break;
         };
@@ -629,9 +695,7 @@ fn apply_document_regions_with(
                 .or_else(|| regions.watermark.clone());
             page.vertical_align = section.vertical_align.clone();
             let restart = section
-                .page_numbering
-                .as_ref()
-                .and_then(|numbering| numbering.start)
+                .page_number_start()
                 .filter(|_| page.section_page_index == Some(0));
             let number = restart.unwrap_or(previous_number + 1);
             if let Some(numbering) = &section.page_numbering {
@@ -1081,6 +1145,27 @@ mod tests {
     }
 
     #[test]
+    fn split_keeps_a_supplied_compatibility_mode_when_regions_carry_none() {
+        let mode = |value: serde_json::Value| {
+            let request: RegionLayoutInput = serde_json::from_value(value).unwrap();
+            request.split().3.compat["compatibilityMode"].clone()
+        };
+        let measured = json!({"compat": {"compatibilityMode": 15}});
+        assert_eq!(
+            mode(json!({"measured": [], "options": {}, "measurement": measured.clone()})),
+            json!(15)
+        );
+        assert_eq!(
+            mode(json!({
+                "measured": [], "options": {}, "measurement": measured,
+                "regions": {"settings": {"compatibilityFlags": {"compatibilityMode": 14}}}
+            })),
+            json!(14)
+        );
+        assert_eq!(mode(json!({"measured": [], "options": {}})), json!(12));
+    }
+
+    #[test]
     fn section_geometry_populates_options_and_breaks() {
         let request: RegionLayoutInput = serde_json::from_value(json!({
             "measured": [{
@@ -1114,6 +1199,193 @@ mod tests {
         };
         assert_eq!(section_break.columns.as_ref().unwrap().count, 2.0);
         assert_eq!(section_break.margins.as_ref().unwrap().top, 10.0);
+    }
+
+    fn sdt_section_input(wrapped: Option<usize>) -> (Input, DocumentRegions) {
+        let mut measured = Vec::new();
+        let mut sections = Vec::new();
+        for index in 0..4 {
+            let (width, height) = if index % 2 == 0 {
+                (300 + index * 20, 500 + index * 20)
+            } else {
+                (500 + index * 20, 300 + index * 20)
+            };
+            let geometry = json!({
+                "pageSize": {"w": width, "h": height},
+                "margins": {"top": 20 + index * 5, "right": 21 + index * 5,
+                    "bottom": 22 + index * 5, "left": 23 + index * 5},
+                "columns": {"count": if index == 1 { 2 } else { 1 }, "gap": 10}
+            });
+            measured.push(json!({
+                "block": {"kind": "paragraph", "id": format!("section-{index}"),
+                    "runs": [{"kind": "text", "text": "Content"}], "attrs": {}},
+                "measure": {"kind": "paragraph", "totalHeight": 24,
+                    "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                        "tailChar": 7, "width": 60, "ascent": 18,
+                        "descent": 6, "lineHeight": 24}]}
+            }));
+            if index < 3 {
+                let mut block = geometry.clone();
+                block["kind"] = json!("sectionBreak");
+                block["id"] = json!(format!("break-{index}"));
+                block["type"] = json!("nextPage");
+                if wrapped == Some(index) {
+                    block["sdtGroups"] = json!([{"id": "sdt@0", "sdtType": "richText"}]);
+                }
+                measured.push(json!({"block": block, "measure": {"kind": "sectionBreak"}}));
+            }
+            if wrapped != Some(index) {
+                let mut section = geometry;
+                section["sectionStart"] = json!("nextPage");
+                sections.push(section);
+            }
+        }
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "measured": measured, "regions": {"sections": sections}
+        }))
+        .unwrap();
+        let (input, regions, _, _, _, _) = request.split();
+        (input, regions)
+    }
+
+    fn assert_sdt_section_geometry(wrapped: usize) {
+        let (mut input, regions) = sdt_section_input(Some(wrapped));
+        let expected: Vec<_> = input
+            .measured
+            .iter()
+            .filter_map(|measured| match &measured.block {
+                LayoutBlock::SectionBreak(section) => Some((
+                    section.page_size.clone().unwrap(),
+                    section.margins.clone().unwrap(),
+                    section.columns.clone().unwrap(),
+                )),
+                _ => None,
+            })
+            .chain(regions.sections.last().map(|section| {
+                (
+                    section.page_size.clone().unwrap(),
+                    section.margins.clone().unwrap(),
+                    section.columns.clone().unwrap(),
+                )
+            }))
+            .collect();
+        apply_section_geometry(&mut input, &regions);
+        assert_eq!(input.options.page_size.as_ref(), Some(&expected[0].0));
+        assert_eq!(input.options.margins.as_ref(), Some(&expected[0].1));
+        assert_eq!(input.options.final_page_size.as_ref(), Some(&expected[3].0));
+        assert_eq!(input.options.final_margins.as_ref(), Some(&expected[3].1));
+        let mut layout = crate::compute_layout_input(&mut input).unwrap();
+        apply_document_regions(&mut layout, &regions);
+        assert_eq!(layout.pages.len(), 4);
+        for (index, (page, (size, margins, columns))) in
+            layout.pages.iter().zip(expected).enumerate()
+        {
+            assert_eq!(page.size, size, "section {index}");
+            assert_eq!(page.margins, margins, "section {index}");
+            assert_eq!(
+                page.columns.as_ref().map_or(1.0, |columns| columns.count),
+                columns.count,
+                "section {index}"
+            );
+            assert_eq!(page.fragments.len(), 1, "section {index}");
+            assert_eq!(
+                page.region_section_index,
+                index - usize::from(index > wrapped),
+                "section {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_section_geometry_matches_direct_layout() {
+        for empty_groups in [false, true] {
+            let (mut input, regions) = sdt_section_input(None);
+            let mut direct = input.clone();
+            let first = &regions.sections[0];
+            let last = &regions.sections[3];
+            direct.options.page_size.clone_from(&first.page_size);
+            direct.options.margins.clone_from(&first.margins);
+            direct.options.final_page_size.clone_from(&last.page_size);
+            direct.options.final_margins.clone_from(&last.margins);
+            direct.options.columns.clone_from(&last.columns);
+            direct.options.body_break_type = last.section_start;
+            for measured in &mut input.measured {
+                if let LayoutBlock::SectionBreak(section) = &mut measured.block {
+                    section.page_size = Some(Size { w: 200.0, h: 250.0 });
+                    section.margins = None;
+                    section.columns = None;
+                    if empty_groups {
+                        section.sdt_groups = Some(Vec::new());
+                    }
+                }
+            }
+            apply_section_geometry(&mut input, &regions);
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            let mut expected = crate::compute_layout_input(&mut direct).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            apply_document_regions(&mut expected, &regions);
+            assert_eq!(
+                serde_json::to_vec(&layout).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_cover_section_keeps_its_own_page_geometry() {
+        assert_sdt_section_geometry(0);
+    }
+
+    #[test]
+    fn wrapped_middle_section_preserves_later_portrait_and_landscape_geometry() {
+        assert_sdt_section_geometry(1);
+    }
+
+    #[test]
+    fn wrapped_last_break_preserves_body_section_geometry() {
+        assert_sdt_section_geometry(2);
+    }
+
+    #[test]
+    fn wrapped_section_does_not_advance_caller_note_grid_or_numbering_lookups() {
+        let (mut input, mut regions) = sdt_section_input(Some(0));
+        for (index, section) in regions.sections.iter_mut().enumerate() {
+            section.note_settings.footnote_columns = Some(index as u64 + 2);
+            section.properties = Some(AuthoredSectionProperties {
+                doc_grid: Some(json!({"type": "lines", "linePitch": 300 + index * 150})),
+                ..AuthoredSectionProperties::default()
+            });
+            section.page_numbering = Some(PageNumbering {
+                start: Some(7 + index as u64 * 10),
+                format: Some("decimal".into()),
+            });
+            section.header_footer_refs = Some(HeaderFooterRefs {
+                header_default: Some(format!("header-{index}")),
+                ..HeaderFooterRefs::default()
+            });
+        }
+        apply_section_geometry(&mut input, &regions);
+        let mut layout = crate::compute_layout_input(&mut input).unwrap();
+        apply_document_regions(&mut layout, &regions);
+        let columns = crate::footnotes::footnote_columns_by_page(&layout.pages, &regions);
+        for (index, page) in layout.pages.iter().enumerate() {
+            let caller = index.saturating_sub(1);
+            assert_eq!(page.region_section_index, caller);
+            assert_eq!(columns.get(&page.number), Some(&(caller as u64 + 2)));
+            assert_eq!(
+                regions.paragraph_spacing_line_px(page.region_section_index),
+                20.0 + caller as f64 * 10.0
+            );
+            assert_eq!(
+                regions.doc_grid_snap_pitch_px(page.region_section_index),
+                Some(20.0 + caller as f64 * 10.0)
+            );
+            assert_eq!(page.section_page_number, Some([7, 8, 17, 27][index]));
+            assert_eq!(
+                page.header_footer_refs.as_ref().unwrap().header_default,
+                Some(format!("header-{caller}"))
+            );
+        }
     }
 
     fn restart_parity_input(
@@ -1177,6 +1449,147 @@ mod tests {
         let mut layout = crate::compute_layout_input(&mut input).unwrap();
         apply_document_regions(&mut layout, &regions);
         layout
+    }
+
+    #[test]
+    fn authored_odd_page_uses_the_incoming_restart() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(1), 1, Some("oddPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(1));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_restart_at_two_after_one_page_needs_no_filler() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 1, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 2, "headers={headers}");
+            assert_eq!(layout.pages[1].section_page_number, Some(2));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_uses_restart_instead_of_physical_parity() {
+        for headers in [false, true] {
+            let layout = restart_parity_layout(headers, Some(2), 2, Some("evenPage"));
+            assert_eq!(layout.pages.len(), 3, "headers={headers}");
+            assert_eq!(layout.pages[2].section_page_number, Some(2));
+            assert_eq!(layout.pages[2].parity_filler, None);
+            assert!(!layout.pages[2].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_even_page_rounds_an_odd_restart_without_a_filler() {
+        for headers in [false, true] {
+            for preceding in [1, 2] {
+                let (mut input, mut regions) =
+                    restart_parity_input(headers, Some(1), preceding, Some("evenPage"), 1);
+                for title_pg in [false, true] {
+                    regions.sections[1].title_pg = title_pg;
+                    let mut layout = crate::compute_layout_input(&mut input).unwrap();
+                    apply_document_regions(&mut layout, &regions);
+                    assert_eq!(layout.pages.len(), preceding + 1);
+                    let first = &layout.pages[preceding];
+                    assert_eq!(first.number as usize, preceding + 1);
+                    assert_eq!(first.section_page_number, Some(2));
+                    assert_eq!(first.page_label.as_deref(), Some("2"));
+                    assert_eq!(first.section_page_index, Some(0));
+                    assert_eq!(first.parity_filler, None);
+                    assert!(!first.fragments.is_empty());
+                    assert_eq!(
+                        regions.sections[1].page_numbering.as_ref().unwrap().start,
+                        Some(1)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn even_page_restart_keeps_the_authored_blank_first_page() {
+        for headers in [false, true] {
+            let (mut input, regions) =
+                restart_parity_input(headers, Some(1), 3, Some("evenPage"), 1);
+            let mut blank = input.measured.last().unwrap().clone();
+            let LayoutBlock::Paragraph(paragraph) = &mut blank.block else {
+                panic!("paragraph expected");
+            };
+            paragraph.id = crate::types::BlockId::Str("blank-first".into());
+            paragraph.runs.clear();
+            let index = input.measured.len() - 1;
+            input.measured.insert(index, blank);
+            input.measured.insert(
+                index + 1,
+                serde_json::from_value(json!({
+                    "block": {"kind": "pageBreak", "id": "authored-blank"},
+                    "measure": {"kind": "pageBreak"}
+                }))
+                .unwrap(),
+            );
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            assert_eq!(layout.pages.len(), 5);
+            assert_eq!(layout.pages[3].number, 4);
+            assert_eq!(layout.pages[3].region_section_index, 1);
+            assert_eq!(layout.pages[3].section_page_number, Some(2));
+            assert_eq!(layout.pages[3].section_page_index, Some(0));
+            assert_eq!(layout.pages[4].section_page_number, Some(3));
+            assert_eq!(layout.pages[4].section_page_index, Some(1));
+            assert!(layout.pages.iter().all(|page| page.parity_filler.is_none()));
+        }
+    }
+
+    #[test]
+    fn authored_parity_rounds_mismatched_restart_numbers() {
+        for (section_type, start, expected) in
+            [("evenPage", 3, 4), ("oddPage", 2, 3), ("oddPage", 0, 1)]
+        {
+            let layout = restart_parity_layout(false, Some(start), 1, Some(section_type));
+            assert_eq!(layout.pages.len(), 2);
+            assert_eq!(layout.pages[1].section_page_number, Some(expected));
+            assert_eq!(layout.pages[1].parity_filler, None);
+            assert!(!layout.pages[1].fragments.is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_odd_page_without_restart_keeps_physical_parity() {
+        for headers in [false, true] {
+            for first_start in [1, 2] {
+                let (mut input, regions) =
+                    restart_parity_input(headers, None, 1, Some("oddPage"), first_start);
+                let mut layout = crate::compute_layout_input(&mut input).unwrap();
+                apply_document_regions(&mut layout, &regions);
+                assert_eq!(
+                    layout.pages.len(),
+                    3,
+                    "headers={headers}, start={first_start}"
+                );
+                assert_eq!(layout.pages[1].parity_filler, Some(true));
+                assert!(layout.pages[1].fragments.is_empty());
+                assert!(!layout.pages[2].fragments.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn restarts_reach_placement_without_header_parity_alignment() {
+        let (input, _) = restart_parity_input(false, Some(1), 1, Some("oddPage"), 2);
+        let restarts = input.options.section_page_restarts.as_ref().unwrap();
+        assert_eq!(restarts[0].unwrap().start, 2);
+        assert_eq!(restarts[1].unwrap().start, 1);
+        assert!(
+            restarts
+                .iter()
+                .flatten()
+                .all(|restart| !restart.align_parity)
+        );
     }
 
     #[test]

@@ -306,7 +306,7 @@ export function PageSetupDialog({
               value={twipsToInches(marginTop)}
               onChange={(e) => setMarginTop(inchesToTwips(Number(e.target.value) || 0))}
             />
-            <span style={unitStyle}>in</span>
+            <span style={unitStyle}>{t('common.units.inch')}</span>
           </div>
 
           <div style={rowStyle}>
@@ -320,7 +320,7 @@ export function PageSetupDialog({
               value={twipsToInches(marginBottom)}
               onChange={(e) => setMarginBottom(inchesToTwips(Number(e.target.value) || 0))}
             />
-            <span style={unitStyle}>in</span>
+            <span style={unitStyle}>{t('common.units.inch')}</span>
           </div>
 
           <div style={rowStyle}>
@@ -334,7 +334,7 @@ export function PageSetupDialog({
               value={twipsToInches(marginLeft)}
               onChange={(e) => setMarginLeft(inchesToTwips(Number(e.target.value) || 0))}
             />
-            <span style={unitStyle}>in</span>
+            <span style={unitStyle}>{t('common.units.inch')}</span>
           </div>
 
           <div style={rowStyle}>
@@ -348,7 +348,7 @@ export function PageSetupDialog({
               value={twipsToInches(marginRight)}
               onChange={(e) => setMarginRight(inchesToTwips(Number(e.target.value) || 0))}
             />
-            <span style={unitStyle}>in</span>
+            <span style={unitStyle}>{t('common.units.inch')}</span>
           </div>
         </div>
 

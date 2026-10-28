@@ -12,10 +12,13 @@
   "dependencies": {
     "@betteroffice/docx": "workspace:*",
     "@betteroffice/docx-react": "workspace:*",
+    "@betteroffice/docx-i18n": "workspace:*",
     "@betteroffice/xlsx": "workspace:*",
     "@betteroffice/xlsx-react": "workspace:*",
+    "@betteroffice/xlsx-i18n": "workspace:*",
     "@betteroffice/pptx": "workspace:*",
     "@betteroffice/pptx-react": "workspace:*",
+    "@betteroffice/pptx-i18n": "workspace:*",
     "@betteroffice/fonts": "workspace:*",
     "@betteroffice/fonts-cjk": "workspace:*",
     "react": "^19.2.7",

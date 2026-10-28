@@ -49,6 +49,7 @@ export type {
   InstrTextContent,
   SoftHyphenContent,
   NoBreakHyphenContent,
+  DocxDrawing,
   DrawingContent,
   ShapeContent,
   RunContent,

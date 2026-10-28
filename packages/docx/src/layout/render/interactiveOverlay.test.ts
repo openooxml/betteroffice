@@ -367,6 +367,14 @@ test('turned or compressed body text does not hide header controls', () => {
   }
 });
 
+test('canvas substitute correction leaves measured text occlusion unchanged', () => {
+  const run: TextRunPrimitive = {
+    kind: 'text', text: 'covered', x: 100, baselineY: 35, width: 60,
+    font: '16px sans-serif', color: '#000', substituteScale: 0.8,
+  };
+  expectHidden(headerWidget([run]));
+});
+
 test('a page whose only inline control is covered has no tab stop', () => {
   const page = pageWith([image()]);
   expectHidden(buildInteractiveOverlayPage(page)
