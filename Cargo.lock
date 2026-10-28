@@ -186,6 +186,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "libm",
  "png",
  "resvg",
 ]
@@ -264,6 +265,7 @@ dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "proptest",
  "quick-xml",
  "serde",
@@ -296,6 +298,7 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",

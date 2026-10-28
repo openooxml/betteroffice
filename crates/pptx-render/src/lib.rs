@@ -3,6 +3,7 @@
 mod chart;
 mod display_list;
 mod family_metrics;
+mod fmath;
 mod geometry;
 mod image_effects;
 mod layout;

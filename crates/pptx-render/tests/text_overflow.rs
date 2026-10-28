@@ -88,7 +88,8 @@ fn assert_overflow_carets(rendered: &RenderedSlide, id: u32) {
         let cy = y + h / 2.0;
         let dx = (stop.x - cx) * if transform.flip_h { -1.0 } else { 1.0 };
         let dy = (outside_y - cy) * if transform.flip_v { -1.0 } else { 1.0 };
-        let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+        let angle = transform.rotation_deg.to_radians();
+        let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
         let hit = rendered.hit_test(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos);
         assert_eq!(
             hit,
@@ -340,7 +341,8 @@ fn unwrapped_overflow_carets_remain_clickable_in_the_text_frame() {
         let cy = y + h / 2.0;
         let dx = stop.x - cx;
         let dy = lines[0].baseline - cy;
-        let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+        let angle = transform.rotation_deg.to_radians();
+        let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
         assert_eq!(
             rendered.hit_test(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos),
             Some(HitTestResult::Text {
