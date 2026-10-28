@@ -243,6 +243,6 @@ export async function decodeFontBytes(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const wasm = await decoder(options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url));
+  const wasm = await decoder(options?.wasmUrl ?? new URL('../dist/decoder/fontpack.wasm', import.meta.url));
   return decodeWasm(wasm, input, dictionary, maxOutput, expectedSize);
 }

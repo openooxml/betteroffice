@@ -159,6 +159,20 @@ describe('internal font decoder', () => {
     expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
   });
 
+  test.skipIf(!hasWasm)('without native zstd or wasmUrl the default decoder url loads the built wasm', async () => {
+    const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
+    const original = host.getBuiltinModule;
+    host.getBuiltinModule = (id: string) => (id === 'node:zlib' ? {} : original?.call(host, id));
+    try {
+      expect(new Uint8Array(await decodeFontBytes(helloFrame))).toEqual(hello);
+      const corrupt = helloFrame.slice();
+      corrupt[corrupt.length - 1] ^= 1;
+      await expect(decodeFontBytes(corrupt)).rejects.toThrow('Font face checksum failed');
+    } finally {
+      host.getBuiltinModule = original;
+    }
+  });
+
   test.skipIf(!hasWasm)('wasm linear memory cannot grow past 1 GiB', async () => {
     const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
     const memory = instance.exports.memory as WebAssembly.Memory;

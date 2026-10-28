@@ -33,7 +33,8 @@ Decoding is a single operation, with no recursive attempt on the result.
 
 The internal TypeScript decoder uses the built-in Node zstd decompressor when
 available, otherwise the standalone wasm decoder. An explicit `wasmUrl` selects
-the wasm decoder. The Rust decoder links the same decompression-only C source
+the wasm decoder; without it the decoder loads `dist/decoder/fontpack.wasm` from
+the package root. The Rust decoder links the same decompression-only C source
 on native and wasm targets.
 
 Each manifest face must have `codec: "zstd"`. Callers pass that value as the
