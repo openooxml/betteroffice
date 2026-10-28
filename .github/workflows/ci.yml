@@ -139,6 +139,11 @@ jobs:
       - name: Build
         run: bun run build:packages
 
+      - name: Check plugin declarations against the built packages
+        env:
+          BETTEROFFICE_PACKAGE_DECLARATIONS: prebuilt
+        run: bun test scripts/docx-plugin-declarations.test.ts scripts/xlsx-plugin-declarations.test.ts scripts/pptx-plugin-declarations.test.ts
+
       - uses: actions/setup-node@v7.0.0
         with:
           node-version: "24"
@@ -190,6 +195,8 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test
+        env:
+          BETTEROFFICE_PACKAGE_DECLARATIONS: skip
         run: bun run test --shard=${{ matrix.shard }}/2
 
   audit:
