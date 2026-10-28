@@ -2006,6 +2006,13 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
 /// pictures at the tallest picture's height; the paragraph mark's font adds
 /// no room.
 fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return;
+    }
     let rule_picture = |run: &crate::types::Run| match run {
         crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
             (image.position.is_none()
@@ -4212,6 +4219,13 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     else {
         return extent_height(measure);
     };
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return extent.total_height;
+    }
     let non_empty: Vec<_> = paragraph
         .runs
         .iter()

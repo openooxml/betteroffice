@@ -236,6 +236,75 @@ fn table_first_picture_bullet_wraps_cell_text_below_its_line() {
 }
 
 #[test]
+fn table_first_picture_bullet_keeps_inline_picture_inside_auto_height_row() {
+    for rule in [
+        "",
+        r#"xmlns:o="urn:schemas-microsoft-com:office:office" o:hr="t""#,
+    ] {
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="8000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="8000" w:type="dxa"/></w:tcPr><w:p w14:paraId="00000001"><w:r><w:pict><v:shape {rule} style="width:50pt;height:40pt"><v:imagedata r:id="image"/></v:shape></w:pict></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+            paragraph(2, "After")
+        );
+        let xml = numbering(&bullet("width:3in;height:3in"), false);
+        let (_, layout, display) = render(&document(&body, Some(&xml)));
+        let number = |value: &Value| value.as_f64().unwrap();
+        let row = &layout["measured"][0]["measure"]["rows"][0];
+        let cell_paragraph = &row["cells"][0]["blocks"][0];
+        let lines = cell_paragraph["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 1);
+        near(number(&lines[0]["ascent"]) * 0.75, 216.0);
+        assert!(number(&row["height"]) * 0.75 >= 216.0 - 0.1);
+        assert!(number(&row["height"]) >= number(&cell_paragraph["totalHeight"]) - 0.1);
+
+        let pages = layout["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 1);
+        let fragments = pages[0]["fragments"].as_array().unwrap();
+        assert_eq!(fragments.len(), 2);
+        let table = &fragments[0];
+        assert_eq!(table["kind"], "table");
+        near(number(&table["height"]), number(&row["height"]));
+        let row_bottom = number(&table["y"]) + number(&table["height"]);
+        assert_eq!(fragments[1]["kind"], "paragraph");
+        assert!(number(&fragments[1]["y"]) >= row_bottom - 0.1);
+        assert!(origin(&display, "After").1 >= row_bottom - 0.1);
+
+        let display = serde_json::to_value(display).unwrap();
+        let images: Vec<_> = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| primitive["kind"] == "image")
+            .collect();
+        assert_eq!(images.len(), 1);
+        let image = images[0];
+        let x = number(&image["x"]);
+        let y = number(&image["y"]);
+        let width = number(&image["w"]);
+        let height = number(&image["h"]);
+        near(width * 0.75, 50.0);
+        near(height * 0.75, 40.0);
+        let clip = &image["clipGroup"]["clip"];
+        for (left, top, right, bottom) in [
+            (
+                number(&table["x"]),
+                number(&table["y"]),
+                number(&table["x"]) + number(&table["width"]),
+                row_bottom,
+            ),
+            (
+                number(&clip["x"]),
+                number(&clip["y"]),
+                number(&clip["x"]) + number(&clip["w"]),
+                number(&clip["y"]) + number(&clip["h"]),
+            ),
+        ] {
+            assert!(x >= left - 0.1 && y >= top - 0.1);
+            assert!(x + width <= right + 0.1 && y + height <= bottom + 0.1);
+        }
+    }
+}
+
+#[test]
 fn picture_bullet_keeps_source_offsets_and_caret_positions() {
     let body = paragraph(1, "First");
     let xml = numbering(&bullet("width:3in;height:3in"), false);
