@@ -5,6 +5,8 @@ use ooxml_text::{
 };
 
 const LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
+const NOTO_SANS_JP: &[u8] =
+    include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
 
 fn store_with_font() -> (FontStore, FontId) {
     let mut store = FontStore::new();
@@ -35,6 +37,151 @@ fn table_offset(bytes: &[u8], tag: &[u8; 4]) -> usize {
         .find(|&offset| &bytes[offset..offset + 4] == tag)
         .unwrap();
     u32::from_be_bytes(bytes[entry + 8..entry + 12].try_into().unwrap()) as usize
+}
+
+#[test]
+fn japanese_substitutes_apply_width_tables_without_scaling_cjk_outlines() {
+    let mut store = FontStore::new();
+    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    let upem = f32::from(store.metrics(base).unwrap().units_per_em);
+    for family in [
+        "MS Mincho",
+        "  ＭＳ 明朝  ",
+        "MS Gothic",
+        "ＭＳ ゴシック",
+        "MS PMincho",
+        "ＭＳ Ｐ明朝",
+        "MS PGothic",
+        "ＭＳ Ｐゴシック",
+        "MS UI Gothic",
+    ] {
+        let metrics = family_metrics(&family.trim().to_lowercase(), false, false).unwrap();
+        assert!(!runs_at_own_widths(&store, base, metrics), "{family}");
+        let view = store.register_named_substitute(base, family).unwrap();
+        assert_ne!(view, base, "{family}");
+        assert!(std::ptr::eq(
+            store.family_widths(view).unwrap().unwrap(),
+            metrics
+        ));
+        assert_eq!(store.advance_scale(view).unwrap(), 1.0, "{family}");
+        assert_eq!(
+            store.font_bytes(view).unwrap(),
+            store.font_bytes(base).unwrap()
+        );
+        for ch in ['中', '日', '語'] {
+            assert_eq!(family_advance(metrics, ch), None, "{family} {ch}");
+            assert_eq!(store.advance_width(base, ch).unwrap(), Some(upem));
+            assert_eq!(store.advance_width(view, ch).unwrap(), Some(upem));
+            assert_eq!(
+                shape(&store, view, &ch.to_string(), 16.0, &[]).unwrap(),
+                shape(&store, base, &ch.to_string(), 16.0, &[]).unwrap(),
+                "{family} {ch}"
+            );
+        }
+        for ch in ['中', 'あ', 'ア'] {
+            let glyph = store.glyph_id(base, ch).unwrap().unwrap();
+            assert_eq!(
+                store.outline_glyph(view, glyph).unwrap(),
+                store.outline_glyph(base, glyph).unwrap(),
+                "{family} {ch}"
+            );
+        }
+        let text = "W1中あアiｱ！";
+        let expected = text
+            .chars()
+            .map(|ch| {
+                family_advance(metrics, ch)
+                    .unwrap_or_else(|| store.advance_width(base, ch).unwrap().unwrap() / upem)
+            })
+            .sum::<f32>()
+            * 16.0;
+        assert!(
+            (shaped_width(&store, view, text, 16.0) - expected).abs() < 1e-3,
+            "{family}"
+        );
+        for ch in ' '..='~' {
+            let advance = store.advance_width(view, ch).unwrap().unwrap() / upem;
+            assert!(
+                (advance - family_advance(metrics, ch).unwrap()).abs() < 1e-6,
+                "{family} {ch}"
+            );
+        }
+    }
+    assert_eq!(store.advance_scale(base).unwrap(), 1.0);
+}
+
+#[test]
+fn synthetic_japanese_styles_measure_ascii_at_half_an_em() {
+    for (bold, italic) in [(true, false), (false, true), (true, true)] {
+        let mut bytes = LIBERATION_SANS.to_vec();
+        let os2 = table_offset(&bytes, b"OS/2");
+        let selection = (bold as u16) << 5 | italic as u16;
+        bytes[os2 + 62..os2 + 64].copy_from_slice(&selection.to_be_bytes());
+        let mut store = FontStore::new();
+        let base = store.register(bytes).unwrap();
+        let upem = f32::from(store.metrics(base).unwrap().units_per_em);
+        for family in ["MS Mincho", "ＭＳ 明朝", "MS Gothic", "ＭＳ ゴシック"] {
+            let view = store.register_named_substitute(base, family).unwrap();
+            assert!(store.family_widths(view).unwrap().is_some(), "{family}");
+            assert_eq!(store.advance_scale(view).unwrap(), 1.0, "{family}");
+            for ch in ' '..='~' {
+                assert_eq!(
+                    store.advance_width(view, ch).unwrap(),
+                    Some(upem * 0.5),
+                    "{family} {bold} {italic} {ch}"
+                );
+            }
+            let text = "Wide minimum 0123456789";
+            let expected = text.chars().count() as f32 * 0.5 * 16.0;
+            assert!((shaped_width(&store, view, text, 16.0) - expected).abs() < 1e-3);
+        }
+    }
+}
+
+#[test]
+fn tracked_ms_mincho_lines_measure_half_width_digits_and_full_width_ideographs() {
+    let mut store = FontStore::new();
+    let base = store.register(NOTO_SANS_JP.to_vec()).unwrap();
+    let text = format!("123456{}", "中".repeat(36));
+    let measure = |store: &FontStore, font: FontId, family: &str, tracking, max_width| {
+        let key = format!("{}|0|0", family.to_lowercase());
+        let input = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{"kind": "text", "text": text, "fontFamily": family, "letterSpacing": tracking}]
+            },
+            "maxWidth": max_width,
+            "fontChains": { (key): [font.to_u32()] },
+            "defaults": {"fontSize": 12.0, "fontFamily": family},
+            "authoritativeShaping": true
+        }))
+        .unwrap();
+        ooxml_text::measure_paragraph(store, &input).unwrap()
+    };
+    let tracking = 0.25 * 96.0 / 72.0;
+    let own = measure(&store, base, "MS Mincho", 0.0, 1000.0).lines[0].width;
+    let tracked_own = measure(&store, base, "MS Mincho", tracking, 1000.0).lines[0].width;
+    let tracking_width = tracked_own - own;
+    assert!(tracking_width > 0.0);
+    let expected = (6.0 * 0.5 + 36.0) * 16.0;
+    for family in ["MS Mincho", "ＭＳ 明朝"] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        let plain = measure(&store, view, family, 0.0, 1000.0);
+        assert!((plain.lines[0].width - expected).abs() < 1e-3, "{family}");
+        let tracked = measure(
+            &store,
+            view,
+            family,
+            tracking,
+            expected + tracking_width + 0.01,
+        );
+        assert_eq!(tracked.lines.len(), 1, "{family}");
+        assert!(
+            (tracked.lines[0].width - expected - tracking_width).abs() < 1e-3,
+            "{family}"
+        );
+        assert_eq!(tracked.lines[0].tail_char, 42);
+    }
 }
 
 #[test]

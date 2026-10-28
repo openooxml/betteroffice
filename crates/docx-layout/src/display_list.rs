@@ -4692,6 +4692,11 @@ fn text_substitute_scale(
 ) -> Option<Number> {
     let ratio = fonts.and_then(|fonts| {
         let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+        if ooxml_text::word_fonts::requested_line_metrics(family)
+            .is_some_and(|metrics| metrics.east_asian)
+        {
+            return None;
+        }
         let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
         let font = *chain.first()?;
         if fonts.store.family_widths(font).ok()?.is_none()
