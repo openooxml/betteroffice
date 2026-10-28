@@ -1779,7 +1779,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
-        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style></w:styles>"#
     );
     parts
         .iter_mut()
@@ -1787,6 +1787,119 @@ fn open_numbered_restyle(body: &str) -> EditingDoc {
         .unwrap()
         .1 = styles.into_bytes();
     open_package(&ooxml_opc::rezip_parts(&parts).unwrap())
+}
+
+#[test]
+fn restyle_numbered_runs_refuse_ambiguous_provenance_without_mutation() {
+    for linked in [false, true] {
+        for removed in [0, 1] {
+            let runs = concat!(
+                "<w:r><w:t>a</w:t></w:r>",
+                r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>a</w:t></w:r>"#,
+            );
+            let content = if linked {
+                format!(r#"<w:hyperlink w:anchor="target">{runs}</w:hyperlink>"#)
+            } else {
+                runs.to_owned()
+            };
+            let doc = open_numbered_restyle(&format!(
+                r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>{content}</w:p>"#
+            ));
+            doc.delete_range(
+                &EditCtx::local("", ""),
+                StoryRange::new("body", removed, removed + 1),
+            )
+            .unwrap();
+            let before = doc.story_segments("body").unwrap();
+            let version = doc.version();
+            let failure = refuse(
+                &doc,
+                &UndoSession::new(),
+                vec![set_style("00000001", "Heading1")],
+            )
+            .failure;
+            assert_eq!(failure.code, EditFailureCode::Unsupported);
+            assert!(
+                failure
+                    .message
+                    .contains("ambiguous run formatting provenance")
+            );
+            assert_eq!(doc.story_segments("body").unwrap(), before);
+            assert_eq!(doc.version(), version);
+        }
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_refuse_ambiguous_replacement_provenance() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>ab</w:t></w:r></w:p>"#,
+    ));
+    doc.delete_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 1))
+        .unwrap();
+    doc.replace_range(&EditCtx::local("", ""), StoryRange::new("body", 1, 2), "c")
+        .unwrap();
+    assert_eq!(
+        code(&doc, vec![set_style("00000001", "Heading1")]),
+        EditFailureCode::Unsupported
+    );
+    assert_eq!(
+        properties(&doc, "00000001").get("pStyle"),
+        Some(&Any::from("Body24"))
+    );
+}
+
+#[test]
+fn restyle_numbered_runs_keep_unambiguous_replacement_provenance() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>b</w:t></w:r></w:p>"#,
+    ));
+    doc.replace_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 1), "c")
+        .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    for (text, expected) in [("c", 32.0), ("b", 24.0)] {
+        let attrs = marks(&doc, "body", text);
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size")
+        };
+        assert_eq!(number(size.get("size")), Some(expected));
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_keep_complex_script_off_properties() {
+    for style in ["Heading1", "ScriptHeading"] {
+        let doc = open_numbered_restyle(concat!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+            r#"<w:r><w:rPr><w:bCs w:val="0"/><w:iCs w:val="0"/></w:rPr><w:t>Explicit</w:t></w:r>"#,
+            "<w:r><w:t>Inherited</w:t></w:r></w:p>",
+        ));
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", style)],
+        );
+        let explicit = marks(&doc, "body", "Explicit");
+        let inherited = marks(&doc, "body", "Inherited");
+        for key in ["boldCs", "italicCs"] {
+            assert_eq!(explicit.get(key), Some(&Any::Bool(false)));
+            assert_eq!(
+                inherited.get(key),
+                (style == "ScriptHeading").then_some(&Any::Bool(true))
+            );
+        }
+    }
 }
 
 #[test]

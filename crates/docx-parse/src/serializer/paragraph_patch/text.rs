@@ -106,6 +106,7 @@ pub(super) fn write(
         .map(|cell| Some(cell.unit.clone()))
         .collect();
     let mut formatting: Vec<Option<String>> = vec![None; retained.len()];
+    let mut symbols: Vec<Option<String>> = vec![None; retained.len()];
     let restyle = patch
         .para_deltas
         .iter()
@@ -149,6 +150,15 @@ pub(super) fn write(
                         "run target differs from deltas",
                     ));
                 }
+                let node = &lowered.xml.nodes[cell.node];
+                if node.word("sym")
+                    && attrs.get("fontFamily") != unit_attrs(&cell.unit).get("fontFamily")
+                {
+                    let replacement = symbol_bytes(source, node, &attrs)?;
+                    if replacement != source[node.span.clone()] {
+                        symbols[at] = Some(replacement);
+                    }
+                }
                 let properties = match property_cache.entry(cell.run) {
                     Entry::Occupied(entry) => entry.into_mut(),
                     Entry::Vacant(entry) => {
@@ -163,6 +173,7 @@ pub(super) fn write(
                             let deltas = properties::restyle_run_deltas(
                                 original,
                                 &edit.deltas,
+                                unit_attrs(&cell.unit),
                                 inherited.get(at).copied().unwrap_or(&empty),
                                 &edit.inherit,
                             )?;
@@ -317,7 +328,7 @@ pub(super) fn write(
     for (at, cell) in lowered.cells.iter().enumerate() {
         #[cfg(test)]
         super::work::add(1);
-        if formatting[at].is_some() {
+        if formatting[at].is_some() || symbols[at].is_some() {
             changed_runs.insert(cell.run);
         }
     }
@@ -348,6 +359,7 @@ pub(super) fn write(
         by_node: &node_cells,
         retained: &retained,
         formatting: &formatting,
+        symbols: &symbols,
     };
     let mut edits = Vec::new();
     for run in changed_runs {
@@ -393,6 +405,7 @@ struct CellWrites<'a> {
     by_node: &'a BTreeMap<usize, Vec<usize>>,
     retained: &'a [Option<UnitV1>],
     formatting: &'a [Option<String>],
+    symbols: &'a [Option<String>],
 }
 
 fn write_run(
@@ -406,6 +419,7 @@ fn write_run(
         by_node,
         retained,
         formatting,
+        symbols,
     } = writes;
     let source_run = &lowered.runs[run];
     let node = &lowered.xml.nodes[source_run.node];
@@ -469,11 +483,9 @@ fn write_run(
                 tokens.push(Token {
                     element: None,
                     properties: formatting[*at].as_deref().unwrap_or(original).to_owned(),
-                    raw: if child_node.word("sym") && formatting[*at].is_some() {
-                        symbol_bytes(source, child_node, unit_attrs(unit))?
-                    } else {
-                        source[cell.raw.clone()].to_owned()
-                    },
+                    raw: symbols[*at]
+                        .clone()
+                        .unwrap_or_else(|| source[cell.raw.clone()].to_owned()),
                     text,
                     inserted: false,
                 });

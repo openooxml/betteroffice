@@ -1031,6 +1031,11 @@ fn direct_run_attrs(formatting: &Any) -> BTreeMap<String, Any> {
     let Any::Map(formatting) = formatting else {
         return attrs;
     };
+    for key in ["boldCs", "italicCs"] {
+        if let Some(value @ Any::Bool(_)) = formatting.get(key) {
+            attrs.insert(key.to_owned(), value.clone());
+        }
+    }
     for (property, mark) in [
         ("bold", "bold"),
         ("italic", "italic"),
@@ -1064,24 +1069,139 @@ struct DirectRunFormatting {
     attrs: BTreeMap<String, Any>,
 }
 
+const AMBIGUOUS_RUN_PROVENANCE: &str = "set_paragraph_style cannot preserve direct formatting: ambiguous run formatting provenance after text edits";
+const RUN_ALIGNMENT_LIMIT: &str =
+    "set_paragraph_style cannot verify run formatting provenance within the text alignment limit";
+
+fn subsequence_positions(needle: &[char], haystack: &[char]) -> Option<(Vec<usize>, Vec<usize>)> {
+    let mut first = Vec::with_capacity(needle.len());
+    let mut start = 0;
+    for ch in needle {
+        let at = start + haystack[start..].iter().position(|value| value == ch)?;
+        first.push(at);
+        start = at + 1;
+    }
+    let mut last = vec![0; needle.len()];
+    let mut end = haystack.len();
+    for index in (0..needle.len()).rev() {
+        let at = haystack[..end]
+            .iter()
+            .rposition(|value| *value == needle[index])?;
+        last[index] = at;
+        end = at;
+    }
+    Some((first, last))
+}
+
+fn verify_run_provenance(
+    source: &[char],
+    live: &[char],
+    runs: &[DirectRunFormatting],
+) -> Result<(), &'static str> {
+    if source == live || runs.windows(2).all(|pair| pair[0].attrs == pair[1].attrs) {
+        return Ok(());
+    }
+    let mut origins = vec![0; source.len()];
+    for (index, run) in runs.iter().enumerate() {
+        origins[run.start as usize..run.end as usize].fill(index);
+    }
+    let mut occurrences: HashMap<char, Vec<(usize, usize)>> = HashMap::new();
+    for (index, ch) in source.iter().enumerate() {
+        let entries = occurrences.entry(*ch).or_default();
+        let changes = entries.last().map_or(0, |(previous, changes)| {
+            *changes + usize::from(runs[origins[*previous]].attrs != runs[origins[index]].attrs)
+        });
+        entries.push((index, changes));
+    }
+    let ambiguous = |entries: &[(usize, usize)], start: usize, end: usize| {
+        end > start && entries[end - 1].1 != entries[start].1
+    };
+    if let Some((first, last)) = subsequence_positions(live, source) {
+        for (index, ch) in live.iter().enumerate() {
+            let entries = &occurrences[ch];
+            let start = entries.partition_point(|(at, _)| *at < first[index]);
+            let end = entries.partition_point(|(at, _)| *at <= last[index]);
+            if ambiguous(entries, start, end) {
+                return Err(AMBIGUOUS_RUN_PROVENANCE);
+            }
+        }
+        return Ok(());
+    }
+    if let Some((first, last)) = subsequence_positions(source, live) {
+        for (index, ch) in live.iter().enumerate() {
+            let Some(entries) = occurrences.get(ch) else {
+                continue;
+            };
+            let start = entries.partition_point(|(at, _)| last[*at] < index);
+            let end = entries.partition_point(|(at, _)| first[*at] <= index);
+            if ambiguous(entries, start, end) {
+                return Err(AMBIGUOUS_RUN_PROVENANCE);
+            }
+        }
+        return Ok(());
+    }
+    let columns = live.len() + 1;
+    let cells = (source.len() + 1)
+        .checked_mul(columns)
+        .ok_or(RUN_ALIGNMENT_LIMIT)?;
+    if cells > 1_000_000 {
+        return Err(RUN_ALIGNMENT_LIMIT);
+    }
+    let mut suffix = vec![0u32; cells];
+    for (i, ch) in source.iter().enumerate().rev() {
+        for (j, live_ch) in live.iter().enumerate().rev() {
+            suffix[i * columns + j] = if ch == live_ch {
+                1 + suffix[(i + 1) * columns + j + 1]
+            } else {
+                suffix[(i + 1) * columns + j].max(suffix[i * columns + j + 1])
+            };
+        }
+    }
+    if suffix[0] == 0 {
+        return Err(AMBIGUOUS_RUN_PROVENANCE);
+    }
+    let mut prefix = vec![0u32; columns];
+    let mut next = vec![0u32; columns];
+    let mut matched: Vec<Option<usize>> = vec![None; live.len()];
+    for (i, ch) in source.iter().enumerate() {
+        next[0] = 0;
+        for (j, live_ch) in live.iter().enumerate() {
+            if ch == live_ch && prefix[j] + 1 + suffix[(i + 1) * columns + j + 1] == suffix[0] {
+                let origin = origins[i];
+                if matched[j].is_some_and(|previous| runs[previous].attrs != runs[origin].attrs) {
+                    return Err(AMBIGUOUS_RUN_PROVENANCE);
+                }
+                matched[j] = Some(origin);
+            }
+            next[j + 1] = if ch == live_ch {
+                prefix[j] + 1
+            } else {
+                prefix[j + 1].max(next[j])
+            };
+        }
+        std::mem::swap(&mut prefix, &mut next);
+    }
+    Ok(())
+}
+
 fn original_run_formatting(
     chunks: &[Chunk],
     properties: &BTreeMap<String, Any>,
     retained: Option<&Any>,
     node_start: u32,
     pilcrow: u32,
-) -> Option<Vec<DirectRunFormatting>> {
+) -> Result<Option<Vec<DirectRunFormatting>>, &'static str> {
     let Some(Any::Array(boundaries)) = properties.get("_originalRunBoundaries").or(retained) else {
-        return None;
+        return Ok(None);
     };
     let mut source = Vec::new();
     let mut runs = Vec::new();
     for boundary in boundaries.iter() {
         let Any::Map(boundary) = boundary else {
-            return None;
+            return Ok(None);
         };
         let Some(Any::String(text)) = boundary.get("text") else {
-            return None;
+            return Ok(None);
         };
         let start = source.len() as u32;
         source.extend(text.chars());
@@ -1098,7 +1218,7 @@ fn original_run_formatting(
         }
     }
     if runs.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut live = Vec::new();
     for chunk in chunks {
@@ -1110,6 +1230,7 @@ fn original_run_formatting(
             _ => live.extend(std::iter::repeat_n('\u{fffc}', chunk.len as usize)),
         }
     }
+    verify_run_provenance(&source, &live, &runs)?;
     let diff = ooxml_diff::diff_tokens(
         &source,
         &live,
@@ -1119,7 +1240,10 @@ fn original_run_formatting(
             ooxml_diff::LimitFallback::ReplaceMiddle,
         ),
     )
-    .ok()?;
+    .map_err(|_| RUN_ALIGNMENT_LIMIT)?;
+    if diff.coarsened && runs.windows(2).any(|pair| pair[0].attrs != pair[1].attrs) {
+        return Err(RUN_ALIGNMENT_LIMIT);
+    }
     let widths: Vec<u32> = std::iter::once(0)
         .chain(live.iter().scan(0, |width, ch| {
             *width += ch.len_utf16() as u32;
@@ -1157,7 +1281,7 @@ fn original_run_formatting(
         };
     }
     runs.retain(|run| run.start < run.end);
-    Some(runs)
+    Ok(Some(runs))
 }
 
 fn rebase_attrs(
@@ -1326,7 +1450,7 @@ pub(crate) fn plan_paragraph_style(
     style_id: &str,
     source: &crate::seed::SourceMetadata,
     story_id: &str,
-) -> StylePlan {
+) -> Result<StylePlan, &'static str> {
     let target: HashMap<&str, &Any> = next
         .properties
         .iter()
@@ -1447,11 +1571,11 @@ pub(crate) fn plan_paragraph_style(
     let retained = direct_numbering
         .then(|| source.restyle_run_boundaries(story_id, para_id))
         .flatten();
-    let direct_runs = direct_numbering
-        .then(|| {
-            original_run_formatting(chunks, properties, retained.as_ref(), node_start, pilcrow)
-        })
-        .flatten();
+    let direct_runs = if direct_numbering {
+        original_run_formatting(chunks, properties, retained.as_ref(), node_start, pilcrow)?
+    } else {
+        None
+    };
     let previous_style = match properties.get("pStyle") {
         Some(Any::String(style)) => Some(style.as_ref()),
         _ => None,
@@ -1487,6 +1611,11 @@ pub(crate) fn plan_paragraph_style(
             .copied()
             .chain(old_inherited.keys().map(String::as_str))
             .chain(new_inherited.keys().map(String::as_str))
+            .chain(
+                ["boldCs", "italicCs"]
+                    .into_iter()
+                    .filter(|_| direct_numbering),
+            )
             .filter(|key| !PROTECTED_ATTRS.contains(key))
             .collect();
         let ranges: Vec<_> = match &direct_runs {
@@ -1514,11 +1643,19 @@ pub(crate) fn plan_paragraph_style(
                 }
                 let current = present(chunk.attrs.get(*key));
                 let wanted = if direct_numbering {
+                    let authored = direct.and_then(|direct| direct.get(*key));
+                    let effective = if matches!(*key, "boldCs" | "italicCs") {
+                        current
+                            .or(authored)
+                            .or_else(|| present(old_inherited.get(*key)))
+                    } else {
+                        current
+                    };
                     rebase_style_attr(
-                        current,
+                        effective,
                         present(old_inherited.get(*key)),
                         present(new_inherited.get(*key)),
-                        direct.and_then(|direct| direct.get(*key)),
+                        authored,
                     )
                 } else {
                     let follows_style = STYLE_CONTROLLED_MARKS.contains(key)
@@ -1538,12 +1675,12 @@ pub(crate) fn plan_paragraph_style(
             }
         }
     }
-    StylePlan {
+    Ok(StylePlan {
         para_id: para_id.to_owned(),
         pilcrow,
         properties: changes,
         formats,
-    }
+    })
 }
 
 impl EditingDoc {

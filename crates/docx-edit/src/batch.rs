@@ -1703,7 +1703,8 @@ fn plan_style<T: ReadTxn>(
         style_id,
         source,
         &target.story,
-    );
+    )
+    .map_err(|message| unsupported(message, &requested))?;
     Ok(Planned {
         index,
         story: target.story.clone(),

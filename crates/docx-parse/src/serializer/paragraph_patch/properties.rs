@@ -96,9 +96,25 @@ struct Change {
     children: BTreeMap<&'static str, Change>,
 }
 
+fn normalized_run_attrs(attrs: &Attrs) -> Attrs {
+    let mut result = attrs.clone();
+    if let Some(value @ Value::String(_)) = result.get("highlight") {
+        let value = serde_json::json!({"color": value});
+        result.insert("highlight".to_owned(), value);
+    }
+    if let Some(Value::Object(underline)) = result.get_mut("underline")
+        && let Some(value @ Value::String(_)) = underline.get("color")
+    {
+        let value = serde_json::json!({"rgb": value});
+        underline.insert("color".to_owned(), value);
+    }
+    result
+}
+
 pub(super) fn restyle_run_deltas(
     source: &str,
     deltas: &[AttrDeltaV1],
+    seeded: &Attrs,
     previous: &Attrs,
     next: &Attrs,
 ) -> Result<Vec<AttrDeltaV1>, Failure> {
@@ -107,6 +123,16 @@ pub(super) fn restyle_run_deltas(
     } else {
         super::verify::formatting(source, false)?
     };
+    let mut seeded = normalized_run_attrs(seeded);
+    let previous = normalized_run_attrs(previous);
+    let next = normalized_run_attrs(next);
+    for key in ["boldCs", "italicCs"] {
+        if !seeded.contains_key(key)
+            && let Some(value @ Value::Bool(_)) = direct.get(key).or_else(|| previous.get(key))
+        {
+            seeded.insert(key.to_owned(), value.clone());
+        }
+    }
     let authored = |path: &[String]| {
         let has = |key: &str| direct.get(key).is_some_and(|value| !value.is_null());
         match path.first().map(String::as_str) {
@@ -130,14 +156,9 @@ pub(super) fn restyle_run_deltas(
     let mut direct_deltas = Vec::new();
     for delta in deltas {
         expand(delta, &mut |path, after| {
-            let before = slot(&delta.before)
-                .and_then(|value| {
-                    path[delta.path.len()..]
-                        .iter()
-                        .try_fold(value, |value, key| value.get(key))
-                })
-                .filter(|value| !value.is_null());
-            if authored(path) || before != attr_at(previous, path) || after != attr_at(next, path) {
+            let before = attr_at(&seeded, path);
+            if authored(path) || before != attr_at(&previous, path) || after != attr_at(&next, path)
+            {
                 let slot = |value: Option<&Value>| {
                     value.map_or(SlotV1::Missing, |value| SlotV1::Present {
                         value: value.clone(),

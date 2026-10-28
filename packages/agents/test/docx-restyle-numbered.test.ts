@@ -194,6 +194,45 @@ test('inherited run formatting stays inherited after saving and restyling back',
   expect(heading.attributes.bold ?? null).toBeNull();
 }, 30_000);
 
+test('inherited highlight stays inherited after saving and restyling back', async () => {
+  const source = await restyleFixture();
+  const zip = await JSZip.loadAsync(source.bytes);
+  const styles = source.styles
+    .replace('<w:contextualSpacing/></w:pPr></w:style>',
+      '<w:contextualSpacing/></w:pPr><w:rPr><w:highlight w:val="yellow"/></w:rPr></w:style>')
+    .replace('<w:sz w:val="32"/></w:rPr></w:style>',
+      '<w:sz w:val="32"/><w:highlight w:val="green"/></w:rPr></w:style>');
+  expect(styles).toContain('<w:highlight w:val="yellow"/>');
+  expect(styles).toContain('<w:highlight w:val="green"/>');
+  zip.file('word/styles.xml', styles);
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  await doc.edit({
+    version: doc.list().version,
+    edits: [{ op: 'set_paragraph_style', paragraph: item(doc, 'Some heading').ref, style: 'heading 1' }],
+  });
+  const part = doc.session.paragraphSavePlan().splicedParts!
+    .find(entry => entry.part === 'word/document.xml')!;
+  expect(part.paragraphPatches?.map(patch => patch.ordinal)).toContain(0);
+  expect((part.legacyParagraphs ?? []).filter(entry => entry.ordinal === 0)).toEqual([]);
+  const restyled = doc.session.storySegments('body')
+    .find(segment => segment.kind === 'text' && segment.text.includes('Some heading'))!;
+  expect(restyled.attributes.highlight).toBe('green');
+  const bytes = await doc.export();
+  const saved = await JSZip.loadAsync(bytes);
+  expect(byText(await saved.file('word/document.xml')!.async('string'), 'Some heading')).toBe(
+    HEADING.replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
+  const reopened = await open(bytes);
+  await reopened.edit({
+    version: reopened.list().version,
+    edits: [{ op: 'set_paragraph_style', paragraph: item(reopened, 'Some heading').ref, style: 'List Paragraph' }],
+  });
+  const restored = await JSZip.loadAsync(await reopened.export());
+  expect(byText(await restored.file('word/document.xml')!.async('string'), 'Some heading')).toBe(HEADING);
+  const heading = reopened.session.storySegments('body')
+    .find(segment => segment.kind === 'text' && segment.text.includes('Some heading'))!;
+  expect(heading.attributes.highlight).toBe('yellow');
+}, 30_000);
+
 test('set_paragraph_style still refuses a style that defines list numbering', async () => {
   const source = await restyleFixture();
   const doc = await open(source.bytes);

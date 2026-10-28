@@ -1248,6 +1248,150 @@ fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
 }
 
 #[test]
+fn paragraph_patch_symbol_font_changes_even_when_run_properties_match() {
+    let source = concat!(
+        "<w:p><w:r><w:rPr><w:rFonts w:ascii='Arial' w:hAnsi='Arial' w:eastAsia='Arial' w:cs='Arial'/></w:rPr>",
+        "<w:sym w:font='Wingdings' w:char='0041'/></w:r></w:p>",
+    );
+    let fonts = |name| json!({"ascii": name, "hAnsi": name, "eastAsia": name, "cs": name});
+    let old = fonts("Wingdings");
+    let new = fonts("Arial");
+    let target = json!({"fontFamily": new});
+    let mut plan = patch(
+        vec![text("A", json!({"fontFamily": old}))],
+        vec![text("A", target.clone())],
+    );
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: vec![delta("fontFamily", Some(old), Some(new))],
+        target: attrs(target),
+        inherit: Attrs::new(),
+    });
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("w:font='Wingdings'", "w:font='Arial'")
+    );
+}
+
+fn numbered_run_restyle(
+    before: Value,
+    after: Value,
+    previous: Value,
+    next: Value,
+) -> ParagraphPatchV1 {
+    let old = attrs(before.clone());
+    let new = attrs(after.clone());
+    let mut plan = patch(vec![text("x", before)], vec![text("x", after.clone())]);
+    plan.seed.properties = attrs(json!({"pStyle": "Body24", "numPr": {"numId": 43, "ilvl": 0}}));
+    seed_inheritance(&mut plan, json!({}), json!([previous.clone()]), previous);
+    plan.mark_inherit = attrs(next.clone());
+    plan.para_deltas = vec![delta(
+        "pStyle",
+        Some(json!("Body24")),
+        Some(json!("Heading1")),
+    )];
+    plan.run_edits.push(RunEditV1 {
+        from: 0,
+        to: 1,
+        deltas: super::attr_deltas(&old, &new),
+        target: new,
+        inherit: attrs(next),
+    });
+    let mut properties = plan.seed.properties.clone();
+    properties.insert("pStyle".to_owned(), json!("Heading1"));
+    plan.result_sha256 = result_sha256(&[text("x", after)], &properties);
+    plan
+}
+
+#[test]
+fn paragraph_patch_restyle_normalizes_inherited_run_fields() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for (before, after) in [
+        (
+            json!({"highlight": "yellow"}),
+            json!({"highlight": "green"}),
+        ),
+        (
+            json!({"highlight": {"color": "yellow"}}),
+            json!({"highlight": "green"}),
+        ),
+        (
+            json!({"highlight": "#FF0000"}),
+            json!({"highlight": "#00FF00"}),
+        ),
+        (
+            json!({"underline": {"style": "single", "color": "FF0000"}}),
+            json!({"underline": {"style": "double", "color": {"rgb": "00FF00"}}}),
+        ),
+        (
+            json!({"textColor": {"rgb": "FF0000"}}),
+            json!({"textColor": {"rgb": "00FF00", "themeColor": "accent1"}}),
+        ),
+        (
+            json!({"fontFamily": {"ascii": "Arial", "csTheme": "minorHAnsi"}}),
+            json!({"fontFamily": {"ascii": "Calibri", "csTheme": "majorBidi"}}),
+        ),
+    ] {
+        let plan = numbered_run_restyle(before.clone(), after.clone(), before, after);
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("w:val='Body24'", "w:val='Heading1'")
+        );
+    }
+    let source = source.replace("<w:noProof/>", "<w:noProof/><w:highlight w:val='yellow'/>");
+    let plan = numbered_run_restyle(
+        json!({"highlight": "yellow"}),
+        json!({"highlight": "green"}),
+        json!({"highlight": "yellow"}),
+        json!({"highlight": "green"}),
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap(),
+        source
+            .replace("w:val='Body24'", "w:val='Heading1'")
+            .replace("w:val='yellow'", "w:val='green'")
+    );
+}
+
+#[test]
+fn paragraph_patch_restyle_keeps_complex_script_fields_inherited_or_direct() {
+    let source = concat!(
+        "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for previous in [false, true] {
+        let plan = numbered_run_restyle(
+            json!({}),
+            json!({"boldCs": !previous, "italicCs": !previous}),
+            json!({"boldCs": previous, "italicCs": previous}),
+            json!({"boldCs": !previous, "italicCs": !previous}),
+        );
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("w:val='Body24'", "w:val='Heading1'")
+        );
+    }
+    let source = source.replace(
+        "<w:noProof/>",
+        "<w:bCs w:val='0'/><w:iCs w:val='0'/><w:noProof/>",
+    );
+    let plan = numbered_run_restyle(
+        json!({}),
+        json!({"boldCs": false, "italicCs": false}),
+        json!({}),
+        json!({"boldCs": true, "italicCs": true}),
+    );
+    assert_eq!(
+        write(&source, &plan).unwrap(),
+        source.replace("w:val='Body24'", "w:val='Heading1'")
+    );
+}
+
+#[test]
 fn paragraph_patch_restyle_keeps_inherited_run_properties_out_of_xml() {
     for direct_size in ["", "sz", "szCs"] {
         for target_size in [32, 40] {
