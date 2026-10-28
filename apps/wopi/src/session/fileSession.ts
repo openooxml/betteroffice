@@ -147,6 +147,7 @@ export class FileSession {
   #lastModifiedTime: string | null = null;
   #itemVersion: string | null = null;
   #lockHeld = false;
+  #lockNeedsRecovery = false;
   #lastLockRefreshAt = 0;
   #lockDeadline: number | null = null;
   #refreshFailures = 0;
@@ -328,7 +329,16 @@ export class FileSession {
     if (connectedCount >= max) {
       throw new SessionError("tooManyEditors", "max editors per file reached");
     }
-    const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+    let info: CheckFileInfo;
+    try {
+      info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+    } catch (err) {
+      if (err instanceof WopiHostError && err.kind === "unauthorized") {
+        const user = this.#history.find((candidate) => candidate.accessToken === input.accessToken);
+        if (user) this.#markTokenDead(user);
+      }
+      throw err;
+    }
     const wantsWrite = input.mode === "edit" && info.UserCanWrite === true && info.ReadOnly !== true;
     const first = this.#replica === null;
     if (first) {
@@ -360,7 +370,7 @@ export class FileSession {
     }
     this.#checkLockLease();
     const lockHeldBefore = this.#lockHeld;
-    if (!this.#lockHeld && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost") && wantsWrite) {
+    if (!this.#lockHeld && (this.#viewOnlyReason === null || this.#lockNeedsRecovery) && wantsWrite) {
       try {
         await this.#attemptLock(input.accessToken);
       } catch (err) {
@@ -372,6 +382,7 @@ export class FileSession {
     if (lockJustAcquired) {
       try {
         await this.#refreshSourceUnderLock(input.accessToken);
+        this.#lockNeedsRecovery = false;
         if (this.#viewOnlyReason === "lockLost") {
           this.#viewOnlyReason = null;
           this.#emit("writable", {});
@@ -465,6 +476,7 @@ export class FileSession {
     this.#clearLeaseTimer();
     this.#destroyReplica();
     this.#lockHeld = false;
+    this.#lockNeedsRecovery = false;
     this.#viewOnlyReason = null;
     this.#leader = null;
     this.#journalActive = false;
@@ -617,7 +629,7 @@ export class FileSession {
       return;
     } catch (err) {
       if (!(err instanceof WopiHostError) || (err.kind !== "lockMismatch" && err.kind !== "conflict")) throw err;
-      if (this.#viewOnlyReason === "lockLost") {
+      if (this.#lockNeedsRecovery) {
         this.#scheduleRefresh();
         return;
       }
@@ -728,7 +740,7 @@ export class FileSession {
     const next = this.#syncLeader();
     if (previous?.id !== next?.id) {
       if (this.dirty) this.#scheduleAutosave();
-      if (next && (this.#lockHeld || this.#viewOnlyReason === "lockLost") && !suppressRefresh) {
+      if (next && (this.#lockHeld || this.#lockNeedsRecovery) && !suppressRefresh) {
         await this.#refreshLockNow();
         this.#scheduleRefresh();
       }
@@ -769,15 +781,16 @@ export class FileSession {
 
   #loseLock(): void {
     this.#lockHeld = false;
+    this.#lockNeedsRecovery = true;
     this.#clearLeaseTimer();
-    if (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost") {
+    if (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "lockedElsewhere") {
       this.#setViewOnly("lockLost");
     }
   }
 
   #scheduleRefresh(): void {
     this.#clearTimer("refresh");
-    if ((!this.#lockHeld && this.#viewOnlyReason !== "lockLost") || this.#state !== "open") return;
+    if ((!this.#lockHeld && !this.#lockNeedsRecovery) || this.#state !== "open") return;
     const backoff = Math.min(1000 * 2 ** Math.min(Math.max(this.#refreshFailures - 1, 0), 6), 60000);
     let delay = this.#refreshFailures > 0 || !this.#lockHeld ? backoff : LOCK_REFRESH_MS;
     if (this.#lockDeadline !== null) delay = Math.min(delay, Math.max(0, this.#lockDeadline - this.#now()));
@@ -793,11 +806,11 @@ export class FileSession {
 
   async #refreshLockNow(): Promise<void> {
     this.#checkLockLease();
-    if (!this.#lockHeld && this.#viewOnlyReason !== "lockLost") return;
+    if (!this.#lockHeld && !this.#lockNeedsRecovery) return;
     const tried = new Set<string>();
     let tokenUser: UserSession | null = this.#leader && this.#leader.isTokenValidAt(this.#now()) ? this.#leader : this.#pickToken([]);
     while (tokenUser) {
-      const refreshing = this.#lockHeld && this.#viewOnlyReason !== "lockLost";
+      const refreshing = this.#lockHeld && !this.#lockNeedsRecovery;
       const deadline = this.#lockDeadline;
       const requestedAt = this.#now();
       try {
@@ -814,11 +827,12 @@ export class FileSession {
         this.#renewLock(requestedAt);
         if (!refreshing) {
           await this.#refreshSourceUnderLock(tokenUser.accessToken);
+          this.#lockNeedsRecovery = false;
           if (this.#viewOnlyReason === "lockLost") {
             this.#viewOnlyReason = null;
             this.#emit("writable", {});
-            if (this.dirty) this.#scheduleAutosave();
           }
+          if (this.dirty) this.#scheduleAutosave();
         }
         return;
       } catch (err) {
@@ -872,6 +886,7 @@ export class FileSession {
     }
     this.#syncLeader();
     for (const candidate of affected) this.#emit("userInvalidated", { userId: candidate.id, reason: "unauthorized" });
+    this.#enqueueTask(() => this.#maybeCloseAfterDeparture(affected));
   }
 
   /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
@@ -1211,7 +1226,13 @@ export class FileSession {
             if (editor) {
               try {
                 await this.#attemptLock(editor.accessToken);
-                if (this.#lockHeld) await this.#refreshSourceUnderLock(editor.accessToken);
+                if (this.#lockHeld) {
+                  await this.#refreshSourceUnderLock(editor.accessToken);
+                  this.#lockNeedsRecovery = false;
+                } else if (this.dirty) {
+                  this.#loseLock();
+                  this.#scheduleRefresh();
+                }
               } catch {
                 this.#loseLock();
                 this.#scheduleRefresh();
@@ -1238,6 +1259,7 @@ export class FileSession {
       try {
         await this.#host.unlock({ wopiSrc: this.wopiSrc, accessToken: current.accessToken, lock: this.lockId });
         this.#lockHeld = false;
+        this.#lockNeedsRecovery = false;
         this.#clearLeaseTimer();
         this.#clearTimer("refresh");
         return true;
@@ -1296,6 +1318,7 @@ export class FileSession {
     this.#history = [];
     this.#leader = null;
     this.#lockHeld = false;
+    this.#lockNeedsRecovery = false;
     this.#state = "closed";
     this.#emit("closed", {});
     this.#deps.onClosed?.(this);
