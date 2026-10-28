@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createOfficeMcpServer } from './mcp';
 import { renderDocxPage } from './render';
+import { writeStartupDiagnostics } from './diagnostics';
 
 try {
   const { values } = parseArgs({ options: { root: { type: 'string' }, 'read-only': { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
@@ -12,6 +13,7 @@ try {
     if (!values.root) throw new Error('--root <directory> is required.');
     const server = await createOfficeMcpServer({ root: values.root, readOnly: values['read-only'], renderer: renderDocxPage });
     await server.connect(new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 1024 * 1024 }));
+    writeStartupDiagnostics();
   }
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
