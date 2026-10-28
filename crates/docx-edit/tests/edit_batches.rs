@@ -1776,6 +1776,150 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
     }
 }
 
+fn open_numbered_restyle(body: &str) -> EditingDoc {
+    let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
+    let styles = format!(
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style></w:styles>"#
+    );
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/styles.xml")
+        .unwrap()
+        .1 = styles.into_bytes();
+    open_package(&ooxml_opc::rezip_parts(&parts).unwrap())
+}
+
+#[test]
+fn restyle_numbered_runs_keep_direct_values_equal_to_the_old_style() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Explicit</w:t></w:r>"#,
+        "<w:r><w:t>Inherited</w:t></w:r></w:p>",
+    ));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    for (text, expected) in [("Explicit", 24.0), ("Inherited", 32.0)] {
+        let attrs = marks(&doc, "body", text);
+        let Some(Any::Map(size)) = attrs.get("fontSize") else {
+            panic!("missing run size");
+        };
+        assert_eq!(number(size.get("size")), Some(expected));
+        assert!(size.get("sizeCs").is_none());
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_keep_explicit_off_properties() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        r#"<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Explicit</w:t></w:r>"#,
+        "<w:r><w:t>Inherited</w:t></w:r></w:p>",
+    ));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    assert!(!active(&marks(&doc, "body", "Explicit"), "bold"));
+    assert!(active(&marks(&doc, "body", "Inherited"), "bold"));
+}
+
+#[test]
+fn restyle_empty_numbered_paragraph_merges_direct_mark_properties() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr>"#,
+        "<w:rPr><w:i/></w:rPr></w:pPr></w:p>",
+    ));
+    let before = properties(&doc, "00000001");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let after = properties(&doc, "00000001");
+    let Some(Any::Map(defaults)) = after.get("defaultTextFormatting") else {
+        panic!("missing paragraph defaults");
+    };
+    assert_eq!(number(defaults.get("fontSize")), Some(32.0));
+    assert_eq!(defaults.get("italic"), Some(&Any::Bool(true)));
+    assert_eq!(after.get("numPr"), before.get("numPr"));
+    let Some(Any::Map(before_direct)) = before.get("_originalFormatting") else {
+        panic!("missing source formatting");
+    };
+    let Some(Any::Map(after_direct)) = after.get("_originalFormatting") else {
+        panic!("missing source formatting");
+    };
+    assert_eq!(
+        after_direct.get("runProperties"),
+        before_direct.get("runProperties")
+    );
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_eq!(part.paragraph_patches.len(), 1);
+    assert!(part.paragraph_patches[0].run_edits.is_empty());
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Typed",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let attrs = marks(&doc, "body", "Typed");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing typed run size");
+    };
+    assert_eq!(number(size.get("size")), Some(32.0));
+    assert!(active(&attrs, "italic"));
+}
+
+#[test]
+fn restyle_numbered_paragraph_keeps_unexplained_mark_changes_for_fallback() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr>"#,
+        "<w:rPr><w:i/></w:rPr></w:pPr></w:p>",
+    ));
+    doc.set_paragraph_default_format(
+        &EditCtx::local("", ""),
+        &ParaSelector::One("00000001".to_owned()),
+        Some(&std::collections::BTreeMap::from([
+            ("fontSize".to_owned(), Any::Number(28.0)),
+            ("italic".to_owned(), Any::Bool(true)),
+        ])),
+    )
+    .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let after = properties(&doc, "00000001");
+    let Some(Any::Map(defaults)) = after.get("defaultTextFormatting") else {
+        panic!("missing paragraph defaults");
+    };
+    assert_eq!(number(defaults.get("fontSize")), Some(28.0));
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert!(part.paragraph_patches.is_empty());
+    assert_eq!(part.legacy_paragraphs.len(), 1);
+    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
+}
+
 #[test]
 fn restyle_numbered_paragraphs_keep_direct_numbering_and_formatting() {
     for ilvl in [0, 2] {

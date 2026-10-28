@@ -21,7 +21,7 @@
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yrs::types::Attrs;
@@ -992,6 +992,123 @@ fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
 }
 
+fn rebase_style_attr(
+    current: Option<&Any>,
+    previous: Option<&Any>,
+    next: Option<&Any>,
+    direct: Option<&Any>,
+) -> Option<Any> {
+    if present(direct).is_some_and(|value| !matches!(value, Any::Map(_))) {
+        return current.cloned();
+    }
+    let maps = [current, previous, next, direct].map(|value| match value {
+        Some(Any::Map(value)) => Some(value),
+        _ => None,
+    });
+    if maps.iter().any(Option::is_some) {
+        let keys: BTreeSet<_> = maps.iter().flatten().flat_map(|map| map.keys()).collect();
+        let merged: HashMap<_, _> = keys
+            .into_iter()
+            .filter_map(|key| {
+                let [current, previous, next, direct] =
+                    maps.map(|map| map.and_then(|map| present(map.get(key))));
+                rebase_style_attr(current, previous, next, direct).map(|value| (key.clone(), value))
+            })
+            .collect();
+        return (!merged.is_empty()).then(|| Any::Map(Arc::new(merged)));
+    }
+    if current == previous {
+        next.cloned()
+    } else {
+        current.cloned()
+    }
+}
+
+fn direct_run_attrs(formatting: &Any) -> BTreeMap<String, Any> {
+    let mut attrs: BTreeMap<_, _> =
+        crate::seed::mark_run_attrs(formatting).into_iter().collect();
+    let Any::Map(formatting) = formatting else {
+        return attrs;
+    };
+    for (property, mark) in [
+        ("bold", "bold"),
+        ("italic", "italic"),
+        ("underline", "underline"),
+        ("strike", "strike"),
+        ("doubleStrike", "strike"),
+        ("color", "textColor"),
+        ("highlight", "highlight"),
+        ("shading", "highlight"),
+        ("allCaps", "allCaps"),
+        ("smallCaps", "smallCaps"),
+        ("emboss", "emboss"),
+        ("imprint", "imprint"),
+        ("shadow", "textShadow"),
+        ("outline", "textOutline"),
+        ("hidden", "hidden"),
+        ("rtl", "rtl"),
+        ("vertAlign", "superscript"),
+        ("vertAlign", "subscript"),
+    ] {
+        if present(formatting.get(property)).is_some() {
+            attrs.entry(mark.to_owned()).or_insert(Any::Bool(true));
+        }
+    }
+    attrs
+}
+
+struct DirectRunFormatting {
+    start: u32,
+    end: u32,
+    attrs: BTreeMap<String, Any>,
+}
+
+fn original_run_formatting(
+    chunks: &[Chunk],
+    properties: &BTreeMap<String, Any>,
+    node_start: u32,
+    pilcrow: u32,
+) -> Option<Vec<DirectRunFormatting>> {
+    let Some(Any::Array(boundaries)) = properties.get("_originalRunBoundaries") else {
+        return None;
+    };
+    let mut source = String::new();
+    let mut runs = Vec::new();
+    let mut start = node_start;
+    for boundary in boundaries.iter() {
+        let Any::Map(boundary) = boundary else {
+            return None;
+        };
+        let Some(Any::String(text)) = boundary.get("text") else {
+            return None;
+        };
+        let end = start + crate::ops::utf16_len(text);
+        source.push_str(text);
+        if start < end {
+            runs.push(DirectRunFormatting {
+                start,
+                end,
+                attrs: boundary
+                    .get("formatting")
+                    .map(direct_run_attrs)
+                    .unwrap_or_default(),
+            });
+        }
+        start = end;
+    }
+    let mut live = String::new();
+    for chunk in chunks {
+        if chunk.start < node_start || chunk.start >= pilcrow {
+            continue;
+        }
+        let ChunkKind::Text(text) = &chunk.kind else {
+            return None;
+        };
+        live.push_str(text);
+    }
+    (start == pilcrow && source == live).then_some(runs)
+}
+
 fn rebase_attrs(
     current: &BTreeMap<String, Any>,
     old: &BTreeMap<String, Any>,
@@ -1176,6 +1293,27 @@ pub(crate) fn plan_paragraph_style(
         present(properties.get("numPr")).is_some() && !target.contains_key("numPr");
     let mut changes = Vec::new();
     for key in crate::seed::style_resolved_keys() {
+        if direct_numbering && key == DEFAULT_TEXT_FORMATTING {
+            let direct = match properties.get("_originalFormatting") {
+                Some(Any::Map(original)) => present(original.get("runProperties")),
+                _ => None,
+            };
+            let current = present(properties.get(key));
+            let previous = previous
+                .properties
+                .iter()
+                .find_map(|(name, value)| (name == key).then_some(value));
+            let wanted = rebase_style_attr(
+                current,
+                present(previous),
+                present(target.get(key).copied()),
+                direct,
+            );
+            if wanted.as_ref() != current {
+                changes.push((key.to_owned(), wanted));
+            }
+            continue;
+        }
         if direct_numbering
             && matches!(properties.get("_originalFormatting"), Some(Any::Map(original))
                 if present(original.get(formatting_key(key))).is_some())
@@ -1253,6 +1391,9 @@ pub(crate) fn plan_paragraph_style(
         .collect();
     keys.sort_unstable();
     keys.dedup();
+    let direct_runs = direct_numbering
+        .then(|| original_run_formatting(chunks, properties, node_start, pilcrow))
+        .flatten();
     let mut formats = Vec::new();
     for chunk in chunks {
         if !matches!(chunk.kind, crate::ops::ChunkKind::Text(_))
@@ -1262,25 +1403,56 @@ pub(crate) fn plan_paragraph_style(
             continue;
         }
         let linked = chunk.attr_active(crate::format::HYPERLINK);
-        let mut attrs = Vec::new();
-        for key in &keys {
-            if linked && matches!(*key, "textColor" | "underline") {
-                continue;
+        let ranges: Vec<_> = match &direct_runs {
+            Some(runs) => {
+                let start = runs.partition_point(|run| run.end <= chunk.start);
+                let end = runs.partition_point(|run| run.start < chunk.end());
+                runs[start..end]
+                    .iter()
+                    .map(|run| {
+                        (
+                            chunk.start.max(run.start),
+                            chunk.end().min(run.end),
+                            Some(&run.attrs),
+                        )
+                    })
+                    .collect()
             }
-            let current = present(chunk.attrs.get(*key));
-            let follows_style = (!direct_numbering && STYLE_CONTROLLED_MARKS.contains(key))
-                || current == present(old_run.get(key).copied());
-            let wanted = if follows_style {
-                present(new_run.get(key).copied())
-            } else {
-                current
-            };
-            if wanted != current {
-                attrs.push(((*key).to_owned(), wanted.cloned().unwrap_or(Any::Null)));
+            None => vec![(chunk.start, chunk.end(), None)],
+        };
+        for (start, end, direct) in ranges {
+            let mut attrs = Vec::new();
+            for key in &keys {
+                if linked && matches!(*key, "textColor" | "underline") {
+                    continue;
+                }
+                let current = present(chunk.attrs.get(*key));
+                let wanted = if direct_numbering {
+                    match direct {
+                        Some(direct) => rebase_style_attr(
+                            current,
+                            present(old_run.get(key).copied()),
+                            present(new_run.get(key).copied()),
+                            direct.get(*key),
+                        ),
+                        None => current.cloned(),
+                    }
+                } else {
+                    let follows_style = STYLE_CONTROLLED_MARKS.contains(key)
+                        || current == present(old_run.get(key).copied());
+                    if follows_style {
+                        present(new_run.get(key).copied()).cloned()
+                    } else {
+                        current.cloned()
+                    }
+                };
+                if wanted.as_ref() != current {
+                    attrs.push(((*key).to_owned(), wanted.unwrap_or(Any::Null)));
+                }
             }
-        }
-        if !attrs.is_empty() {
-            formats.push((chunk.start, chunk.len, attrs));
+            if !attrs.is_empty() {
+                formats.push((start, end - start, attrs));
+            }
         }
     }
     StylePlan {

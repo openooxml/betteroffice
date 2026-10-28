@@ -891,6 +891,7 @@ fn validate_theme_fonts(
 fn validate_carriers(
     before: &Snapshot,
     after: &Snapshot,
+    seeded_inherit: &Attrs,
     inherited: &Attrs,
     context: &PatchContext<'_>,
     patchable_restyle: bool,
@@ -922,7 +923,35 @@ fn validate_carriers(
                 }
             }
             "bookmarks" => true,
-            "defaultTextFormatting" => patchable_restyle,
+            "defaultTextFormatting" => {
+                let value = |slot: &SlotV1| match slot {
+                    SlotV1::Present { value } if !value.is_null() => Some(value.clone()),
+                    _ => None,
+                };
+                let direct = |snapshot: &Snapshot| {
+                    snapshot
+                        .carriers
+                        .get("_originalFormatting")
+                        .and_then(|value| value.get("runProperties"))
+                        .and_then(|value| {
+                            change.path[1..]
+                                .iter()
+                                .try_fold(value, |value, key| value.get(key))
+                        })
+                        .is_some_and(|value| !value.is_null())
+                };
+                patchable_restyle
+                    && !direct(before)
+                    && !direct(after)
+                    && value(&change.before)
+                        == attr_at(seeded_inherit, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+                    && value(&change.after)
+                        == attr_at(inherited, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+            }
             "spacingExplicit" => {
                 deltas(&before.properties, &after.properties)
                     .iter()
@@ -1143,7 +1172,14 @@ pub(crate) fn diff_paragraph_v1(
     let para_deltas = deltas(&before.properties, &after.properties);
     validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
-    validate_carriers(&before, &after, &para_inherit, &context, patchable_restyle)?;
+    validate_carriers(
+        &before,
+        &after,
+        &seeded_properties,
+        &para_inherit,
+        &context,
+        patchable_restyle,
+    )?;
     validate_deltas(
         &para_deltas,
         if patchable_restyle {
@@ -1639,6 +1675,33 @@ mod tests {
         let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
         assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
         assert!(legacy.detail.starts_with("restyle:"));
+    }
+
+    #[test]
+    fn numbered_restyle_with_an_unexplained_mark_change_is_not_a_patch() {
+        let paragraph = |style: &str, italic: bool| {
+            paragraph(
+                "x",
+                json!({
+                    "pStyle": style,
+                    "numPr": {"numId": 43, "ilvl": 0},
+                    "defaultTextFormatting": {"italic": italic},
+                    "_originalFormatting": {
+                        "styleId": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "runProperties": {"italic": true}
+                    }
+                }),
+            )
+        };
+        let legacy = diff_paragraph_v1(
+            &paragraph("ListParagraph", true),
+            &paragraph("Heading1", false),
+            context(),
+        )
+        .unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedKey);
+        assert_eq!(legacy.detail, "key:defaultTextFormatting.italic");
     }
 
     #[test]
