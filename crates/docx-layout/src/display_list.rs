@@ -6559,8 +6559,10 @@ fn emit_line(
         attrs.and_then(|attrs| attrs.auto_space_dn),
     );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
-    let leading_inline_box =
-        geom.is_first_line && attrs.and_then(|attrs| attrs.leading_inline_box.as_ref()).is_some();
+    let leading_inline_box = geom.is_first_line
+        && attrs
+            .and_then(|attrs| attrs.leading_inline_box.as_ref())
+            .is_some();
     let authoritative_items =
         authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
     let authoritative_active = authoritative_items.is_some();

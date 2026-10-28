@@ -51,7 +51,10 @@ fn document(body: &str, numbering: Option<&str>) -> Vec<u8> {
         ),
     ];
     if let Some(numbering) = numbering {
-        parts.push(("word/numbering.xml".to_owned(), numbering.as_bytes().to_vec()));
+        parts.push((
+            "word/numbering.xml".to_owned(),
+            numbering.as_bytes().to_vec(),
+        ));
     }
     let numbering_rel = if numbering.is_some() {
         r#"<Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#
@@ -111,10 +114,16 @@ fn origin(display: &docx_layout::display_list::DisplayList, text: &str) -> (f64,
                 .is_some_and(|value| !value.is_empty() && text.starts_with(value))
         })
         .unwrap();
-    if let Some(glyph) = primitive["glyphs"].as_array().and_then(|glyphs| glyphs.first()) {
+    if let Some(glyph) = primitive["glyphs"]
+        .as_array()
+        .and_then(|glyphs| glyphs.first())
+    {
         (glyph["x"].as_f64().unwrap(), glyph["y"].as_f64().unwrap())
     } else {
-        (primitive["x"].as_f64().unwrap(), primitive["baselineY"].as_f64().unwrap())
+        (
+            primitive["x"].as_f64().unwrap(),
+            primitive["baselineY"].as_f64().unwrap(),
+        )
     }
 }
 
@@ -141,7 +150,10 @@ fn sized_picture_bullet_advances_only_the_first_paragraph_without_numbered_text(
                 .as_f64()
                 .unwrap();
             near((baseline - top) * 0.75, height);
-            near(origin(&display, "Second").0, origin(&base_display, "Second").0);
+            near(
+                origin(&display, "Second").0,
+                origin(&base_display, "Second").0,
+            );
             assert_eq!(
                 layout["measured"][0]["block"]["runs"],
                 base_layout["measured"][0]["block"]["runs"]
@@ -168,8 +180,14 @@ fn picture_bullet_moves_an_existing_inline_picture_to_its_baseline() {
     };
     let base = image(&base);
     let image = image(&display);
-    near((image["x"].as_f64().unwrap() - base["x"].as_f64().unwrap()) * 0.75, 216.0);
-    near((image["y"].as_f64().unwrap() - base["y"].as_f64().unwrap()) * 0.75, 167.4);
+    near(
+        (image["x"].as_f64().unwrap() - base["x"].as_f64().unwrap()) * 0.75,
+        216.0,
+    );
+    near(
+        (image["y"].as_f64().unwrap() - base["y"].as_f64().unwrap()) * 0.75,
+        167.4,
+    );
 }
 
 #[test]
@@ -205,11 +223,14 @@ fn table_first_picture_bullet_wraps_cell_text_below_its_line() {
     near(cell["lines"][0]["ascent"].as_f64().unwrap() * 0.75, 216.0);
     assert!(cell["lines"].as_array().unwrap().len() > base_cell["lines"].as_array().unwrap().len());
     assert!(origin(&display, "Cell").1 - origin(&base_display, "Cell").1 >= 288.0);
-    near(origin(&display, "After").0, origin(&base_display, "After").0);
-    let start = layout["measured"][0]["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"][0]
-        ["pmStart"]
-        .as_f64()
-        .unwrap() as i64;
+    near(
+        origin(&display, "After").0,
+        origin(&base_display, "After").0,
+    );
+    let start =
+        layout["measured"][0]["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"][0]["pmStart"]
+            .as_f64()
+            .unwrap() as i64;
     let caret = docx_layout::hit::caret_rect(&display, start).unwrap();
     near(caret.x, origin(&display, "Cell").0);
 }
@@ -267,10 +288,18 @@ fn empty_first_paragraph_reserves_the_box_and_other_stories_do_not() {
     let body = format!("{}{}", paragraph(1, ""), paragraph(2, "Second"));
     let xml = numbering(&bullet("width:3in;height:3in"), false);
     let (engine, layout, _) = render(&document(&body, Some(&xml)));
-    near(layout["measured"][0]["measure"]["lines"][0]["ascent"].as_f64().unwrap(), 288.0);
+    near(
+        layout["measured"][0]["measure"]["lines"][0]["ascent"]
+            .as_f64()
+            .unwrap(),
+        288.0,
+    );
     assert!(layout["measured"][1]["block"]["attrs"]["leadingInlineBox"].is_null());
     for story in ["header:1", "footer:1", "fn:1", "en:1"] {
-        engine.doc().create_story(story, "Other", "Normal", "left").unwrap();
+        engine
+            .doc()
+            .create_story(story, "Other", "Normal", "left")
+            .unwrap();
         let (blocks, _) =
             yrs_doc_to_mapped_layout_blocks(engine.doc(), story, &RenderEnv::default()).unwrap();
         let blocks = serde_json::to_value(blocks).unwrap();

@@ -108,7 +108,9 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
             clusters.retain_mut(|cluster| {
                 cluster.run_index = cluster.run_index.and_then(|index| index.checked_sub(1));
                 if has_box {
-                    cluster.x_offset = cluster.x_offset.map(|offset| (offset - size.width).max(0.0));
+                    cluster.x_offset = cluster
+                        .x_offset
+                        .map(|offset| (offset - size.width).max(0.0));
                 }
                 cluster.run_index.is_some()
             });
