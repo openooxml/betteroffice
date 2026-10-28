@@ -3698,6 +3698,11 @@ fn measure_table_with_compat_shift(
     config: &MeasurementConfig,
     apply_compat_shift: bool,
 ) -> Result<TableExtent, String> {
+    for row in &mut table.rows {
+        for cell in &mut row.cells {
+            crate::paragraph_spacing::apply_list_auto_spacing_blocks(&mut cell.blocks);
+        }
+    }
     let percentage_basis = if apply_compat_shift {
         table_percentage_basis(table, content_width)
     } else {
