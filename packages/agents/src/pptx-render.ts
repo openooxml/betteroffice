@@ -67,13 +67,13 @@ export interface PptxThemeFonts { major: string[]; minor: string[] }
  * package's central directory, inflating only the theme parts.
  */
 export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
-  const fonts: PptxThemeFonts = { major: [], minor: [] };
+  const fonts = { major: new Set<string>(), minor: new Set<string>() };
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = -1;
   for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 65_557); at--) {
     if (view.getUint32(at, true) === 0x06054b50) { end = at; break; }
   }
-  if (end < 0) return fonts;
+  if (end < 0) return { major: [], minor: [] };
   const text = new TextDecoder();
   let entry = view.getUint32(end + 16, true);
   for (let index = view.getUint16(end + 10, true); index > 0 && entry + 46 <= bytes.length; index--) {
@@ -90,20 +90,22 @@ export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
     let xml: string;
     try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
     xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, '');
-    const stack: { kind?: 'major' | 'minor'; latin: boolean }[] = [];
+    const stack: { local: string; kind?: 'major' | 'minor' }[] = [];
+    const found = { major: false, minor: false };
     for (const [, closing, name, attributes] of xml.matchAll(/<(\/?)([^\s/<>!?]+)(\s(?:[^"'<>]|"[^"<]*"|'[^'<]*')*|\/?)>/g)) {
       if (closing) { stack.pop(); continue; }
       const local = name.slice(name.lastIndexOf(':') + 1);
       const parent = stack.at(-1);
-      if (local === 'latin' && parent?.kind && !parent.latin) {
-        parent.latin = true;
+      if (local === 'latin' && parent?.kind && !found[parent.kind] && stack.at(-2)?.local === 'fontScheme') {
+        found[parent.kind] = true;
         const family = attributes.match(/(?:^|\s)typeface\s*=\s*(["'])([\s\S]*?)\1/)?.[2];
-        if (family && !fonts[parent.kind].includes(family)) fonts[parent.kind].push(family);
+        if (family) fonts[parent.kind].add(family);
+        if (found.major && found.minor) break;
       }
-      if (!/\/\s*$/.test(attributes)) stack.push({ kind: local === 'majorFont' ? 'major' : local === 'minorFont' ? 'minor' : undefined, latin: false });
+      if (!/\/\s*$/.test(attributes)) stack.push({ local, kind: local === 'majorFont' ? 'major' : local === 'minorFont' ? 'minor' : undefined });
     }
   }
-  return fonts;
+  return { major: [...fonts.major], minor: [...fonts.minor] };
 }
 
 /** Every run style the slides use, Arial first so the renderer's first face is the same for every call. */

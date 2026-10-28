@@ -101,6 +101,16 @@ test('PPTX theme fonts scan large repetitive comments within two seconds', async
   expect(elapsed).toBeLessThan(2000);
 });
 
+test('PPTX theme fonts read only the font scheme, not font elements in extensions', async () => {
+  const zip = new JSZip();
+  const decoys = Array.from({ length: 20000 }, (_, index) => `<a:majorFont><a:latin typeface="Decoy ${index}"/></a:majorFont><a:minorFont><a:latin typeface="Other ${index}"/></a:minorFont>`).join('');
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements><a:extLst><a:ext uri="{00000000-0000-0000-0000-000000000000}">${decoys}</a:ext></a:extLst></a:theme>`);
+  const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const started = performance.now();
+  expect(pptxThemeFonts(bytes)).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+  expect(performance.now() - started).toBeLessThan(2000);
+});
+
 test('PPTX previews measure runs without a face in the theme fonts the export uses', async () => {
   const handle = openPresentation(await presentationFixture());
   const registered: string[] = [];
