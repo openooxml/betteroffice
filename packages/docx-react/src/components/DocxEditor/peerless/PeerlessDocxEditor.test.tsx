@@ -1135,6 +1135,17 @@ test('custom fonts fetch bytes for worker faces without global CSS and wait for 
   expect(document.head.innerHTML).toBe(original);
 });
 
+function selectWorkerText() {
+  const snapshot = binding!.viewStore.getSnapshot();
+  snapshot.workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
+  snapshot.editState = { ...snapshot.editState!, toolbar: {
+    paraId: 'a', bold: false, italic: false, underline: false, strike: false, superscript: false, subscript: false,
+    fontFamily: 'Calibri', fontSize: 22, color: null, highlight: null, styleId: null, alignment: null,
+    paragraphProperties: {}, hasSelection: true, isMultiParagraph: false, inTable: false,
+    isSingleEmbed: false, embedKind: null, isImage: false, inInsertion: false, inDeletion: false,
+  } };
+}
+
 test('a script typed after open loads its fallback face once and a covered script loads nothing', async () => {
   fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
   const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
@@ -1207,7 +1218,7 @@ test('a requirements hint during a toolbar font pick waits for the pick instead 
   await waitFor(() => expect(binding).toBeDefined());
   const worker = workers[0]!;
   const { session, incarnation, epoch } = worker.initial!;
-  binding!.viewStore.getSnapshot().workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
+  selectWorkerText();
   let picked: Promise<unknown> | undefined;
   await act(async () => { picked = ref.current!.commands.execute('fontFamily', { family: 'Picked' }); });
   await waitFor(() => expect(picking).toBe(true));
@@ -1247,7 +1258,7 @@ test('an aborted toolbar font pick whose loader never settles no longer holds fo
   await waitFor(() => expect(binding).toBeDefined());
   const worker = workers[0]!;
   const { session, incarnation, epoch } = worker.initial!;
-  binding!.viewStore.getSnapshot().workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
+  selectWorkerText();
   await act(async () => { void ref.current!.commands.execute('fontFamily', { family: 'Picked' }); });
   await waitFor(() => expect(picking).toBe(true));
   view.rerender(<DocxEditor {...peerlessProps} ref={ref} measurementFontProvider={{ resolve: () => undefined }} />);
