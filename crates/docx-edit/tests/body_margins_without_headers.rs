@@ -11,9 +11,8 @@ fn document(header: Option<&str>, footer: Option<&str>, title: bool, even: bool)
     let references: String = [("header", header), ("footer", footer)]
         .into_iter()
         .filter_map(|(kind, variant)| {
-            variant.map(|variant| {
-                format!(r#"<w:{kind}Reference w:type="{variant}" r:id="{kind}"/>"#)
-            })
+            variant
+                .map(|variant| format!(r#"<w:{kind}Reference w:type="{variant}" r:id="{kind}"/>"#))
         })
         .collect();
     let title = if title { "<w:titlePg/>" } else { "" };
