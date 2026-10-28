@@ -74,3 +74,46 @@ fn builder_emits_a_sorted_manifest_and_verified_faces() {
         json!({ "format": 1, "pack": "synthetic", "version": "1.2.3", "faces": expected })
     );
 }
+
+#[test]
+fn builder_refuses_an_existing_output_and_leaves_no_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    let out = temp.path().join("out");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("A-Regular.ttf"), common::synthetic(42)).unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_fontpack"))
+            .args(["build", "--src"])
+            .arg(&src)
+            .arg("--out")
+            .arg(&out)
+            .args(["--pack", "synthetic", "--version", "1.2.3"])
+            .output()
+            .unwrap()
+    };
+    let first = run();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let manifest = fs::read(out.join("manifest.json")).unwrap();
+    let face = fs::read(out.join("A-Regular.ttf.zst")).unwrap();
+
+    fs::write(src.join("A-Regular.ttf"), common::synthetic(43)).unwrap();
+    fs::write(src.join("A-Bold.ttf"), common::synthetic(44)).unwrap();
+    let second = run();
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("already exists"));
+    assert_eq!(fs::read(out.join("manifest.json")).unwrap(), manifest);
+    assert_eq!(fs::read(out.join("A-Regular.ttf.zst")).unwrap(), face);
+    assert!(!out.join("A-Bold.ttf.zst").exists());
+
+    let mut entries: Vec<_> = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["out", "src"]);
+}

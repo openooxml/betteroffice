@@ -93,8 +93,11 @@ last `-`, or the entire stem when there is no `-`.
 `version` is a semantic version. `encodedLength` is the complete frame size in
 bytes; `byteLength` is the decoded size. `sha256` is the lowercase hexadecimal
 SHA-256 of decoded bytes. The builder decodes and compares every face before
-writing its manifest. Display family names, weights, styles, scripts and metric
-compatibility remain in the TypeScript manifest and are not fields in schema 1.
+writing its manifest. It refuses an existing output directory, writes the whole
+pack into a staging directory beside it and renames that into place, so a
+failed build never leaves a partial or mixed pack. Display family names,
+weights, styles, scripts and metric compatibility remain in the TypeScript
+manifest and are not fields in schema 1.
 
 ## Raw wasm ABI
 

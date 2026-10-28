@@ -4,7 +4,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::Serialize;
@@ -195,7 +195,39 @@ fn build(options: Options) -> Result<()> {
             }
         }
     }
-    fs::create_dir_all(&options.out)?;
+    if fs::symlink_metadata(&options.out).is_ok() {
+        return Err(invalid(format!(
+            "output {} already exists; remove it before rebuilding",
+            options.out.display()
+        ))
+        .into());
+    }
+    let name = options
+        .out
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| invalid("invalid output directory name"))?;
+    let parent = match options.out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(".{name}.partial-{}", std::process::id()));
+    fs::create_dir(&staging)?;
+    let written = write_pack(&options, &sources, &dictionaries, &staging)
+        .and_then(|()| fs::rename(&staging, &options.out).map_err(Into::into));
+    if written.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    written
+}
+
+fn write_pack(
+    options: &Options,
+    sources: &[Source],
+    dictionaries: &[Option<usize>],
+    staging: &Path,
+) -> Result<()> {
     let mut faces = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         let dictionary = dictionaries[index].map(|index| &sources[index]);
@@ -208,7 +240,7 @@ fn build(options: Options) -> Result<()> {
             );
         }
         let file = format!("{}.zst", source.file);
-        fs::write(options.out.join(&file), &encoded)?;
+        fs::write(staging.join(&file), &encoded)?;
         faces.push(Face {
             file,
             source: source.file.clone(),
@@ -223,13 +255,13 @@ fn build(options: Options) -> Result<()> {
     faces.sort_by(|left, right| left.file.cmp(&right.file));
     let manifest = Manifest {
         format: 1,
-        pack: options.pack,
-        version: options.version,
+        pack: options.pack.clone(),
+        version: options.version.clone(),
         faces,
     };
     let mut json = serde_json::to_vec_pretty(&manifest)?;
     json.push(b'\n');
-    fs::write(options.out.join("manifest.json"), json)?;
+    fs::write(staging.join("manifest.json"), json)?;
     Ok(())
 }
 
