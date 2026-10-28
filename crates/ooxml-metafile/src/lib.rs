@@ -223,9 +223,10 @@ fn plus_header(bytes: &[u8], budget: &SharedBudget) -> Option<bool> {
 }
 
 /// GDI records that put marks on the page.
-const DRAWING_RECORDS: [u32; 48] = [
+const DRAWING_RECORDS: [u32; 50] = [
     2, 3, 4, 5, 6, 7, 8, 15, 41, 42, 43, 44, 45, 46, 47, 53, 54, 55, 56, 62, 63, 64, 71, 72, 73,
-    74, 76, 77, 78, 79, 80, 81, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 96, 97, 108, 114, 116, 118,
+    74, 76, 77, 78, 79, 80, 81, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 96, 97, 102, 103, 108, 114,
+    116, 118,
 ];
 
 /// The raster operation that leaves the destination as it is.

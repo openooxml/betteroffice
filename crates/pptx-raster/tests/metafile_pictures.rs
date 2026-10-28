@@ -1,6 +1,9 @@
 use ooxml_text::FontStore;
 use pptx_edit::DeckSession;
-use pptx_raster::{AssetMap, RenderResources, render_png};
+use pptx_raster::{
+    AssetMap, GlyphCache, ImageCache, RenderOptions, RenderResources, render_png,
+    render_slide_shared,
+};
 use pptx_render::SlideRenderer;
 use tiny_skia::Pixmap;
 
@@ -38,4 +41,44 @@ fn text_and_bitmap_with_line_paint_inside_their_picture_frames() {
     }
     assert_eq!(pixels.pixel(95, 95).unwrap().red(), 255);
     assert_eq!(session.save().unwrap(), saved);
+}
+
+#[test]
+fn a_metafile_picture_rerenders_when_a_font_is_registered() {
+    let fixture = include_bytes!("../../pptx-render/tests/fixtures/metafile-svg-pictures.pptx");
+    let session = DeckSession::open(fixture, 320).unwrap();
+    let list = SlideRenderer::new()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let images: AssetMap<'_> = session
+        .package()
+        .media
+        .iter()
+        .map(|part| (part.part_path.as_str(), part.bytes.as_slice()))
+        .collect();
+    let mut fonts = FontStore::new();
+    let mut cache = ImageCache::default();
+    let first = render_slide_shared(
+        &list,
+        &RenderResources::new(&fonts, &images),
+        &RenderOptions::default(),
+        &mut GlyphCache::default(),
+        &mut cache,
+    )
+    .unwrap();
+    fonts
+        .register(
+            include_bytes!("../../../packages/fonts/assets/LiberationSans-Regular.ttf").to_vec(),
+        )
+        .unwrap();
+    let second = render_slide_shared(
+        &list,
+        &RenderResources::new(&fonts, &images),
+        &RenderOptions::default(),
+        &mut GlyphCache::default(),
+        &mut cache,
+    )
+    .unwrap();
+    assert_ne!(first.bytes, second.bytes);
 }

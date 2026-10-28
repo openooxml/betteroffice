@@ -654,6 +654,19 @@ fn a_dual_emf_whose_gdi_records_draw_nothing_draws_nothing() {
 }
 
 #[test]
+fn a_dual_emf_whose_gdi_side_draws_only_with_opengl_records_plays_its_emf_plus_records() {
+    for kind in [102, 103] {
+        let drawing = replay(&plus_fill_with_gdi(true, (kind, Vec::new()))).unwrap();
+        assert!(
+            shapes(&drawing.ops)
+                .iter()
+                .any(|shape| shape.fill == Some(Paint::Solid(Rgba::BLACK))),
+            "record {kind}"
+        );
+    }
+}
+
+#[test]
 fn a_nested_dual_emf_whose_gdi_records_draw_nothing_plays_its_emf_plus_records() {
     let inner = plus_fill_with_gdi(true, (76, bitblt(0x00AA_0029)));
     let mut image = u32s(&[0xDBC0_1002, 2, 3, inner.len() as u32]);

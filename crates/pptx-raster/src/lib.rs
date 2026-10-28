@@ -1331,6 +1331,7 @@ pub struct ImageCache {
     retained: u64,
     cap: u64,
     metafiles: pptx_edit::MetafileSvgCache,
+    fontdb: Option<(u64, usize, Arc<resvg::usvg::fontdb::Database>)>,
 }
 
 type ImageKey = (u64, u64);
@@ -1351,6 +1352,7 @@ impl Default for ImageCache {
             retained: 0,
             cap: MAX_CACHED_IMAGE_BYTES,
             metafiles: Default::default(),
+            fontdb: None,
         }
     }
 }
@@ -1377,11 +1379,14 @@ impl ImageCache {
         budget: &mut ImageBudget,
         fonts: Option<&FontStore>,
     ) -> Option<DecodedImage> {
+        let metafile = ooxml_metafile::is_metafile(bytes);
+        let source = key.0;
+        let key = if metafile { metafile_key(key, fonts) } else { key };
         if let Some(image) = self.decoded.get(&key) {
             return Some(image.clone());
         }
-        let svg = if ooxml_metafile::is_metafile(bytes) {
-            Some(self.metafiles.resolve(&key.0.to_string(), bytes)?)
+        let svg = if metafile {
+            Some(self.metafiles.resolve(&source.to_string(), bytes)?)
         } else {
             None
         };
@@ -1389,7 +1394,12 @@ impl ImageCache {
             let left = (MAX_SLIDE_IMAGE_PIXELS.saturating_sub(budget.pixels))
                 .min(MAX_SLIDE_IMAGE_BYTES.saturating_sub(budget.bytes) / 8)
                 .min(MAX_IMAGE_PIXELS);
-            let image = svg::parse_metafile(&svg, left, fonts).ok()?;
+            let fontdb = if svg::has_text_element(&svg) {
+                fonts.map(|fonts| self.fontdb_for(fonts))
+            } else {
+                None
+            };
+            let image = svg::parse_metafile(&svg, left, fontdb).ok()?;
             budget.charge(image.pixels(), image.pixels().saturating_mul(8))?;
             let intrinsic = image.intrinsic();
             let (data, size) = image.render().ok()?;
@@ -1399,6 +1409,18 @@ impl ImageCache {
         };
         self.remember(key, image.clone());
         Some(image)
+    }
+
+    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<resvg::usvg::fontdb::Database> {
+        let generation = (fonts.id(), fonts.font_count());
+        if let Some((id, count, fontdb)) = &self.fontdb
+            && (*id, *count) == generation
+        {
+            return Arc::clone(fontdb);
+        }
+        let fontdb = svg::metafile_fontdb(fonts);
+        self.fontdb = Some((generation.0, generation.1, Arc::clone(&fontdb)));
+        fontdb
     }
 
     /// Keeps a decode while the cache has room; oldest insertions evict first.
@@ -1416,6 +1438,19 @@ impl ImageCache {
         self.order.push_back(key);
         self.decoded.insert(key, image);
     }
+}
+
+fn font_generation(fonts: Option<&FontStore>) -> (u64, usize) {
+    fonts.map_or((0, 0), |fonts| (fonts.id(), fonts.font_count()))
+}
+
+fn metafile_key(key: ImageKey, fonts: Option<&FontStore>) -> ImageKey {
+    let (id, count) = font_generation(fonts);
+    let mut hasher = DefaultHasher::new();
+    key.0.hash(&mut hasher);
+    id.hash(&mut hasher);
+    count.hash(&mut hasher);
+    (hasher.finish(), key.1)
 }
 
 /// An asset id plus its encoded bytes identify a decode: an id that starts
@@ -1723,6 +1758,23 @@ mod tests {
 
     fn resources<'a>(fonts: &'a FontStore, images: &'a AssetMap<'a>) -> RenderResources<'a> {
         RenderResources::new(fonts, images)
+    }
+
+    #[test]
+    fn metafile_keys_and_fontdb_track_the_font_store_generation() {
+        const FONT: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/LiberationSans-Regular.ttf");
+        let mut fonts = FontStore::new();
+        let key = image_key("a.emf", &[1, 2, 3], &[]);
+        let empty = metafile_key(key, Some(&fonts));
+        let mut cache = ImageCache::default();
+        let first = cache.fontdb_for(&fonts);
+        assert!(Arc::ptr_eq(&first, &cache.fontdb_for(&fonts)));
+        fonts.register(FONT.to_vec()).unwrap();
+        assert_ne!(empty, metafile_key(key, Some(&fonts)));
+        let second = cache.fontdb_for(&fonts);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &cache.fontdb_for(&fonts)));
     }
 
     #[test]

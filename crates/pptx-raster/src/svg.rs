@@ -308,11 +308,25 @@ pub(crate) fn parse_within(bytes: &[u8], pixels: u64) -> Result<SvgImage, SvgRef
     Ok(SvgImage { tree, size, pixels })
 }
 
+pub(crate) fn metafile_fontdb(fonts: &ooxml_text::FontStore) -> Arc<usvg::fontdb::Database> {
+    let mut fontdb = usvg::fontdb::Database::new();
+    for index in 0..fonts.font_count() {
+        if let Ok(bytes) = fonts.font_bytes(ooxml_text::FontId::from_u32(index as u32)) {
+            fontdb.load_font_data(bytes.to_vec());
+        }
+    }
+    Arc::new(fontdb)
+}
+
+pub(crate) fn has_text_element(bytes: &[u8]) -> bool {
+    bytes.windows(5).any(|window| window == b"<text")
+}
+
 /// Accepts only output of the bounded metafile player.
 pub(crate) fn parse_metafile(
     bytes: &[u8],
     budget: u64,
-    fonts: Option<&ooxml_text::FontStore>,
+    fontdb: Option<Arc<usvg::fontdb::Database>>,
 ) -> Result<SvgImage, SvgRefusal> {
     if bytes.len() > MAX_SVG_BYTES {
         return Err(SvgRefusal::DocumentTooLarge);
@@ -365,12 +379,8 @@ pub(crate) fn parse_metafile(
             usvg::ImageKind::JPEG(data)
         })
     });
-    if let Some(fonts) = fonts {
-        for index in 0..fonts.font_count() {
-            if let Ok(bytes) = fonts.font_bytes(ooxml_text::FontId::from_u32(index as u32)) {
-                options.fontdb_mut().load_font_data(bytes.to_vec());
-            }
-        }
+    if let Some(fontdb) = fontdb {
+        options.fontdb = fontdb;
     }
     let tree = guarded(|| usvg::Tree::from_xmltree(&document, &options))?
         .map_err(|_| SvgRefusal::Unparsable)?;

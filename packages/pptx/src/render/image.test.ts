@@ -444,4 +444,10 @@ describe('engine metafile SVG display copies', () => {
     const blob = presentationImageBlob(metafileImageBytes(bytes, () => { throw new Error('unexpected replay'); }));
     expect(blob.type).toBe('image/bmp');
   });
+
+  test('bitmap wrapper EMF and WMF keep their original bytes without resolving', () => {
+    for (const bytes of [bitmapMetafile(), enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)])]) {
+      expect(metafileImageBytes(bytes, () => { throw new Error('unexpected replay'); })).toBe(bytes);
+    }
+  });
 });

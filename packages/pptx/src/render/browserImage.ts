@@ -192,7 +192,7 @@ function declarationEnd(text: string, from: number): number {
  * path already draws it (a plain bitmap wrapper). Other images are unchanged.
  */
 export function metafileImageBytes(bytes: Uint8Array, resolve?: () => Uint8Array | undefined): Uint8Array {
-  if (!resolve || (!emfData(bytes) && wmfStart(bytes) < 0) || wmfBitmap(bytes) || emfBitmap(bytes)) return bytes;
+  if (!resolve || (!emfData(bytes) && wmfStart(bytes) < 0) || wmfBitmap(bytes, true) || emfBitmap(bytes, true)) return bytes;
   return resolve() ?? new Uint8Array();
 }
 
@@ -209,7 +209,7 @@ function wmfStart(bytes: Uint8Array): number {
     data.getUint16(start + 2, true) === 9 && data.getUint16(start + 4, true) === 0x0300 ? start : -1;
 }
 
-function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
+function emfBitmap(bytes: Uint8Array, check?: boolean): Uint8Array<ArrayBuffer> | undefined {
   const data = emfData(bytes);
   if (!data || data.byteLength < 108) return;
   const header = data.getUint32(4, true);
@@ -240,10 +240,10 @@ function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
     data.getUint32(end, true) !== 14 ||
     data.getUint32(end + 4, true) !== data.byteLength - end
   ) return;
-  return dibBitmap(bytes.subarray(header + bmi, end), width, height);
+  return dibBitmap(bytes.subarray(header + bmi, end), width, height, check);
 }
 
-function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
+function wmfBitmap(bytes: Uint8Array, check?: boolean): Uint8Array<ArrayBuffer> | undefined {
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const start = wmfStart(bytes);
   if (start < 0 || data.getUint32(start + 6, true) * 2 !== data.byteLength - start) return;
@@ -291,7 +291,8 @@ function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
       bitmap = dibBitmap(
         bytes.subarray(offset + 26, offset + size),
         data.getInt16(offset + 12, true),
-        data.getInt16(offset + 10, true)
+        data.getInt16(offset + 10, true),
+        check
       );
       if (!bitmap) return;
     } else return;
@@ -302,7 +303,8 @@ function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
 function dibBitmap(
   bytes: Uint8Array,
   sourceWidth: number,
-  sourceHeight: number
+  sourceHeight: number,
+  check?: boolean
 ): Uint8Array<ArrayBuffer> | undefined {
   if (bytes.length < 40) return;
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -319,8 +321,8 @@ function dibBitmap(
     data.getUint32(32, true) !== 0
   ) return;
   const pixelBytes = Math.ceil(width * bits / 32) * 4 * Math.abs(height);
-  const declaredBytes = data.getUint32(20, true);
-  if (40 + pixelBytes !== bytes.length || (declaredBytes !== 0 && declaredBytes !== pixelBytes)) return;
+  if (40 + pixelBytes !== bytes.length || ![0, pixelBytes].includes(data.getUint32(20, true))) return;
+  if (check) return new Uint8Array();
   const bitmap = new Uint8Array(14 + bytes.length);
   const header = new DataView(bitmap.buffer);
   header.setUint16(0, 0x4d42, true);
