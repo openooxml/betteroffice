@@ -857,7 +857,9 @@
       "center": null,
       "right": null,
       "decimal": null,
-      "bar": null
+      "bar": null,
+      "clear": null,
+      "num": null
     },
     "horizontal": "Linijka pozioma",
     "vertical": "Linijka pionowa",

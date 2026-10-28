@@ -30,7 +30,7 @@ export function formatKeys(keys: string): string {
   return keys;
 }
 
-function localizeKeys(keys: string, t: TFunction): string {
+export function localizeKeys(keys: string, t: TFunction): string {
   return formatKeys(keys)
     .replace(/Page Down/g, t('dialogs.keyboardShortcuts.keys.pageDown'))
     .replace(/Page Up/g, t('dialogs.keyboardShortcuts.keys.pageUp'))

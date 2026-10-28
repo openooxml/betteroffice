@@ -857,7 +857,9 @@
       "center": null,
       "right": null,
       "decimal": null,
-      "bar": null
+      "bar": null,
+      "clear": null,
+      "num": null
     },
     "horizontal": "水平标尺",
     "vertical": "垂直标尺",

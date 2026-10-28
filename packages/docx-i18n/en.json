@@ -912,7 +912,9 @@
       "center": "Center",
       "right": "Right",
       "decimal": "Decimal",
-      "bar": "Bar"
+      "bar": "Bar",
+      "clear": "Clear",
+      "num": "List"
     },
     "horizontal": "Horizontal ruler",
     "vertical": "Vertical ruler",

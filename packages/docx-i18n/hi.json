@@ -866,7 +866,9 @@
       "center": null,
       "right": null,
       "decimal": null,
-      "bar": null
+      "bar": null,
+      "clear": null,
+      "num": null
     },
     "horizontal": "क्षैतिज रूलर",
     "vertical": "लंबवत रूलर",
