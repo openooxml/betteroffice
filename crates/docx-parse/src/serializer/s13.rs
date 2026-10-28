@@ -1297,30 +1297,26 @@ impl StoryParts<'_> {
                 &mut reasons,
             )
         } else {
-            super::splice::splice_story_part(
+            super::splice::splice_source_direct(
                 source,
                 &serialized,
                 &written,
                 part,
                 assignments,
                 patches,
-                &mut reasons,
             )
-        };
-        let spliced = spliced.or_else(|| {
-            if strict {
-                None
-            } else {
-                super::splice::splice_source_direct(
+            .or_else(|| {
+                super::splice::splice_story_part(
                     source,
                     &serialized,
                     &written,
                     part,
                     assignments,
                     patches,
+                    &mut reasons,
                 )
-            }
-        });
+            })
+        };
         if let Some(spliced) = spliced {
             for reason in reasons {
                 count_replace(context, &part.part, 0, &reason)?;

@@ -259,7 +259,10 @@ function withoutSyntheticParagraphs(
   if (synthetic.size === 0) return document;
   return mapStoryParagraphs(document, (paragraph) => {
     const key = projectedSessionKey(paragraph);
-    return paragraph.content.length === 0 && key !== undefined && synthetic.has(key)
+    const empty = paragraph.content.every(node =>
+      node.type === 'run' && node.content.every(content => content.type === 'break')
+    );
+    return empty && key !== undefined && synthetic.has(key)
       ? null
       : paragraph;
   });

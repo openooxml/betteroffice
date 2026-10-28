@@ -1442,6 +1442,118 @@ fn splice_fragments<'a>(
     Some(fragments)
 }
 
+struct XmlPositions<'a> {
+    elements: Vec<(&'a str, Range<usize>, Option<usize>)>,
+    paragraphs: Vec<usize>,
+}
+
+fn xml_positions(xml: &str) -> Option<XmlPositions<'_>> {
+    let mut positions = XmlPositions {
+        elements: Vec::new(),
+        paragraphs: Vec::new(),
+    };
+    let mut stack: Vec<usize> = Vec::new();
+    for tag in tags(xml)? {
+        if tag.end {
+            let index = stack.pop()?;
+            let (name, span, _) = positions.elements.get_mut(index)?;
+            if *name != tag.name {
+                return None;
+            }
+            span.end = tag.range.end;
+            continue;
+        }
+        let index = positions.elements.len();
+        positions
+            .elements
+            .push((tag.name, tag.range, stack.last().copied()));
+        if tag.name == "w:p" {
+            positions.paragraphs.push(index);
+        }
+        if !tag.empty {
+            stack.push(index);
+        }
+    }
+    stack.is_empty().then_some(positions)
+}
+
+fn insertion_offsets(
+    source: &str,
+    serialized: &str,
+    recorded: &RecordedParagraphs,
+    inserted: &[(S13SpliceAnchor, &str)],
+) -> Option<Vec<usize>> {
+    if inserted.is_empty() {
+        return Some(Vec::new());
+    }
+    let source = xml_positions(source)?;
+    let target = xml_positions(serialized)?;
+    let entries = recorded_entries(serialized, recorded)?;
+    let mut written = HashMap::new();
+    let mut added = Vec::new();
+    for (paragraph, entry) in target.paragraphs.iter().zip(entries) {
+        if let Some(entry) = entry {
+            match recorded.order[entry] {
+                Some(ordinal) => {
+                    written.insert(ordinal, *paragraph);
+                }
+                None => added.push(*paragraph),
+            }
+        }
+    }
+    if added.len() != inserted.len() {
+        return None;
+    }
+    inserted
+        .iter()
+        .zip(added)
+        .map(|((anchor, _), paragraph)| {
+            let parent = target.elements[paragraph].2?;
+            if !PARENTS.contains(&target.elements[parent].0) {
+                return None;
+            }
+            let mut projected = *written.get(&anchor.ordinal())?;
+            let original_paragraph = *source.paragraphs.get(anchor.ordinal() as usize)?;
+            let mut original = original_paragraph;
+            while target.elements[projected].2 != Some(parent) {
+                projected = target.elements[projected].2?;
+                original = source.elements[original].2?;
+                if target.elements[projected].0 != source.elements[original].0 {
+                    return None;
+                }
+            }
+            let source_parent = source.elements[original].2?;
+            if source.elements[source_parent].0 != target.elements[parent].0 {
+                return None;
+            }
+            let span = &source.elements[original].1;
+            let after = matches!(anchor, S13SpliceAnchor::After(_));
+            let target_span = &target.elements[projected].1;
+            let paragraph_span = &target.elements[paragraph].1;
+            if (after && target_span.end > paragraph_span.start)
+                || (!after && target_span.start < paragraph_span.end)
+            {
+                return None;
+            }
+            if original != original_paragraph
+                && (!matches!(source.elements[original].0, "w:tbl" | "w:sdt")
+                    || recorded.written.keys().any(|ordinal| {
+                        let at = source.elements[source.paragraphs[*ordinal as usize]].1.start;
+                        span.contains(&at)
+                            && if after {
+                                *ordinal > anchor.ordinal()
+                            } else {
+                                *ordinal < anchor.ordinal()
+                            }
+                    }))
+            {
+                return None;
+            }
+            Some(if after { span.end } else { span.start })
+        })
+        .collect()
+}
+
 fn replacement_xml(source: &str, at: usize, serialized: &str, xml: &str) -> Option<String> {
     if xml.is_empty() {
         return Some(String::new());
@@ -1599,9 +1711,6 @@ pub(crate) fn splice_source_direct(
     }
     let inserted = placed(recorded, &part.inserted)?;
     let occurrences = paragraph_occurrences(source)?;
-    if occurrences.len() != part.paragraphs.len() + removed.len() {
-        return None;
-    }
     let mut spans = BTreeMap::new();
     for &ordinal in recorded.written.keys().chain(&removed) {
         let occurrence = occurrences
@@ -1641,46 +1750,17 @@ pub(crate) fn splice_source_direct(
             return None;
         }
     }
-    const MARKERS: [&str; 7] = [
-        "w:bookmarkStart",
-        "w:bookmarkEnd",
-        "w:commentRangeStart",
-        "w:commentRangeEnd",
-        "w:commentReference",
-        "w:permStart",
-        "w:permEnd",
-    ];
+    let rows = row_edits(source, serialized, recorded, &inserted, &removed, &[])?;
+    if !rows.edits.is_empty() {
+        return None;
+    }
     for (anchor, xml) in &inserted {
         let ordinal = anchor.ordinal();
-        if !in_story(&ordinal)
-            || layout.parents.get(&ordinal).copied() == Some("w:tc")
-            || !simple(xml)?
-        {
+        if !in_story(&ordinal) || !simple(xml)? {
             return None;
         }
         let edges = layout.edges.get(&ordinal)?;
-        let admitted = match anchor {
-            S13SpliceAnchor::After(_) => {
-                !edges.field_after
-                    && match edges.after {
-                        Some((name, true)) => PARENTS.contains(&name),
-                        Some((name, false)) => {
-                            matches!(name, "w:p" | "w:tbl" | "w:sectPr" | "w:sdt")
-                        }
-                        None => false,
-                    }
-            }
-            S13SpliceAnchor::Before(_) => match edges.before {
-                Some((name, false)) => PARENTS.contains(&name),
-                Some((name, true)) => matches!(name, "w:tcPr" | "w:sdt"),
-                None => false,
-            },
-        };
-        let neighbour = match anchor {
-            S13SpliceAnchor::After(_) => edges.after,
-            S13SpliceAnchor::Before(_) => edges.before,
-        };
-        if !admitted || neighbour.is_some_and(|(name, _)| MARKERS.contains(&name)) {
+        if matches!(anchor, S13SpliceAnchor::After(_)) && edges.field_after {
             return None;
         }
     }
@@ -1744,12 +1824,10 @@ pub(crate) fn splice_source_direct(
     for &ordinal in &removed {
         edits.push((span(ordinal)?, 2, String::new()));
     }
-    for (anchor, xml) in &inserted {
-        let range = span(anchor.ordinal())?;
-        edits.push(match anchor {
-            S13SpliceAnchor::After(_) => (range.end..range.end, 0, (*xml).to_owned()),
-            S13SpliceAnchor::Before(_) => (range.start..range.start, 1, (*xml).to_owned()),
-        });
+    let offsets = insertion_offsets(&source, serialized, recorded, &inserted)?;
+    for ((anchor, xml), at) in inserted.iter().zip(offsets) {
+        let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
+        edits.push((at..at, rank, (*xml).to_owned()));
     }
     let edits = edits
         .iter()
@@ -1900,6 +1978,156 @@ mod tests {
                 &BTreeMap::new()
             ),
             Some(body(&format!("{heading}{inserted}{start}{end}")))
+        );
+    }
+
+    const INSERTED: &str = "<w:p><w:r><w:t>Inserted</w:t></w:r></w:p>";
+    const RETAINED: &str = concat!(
+        "<w:p w:rsidR=\"00112233\"><w:r><w:rPr><w:lang w:val=\"en-CA\"/>",
+        "<w:color w:val=\"auto\"/></w:rPr><w:t>Retained</w:t></w:r>",
+        "<w:r><mc:AlternateContent xmlns:v=\"urn:schemas-microsoft-com:vml\" ",
+        "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+        "<mc:Choice Requires=\"wps\"><w:drawing/></mc:Choice><mc:Fallback>",
+        "<w:pict><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:t>Box</w:t>",
+        "</w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>",
+        "</mc:Fallback></mc:AlternateContent></w:r></w:p>",
+    );
+
+    fn direct_insert(
+        source: &str,
+        serialized: &str,
+        written: &[(u32, &str)],
+        anchor: S13SpliceAnchor,
+    ) -> Option<String> {
+        let mut recorded = RecordedParagraphs::default();
+        for &(ordinal, xml) in written {
+            recorded.written.insert(ordinal, xml.to_owned());
+            recorded.order.push(Some(ordinal));
+        }
+        let at = written
+            .iter()
+            .position(|(ordinal, _)| *ordinal == anchor.ordinal())?;
+        let at = at + usize::from(matches!(anchor, S13SpliceAnchor::After(_)));
+        recorded.order.insert(at, None);
+        recorded.inserted.push(INSERTED.to_owned());
+        let mut next = 0;
+        let mut end = 0;
+        for paragraph in paragraph_occurrences(serialized)? {
+            if paragraph.tag.start < end {
+                continue;
+            }
+            let span = paragraph_span(serialized, &paragraph)?;
+            end = span.end;
+            if &serialized[span] == "<w:p/>" {
+                recorded.placeholders.push(next);
+            } else {
+                next += 1;
+            }
+        }
+        let part = S13SplicedPart {
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: written.iter().map(|(ordinal, _)| *ordinal).collect(),
+            changed: Vec::new(),
+            inserted: vec![anchor],
+            removed: Vec::new(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        splice_source_direct(
+            source,
+            serialized,
+            &recorded,
+            &part,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn direct_insertion_keeps_a_body_bookmark_end_beside_an_empty_anchor() {
+        let first = "<w:p><w:bookmarkStart w:id=\"0\" w:name=\"Range\"/><w:r><w:t>Title</w:t></w:r></w:p>";
+        let empty = "<w:p w:rsidR=\"00112233\"><w:pPr><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:pPr></w:p>";
+        let end = "<w:bookmarkEnd w:id=\"0\"/>";
+        let source = body(&format!("{first}{empty}{end}{RETAINED}"));
+        let serialized = body(&format!("{first}{empty}{INSERTED}{RETAINED}"));
+        assert_eq!(
+            direct_insert(
+                &source,
+                &serialized,
+                &[(0, first), (1, empty), (2, RETAINED)],
+                S13SpliceAnchor::After(1)
+            ),
+            Some(body(&format!("{first}{empty}{INSERTED}{end}{RETAINED}")))
+        );
+    }
+
+    #[test]
+    fn direct_insertion_keeps_an_untouched_sdt_and_its_spanning_field() {
+        let first = "<w:p><w:r><w:rPr><w:lang w:val=\"en-CA\"/></w:rPr><w:t>Anchor</w:t><w:br w:type=\"page\"/></w:r></w:p>";
+        let entry = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:hyperlink w:anchor=\"_Toc1\"><w:r><w:rPr><w:webHidden/></w:rPr><w:t>Entry</w:t></w:r></w:hyperlink></w:p>";
+        let closing = "<w:p><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>";
+        let sdt = format!("<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val=\"Table of Contents\"/></w:docPartObj></w:sdtPr><w:sdtContent>{entry}{RETAINED}{closing}</w:sdtContent></w:sdt>");
+        let source = body(&format!("{first}{sdt}"));
+        let serialized = body(&format!("{first}{INSERTED}{sdt}"));
+        assert_eq!(
+            direct_insert(
+                &source,
+                &serialized,
+                &[(0, first), (1, entry), (2, RETAINED), (4, closing)],
+                S13SpliceAnchor::After(0)
+            ),
+            Some(body(&format!("{first}{INSERTED}{sdt}")))
+        );
+    }
+
+    #[test]
+    fn direct_insertion_keeps_orphan_table_markers_and_unbacked_continuations() {
+        let source = merged_table_body().replace(
+            "</w:tr><w:tr>",
+            "<w:bookmarkEnd w:id=\"7\"/></w:tr><w:bookmarkEnd w:id=\"8\"/><w:tr>",
+        );
+        let serialized = source
+            .replace("<w:bookmarkEnd w:id=\"7\"/>", "")
+            .replace("<w:bookmarkEnd w:id=\"8\"/>", "")
+            .replace("<w:p w14:paraId=\"0000000D\"/>", "<w:p/>");
+        let occurrences = paragraph_occurrences(&source).unwrap();
+        let written: Vec<_> = occurrences
+            .iter()
+            .filter(|paragraph| paragraph.ordinal != 3)
+            .map(|paragraph| {
+                (
+                    paragraph.ordinal,
+                    &source[paragraph_span(&source, paragraph).unwrap()],
+                )
+            })
+            .collect();
+        let at = paragraph_span(&source, &occurrences[0]).unwrap().end;
+        let mut expected = source.clone();
+        expected.insert_str(at, INSERTED);
+        let mut serialized = serialized;
+        serialized.insert_str(at, INSERTED);
+        assert_eq!(
+            direct_insert(&source, &serialized, &written, S13SpliceAnchor::After(0)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn direct_insertion_lifts_a_cell_anchor_to_its_unchanged_offset_table_edge() {
+        let cell = "<w:p w:rsidR=\"00112233\"><w:r><w:rPr><w:color w:val=\"auto\"/><w:lang w:val=\"en-US\"/></w:rPr><w:t>Cell</w:t></w:r></w:p>";
+        let table = format!("<w:tbl><w:tblPr><w:tblStyle w:val=\"Tabellenraster\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/><w:gridCol w:w=\"10\"/></w:tblGrid><w:tr><w:trPr><w:gridAfter w:val=\"1\"/><w:wAfter w:w=\"10\" w:type=\"dxa\"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>");
+        let source = body(&format!("{RETAINED}{table}"));
+        let serialized = body(&format!("{RETAINED}{table}{INSERTED}"));
+        assert_eq!(
+            direct_insert(
+                &source,
+                &serialized,
+                &[(0, RETAINED), (2, cell)],
+                S13SpliceAnchor::After(2)
+            ),
+            Some(serialized)
         );
     }
 
@@ -2062,23 +2290,32 @@ mod tests {
     }
 
     #[test]
-    fn insertions_at_inadmissible_edges_fall_back_to_the_whole_part() {
+    fn insertions_beside_body_bookmark_pairs_keep_every_source_byte() {
         let first = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
         let second = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
-        let new = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
-        let source = body(&format!(
-            "{first}<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:bookmarkEnd w:id=\"1\"/>{second}"
-        ));
-        assert!(crate::xml::reads_as_written(source.as_bytes()));
+        let markers = "<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:bookmarkEnd w:id=\"1\"/>";
+        let source = body(&format!("{first}{markers}{second}"));
         for anchor in [S13SpliceAnchor::After(0), S13SpliceAnchor::Before(1)] {
-            assert_whole_part_fallback(
+            let saved = saved_document(
                 &source,
-                &[(Some(0), first), (None, new), (Some(1), second)],
-                Edit {
-                    inserted: &[anchor],
-                    ..Edit::default()
+                |content| {
+                    let new = new_paragraph(&content[0], "00000010", "new");
+                    content.insert(1, new);
                 },
+                Some(json!({"paragraphs": [0, 1], "inserted": [anchor]})),
             );
+            let at = match anchor {
+                S13SpliceAnchor::After(_) => source.find(markers).unwrap(),
+                S13SpliceAnchor::Before(_) => source.find(second).unwrap(),
+            };
+            assert!(saved.starts_with(&source[..at]), "{saved}");
+            assert!(saved.ends_with(&source[at..]), "{saved}");
+            let added = &saved[at..saved.len() - source[at..].len()];
+            assert!(
+                added.starts_with("<w:p ") && added.ends_with("</w:p>"),
+                "{added}"
+            );
+            assert!(added.contains("<w:t>new</w:t>"), "{added}");
         }
     }
 

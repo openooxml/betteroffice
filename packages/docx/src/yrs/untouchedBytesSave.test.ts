@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
-import { setupStructuralSaves, W, W14 } from './structuralSaveTestSupport';
+import { SAVE_PATHS, setupStructuralSaves } from './structuralSaveTestSupport';
+import { bodyMarkerBody, MC, offsetTableBody, orphanTableMarkersBody, paragraphsOf, textNodes, tocSdtBody, V, W, W14, WPS } from './__fixtures__/untouchedBytes';
 import type { YrsSession } from './index';
 
 const save = setupStructuralSaves();
-const ROOT = `<w:document xmlns:w='${W}' xmlns:w14='${W14}'><w:body>`;
+const ROOT = `<w:document xmlns:w='${W}' xmlns:w14='${W14}' xmlns:mc='${MC}' xmlns:v='${V}' xmlns:wps='${WPS}'><w:body>`;
 const RICH = (id: string, text: string) =>
   `<w:p w14:paraId="${id}" w:rsidR="00752A6D" w:rsidRDefault="00593C67"><w:pPr><w:rPr><w:lang w:val="en-US"/></w:rPr></w:pPr><w:proofErr w:type="spellStart"/><w:r w:rsidR="00761B10"><w:rPr><w:color w:val="auto"/><w:lang w:val="en-US"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:br/></w:r><w:proofErr w:type="spellEnd"/></w:p>`;
 const TITLE = RICH('10000001', 'Editor save title');
@@ -41,28 +42,43 @@ describe('editor save keeps untouched paragraphs byte for byte', () => {
     expect(xml).toContain(AFTER);
     expect(xml).toContain('<w:gridSpan w:val="2"/>');
   });
+});
 
-  it('a bookmark spanning paragraphs through saveEditorDocument keeps every paragraph', async () => {
-    const first = '<w:p w14:paraId="10000001" w:rsidR="003E0150" w:rsidRDefault="00F77663" w:rsidP="00F97380"><w:pPr><w:rPr><w:lang w:val="en-US"/></w:rPr></w:pPr><w:bookmarkStart w:id="0" w:name="_Toc256857534"/><w:bookmarkStart w:id="1" w:name="_Toc256859777"/><w:bookmarkStart w:id="2" w:name="_GoBack"/><w:bookmarkEnd w:id="2"/><w:proofErr w:type="spellStart"/><w:r w:rsidR="003E0150"><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>Bookmarked editor heading</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>';
-    const second = '<w:p w14:paraId="10000002" w:rsidR="003E0150"><w:bookmarkEnd w:id="0"/><w:bookmarkEnd w:id="1"/><w:r w:rsidR="00761B10"><w:rPr><w:color w:val="auto"/><w:lang w:val="en-US"/></w:rPr><w:t>after table</w:t></w:r><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:br/></w:r></w:p>';
-    const third = '<w:p w14:paraId="10000003" w:rsidR="003E0150"><w:bookmarkStart w:id="3" w:name="_Hlk169608992"/><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>Closing editor paragraph</w:t></w:r></w:p>';
-    const bodyEnd = '<w:bookmarkEnd w:id="3"/>';
-    const fourth = RICH('10000004', 'Final editor paragraph');
-    const xml = await save('main-thread (hybrid and in-thread)', fixture(`${first}${TABLE}${second}${third}${bodyEnd}${fourth}`), (engine) => {
-      const read = engine.readParagraphs({ story: 'body', view: 'accepted' });
+describe.each([...SAVE_PATHS])('%s source boundaries keep untouched XML', (path) => {
+  it.each([
+    { name: 'body bookmark end next to an empty anchor', body: bodyMarkerBody, story: 'body', anchor: '' },
+    { name: 'TOC sdt after a paragraph with a page break', body: tocSdtBody, story: 'body', anchor: 'Contents anchor' },
+    { name: 'orphan bookmark ends between rows and cells', body: orphanTableMarkersBody, story: 'body', anchor: 'Table anchor' },
+    { name: 'synthetic table paragraph with offset and spanned rows', body: offsetTableBody, story: 'body', anchor: null },
+    { name: 'cell paragraph with offset and spanned rows', body: offsetTableBody, story: 'body:t0:r0c0', anchor: 'sample' },
+  ])('$name', async ({ body, story, anchor }) => {
+    const source = body();
+    const xml = await save(path, fixture(source), (engine) => {
+      const read = engine.readParagraphs({ story, view: 'accepted' });
       if (!read.ok) throw new Error(JSON.stringify(read));
-      const target = read.paragraphs.find(({ text }) => text.startsWith('after table'))!;
+      const target = anchor === null ? read.paragraphs[1]!
+        : read.paragraphs.find(({ text }) => anchor === '' ? text === '' : anchor !== null && text.startsWith(anchor))!;
+      expect(target).toBeDefined();
       const result = engine.applyEdits({
         expectVersion: engine.version(),
-        steps: [{ op: 'insertParagraphs', target: { story: 'body', paraId: target.paraId }, at: 'end', paragraphs: [{ text: 'inserted' }] }],
+        steps: [{ op: 'insertParagraphs', target: { story, paraId: target.paraId }, at: 'end', paragraphs: [{ text: 'inserted' }] }],
       });
       if (!result.ok) throw new Error(JSON.stringify(result));
     });
-    expect(xml).toContain(first);
-    expect(xml).toContain(second);
-    expect(xml).toContain(third);
-    expect(xml).toContain(fourth);
-    expect(xml).toContain(bodyEnd);
-    expect(xml).toContain('inserted');
+    for (const paragraph of paragraphsOf(source)) expect(xml).toContain(paragraph);
+    expect(paragraphsOf(xml)).toHaveLength(paragraphsOf(source).length + 1);
+    for (const tag of ['w:txbxContent', 'mc:AlternateContent', 'mc:Fallback', 'w:bookmarkStart', 'w:bookmarkEnd']) {
+      expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0).toBe(source.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0);
+    }
+    expect(textNodes(xml).filter(text => text !== 'inserted')).toEqual(textNodes(source));
+    expect(textNodes(xml).filter(text => text === 'inserted')).toHaveLength(1);
+    if (anchor === null) {
+      expect(xml).toContain(source.slice(source.indexOf('<w:tbl>')));
+      expect(xml.indexOf('<w:t>inserted</w:t>')).toBeGreaterThan(xml.indexOf('</w:tbl>'));
+    } else if (story === 'body:t0:r0c0') {
+      const sample = xml.indexOf('<w:t>sample</w:t>');
+      expect(xml.indexOf('<w:t>inserted</w:t>')).toBeGreaterThan(sample);
+      expect(xml.indexOf('<w:t>inserted</w:t>')).toBeLessThan(xml.indexOf('</w:tc>', sample));
+    }
   });
 });

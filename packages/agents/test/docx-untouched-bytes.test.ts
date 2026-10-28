@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx } from '../src';
+import { bodyMarkerBody, offsetTableBody, orphanTableMarkersBody, paragraphsOf, textNodes, tocSdtBody, V, WPS } from '../../docx/src/yrs/__fixtures__/untouchedBytes';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
@@ -20,7 +21,7 @@ async function docx(body: string, extra: Record<string, string> = {}, rels = '')
   zip.file('[Content_Types].xml', `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>${overrides}</Types>`);
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`);
   if (rels) zip.file('word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`);
-  const xml = `<w:document xmlns:w="${W}" xmlns:w14="${W14}" xmlns:mc="${MC}" xmlns:r="${R}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
+  const xml = `<w:document xmlns:w="${W}" xmlns:w14="${W14}" xmlns:mc="${MC}" xmlns:r="${R}" xmlns:v="${V}" xmlns:wps="${WPS}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
   zip.file('word/document.xml', xml);
   for (const [part, content] of Object.entries(extra)) zip.file(part, content);
   return { bytes: await zip.generateAsync({ type: 'uint8array' }), xml };
@@ -30,24 +31,6 @@ const styles = (normalColor = '') => `<w:styles xmlns:w="${W}"><w:docDefaults><w
 
 async function exportedXml(bytes: Uint8Array, part = 'word/document.xml'): Promise<string> {
   return (await JSZip.loadAsync(bytes)).file(part)!.async('string');
-}
-
-function paragraphsOf(xml: string): string[] {
-  const found: Array<[number, string]> = [];
-  const open: number[] = [];
-  for (const match of xml.matchAll(/<(\/?)([A-Za-z0-9:.-]+)((?:[^>"']|"[^"]*"|'[^']*')*)(\/?)>/g)) {
-    if (match[2] !== 'w:p') continue;
-    const at = match.index!;
-    if (match[1]) {
-      const start = open.pop();
-      if (start !== undefined) found.push([start, xml.slice(start, at + match[0].length)]);
-    } else if (match[4]) {
-      found.push([at, match[0]]);
-    } else {
-      open.push(at);
-    }
-  }
-  return found.sort((a, b) => a[0] - b[0]).map(([, xml]) => xml);
 }
 
 function expectUntouched(sourceXml: string, outputXml: string, edited: string[] = []) {
@@ -104,69 +87,57 @@ test('merge_cells keeps untouched paragraphs byte for byte', async () => {
   } finally { doc.close(); }
 });
 
-test('block level sdt keeps untouched paragraphs byte for byte', async () => {
-  const heading = rich('10000001', 'Before the contents block');
-  const toc = '<w:p w14:paraId="10000003"><w:pPr><w:pStyle w:val="TOCHeading"/></w:pPr><w:r><w:rPr><w:color w:val="auto"/><w:lang w:val="en-CA"/></w:rPr><w:t>Table of Contents</w:t></w:r></w:p>';
-  const sdt = `<w:sdt><w:sdtPr><w:id w:val="2105616765"/><w:docPartObj><w:docPartGallery w:val="Table of Contents"/><w:docPartUnique/></w:docPartObj></w:sdtPr><w:sdtContent>${toc}</w:sdtContent></w:sdt>`;
-  const after = rich('10000002', 'After the contents block');
-  const source = await docx(`${heading}${sdt}${after}`, { 'word/styles.xml': styles() });
+async function expectInsertedBody(body: string, anchorText: string | null) {
+  const source = await docx(body);
   const doc = await openDocx(source.bytes);
   try {
-    const item = doc.list().items.find(entry => entry.text.includes('Before the contents'))!;
+    const item = doc.list().items.find(entry => anchorText === null
+      ? entry.story === 'body' && entry.text === '\ufffc'
+      : anchorText === '' ? entry.story === 'body' && entry.text === '' : entry.text.startsWith(anchorText))!;
+    expect(item).toBeDefined();
     await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Inserted paragraph.' }] }] });
     const bytes = await doc.export();
     const xml = await exportedXml(bytes);
     expectUntouched(source.xml, xml);
-    expect(xml).toContain(sdt);
+    expect(paragraphsOf(xml)).toHaveLength(paragraphsOf(source.xml).length + 1);
+    for (const tag of ['w:txbxContent', 'mc:AlternateContent', 'mc:Fallback', 'w:bookmarkStart', 'w:bookmarkEnd']) {
+      expect(xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0).toBe(source.xml.match(new RegExp(`<${tag}\\b`, 'g'))?.length ?? 0);
+    }
+    expect(textNodes(xml).filter(text => text !== 'Inserted paragraph.')).toEqual(textNodes(source.xml));
+    expect(textNodes(xml).filter(text => text === 'Inserted paragraph.')).toHaveLength(1);
     const reopened = await openDocx(bytes);
     try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
+    return xml;
   } finally { doc.close(); }
+}
+
+test('block sdt with a trailing page break and TOC fields keeps every source paragraph', async () => {
+  const body = tocSdtBody();
+  const xml = await expectInsertedBody(body, 'Contents anchor');
+  expect(xml).toContain(body.slice(body.indexOf('<w:sdt>')));
+  expect(xml.match(/<w:br w:type="page"\/>/g)).toHaveLength(1);
 });
 
-test('bookmarks spanning paragraphs keep untouched paragraphs byte for byte', async () => {
-  const first = '<w:p w14:paraId="10000001" w:rsidR="003E0150" w:rsidRDefault="00F77663" w:rsidP="00F97380"><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:lang w:val="en-US"/></w:rPr></w:pPr><w:bookmarkStart w:id="0" w:name="_Toc256857534"/><w:bookmarkStart w:id="1" w:name="_Toc256859777"/><w:bookmarkStart w:id="2" w:name="_GoBack"/><w:bookmarkEnd w:id="2"/><w:proofErr w:type="spellStart"/><w:r w:rsidR="003E0150"><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>Bookmarked heading text</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>';
-  const second = '<w:p w14:paraId="10000002" w:rsidR="003E0150"><w:bookmarkEnd w:id="0"/><w:bookmarkEnd w:id="1"/><w:r w:rsidR="00761B10"><w:rPr><w:color w:val="auto"/><w:lang w:val="en-US"/></w:rPr><w:t>Following paragraph text</w:t></w:r><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:br/></w:r></w:p>';
-  const third = '<w:p w14:paraId="10000003" w:rsidR="003E0150"><w:bookmarkStart w:id="3" w:name="_Hlk169608992"/><w:r><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>Closing paragraph text</w:t></w:r></w:p>';
-  const bodyEnd = '<w:bookmarkEnd w:id="3"/>';
-  const fourth = rich('10000004', 'Final paragraph text');
-  const source = await docx(`${first}${second}${third}${bodyEnd}${fourth}`);
-  const doc = await openDocx(source.bytes);
-  try {
-    const item = doc.list().items.find(entry => entry.text.includes('Bookmarked heading'))!;
-    await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Inserted paragraph.' }] }] });
-    const bytes = await doc.export();
-    const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml);
-    expect(xml).toContain(bodyEnd);
-    const reopened = await openDocx(bytes);
-    try { expect(reopened.list().items.map(entry => entry.text)).toContain('Inserted paragraph.'); } finally { reopened.close(); }
-  } finally { doc.close(); }
+test('body bookmark end beside an empty anchor keeps every source paragraph', async () => {
+  await expectInsertedBody(bodyMarkerBody(), '');
 });
 
-test('gridAfter table cell insert keeps untouched paragraphs byte for byte', async () => {
-  const title = rich('10000001', 'Wide table title');
-  const cellPara = (id: number, text: string) =>
-    `<w:p w14:paraId="1000${String(id).padStart(4, '0')}" w:rsidR="00D856F6"><w:pPr><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:lang w:val="en-US"/></w:rPr></w:pPr><w:proofErr w:type="spellStart"/><w:r w:rsidR="00D856F6"><w:rPr><w:lang w:val="en-US"/></w:rPr><w:t>${text}</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>`;
-  const cell = (id: number, text: string, extra = '') =>
-    `<w:tc><w:tcPr><w:tcW w:w="887" w:type="dxa"/>${extra}<w:tcBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tcBorders></w:tcPr>${cellPara(id, text)}</w:tc>`;
-  const headerRow = `<w:tr><w:trPr><w:gridAfter w:val="1"/><w:wAfter w:w="7" w:type="dxa"/></w:trPr>${cell(11, 'sample')}${Array.from({ length: 15 }, (_, at) => cell(20 + at, `H${at}`)).join('')}</w:tr>`;
-  const spannedRow = `<w:tr><w:trPr><w:gridAfter w:val="1"/><w:wAfter w:w="7" w:type="dxa"/></w:trPr>${cell(51, 'Spanned', '<w:gridSpan w:val="2"/>')}${Array.from({ length: 14 }, (_, at) => cell(60 + at, `S${at}`)).join('')}</w:tr>`;
-  const grid = '<w:gridCol w:w="887"/>'.repeat(17);
-  const tableStyles = `<w:styles xmlns:w="${W}"><w:style w:type="table" w:styleId="Tabellenraster"><w:name w:val="Table Grid"/></w:style><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`;
-  const table = `<w:tbl><w:tblPr><w:tblStyle w:val="Tabellenraster"/><w:tblW w:w="14430" w:type="dxa"/></w:tblPr><w:tblGrid>${grid}</w:tblGrid>${headerRow}${spannedRow}</w:tbl>`;
-  const source = await docx(`${title}${table}`, { 'word/styles.xml': tableStyles }, `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/>`);
-  const doc = await openDocx(source.bytes);
-  try {
-    const item = doc.list().items.find(entry => entry.text === 'sample')!;
-    await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item.ref, paragraphs: [{ text: 'Cell note.' }] }] });
-    const bytes = await doc.export();
-    const xml = await exportedXml(bytes);
-    expectUntouched(source.xml, xml);
-    expect(xml).toContain('<w:gridAfter w:val="1"/>');
-    expect(xml).toContain('<w:gridSpan w:val="2"/>');
-    const reopened = await openDocx(bytes);
-    try { expect(reopened.list().items.map(entry => entry.text)).toContain('Cell note.'); } finally { reopened.close(); }
-  } finally { doc.close(); }
+test('orphan bookmark ends between rows and cells keep every source paragraph', async () => {
+  const body = orphanTableMarkersBody();
+  const xml = await expectInsertedBody(body, 'Table anchor');
+  expect(xml).toContain(body.slice(body.indexOf('<w:tbl>'), body.indexOf('</w:tbl>') + 8));
+});
+
+test('gridAfter and spanned rows keep every source paragraph on table and cell inserts', async () => {
+  const body = offsetTableBody();
+  const xml = await expectInsertedBody(body, null);
+  expect(xml).toContain(body.slice(body.indexOf('<w:tbl>')));
+  const tableEnd = xml.indexOf('</w:tbl>');
+  expect(xml.indexOf('Inserted paragraph.')).toBeGreaterThan(tableEnd);
+  const cellXml = await expectInsertedBody(body, 'sample');
+  const sample = cellXml.indexOf('<w:t>sample</w:t>');
+  expect(cellXml.indexOf('Inserted paragraph.')).toBeGreaterThan(sample);
+  expect(cellXml.indexOf('Inserted paragraph.')).toBeLessThan(cellXml.indexOf('</w:tc>', sample));
 });
 
 test('edited footnote keeps direct color auto and untouched runs byte for byte', async () => {
