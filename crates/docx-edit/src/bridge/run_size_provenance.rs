@@ -100,7 +100,52 @@ pub(crate) fn paragraph_sizes(
         }
     }
 
+    const PROPERTIES: [&str; 4] = ["pPr", "sdtPr", "sdtEndPr", "smartTagPr"];
+    const CONTAINERS: [&str; 6] = ["p", "hyperlink", "sdt", "sdtContent", "smartTag", "customXml"];
+    const MARKS: [&str; 7] = [
+        "bookmarkStart",
+        "bookmarkEnd",
+        "proofErr",
+        "permStart",
+        "permEnd",
+        "commentRangeStart",
+        "commentRangeEnd",
+    ];
+    const RUN_CHILDREN: [&str; 12] = [
+        "rPr",
+        "t",
+        "tab",
+        "ptab",
+        "fldChar",
+        "instrText",
+        "sym",
+        "softHyphen",
+        "noBreakHyphen",
+        "lastRenderedPageBreak",
+        "br",
+        "cr",
+    ];
+
     fn visit(node: &XmlElement, scan: &mut Scan) -> bool {
+        if PROPERTIES.iter().any(|name| node.matches_name("w", name))
+            || node.matches_name("w", "customXmlPr")
+            || MARKS.iter().any(|name| node.matches_name("w", name))
+        {
+            return true;
+        }
+        if node.matches_name("w", "r")
+            && !node
+                .child_elements()
+                .all(|child| RUN_CHILDREN.iter().any(|name| child.matches_name("w", name)))
+        {
+            return false;
+        }
+        if !node.matches_name("w", "r")
+            && !node.matches_name("w", "fldSimple")
+            && !CONTAINERS.iter().any(|name| node.matches_name("w", name))
+        {
+            return false;
+        }
         if node.matches_name("w", "fldSimple") {
             let field = Field {
                 instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
@@ -135,14 +180,12 @@ pub(crate) fn paragraph_sizes(
                         Some("end") => scan.close(),
                         _ => return false,
                     }
-                } else if child.matches_name("w", "instrText")
-                    || child.matches_name("w", "delInstrText")
-                {
+                } else if child.matches_name("w", "instrText") {
                     control = true;
                     if let Some(field) = scan.fields.last_mut() {
                         field.instruction.push_str(&child.text_content());
                     }
-                } else if child.matches_name("w", "t") || child.matches_name("w", "delText") {
+                } else if child.matches_name("w", "t") {
                     text |= !child.text_content().is_empty();
                 } else if ["sym", "softHyphen", "noBreakHyphen"]
                     .iter()
@@ -151,7 +194,7 @@ pub(crate) fn paragraph_sizes(
                     text = true;
                 }
             }
-            if control && text {
+            if text && (control || scan.fields.last().is_some_and(|field| !field.result)) {
                 return false;
             }
             if text && !scan.fields.iter().any(|field| field.kind("TOC")) {
@@ -527,6 +570,38 @@ mod tests {
             (format!("{entry}{end}{reference}"), false),
             (format!("{reference}{begin}{entry}"), false),
             (format!("{reference}{entry}"), true),
+            (
+                format!(
+                    concat!(
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                        r#"<w:r><w:instrText> REF x </w:instrText></w:r>{entry}"#,
+                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>{entry}"#,
+                    ),
+                    entry = entry,
+                ),
+                false,
+            ),
+            (format!(r#"<w:del w:id="1">{begin}</w:del>{entry}"#), false),
+            (format!(r#"<w:ins w:id="1">{entry}</w:ins>"#), false),
+            (
+                format!(
+                    r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w14">{begin}</mc:Choice><mc:Fallback/></mc:AlternateContent>{entry}"#
+                ),
+                false,
+            ),
+            (
+                format!(
+                    r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:footnoteReference w:id="1"/></w:r>{entry}"#
+                ),
+                false,
+            ),
+            (
+                format!(
+                    r#"<w:proofErr w:type="spellStart"/>{begin}<w:bookmarkStart w:id="0" w:name="x"/>{entry}<w:bookmarkEnd w:id="0"/>"#
+                ),
+                true,
+            ),
             (
                 format!(
                     concat!(
