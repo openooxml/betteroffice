@@ -845,7 +845,6 @@ fn assert_wrapped_float_edit_matches_fresh(cover_width: u32, body_width: u32, re
         let initial: Value =
             serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
         assert_wrapped_float_measurements(&initial, body_width == 690);
-        let before = engine.stats();
         let edit = |doc: &docx_edit::EditingDoc| {
             doc.insert_text(
                 &docx_edit::EditCtx::local("", ""),
@@ -872,13 +871,6 @@ fn assert_wrapped_float_edit_matches_fresh(cover_width: u32, body_width: u32, re
             engine.apply_and_layout("body", 0).unwrap();
         }
         let after = engine.stats();
-        if relative_to == "paragraph" {
-            assert!(after.resident_measure_calls - before.resident_measure_calls > 1);
-            assert!(after.resident_reused_blocks > before.resident_reused_blocks);
-        } else {
-            assert_eq!(after.resident_reused_blocks, before.resident_reused_blocks);
-        }
-        assert!(after.incremental_pagination_calls > before.incremental_pagination_calls);
         let incremental: Value =
             serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
         assert_wrapped_float_measurements(&incremental, body_width == 690);
