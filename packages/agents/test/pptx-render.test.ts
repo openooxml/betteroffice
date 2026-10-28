@@ -65,6 +65,19 @@ test('PPTX save faces follow the theme for runs that name no face', async () => 
   ]);
 });
 
+test('PPTX theme fonts include custom theme part names', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/corporate.xml', '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>');
+  zip.file('ppt/theme/_rels/corporate.xml', '<a:majorFont><a:latin typeface="Ignored"/></a:majorFont>');
+  expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+});
+
+test('PPTX theme fonts accept single-quoted typefaces', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface='Times New Roman'/></a:majorFont><a:minorFont><a:latin typeface='Arial'/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`);
+  expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+});
+
 test('PPTX previews measure runs without a face in the theme fonts the export uses', async () => {
   const handle = openPresentation(await presentationFixture());
   const registered: string[] = [];

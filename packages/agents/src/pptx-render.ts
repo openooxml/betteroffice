@@ -84,13 +84,13 @@ export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
     const local = view.getUint32(entry + 42, true);
     const name = text.decode(bytes.subarray(entry + 46, entry + 46 + nameLength));
     entry += 46 + nameLength + view.getUint16(entry + 30, true) + view.getUint16(entry + 32, true);
-    if (!/^ppt\/theme\/theme\d+\.xml$/.test(name) || local + 30 > bytes.length || (method !== 0 && method !== 8)) continue;
+    if (!/^ppt\/theme\/[^/]+\.xml$/.test(name) || local + 30 > bytes.length || (method !== 0 && method !== 8)) continue;
     const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
     const data = bytes.subarray(start, start + size);
     let xml: string;
     try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
     for (const kind of ['major', 'minor'] as const) {
-      const family = xml.match(new RegExp(`<(?:[\\w.-]+:)?${kind}Font\\b[^>]*>\\s*<(?:[\\w.-]+:)?latin\\b[^>]*\\btypeface="([^"]+)"`))?.[1];
+      const family = xml.match(new RegExp(`<(?:[\\w.-]+:)?${kind}Font\\b[^>]*>\\s*<(?:[\\w.-]+:)?latin\\b[^>]*\\btypeface=(["'])([\\s\\S]*?)\\1`))?.[2];
       if (family && !fonts[kind].includes(family)) fonts[kind].push(family);
     }
   }

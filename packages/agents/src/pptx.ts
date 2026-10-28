@@ -547,11 +547,11 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     return { applied: result.applied, version: result.version, changedSlides: result.changedSlides.length, changedStories: result.changedStories.length };
   }
   protected async save(steps?: PptxEditStep[]) {
-    if (!steps) return this.saveFitted(this.handle);
+    if (!steps) return this.owned ? this.saveFitted(this.handle) : this.handle.save();
     const draft = this.handle.fork();
     try {
       unwrap(draft.applyEdits({ expectVersion: draft.version(), steps, source: 'agent' }));
-      return await this.saveFitted(draft);
+      return this.owned ? await this.saveFitted(draft) : draft.save();
     } finally { draft.dispose(); }
   }
 

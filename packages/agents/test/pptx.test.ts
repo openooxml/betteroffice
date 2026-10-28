@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import JSZip from 'jszip';
+import { createFontProvider } from '@betteroffice/fonts';
 import { openPresentation } from '@betteroffice/pptx';
 import { attachPptx, openPptx } from '../src/pptx';
 import type { PptxAgentPresentation } from '../src/pptx';
@@ -478,6 +479,36 @@ for (const mapped of [false, true]) {
     expect(saved[0]).toMatch(/<a:bodyPr><a:normAutofit fontScale="\d+"/);
   });
 }
+
+test('PPTX attached export fits inherited theme fonts with the live renderer', async () => {
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const rels = 'ppt/slideMasters/_rels/slideMaster1.xml.rels';
+  zip.file(rels, (await zip.file(rels)!.async('string')).replace('</Relationships>', `<Relationship Id="theme" Type="${r}/theme" Target="../theme/theme1.xml"/></Relationships>`));
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="${a}"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Times New Roman"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`);
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>'));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>').replace('<a:bodyPr/>', '<a:bodyPr><a:normAutofit/></a:bodyPr>').replace('b="1" sz="2400"', 'sz="2400"'));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const seed = await openPptx(bytes);
+  seed.close();
+  const load = createFontProvider().resolve('Times New Roman', false, false)!;
+  const font = new Uint8Array(await load());
+  const handle = openPresentation(bytes);
+  handle.registerFont({ family: 'Times New Roman', bold: false, italic: false, bytes: font });
+  const deck = attachPptx(handle);
+  try {
+    const target = first(deck);
+    apply(deck, [{ op: 'replace_text', ...target, text: 'Punishments: 2011 to 2018 '.repeat(4).trim() }]);
+    expect(deck.readSlide({ slide: target.slide }).shapes[0].stories[0].paragraphs[0].runs[0].formatting.fontFamily).toBeFalsy();
+    const expected = await (await JSZip.loadAsync(handle.save())).file(path)!.async('string');
+    const exported = await (await JSZip.loadAsync(await deck.export())).file(path)!.async('string');
+    expect(expected).toMatch(/<a:normAutofit fontScale="\d+"/);
+    expect(Number(expected.match(/fontScale="(\d+)"/)?.[1])).toBeLessThan(100000);
+    expect(exported).toBe(expected);
+  } finally { deck.close(); handle.dispose(); }
+});
 
 test('PPTX export saves the version it fitted and refuses a document closed while fonts load', async () => {
   const closing = await openPptx(await presentationFixture());
