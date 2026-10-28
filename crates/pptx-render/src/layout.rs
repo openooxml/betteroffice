@@ -454,14 +454,18 @@ impl SlideRenderer {
         } else {
             parsed_slide.map(BackgroundSource::from_slide)
         };
-        let background_source = [
-            slide_background,
-            layout.map(BackgroundSource::from_layout),
-            master.map(BackgroundSource::from_master),
-        ]
-        .into_iter()
-        .flatten()
-        .find(BackgroundSource::is_declared);
+        let background_source = if shape_filter.is_none() {
+            [
+                slide_background,
+                layout.map(BackgroundSource::from_layout),
+                master.map(BackgroundSource::from_master),
+            ]
+            .into_iter()
+            .flatten()
+            .find(BackgroundSource::is_declared)
+        } else {
+            None
+        };
         let background_fill =
             background_source
                 .as_ref()
@@ -491,7 +495,7 @@ impl SlideRenderer {
             })
             .filter(|paint| !is_invisible(paint))
             .or_else(|| {
-                Some(Paint::Solid {
+                shape_filter.is_none().then(|| Paint::Solid {
                     color: "#ffffff".to_owned(),
                 })
             });
@@ -1071,139 +1075,141 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         let stable_id = shape.id.clone();
-        let inherited = [original, layout_node, master_node];
-        let inherited_fill = self.resolved_fill(&inherited);
-        let inherited_outline = self.resolved_outline(&inherited);
-        let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
-        let picture = effective_fill
-            .filter(|fill| fill.fill_type == PICTURE_FILL)
-            .and_then(|_| picture_fill(&inherited));
-        let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
-        let background_picture = use_bg_fill
-            .then(|| self.background_picture.clone())
-            .flatten();
-        let picture = if use_bg_fill {
-            background_picture.as_ref()
-        } else {
-            picture
-        };
-        let fill = if use_bg_fill {
-            self.background_paint.clone()
-        } else {
-            effective_fill.and_then(|fill| paint(fill, self.theme))
-        };
-        let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
-            inherited_outline
-        } else {
-            shape
-                .outline
-                .as_ref()
-                .map(|edited| {
-                    if *edited == ShapeOutline::default() {
-                        edited.clone()
-                    } else {
-                        merge_outline(edited, inherited_outline.as_ref())
-                    }
-                })
-                .or(inherited_outline)
-        }
-        .and_then(|outline| stroke(&outline, self.theme));
-        let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
-        let shadow = node_effects
-            .as_ref()
-            .filter(|_| match shape.kind {
-                ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
-                ShapeKind::Picture => true,
-                ShapeKind::GraphicFrame | ShapeKind::Group => false,
-            })
-            .and_then(|effects| {
-                shadow(
-                    effects,
-                    self.theme,
-                    space,
-                    rect,
-                    resolved.rotation_deg as f32,
-                    resolved.flip_h,
-                    resolved.flip_v,
-                )
-            });
         let transform = Transform {
             rotation_deg: resolved.rotation_deg as f32,
             flip_h: resolved.flip_h,
             flip_v: resolved.flip_v,
         };
-        match shape.kind {
-            ShapeKind::Shape => {
-                let paths = custom_paths(original);
-                let (path, mut geometry_fallback) = geometry_path_with_fallback(
-                    &shape.geometry,
-                    &shape.adjust_values,
-                    f64::from(rect.w) / f64::from(rect.h),
-                );
-                if shape.geometry == "custom" && !paths.is_empty() {
-                    geometry_fallback = false;
+        if self.shape_filter.is_none() {
+            let inherited = [original, layout_node, master_node];
+            let inherited_fill = self.resolved_fill(&inherited);
+            let inherited_outline = self.resolved_outline(&inherited);
+            let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
+            let picture = effective_fill
+                .filter(|fill| fill.fill_type == PICTURE_FILL)
+                .and_then(|_| picture_fill(&inherited));
+            let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
+            let background_picture = use_bg_fill
+                .then(|| self.background_picture.clone())
+                .flatten();
+            let picture = if use_bg_fill {
+                background_picture.as_ref()
+            } else {
+                picture
+            };
+            let fill = if use_bg_fill {
+                self.background_paint.clone()
+            } else {
+                effective_fill.and_then(|fill| paint(fill, self.theme))
+            };
+            let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
+                inherited_outline
+            } else {
+                shape
+                    .outline
+                    .as_ref()
+                    .map(|edited| {
+                        if *edited == ShapeOutline::default() {
+                            edited.clone()
+                        } else {
+                            merge_outline(edited, inherited_outline.as_ref())
+                        }
+                    })
+                    .or(inherited_outline)
+            }
+            .and_then(|outline| stroke(&outline, self.theme));
+            let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
+            let shadow = node_effects
+                .as_ref()
+                .filter(|_| match shape.kind {
+                    ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
+                    ShapeKind::Picture => true,
+                    ShapeKind::GraphicFrame | ShapeKind::Group => false,
+                })
+                .and_then(|effects| {
+                    shadow(
+                        effects,
+                        self.theme,
+                        space,
+                        rect,
+                        resolved.rotation_deg as f32,
+                        resolved.flip_h,
+                        resolved.flip_v,
+                    )
+                });
+            match shape.kind {
+                ShapeKind::Shape => {
+                    let paths = custom_paths(original);
+                    let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                        &shape.geometry,
+                        &shape.adjust_values,
+                        f64::from(rect.w) / f64::from(rect.h),
+                    );
+                    if shape.geometry == "custom" && !paths.is_empty() {
+                        geometry_fallback = false;
+                    }
+                    let primitive = Primitive::Shape {
+                        clip: None,
+                        even_odd: false,
+                        object_id: shape.source_id,
+                        shape_id: Some(stable_id.clone()),
+                        name: shape.name.clone(),
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        geometry: shape.geometry.clone(),
+                        path,
+                        geometry_fallback,
+                        adjust_values: shape
+                            .adjust_values
+                            .iter()
+                            .map(|(name, value)| (name.clone(), *value as f32))
+                            .collect(),
+                        fill,
+                        stroke: outline,
+                        shadow,
+                        transform,
+                    };
+                    if use_bg_fill {
+                        self.push_background_shape(primitive, paths, picture)?;
+                    } else {
+                        self.push_shape(primitive, paths, picture)?;
+                    }
                 }
-                let primitive = Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id: shape.source_id,
-                    shape_id: Some(stable_id.clone()),
-                    name: shape.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: shape.geometry.clone(),
-                    path,
-                    geometry_fallback,
-                    adjust_values: shape
-                        .adjust_values
-                        .iter()
-                        .map(|(name, value)| (name.clone(), *value as f32))
-                        .collect(),
-                    fill,
-                    stroke: outline,
-                    shadow,
-                    transform,
-                };
-                if use_bg_fill {
-                    self.push_background_shape(primitive, paths, picture)?;
-                } else {
-                    self.push_shape(primitive, paths, picture)?;
+                ShapeKind::Picture => {
+                    let source = picture_source(original);
+                    let asset_id = picture_asset_id(shape);
+                    self.render_picture(
+                        shape.source_id,
+                        &stable_id,
+                        &shape.name,
+                        rect,
+                        transform,
+                        asset_id.as_deref(),
+                        &shape.blip_effects,
+                        source.map(|picture| &picture.crop),
+                        source
+                            .map(|picture| picture_mask(picture, rect))
+                            .unwrap_or_default(),
+                        outline,
+                        shadow,
+                    );
                 }
+                ShapeKind::GraphicFrame => {
+                    self.render_graphic_frame(
+                        shape.source_id,
+                        &stable_id,
+                        &shape.name,
+                        rect,
+                        transform,
+                        space,
+                        shape.graphic.as_ref(),
+                        &shape.text_stories,
+                    )?;
+                }
+                ShapeKind::Group => unreachable!(),
             }
-            ShapeKind::Picture => {
-                let source = picture_source(original);
-                let asset_id = picture_asset_id(shape);
-                self.render_picture(
-                    shape.source_id,
-                    &stable_id,
-                    &shape.name,
-                    rect,
-                    transform,
-                    asset_id.as_deref(),
-                    &shape.blip_effects,
-                    source.map(|picture| &picture.crop),
-                    source
-                        .map(|picture| picture_mask(picture, rect))
-                        .unwrap_or_default(),
-                    outline,
-                    shadow,
-                );
-            }
-            ShapeKind::GraphicFrame => {
-                self.render_graphic_frame(
-                    shape.source_id,
-                    &stable_id,
-                    &shape.name,
-                    rect,
-                    transform,
-                    space,
-                    shape.graphic.as_ref(),
-                    &shape.text_stories,
-                )?;
-            }
-            ShapeKind::Group => unreachable!(),
         }
         let body_cascade = BodyCascade {
             fit_to_box: false,
@@ -1231,7 +1237,7 @@ impl<'a> LayoutBuilder<'a> {
             }
         };
         let text_hit = if let Some(content) = text {
-            Some(self.render_text_box(
+            self.render_text_box(
                 shape.source_id,
                 &stable_id,
                 rect,
@@ -1240,17 +1246,19 @@ impl<'a> LayoutBuilder<'a> {
                 geometry_text_inset(original, rect),
                 content,
                 body_cascade,
-            )?)
+            )?
         } else {
             None
         };
-        self.hit_regions.push(HitRegion {
-            shape_id: stable_id,
-            rect,
-            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
-            transform,
-            text: text_hit,
-        });
+        if self.shape_filter.is_none() {
+            self.hit_regions.push(HitRegion {
+                shape_id: stable_id,
+                rect,
+                hit_rect: rect_covering_text(rect, text_hit.as_ref()),
+                transform,
+                text: text_hit,
+            });
+        }
         Ok(())
     }
 
@@ -1408,7 +1416,7 @@ impl<'a> LayoutBuilder<'a> {
         }
         let text_hit = if let Some(body) = node_text(shape) {
             let content = content_from_body(stable_id, body, self.theme, self.slide_number);
-            Some(self.render_text_box(
+            self.render_text_box(
                 base.id,
                 stable_id,
                 rect,
@@ -1427,7 +1435,7 @@ impl<'a> LayoutBuilder<'a> {
                     placeholder: base.placeholder.as_ref(),
                     style_color: shape_style_color(Some(shape)),
                 },
-            )?)
+            )?
         } else {
             None
         };
@@ -2131,7 +2139,7 @@ impl<'a> LayoutBuilder<'a> {
             }
         }
         for plan in &plans {
-            self.render_text_box(
+            let _ = self.render_text_box(
                 object_id,
                 shape_id,
                 plan.rect(&columns, &rows),
@@ -2243,7 +2251,7 @@ impl<'a> LayoutBuilder<'a> {
         preset_inset: (f32, f32),
         content: TextContent,
         cascade: BodyCascade<'_>,
-    ) -> Result<TextHit, RenderError> {
+    ) -> Result<Option<TextHit>, RenderError> {
         self.substitutions.enter_shape(shape_id);
         let mut resolved = resolve_content(
             self.renderer,
@@ -2326,6 +2334,9 @@ impl<'a> LayoutBuilder<'a> {
         } else {
             autofit_font_scale(cascade.autofit())
         };
+        if self.shape_filter.is_some() {
+            return Ok(None);
+        }
         let mut laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
         if cascade.fit_to_box {
             let largest_font = resolved
@@ -2435,13 +2446,13 @@ impl<'a> LayoutBuilder<'a> {
             overflow,
             transform: text_transform,
         });
-        Ok(TextHit {
+        Ok(Some(TextHit {
             overflow,
             story_id,
             rect: text_rect,
             transform: text_transform,
             lines,
-        })
+        }))
     }
 
     fn layout_text_columns(
@@ -10491,6 +10502,22 @@ mod tests {
         inherited: bool,
         grouped: bool,
     ) -> (DeckSession, StorySnapshot) {
+        edited_autofit_session_with_graphics(
+            untouched_text,
+            inherited,
+            grouped,
+            "",
+            &" words that must shrink to stay inside the title".repeat(6),
+        )
+    }
+
+    fn edited_autofit_session_with_graphics(
+        untouched_text: &str,
+        inherited: bool,
+        grouped: bool,
+        graphics: &str,
+        inserted_text: &str,
+    ) -> (DeckSession, StorySnapshot) {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let normal = r#"<a:normAutofit fontScale="100000"/>"#;
         let transform =
@@ -10498,7 +10525,7 @@ mod tests {
         let title = format!(
             r#"<p:sp>
 <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
-<p:spPr>{}</p:spPr>
+<p:spPr>{}{graphics}</p:spPr>
 <p:txBody><a:bodyPr lIns="0" rIns="0" tIns="0" bIns="0">{}</a:bodyPr><a:lstStyle/>
 <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>Start</a:t></a:r></a:p>
 </p:txBody></p:sp>"#,
@@ -10544,11 +10571,36 @@ mod tests {
                 &EditCtx::local("test"),
                 &story.id,
                 story.length - 1,
-                &" words that must shrink to stay inside the title".repeat(6),
+                inserted_text,
                 &TextStyle::default(),
             )
             .unwrap();
         (session, story)
+    }
+
+    fn autofit_custom_graphics(path_count: usize, stop_count: usize) -> String {
+        use std::fmt::Write as _;
+
+        let path = r#"<a:path w="100" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="0"/></a:lnTo><a:lnTo><a:pt x="50" y="100"/></a:lnTo><a:close/></a:path>"#;
+        let mut graphics = format!(
+            "<a:custGeom><a:pathLst>{}</a:pathLst></a:custGeom><a:gradFill><a:gsLst>",
+            path.repeat(path_count)
+        );
+        for index in 0..stop_count {
+            let position = index as u64 * 100_000 / stop_count.saturating_sub(1).max(1) as u64;
+            let color = if index % 2 == 0 { "112233" } else { "445566" };
+            write!(
+                graphics,
+                r#"<a:gs pos="{position}"><a:srgbClr val="{color}"/></a:gs>"#
+            )
+            .unwrap();
+        }
+        graphics.push_str(
+            r#"</a:gsLst><a:lin ang="5400000" scaled="1"/></a:gradFill>
+<a:ln w="19050"><a:solidFill><a:srgbClr val="778899"/></a:solidFill></a:ln>
+<a:effectLst><a:outerShdw blurRad="12700" dist="12700" dir="5400000"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst>"#,
+        );
+        graphics
     }
 
     fn edited_autofit_session_with_text(text: &str, inherited: bool, grouped: bool) -> DeckSession {
@@ -10647,24 +10699,129 @@ mod tests {
 
     #[test]
     fn fitted_save_matches_full_layout_autofit() {
+        let graphics = autofit_custom_graphics(2, 2);
         for inherited in [false, true] {
             for grouped in [false, true] {
-                let (session, story) = edited_autofit_session("Untouched", inherited, grouped);
-                let renderer = renderer();
-                let rendered = renderer
-                    .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
-                    .unwrap();
-                let expected = rendered.autofit.get(&story.id).unwrap();
-                assert!(matches!(
-                    expected,
-                    TextAutofit::Normal { font_scale: Some(scale), .. } if *scale < 1.0
-                ));
-                let saved = renderer.save(&session).unwrap();
-                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
-                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
-                assert_eq!(title.autofit.as_ref(), Some(expected));
+                for graphics in ["", graphics.as_str()] {
+                    let (session, story) = edited_autofit_session_with_graphics(
+                        "Untouched",
+                        inherited,
+                        grouped,
+                        graphics,
+                        &" words that must shrink to stay inside the title".repeat(6),
+                    );
+                    let renderer = renderer();
+                    let rendered = renderer
+                        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                        .unwrap();
+                    let expected = rendered.autofit.get(&story.id).unwrap();
+                    assert!(matches!(
+                        expected,
+                        TextAutofit::Normal { font_scale: Some(scale), .. } if *scale < 1.0
+                    ));
+                    let saved = renderer.save(&session).unwrap();
+                    let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                    let title =
+                        node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                    assert_eq!(title.autofit.as_ref(), Some(expected));
+                }
             }
         }
+    }
+
+    #[test]
+    fn fitted_save_layout_emits_no_graphic_primitives() {
+        let graphics = autofit_custom_graphics(2, 2);
+        let (session, story) = edited_autofit_session_with_graphics(
+            "Untouched",
+            false,
+            false,
+            &graphics,
+            &" words that must shrink to stay inside the title".repeat(6),
+        );
+        let renderer = renderer();
+        let snapshot = session.snapshot().unwrap();
+        let full = renderer
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap();
+        assert!(
+            full.display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape {
+                        fill: Some(_),
+                        stroke: Some(_),
+                        shadow: Some(_),
+                        ..
+                    }
+                ))
+        );
+        let shapes = HashSet::from([snapshot.slides[0].shapes[0].id.clone()]);
+        let fitted = renderer
+            .layout_resolved(
+                session.package(),
+                &snapshot.slides[0],
+                snapshot.width_emu,
+                snapshot.height_emu,
+                0,
+                Some(&shapes),
+            )
+            .unwrap();
+        assert!(fitted.display_list.primitives.is_empty());
+        assert!(fitted.display_list.background.is_none());
+        assert!(fitted.hit_regions.is_empty());
+        assert!(fitted.autofit.contains_key(&story.id));
+        assert_eq!(fitted.autofit, full.autofit);
+    }
+
+    #[test]
+    fn fitted_save_skips_large_custom_geometry_and_gradient() {
+        let graphics = autofit_custom_graphics(3_000, 100_000);
+        let (session, story) =
+            edited_autofit_session_with_graphics("Untouched", false, false, &graphics, "!");
+        assert_eq!(session.story(&story.id).unwrap().length, story.length + 1);
+        let ShapeNode::Shape(shape) = find_node(&session.package().slides[0].shapes, 2).unwrap()
+        else {
+            panic!("a custom shape");
+        };
+        assert_eq!(shape.paths.len(), 3_000);
+        assert!(shape.paths.iter().all(|path| path.commands.len() == 4));
+        assert_eq!(
+            shape
+                .fill
+                .as_ref()
+                .unwrap()
+                .gradient
+                .as_ref()
+                .unwrap()
+                .stops
+                .len(),
+            100_000
+        );
+        let renderer = renderer();
+        let start = std::time::Instant::now();
+        let saved = renderer.save(&session).unwrap();
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+        assert_eq!(
+            title.autofit,
+            Some(TextAutofit::Normal {
+                font_scale: Some(1.0),
+                line_space_reduction: Some(0.0),
+            })
+        );
+        assert_eq!(
+            title.paragraphs[0]
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "Start!"
+        );
     }
 
     #[test]
