@@ -568,6 +568,7 @@ fn parse_paragraph_contents(
                     doc_defaults,
                     budget,
                     drawing.as_deref_mut(),
+                    in_control,
                     in_header_footer,
                 )?;
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
@@ -583,6 +584,7 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_control,
                     in_header_footer,
                 )?;
                 if let Some(active) = fields.last_mut() {
@@ -632,6 +634,7 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_control,
                     in_header_footer,
                 )?;
                 if let Some(active) = fields.last_mut() {
@@ -841,6 +844,7 @@ fn parse_simple_field_composed(
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
+    in_control: bool,
     in_header_footer: bool,
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
@@ -859,7 +863,7 @@ fn parse_simple_field_composed(
             drawing,
             depth,
             false,
-            false,
+            in_control,
             in_header_footer,
         )?,
         false,
@@ -908,6 +912,7 @@ fn parse_hyperlink_composed(
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
+    in_control: bool,
     in_header_footer: bool,
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
@@ -932,6 +937,7 @@ fn parse_hyperlink_composed(
                 doc_defaults,
                 budget,
                 drawing.as_deref_mut(),
+                in_control,
                 in_header_footer,
             )?)),
             "bookmarkStart" => has_bookmark_id(child)
@@ -950,6 +956,7 @@ fn parse_hyperlink_composed(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_control,
                     in_header_footer,
                 )?,
             ))),
@@ -1142,6 +1149,7 @@ pub(crate) fn parse_run_composed(
         doc_defaults,
         budget,
         drawing.as_mut(),
+        false,
         in_header_footer,
     )
 }
@@ -1155,19 +1163,33 @@ fn parse_run_with_context(
     doc_defaults: Option<&DocDefaults>,
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut ComposedDrawingContext<'_>>,
+    in_control: bool,
     in_header_footer: bool,
 ) -> Result<Run, ParseError> {
     let mut run = parse_run(element, theme, styles, doc_defaults).run;
     let mut replacements = Vec::new();
     for child in element.child_elements() {
         match child.local_name() {
-            "drawing" | "pict" | "object" => replacements.push(parse_drawing_owned(
-                child,
-                relationships,
-                budget,
-                drawing.as_deref_mut(),
-                in_header_footer,
-            )?),
+            "drawing" | "pict" | "object" => {
+                let mut parsed = parse_drawing_owned(
+                    child,
+                    relationships,
+                    budget,
+                    drawing.as_deref_mut(),
+                    in_header_footer,
+                )?;
+                if in_control && parsed.is_empty() && is_text_box_drawing(child) {
+                    parsed.push(RunContent::OpaqueDrawing {
+                        kind: "drawing".to_owned(),
+                        xml: child.to_raw_inline_xml(),
+                        preview: None,
+                        previews: Vec::new(),
+                        text_box: None,
+                        drawing_properties: crate::image::parse_drawing_properties(child),
+                    });
+                }
+                replacements.push(parsed);
+            }
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 let parsed = parse_alternate_content(
                     child,
@@ -1180,19 +1202,54 @@ fn parse_run_with_context(
                     RunContent::OpaqueDrawing { previews, .. } => !previews.is_empty(),
                     _ => true,
                 });
-                if !modeled && !alternate_content_has_text_box(child) {
-                    let fallback_properties = parsed
-                        .iter()
-                        .find_map(|content| content.drawing_properties().cloned());
-                    let preview = parsed.into_iter().find_map(|content| match content {
-                        RunContent::OpaqueDrawing { preview, .. } => preview,
-                        _ => None,
-                    });
+                let has_text_box = alternate_content_has_text_box(child);
+                let control_text_box = in_control && has_text_box;
+                if control_text_box || (!modeled && !has_text_box) {
+                    let fallback_properties = if control_text_box {
+                        child.child_elements().find_map(|branch| {
+                            branch.child_elements().find_map(|drawing| {
+                                is_text_box_drawing(drawing)
+                                    .then(|| crate::image::parse_drawing_properties(drawing))
+                                    .flatten()
+                            })
+                        })
+                    } else {
+                        parsed
+                            .iter()
+                            .find_map(|content| content.drawing_properties().cloned())
+                    };
+                    let (preview, previews) = if control_text_box {
+                        let mut previews: Vec<_> = parsed
+                            .into_iter()
+                            .flat_map(|content| match content {
+                                RunContent::Drawing { image, .. } => vec![*image],
+                                RunContent::OpaqueDrawing {
+                                    preview, previews, ..
+                                } => preview
+                                    .map(|image| *image)
+                                    .into_iter()
+                                    .chain(previews)
+                                    .collect(),
+                                _ => Vec::new(),
+                            })
+                            .collect();
+                        if previews.len() == 1 {
+                            (previews.pop().map(Box::new), previews)
+                        } else {
+                            (None, previews)
+                        }
+                    } else {
+                        let preview = parsed.into_iter().find_map(|content| match content {
+                            RunContent::OpaqueDrawing { preview, .. } => preview,
+                            _ => None,
+                        });
+                        (preview, Vec::new())
+                    };
                     replacements.push(vec![RunContent::OpaqueDrawing {
                         kind: "alternateContent".to_owned(),
                         xml: child.to_raw_inline_xml(),
                         preview,
-                        previews: Vec::new(),
+                        previews,
                         text_box: None,
                         drawing_properties: fallback_properties,
                     }]);

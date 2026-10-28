@@ -5,6 +5,7 @@ import { proposalRevisionPreview, type DocxOccurrence, type DocxProposalSnapshot
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   createYrsPositionProjection,
+  inlineControlDisplaySize,
   createYrsLocProjectionFromOutline,
   yrsLocToProjectedDisplayPosition,
   type YrsLocProjection,
@@ -64,7 +65,7 @@ export type AnchorGeometryTarget =
   | { kind: 'paragraph'; paragraph: DocxParagraphAnchor }
   | { kind: 'search'; paragraph: DocxParagraphAnchor; text: string; occurrence?: DocxOccurrence }
   | { kind: 'range'; version: string; range: DocxTextRange }
-  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number };
+  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number; index?: number };
 
 /** @internal */
 export interface RawAnchorRange {
@@ -74,7 +75,7 @@ export interface RawAnchorRange {
 
 /** @internal */
 export type AnchorResolution =
-  | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean }
+  | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean; drawingOffset?: number }
   | AnchorResolutionFailure;
 
 /** Cached reads of one document version. */
@@ -349,6 +350,29 @@ export function hiddenRangesForPreview(
     }));
 }
 
+function controlDrawingOffsets(payload: Record<string, unknown>, start = 1): number[] {
+  const offsets: number[] = [];
+  let at = start;
+  if (!Array.isArray(payload.content)) return offsets;
+  for (const child of payload.content as unknown[]) {
+    if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+    const item = child as Record<string, unknown>;
+    const nested = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+      ? item.payload as Record<string, unknown> : null;
+    const size = item.kind === 'text' ? (typeof item.text === 'string' ? item.text.length : 0)
+      : item.kind === 'sdt' ? (nested ? inlineControlDisplaySize(nested) : 2) : 1;
+    const attrs = item.attrs as Record<string, unknown> | undefined;
+    if (attrs?.del == null && nested) {
+      if (item.kind === 'sdt') offsets.push(...controlDrawingOffsets(nested, at + 1));
+      else if (nested.docPr && typeof nested.docPr === 'object' && !Array.isArray(nested.docPr)) {
+        offsets.push(at);
+      }
+    }
+    at += size;
+  }
+  return offsets;
+}
+
 /** @internal */
 export function resolveAnchorTarget(
   session: AnchorReader,
@@ -433,8 +457,18 @@ export function resolveAnchorTarget(
       return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
     }
     const atom = view?.atoms.find((candidate) => candidate.view === target.offset);
-    if (
-      !atom ||
+    if (!atom) return anchorFailure('missing-target', 'The offset is not on a drawing');
+    let drawingOffset: number | undefined;
+    if (target.index !== undefined) {
+      if (atom.embedKind !== 'sdt' || !Number.isInteger(target.index) || target.index < 0) {
+        return anchorFailure('missing-target', 'The index is not on a control drawing');
+      }
+      drawingOffset = controlDrawingOffsets(atom.payload)[target.index];
+      if (drawingOffset === undefined) {
+        return anchorFailure('missing-target', 'The index is not on a control drawing');
+      }
+    } else if (
+      atom.embedKind === 'sdt' ||
       (!DRAWING_EMBEDS.has(atom.embedKind) && atom.payload.docPr === undefined)
     ) {
       return anchorFailure('missing-target', 'The offset is not on a drawing');
@@ -445,6 +479,7 @@ export function resolveAnchorTarget(
       ranges: [{ start: at, end: { ...at, offset: atom.raw + 1 } }],
       paragraph: paragraph.loc,
       drawing: true,
+      ...(drawingOffset !== undefined ? { drawingOffset } : {}),
     };
   }
   if (!target.text) return anchorFailure('missing-target', 'The search text is empty');
@@ -584,7 +619,10 @@ function displayMapping(reader: ProposalGeometryReader, version: string, root = 
     for (const range of resolved.ranges) {
       const mapped = display(range);
       if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
-      ranges.push(mapped);
+      ranges.push(resolved.drawingOffset === undefined ? mapped : {
+        from: mapped.from + resolved.drawingOffset,
+        to: mapped.from + resolved.drawingOffset + 1,
+      });
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
     return {

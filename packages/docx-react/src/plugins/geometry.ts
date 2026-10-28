@@ -668,7 +668,7 @@ export function createPluginGeometry(
   /** Places `target`, or the raw ranges a caller resolved itself. */
   const anchorGeometry = (
     target: AnchorGeometryTarget | null,
-    raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean },
+    raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean; drawingOffset?: number },
     reservationTarget = false,
     hiddenTarget = false
   ): DocxAnchorGeometryResult => {
@@ -743,7 +743,10 @@ export function createPluginGeometry(
     for (const range of resolved?.ok ? resolved.ranges : []) {
       const mapped = display(range);
       if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
-      ranges.push(mapped);
+      ranges.push(resolved?.ok && resolved.drawingOffset !== undefined ? {
+        from: mapped.from + resolved.drawingOffset,
+        to: mapped.from + resolved.drawingOffset + 1,
+      } : mapped);
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
     if (
