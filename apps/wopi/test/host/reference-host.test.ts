@@ -230,7 +230,7 @@ describe("reference host write races", () => {
         advance(31 * 60 * 1000);
         await client.getLock({ wopiSrc: SRC, accessToken: TOKEN });
       }
-      const before = { ...host.files.get("file1") };
+      const before = { ...host.files.get("file1")! };
       upload.finish();
       const err = await pending;
       expect(err.kind).toBe("lockMismatch");
@@ -246,7 +246,7 @@ describe("reference host write races", () => {
     const pending = kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: upload.body }));
     await upload.started;
     await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]) });
-    const before = { ...host.files.get("file1") };
+    const before = { ...host.files.get("file1")! };
     upload.finish();
     expect((await pending).kind).toBe("lockMismatch");
     expect(host.files.get("file1")).toEqual(before);
