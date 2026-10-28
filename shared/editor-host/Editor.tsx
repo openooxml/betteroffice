@@ -14,7 +14,7 @@ import {
   resolveMetricCompatFace,
 } from "@betteroffice/fonts";
 import { createRoomTransport } from "./collaboration/createRoomTransport";
-import type { CollaborationReplica } from "./collaboration/types";
+import type { CollaborationReplica, CollaborationTransport } from "./collaboration/types";
 import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
@@ -61,7 +61,8 @@ export interface PreparedFile {
 
 export async function prepareFile(
   bytes: Uint8Array,
-  format: Format
+  format: Format,
+  options?: { fontBaseUrl?: string }
 ): Promise<PreparedFile> {
   if (format === "docx") {
     if (!legacyDocx()) {
@@ -93,7 +94,7 @@ export async function prepareFile(
           family: "Arial",
           bold,
           italic,
-          bytes: new Uint8Array(await loadBundledFontBytes(face)),
+          bytes: new Uint8Array(await loadBundledFontBytes(face, options?.fontBaseUrl ? { baseUrl: options.fontBaseUrl } : undefined)),
         };
       })
     )
@@ -124,19 +125,48 @@ export interface Room {
   name: string;
 }
 
+/** One collaboration view, for presence reporting. */
+export interface EditorView {
+  clientId: number;
+  name?: string;
+}
+
 export interface EditorProps {
   file: PreparedFile;
   name: string;
   room: Room | null;
-  relayOrigin: string;
+  relayOrigin?: string;
+  createTransport?: (roomId: string) => CollaborationTransport;
+  initialUpdate?: Uint8Array;
+  collaborationClientId?: number;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
   onSave(bytes: Uint8Array): void;
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
+  downloadOnSave?: boolean;
   onChange(): void;
   onError(error: Error): void;
   onReady(api: EditorApi | null): void;
   onOpen(file: File): Promise<void>;
   onStatus(status: string): void;
+  onViewsChange?(views: EditorView[]): void;
+}
+
+function viewsFromPeers(peers: readonly unknown[]): EditorView[] {
+  const views: EditorView[] = [];
+  for (const peer of peers) {
+    if (typeof peer !== "object" || peer === null) continue;
+    const record = peer as { clientId?: unknown; state?: unknown; user?: unknown };
+    const state = typeof record.state === "object" && record.state !== null
+      ? (record.state as { clientId?: unknown; user?: unknown })
+      : undefined;
+    const clientId = typeof record.clientId === "number" ? record.clientId
+      : state && typeof state.clientId === "number" ? state.clientId : undefined;
+    if (clientId === undefined) continue;
+    const user = (record.user ?? state?.user) as { name?: unknown } | undefined;
+    views.push({ clientId, ...(typeof user?.name === "string" ? { name: user.name } : {}) });
+  }
+  return views;
 }
 
 export default function Editor({
@@ -144,14 +174,20 @@ export default function Editor({
   name,
   room,
   relayOrigin,
+  createTransport,
+  initialUpdate,
+  collaborationClientId,
   mode,
   readOnly,
   onSave,
+  onSaveRequest,
+  downloadOnSave,
   onChange,
   onError,
   onReady,
   onOpen,
   onStatus,
+  onViewsChange,
 }: EditorProps) {
   const serialization = useRef<{ failure: Error | null; bytes?: Uint8Array } | null>(null);
   const serializations = useRef<Promise<unknown>>(Promise.resolve());
@@ -160,9 +196,10 @@ export default function Editor({
   const pptx = useRef<PptxAsyncEditorApi | null>(null);
   const apiWaiter = useRef<{ resolve(): void; reject(error: Error): void } | null>(null);
   const apiFailure = useRef<Error | null>(null);
-  const clientId = useRef(
+  const generatedClientId = useRef(
     crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff || 1
   ).current;
+  const clientId = collaborationClientId ?? generatedClientId;
   const [replica, setReplica] = useState<CollaborationReplica | null>(null);
   const [presentationReplica, setPresentationReplica] = useState<AsyncCollaborationReplica | null>(null);
   const [provider, setProvider] = useState<
@@ -176,15 +213,29 @@ export default function Editor({
   const presentationCollaboration = useMemo(() => room ? {
     roomId: room.id,
     clientId,
+    ...(initialUpdate ? { initialUpdate } : {}),
     onReplica: setPresentationReplica,
     presence: presentationPresence,
-  } : undefined, [room?.id, clientId, presentationPresence]);
-  const callbacks = useRef({ onSave, onChange, onError, onStatus, onReady });
-  callbacks.current = { onSave, onChange, onError, onStatus, onReady };
+  } : undefined, [room?.id, clientId, initialUpdate, presentationPresence]);
+  const callbacks = useRef({ onSave, onChange, onError, onStatus, onReady, onViewsChange });
+  callbacks.current = { onSave, onChange, onError, onStatus, onReady, onViewsChange };
+
+  useEffect(() => {
+    if (!provider || !callbacks.current.onViewsChange) return;
+    const report = (peers: readonly unknown[]) => callbacks.current.onViewsChange?.(viewsFromPeers(peers));
+    const candidate = provider as unknown as {
+      onPeers?: (listener: (peers: readonly unknown[]) => void) => () => void;
+      onAwareness?: (listener: (peers: readonly unknown[]) => void) => () => void;
+      onPresence?: (listener: (peers: readonly unknown[]) => void) => () => void;
+    };
+    const subscribe = candidate.onPeers ?? candidate.onAwareness ?? candidate.onPresence;
+    if (!subscribe) return;
+    return subscribe.call(provider, report);
+  }, [provider]);
 
   useEffect(() => {
     if (!room || (file.format === "pptx" ? !presentationReplica : !replica)) return;
-    const transport = createRoomTransport(relayOrigin, room.id);
+    const transport = createTransport ? createTransport(room.id) : createRoomTransport(relayOrigin ?? "", room.id);
     const options = { user: { name: room.name } };
     const next =
       file.format === "docx"
@@ -206,7 +257,7 @@ export default function Editor({
       next.destroy();
       setProvider(null);
     };
-  }, [file.format, replica, presentationReplica, room, relayOrigin]);
+  }, [file.format, replica, presentationReplica, room, relayOrigin, createTransport]);
 
   const changed = useCallback(() => callbacks.current.onChange(), []);
   const saveBytes = useCallback(
@@ -340,7 +391,8 @@ export default function Editor({
         mode={mode}
         readOnly={readOnly}
         documentBuffer={file.bytes}
-        downloadOnSave={false}
+        downloadOnSave={downloadOnSave ?? false}
+        {...(onSaveRequest ? { onSaveRequest } : {})}
         onSave={(buffer) => {
           if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
@@ -358,6 +410,7 @@ export default function Editor({
           room
             ? {
                 clientId,
+                ...(initialUpdate ? { initialUpdate } : {}),
                 user: { name: room.name },
                 onReplica: setReplica,
                 presence:
@@ -372,6 +425,8 @@ export default function Editor({
       <XlsxEditor
         file={file.bytes}
         fileName={name}
+        {...(onSaveRequest ? { onSaveRequest } : {})}
+        {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
         onSave={(bytes) => {
           if (serialization.current) serialization.current.bytes = bytes;
           else saveBytes(bytes);
@@ -384,6 +439,7 @@ export default function Editor({
           room
             ? {
                 clientId,
+                ...(initialUpdate ? { initialUpdate } : {}),
                 onReplica: setReplica,
                 provider:
                   provider instanceof XlsxProvider ? provider : undefined,
@@ -397,6 +453,8 @@ export default function Editor({
       file={file.bytes}
       fileName={name}
       fonts={file.fonts ?? []}
+      {...(onSaveRequest ? { onSaveRequest } : {})}
+      {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
       onSave={saveBytes}
       onChange={changed}
       onReady={presentationReady}

@@ -2,6 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import type { HostClient } from "../host/client";
 import { WopiHostError } from "../host/errors";
 import { redactText } from "../host/redact";
+import { blankDocument } from "../blank";
 import { openServerReplica, type Format, type JoinPayload, type ServerReplica } from "../replica/replica";
 import { electLeader } from "./leader";
 import { UserSession } from "./userSession";
@@ -333,7 +334,13 @@ export class FileSession {
         this.#fileSize = info.Size;
         this.#lastModifiedTime = info.LastModifiedTime ?? null;
         this.#itemVersion = info.Version ?? null;
-        const bytes = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+        const fetched = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+        const isBlank = fetched.byteLength === 0;
+        const bytes = isBlank ? await blankDocument(this.#format) : fetched;
+        if (isBlank) {
+          this.#savedVersion = -1;
+          this.#firstDirtyAt = this.#now();
+        }
         this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));

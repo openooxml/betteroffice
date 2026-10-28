@@ -9,6 +9,8 @@ import {
   loadOrCreateKeyPairFile,
   type ProofKeyPair,
 } from "./proof";
+import { existsSync, statSync } from "node:fs";
+import { extname, resolve, sep } from "node:path";
 import { CollabRelay, findByHandle } from "./relay/relay";
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
@@ -22,6 +24,59 @@ export interface WopiServerDeps {
   registry?: SessionRegistry;
   hostClient?: HostClient;
   relay?: CollabRelay;
+  webRoot?: string;
+  fontRoots?: string[];
+}
+
+const STATIC_CONTENT_TYPES: Record<string, string> = {
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".map": "application/json; charset=utf-8",
+};
+
+const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
+
+/** Resolves a request path inside a root, or null when it escapes. */
+export function resolveStaticPath(root: string, requestPath: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(requestPath);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("\\") || decoded.includes("\0")) return null;
+  const segments = decoded.split("/").filter((segment) => segment.length > 0);
+  if (segments.some((segment) => segment === ".." || segment === ".")) return null;
+  const rootResolved = resolve(root);
+  const candidate = resolve(rootResolved, ...segments);
+  if (candidate !== rootResolved && !candidate.startsWith(rootResolved + sep)) return null;
+  return candidate;
+}
+
+function staticFileResponse(filePath: string, cacheControl: string, method: string): Response | null {
+  if (!existsSync(filePath) || !statSync(filePath).isFile()) return null;
+  const contentType = STATIC_CONTENT_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+  const file = Bun.file(filePath);
+  return new Response(method === "HEAD" ? null : file, {
+    status: 200,
+    headers: {
+      "Content-Type": contentType,
+      "Content-Length": String(file.size),
+      "Cache-Control": cacheControl,
+      ...SECURITY_HEADERS,
+    },
+  });
 }
 
 /** Minimal upgrade surface of a Bun server. */
@@ -211,10 +266,15 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       tokenExpiresAt: joined.user.expiresAt,
     });
     const ancestors = host.frameOrigins.length > 0 ? host.frameOrigins.join(" ") : "'none'";
+    let collabOrigin = "";
+    try {
+      const publicUrl = new URL(deps.config.publicUrl);
+      collabOrigin = `${publicUrl.protocol === "https:" ? "wss:" : "ws:"}//${publicUrl.host}`;
+    } catch {}
     const csp = [
       `frame-ancestors ${ancestors}`,
       "default-src 'self'",
-      "connect-src 'self'",
+      collabOrigin ? `connect-src 'self' ${collabOrigin}` : "connect-src 'self'",
       "img-src 'self' blob: data:",
       "font-src 'self' data:",
       "style-src 'self' 'unsafe-inline'",
@@ -224,8 +284,9 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     const html = [
       "<!doctype html>",
       '<html lang="en">',
-      `<head><meta charset="utf-8"><title>${escapeHtml(session.fileName || "BetterOffice")}</title></head>`,
+      `<head><meta charset="utf-8"><title>${escapeHtml(session.fileName || "BetterOffice")}</title><link rel="stylesheet" href="/app/main.css"></head>`,
       "<body>",
+      '<div id="root"></div>',
       `<script type="application/json" id="wopi-config">${configJson}</script>`,
       '<script type="module" src="/app/main.js"></script>',
       "</body>",
@@ -322,6 +383,29 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     }
     if (url.pathname === "/wopi/edit") return handlePage(request, url, "edit");
     if (url.pathname === "/wopi/view") return handlePage(request, url, "view");
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/app" || url.pathname.startsWith("/app/"))) {
+      const webRoot = deps.webRoot ?? resolve(import.meta.dir, "../web/dist");
+      const relative = url.pathname.slice("/app".length) || "/main.js";
+      const filePath = resolveStaticPath(webRoot, relative);
+      if (filePath === null) return respond("Not Found", "text/plain; charset=utf-8", 404);
+      const base = filePath.split(sep).pop() ?? "";
+      const cache = base === "main.js" || base === "main.css" || base.endsWith(".html") ? "no-cache" : IMMUTABLE_CACHE;
+      return staticFileResponse(filePath, cache, request.method) ?? respond("Not Found", "text/plain; charset=utf-8", 404);
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/fonts/")) {
+      const fontRoots = deps.fontRoots ?? [
+        resolve(import.meta.dir, "../../../packages/fonts/assets"),
+        resolve(import.meta.dir, "../../../packages/fonts-cjk/assets"),
+      ];
+      const relative = url.pathname.slice("/fonts".length);
+      for (const root of fontRoots) {
+        const filePath = resolveStaticPath(root, relative);
+        if (filePath === null) return respond("Not Found", "text/plain; charset=utf-8", 404);
+        const found = staticFileResponse(filePath, IMMUTABLE_CACHE, request.method);
+        if (found) return found;
+      }
+      return respond("Not Found", "text/plain; charset=utf-8", 404);
+    }
     if (url.pathname.startsWith("/api/session/")) return handleApi(request, url);
     if (url.pathname === "/collab") {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);

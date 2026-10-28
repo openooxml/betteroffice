@@ -567,11 +567,63 @@ test.each(["xlsx", "pptx"] as const)("%s receives readOnly in a collaboration ro
   expect(props.collaboration).toBeDefined();
 });
 
+test("pptx preparation loads fonts from a configured base url", async () => {
+  const descriptors = ["Worker", "OffscreenCanvas"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  loadFont.mockClear();
+  try {
+    for (const [key] of descriptors) Object.defineProperty(globalThis, key, { configurable: true, value: class {} });
+    await prepareFile(Uint8Array.of(1), "pptx", { fontBaseUrl: "/fonts/" });
+    expect(loadFont.mock.calls.length).toBeGreaterThan(0);
+    for (const call of loadFont.mock.calls) expect(call[1]).toEqual({ baseUrl: "/fonts/" });
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
 test("collaboration transport is created from the relay origin prop", async () => {
   roomTransportCalls.length = 0;
   await mount("pptx", true);
   expect(roomTransportCalls).toEqual([["https://relay.example.test", "test"]]);
 });
+
+test("createTransport replaces relayOrigin and receives the room id", async () => {
+  roomTransportCalls.length = 0;
+  presentationOptions.length = 0;
+  const createTransport = mock((_roomId: string) => ({
+    connect() {},
+    disconnect() {},
+    send: () => true,
+    onEvent: () => () => {},
+  }));
+  const initialUpdate = Uint8Array.of(9, 8);
+  await act(async () => {
+    render(
+      <Editor
+        file={{ bytes: new Uint8Array(), format: "pptx" }}
+        name="deck.pptx"
+        room={{ id: "wopi-room", name: "Alice A" }}
+        createTransport={createTransport}
+        initialUpdate={initialUpdate}
+        collaborationClientId={4242}
+        onSave={() => {}}
+        onChange={() => {}}
+        onError={() => {}}
+        onReady={() => {}}
+        onOpen={async () => {}}
+        onStatus={() => {}}
+      />
+    );
+  });
+  expect(createTransport).toHaveBeenCalledTimes(1);
+  expect(createTransport.mock.calls[0]).toEqual(["wopi-room"]);
+  expect(roomTransportCalls).toEqual([]);
+  const opening = presentationOptions.find((options) => options?.clientId === 4242);
+  expect(opening?.initialUpdate).toEqual(initialUpdate);
+});
+
 
 test("presentation collaboration connects the async replica and presence provider", async () => {
   providerReplicas.length = 0;
