@@ -14,7 +14,6 @@ use ooxml_drawingml::{
 use ooxml_text::family_metrics::{
     FamilyMetrics, family_advance, family_cluster_advance, family_metrics, runs_at_own_widths,
 };
-use ooxml_text::shape::is_nonspacing_mark;
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
@@ -4538,16 +4537,23 @@ fn shape_face(
         glyphs.push(ShapedGlyph {
             glyph_id: 0,
             cluster: index as u32,
-            x_advance: 0.0,
+            x_advance: face
+                .widths
+                .and_then(|metrics| family_advance(metrics, character))
+                .unwrap_or(0.5)
+                * size_px,
             x_offset: 0.0,
             y_offset: 0.0,
         });
-        let mut end = index + character.len_utf8();
-        while let Some(&(next, mark)) = characters.peek()
-            && is_nonspacing_mark(mark)
+        let kana = matches!(character,
+            '\u{3041}'..='\u{3096}' | '\u{309d}'..='\u{309f}' |
+            '\u{30a1}'..='\u{30fa}' | '\u{30fd}'..='\u{30ff}' |
+            '\u{ff66}'..='\u{ff9d}');
+        if kana
+            && let Some(&(next, mark)) = characters.peek()
+            && matches!(mark, '\u{3099}' | '\u{309a}')
         {
             characters.next();
-            end = next + mark.len_utf8();
             glyphs.push(ShapedGlyph {
                 glyph_id: 0,
                 cluster: index as u32,
@@ -4555,17 +4561,11 @@ fn shape_face(
                 x_offset: 0.0,
                 y_offset: 0.0,
             });
-        }
-        if !is_nonspacing_mark(character) {
-            glyphs[first].x_advance = face
-                .widths
-                .and_then(|metrics| family_cluster_advance(metrics, &text[index..end]))
-                .or_else(|| {
-                    face.widths
-                        .and_then(|metrics| family_advance(metrics, character))
-                })
-                .unwrap_or(0.5)
-                * size_px;
+            if let Some(advance) = face.widths.and_then(|metrics| {
+                family_cluster_advance(metrics, &text[index..next + mark.len_utf8()])
+            }) {
+                glyphs[first].x_advance = advance * size_px;
+            }
         }
     }
     Ok(glyphs)
@@ -11818,42 +11818,72 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_faces_join_nonspacing_marks_without_advancing_them() {
+    fn unregistered_faces_preserve_scalar_advances_outside_kana_voicing() {
         let renderer = SlideRenderer::new();
         for family in ["MS UI Gothic", "MS Mincho", "MS Gothic", "Aptos"] {
             let face = renderer
                 .resolve_face(family, false, false, &mut SubstitutionLog::default())
                 .unwrap();
-            for marks in [
-                "\u{0301}",
-                "\u{1ab0}",
-                "\u{20d0}",
-                "\u{fe20}",
+            for text in [
+                "x\u{0301}x",
+                "x\u{1ab0}x",
+                "x\u{20d0}x",
+                "x\u{fe20}x",
+                "x\u{0301}\u{1ab0}x",
                 "\u{0301}\u{1ab0}",
+                "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}",
+                "👩\u{200d}💻",
+                "\u{fe0f}",
+                "\u{200d}",
+                "か\u{fe0f}",
+                "か\u{0301}",
+                "x\u{3099}",
+                "x\u{309a}",
+                "\u{3099}\u{309a}",
+                "あ\u{309b}",
+                "あ\u{309c}",
             ] {
-                let text = format!("x{marks}x");
-                let glyphs = shape_face(&renderer.fonts, &face, &text, 16.0, &[]).unwrap();
-                let advance = face
-                    .widths
-                    .and_then(|metrics| family_advance(metrics, 'x'))
-                    .unwrap()
-                    * 16.0;
-                let last = glyphs.last().unwrap();
-                assert_eq!(last.cluster as usize, text.len() - 1);
-                assert_eq!(last.x_advance, advance);
-                assert_eq!(glyphs[0].x_advance, advance);
-                for mark in &glyphs[1..glyphs.len() - 1] {
-                    assert_eq!(mark.cluster, 0);
-                    assert_eq!(mark.x_advance, 0.0);
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), text.chars().count(), "{family} {text}");
+                for (glyph, (index, character)) in glyphs.iter().zip(text.char_indices()) {
+                    let expected = face
+                        .widths
+                        .and_then(|metrics| family_advance(metrics, character))
+                        .unwrap_or(0.5)
+                        * 16.0;
+                    assert_eq!(glyph.cluster as usize, index, "{family} {text}");
+                    assert_eq!(glyph.x_advance, expected, "{family} {text}");
                 }
-                let leading = shape_face(&renderer.fonts, &face, marks, 16.0, &[]).unwrap();
-                assert!(
-                    leading
-                        .iter()
-                        .all(|glyph| glyph.cluster == 0 && glyph.x_advance == 0.0)
-                );
             }
         }
+    }
+
+    #[test]
+    fn unregistered_aptos_keeps_emoji_variation_selector_widths() {
+        let renderer = SlideRenderer::new();
+        let face = renderer
+            .resolve_face("Aptos", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+        let text = "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}";
+        let mut paragraph = paragraph(&renderer, "l", text);
+        paragraph.runs[0].style.face = face;
+        paragraph.runs[0].style.family = "Aptos".to_owned();
+        paragraph.runs[0].style.font_size_pt = 12.0;
+        paragraph.runs[0].style.line_font_size_pt = 12.0;
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].width, 48.0);
     }
 
     #[test]
