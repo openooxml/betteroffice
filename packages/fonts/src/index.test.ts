@@ -25,6 +25,12 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('  CAMBRIA ')).toBe('Caladea');
     expect(resolveMetricCompatFamily('Helvetica')).toBe('Liberation Sans');
     expect(resolveMetricCompatFamily('Times')).toBe('Liberation Serif');
+    for (const family of ['Tms Rmn', 'Times Roman', 'TimesNewRomanPSMT', 'TimesNewRoman']) {
+      expect(resolveMetricCompatFamily(family)).toBe('Liberation Serif');
+    }
+    for (const family of ['Helv', 'Arial MT', 'ArialMT']) {
+      expect(resolveMetricCompatFamily(family)).toBe('Liberation Sans');
+    }
     expect(resolveMetricCompatFamily('Nonesuch')).toBeUndefined();
   });
 
