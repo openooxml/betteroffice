@@ -334,10 +334,12 @@ describe('command frame incremental raster', () => {
   });
 
   test('pooled canvases do not keep earlier typing frames alive', async () => {
-    const target = painter(); const lists: WeakRef<SlideDisplayList>[] = [];
+    const WeakReference = (globalThis as unknown as {
+      WeakRef: new (value: object) => { deref(): object | undefined } }).WeakRef;
+    const target = painter(); const lists: { deref(): object | undefined }[] = [];
     for (let index = 0; index < 40; index += 1) {
       const displayList = list(`a${index}`);
-      lists.push(new WeakRef(displayList));
+      lists.push(new WeakReference(displayList));
       await paint(target, displayList);
     }
     for (let round = 0; round < 3; round += 1) {
