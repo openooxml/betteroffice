@@ -11,6 +11,72 @@ const { act, waitFor } = await import('@testing-library/react');
 
 const last = <T,>(items: readonly T[]): T | undefined => items[items.length - 1];
 
+for (const update of [false, true]) for (const edited of [false, true]) test(`recovery reads the mount Blob lazily with update baseline ${update} and edits ${edited}`, async () => {
+  const file = await deck();
+  let reference = file.slice();
+  const NativeBlob = globalThis.Blob;
+  const constructed = mock((_parts?: BlobPart[]) => {});
+  globalThis.Blob = new Proxy(NativeBlob, {
+    construct(target, args) { constructed(args[0]); return Reflect.construct(target, args); },
+  });
+  const read = spyOn(NativeBlob.prototype, 'arrayBuffer');
+  const create = peerlessRecoveryFactory.create;
+  let recovery: ReturnType<typeof create> | undefined;
+  const factory = spyOn(peerlessRecoveryFactory, 'create').mockImplementation((...args) => {
+    recovery = create(...args);
+    return recovery;
+  });
+  const error = mock(() => {});
+  try {
+    const value = await open({ file, onError: error, ...(update ? { collaboration: { clientId: 9001 } } : {}) });
+    expect(constructed.mock.calls.filter(([parts]) => parts?.[0] === file)).toHaveLength(1);
+    expect(factory.mock.calls[0]?.[0]).toBeInstanceOf(NativeBlob);
+    expect(recovery?.saved.bytes).toBeUndefined();
+    expect(recovery?.baseline?.kind).toBe(update ? 'update' : 'source');
+    expect(read).not.toHaveBeenCalled();
+    file.fill(0);
+    const checkpoint = spyOn(value.client, 'checkpoint');
+    try {
+      await act(async () => {
+        if (edited) {
+          const target = await story(value.api);
+          const ack = await value.client.dispatch({ kind: 'insertText', payload: { inputTime: 0, undoGroup: 'blob', text: 'Accepted',
+            at: { source: 'confirmed', selection: { slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
+              anchor: 0, focus: 0, affinity: 'downstream' } } } });
+          expect(last(ack.outcomes)?.committed).toBe(true);
+          reference = await value.client.save();
+        }
+        faultControl.crash();
+      });
+      await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(read).not.toHaveBeenCalled();
+      const throughSeq = value.client.state.throughSeq;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const recovered = await value.api.recoverySave();
+        expect(recovered.throughSeq).toBe(throughSeq);
+        if (edited) await equalParts(recovered.bytes, reference);
+        else expect(recovered.bytes).toEqual(reference);
+        expect(read).toHaveBeenCalledTimes(attempt);
+        expect(recovery?.saved.bytes).toBeUndefined();
+      }
+      read.mockRejectedValueOnce(new Error('Unreadable Blob'));
+      await expect(value.api.recoverySave()).rejects.toThrow('Recovery baseline is unavailable');
+    } finally { checkpoint.mockRestore(); }
+  } finally { factory.mockRestore(); read.mockRestore(); globalThis.Blob = NativeBlob; }
+});
+
+test('recoverySave without edits returns the original bytes without reading the Blob', async () => {
+  const file = await deck();
+  const read = spyOn(Blob.prototype, 'arrayBuffer');
+  try {
+    const value = await open({ file });
+    const recovered = await value.api.recoverySave();
+    expect(recovered.bytes).toEqual(file);
+    expect(read).not.toHaveBeenCalled();
+  } finally { read.mockRestore(); }
+});
+
 test('recovery retains typing after an edited automatic checkpoint', async () => {
   const error = mock(() => {});
   const value = await open({ onError: error });

@@ -131,8 +131,13 @@ export function usePeerlessPresentation(
       catch (error) { console.error('documentChange listener threw:', error); }
     };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-    const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
+    let recoveryBase: Blob | undefined = new Blob([props.file as BlobPart]);
     const recovery = peerlessRecoveryFactory.create(recoveryBase);
+    const readRecoveryBase = async () => {
+      if (!recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+      try { return new Uint8Array(await recoveryBase.arrayBuffer()); }
+      catch { throw new Error('Recovery baseline is unavailable'); }
+    };
     let firstPainted = false;
     let published = false;
     let paintedFrame: PresentationCommandFrame | undefined;
@@ -536,12 +541,20 @@ export function usePeerlessPresentation(
             if (!fatal) await saveCheckpoint(client);
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const baseline = recovery.baseline && recovery.validate();
-            if (baseline?.kind === 'source' && !recoveryBase.byteLength) throw new Error('Recovery baseline is unavailable');
-            if (!recovery.hasUncheckpointedUpdates()) return { ...recovery.saved, bytes: recovery.saved.bytes.slice(), recovery: true };
+            if (baseline?.kind === 'source' && !recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+            if (!recovery.hasUncheckpointedUpdates()) {
+              const saved = recovery.saved;
+              const bytes = saved.bytes?.slice() ?? await readRecoveryBase();
+              if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+              return { ...saved, bytes, recovery: true };
+            }
             if (!baseline) throw new Error('Recovery baseline is unavailable');
             const journal = recovery.journal.slice();
-            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts,
+            let source: Uint8Array | undefined = await readRecoveryBase();
+            if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+            const recovering = peerlessSessionOpener.open(source, { fonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
+            source = undefined;
             try {
               const replay = await recovering.ready;
               if (baseline.kind === 'source' && replay.state.recoveryEngine !== baseline.engine) {
@@ -636,6 +649,7 @@ export function usePeerlessPresentation(
     } catch (error) { report(error); }
     return () => {
       alive = false;
+      recoveryBase = undefined;
       if (requestMode.current === setReadOnly) requestMode.current = null;
       signal();
       cancelIdle?.();
