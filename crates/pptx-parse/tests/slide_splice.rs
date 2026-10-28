@@ -66,6 +66,40 @@ fn sp_tree(inner: &str) -> String {
     )
 }
 
+const TABLE_ROW: &str = r#"<a:tr h="370840"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Same</a:t></a:r></a:p></a:txBody><a:tcPr marL="91440" anchor="ctr"></a:tcPr></a:tc></a:tr>"#;
+
+fn table_slide(rows: usize) -> String {
+    let table = format!(
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="1000"/></a:tblGrid>{}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+        TABLE_ROW.repeat(rows)
+    );
+    slide_xml(&sp_tree(&table))
+}
+
+fn table_patch(row: usize, text: &str) -> ShapePatch {
+    ShapePatch {
+        texts: vec![TextWrite {
+            target: TextTarget::TableCell { row, cell: 0 },
+            autofit: None,
+            paragraphs: vec![ParagraphWrite {
+                source_index: Some(0),
+                source_paragraphs: Vec::new(),
+                preserved_xml: None,
+                rebuild: true,
+                properties_changed: false,
+                alignment: None,
+                level: 0,
+                bullet: None,
+                runs: vec![RunWrite {
+                    text: text.to_owned(),
+                    properties: RunProperties::default(),
+                }],
+            }],
+        }],
+        ..ShapePatch::default()
+    }
+}
+
 fn text_patch(text: &str) -> ShapePatch {
     ShapePatch {
         texts: vec![TextWrite {
@@ -372,4 +406,211 @@ fn a_background_patch_keeps_the_shapes_byte_identical() {
         "survivor bytes require the splice: {xml}"
     );
     assert_eq!(parse_pptx(&saved).unwrap().slides.len(), 1);
+}
+
+#[test]
+fn a_comment_and_pi_before_a_removed_shape_survive() {
+    let edited = shape(2, "Edited", "Before");
+    let removed = shape(3, "Removed", "Removed text");
+    let last = kept_shape(4, "Last", "Last text");
+    let slide = slide_xml(&sp_tree(&format!(
+        "{edited}<!-- before removed --><?keep-pi some data?>{removed}{last}"
+    )));
+    let saved = save(
+        &deck(&slide),
+        vec![
+            ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(text_patch("Edited text")),
+            },
+            ShapeWrite::Keep { source_index: 2 },
+        ],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    assert!(xml.contains("<!-- before removed -->"), "{xml}");
+    assert!(xml.contains("<?keep-pi some data?>"), "{xml}");
+    assert!(
+        xml.contains(last.as_str()),
+        "survivor bytes require the splice: {xml}"
+    );
+    assert!(xml.contains("Edited text"), "{xml}");
+    assert!(!xml.contains("Removed"), "{xml}");
+}
+
+#[test]
+fn a_comment_between_two_removed_shapes_survives() {
+    let first = kept_shape(2, "First", "First text");
+    let removed_one = shape(3, "RemovedOne", "Removed one text");
+    let removed_two = shape(4, "RemovedTwo", "Removed two text");
+    let last = kept_shape(5, "Last", "Last text");
+    let slide = slide_xml(&sp_tree(&format!(
+        "{first}{removed_one}<!-- between removed -->{removed_two}{last}"
+    )));
+    let saved = save(
+        &deck(&slide),
+        vec![
+            ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(text_patch("First edited")),
+            },
+            ShapeWrite::Keep { source_index: 3 },
+        ],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    assert!(xml.contains("<!-- between removed -->"), "{xml}");
+    assert!(
+        xml.contains(last.as_str()),
+        "survivor bytes require the splice: {xml}"
+    );
+    assert!(xml.contains("First edited"), "{xml}");
+    assert!(!xml.contains("RemovedOne"), "{xml}");
+    assert!(!xml.contains("RemovedTwo"), "{xml}");
+}
+
+#[test]
+fn a_removed_last_shape_keeps_the_following_comment() {
+    let first = kept_shape(2, "First", "First text");
+    let removed = shape(3, "Removed", "Removed text");
+    let slide = slide_xml(&sp_tree(&format!("{first}{removed}<!-- tail stays -->")));
+    let saved = save(
+        &deck(&slide),
+        vec![ShapeWrite::Patch {
+            source_index: 0,
+            patch: Box::new(text_patch("First edited")),
+        }],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    assert!(xml.contains("<!-- tail stays -->"), "{xml}");
+    assert!(xml.contains("First edited"), "{xml}");
+    assert!(!xml.contains("Removed"), "{xml}");
+}
+
+#[test]
+fn a_comment_with_whitespace_before_a_removed_shape_survives() {
+    let edited = shape(2, "Edited", "Before");
+    let removed = shape(3, "Removed", "Removed text");
+    let last = kept_shape(4, "Last", "Last text");
+    let slide = slide_xml(&sp_tree(&format!(
+        "{edited}\n  <!-- gap stays -->\n  {removed}\n  {last}\n"
+    )));
+    let saved = save(
+        &deck(&slide),
+        vec![
+            ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(text_patch("Edited text")),
+            },
+            ShapeWrite::Keep { source_index: 2 },
+        ],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    assert!(xml.contains("<!-- gap stays -->"), "{xml}");
+    assert!(
+        xml.contains(last.as_str()),
+        "survivor bytes require the splice: {xml}"
+    );
+    assert!(!xml.contains("Removed"), "{xml}");
+}
+
+#[test]
+fn reordered_untouched_shapes_keep_their_source_bytes() {
+    let first = kept_shape(2, "Alpha", "Alpha text");
+    let second = kept_shape(3, "Bravo", "Bravo text");
+    let third = kept_shape(4, "Charlie", "Charlie text");
+    let fourth = kept_shape(5, "Delta", "Delta text");
+    let edited = shape(6, "Edited", "Before");
+    let slide = slide_xml(&sp_tree(&format!(
+        "{first}{second}{third}{fourth}{edited}"
+    )));
+    let saved = save(
+        &deck(&slide),
+        vec![
+            ShapeWrite::Keep { source_index: 3 },
+            ShapeWrite::Keep { source_index: 2 },
+            ShapeWrite::Keep { source_index: 1 },
+            ShapeWrite::Keep { source_index: 0 },
+            ShapeWrite::Patch {
+                source_index: 4,
+                patch: Box::new(text_patch("Edited text")),
+            },
+        ],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    for survivor in [&first, &second, &third, &fourth] {
+        assert!(
+            xml.contains(survivor.as_str()),
+            "reordered survivor bytes require the splice: {xml}"
+        );
+    }
+    assert!(xml.contains("Edited text"), "{xml}");
+}
+
+#[test]
+fn a_reordered_edited_shape_keeps_the_other_shapes_byte_identical() {
+    let first = kept_shape(2, "Alpha", "Alpha text");
+    let second = kept_shape(3, "Bravo", "Bravo text");
+    let third = kept_shape(4, "Charlie", "Charlie text");
+    let fourth = kept_shape(5, "Delta", "Delta text");
+    let slide = slide_xml(&sp_tree(&format!(
+        "{first}{second}{third}{fourth}"
+    )));
+    let saved = save(
+        &deck(&slide),
+        vec![
+            ShapeWrite::Keep { source_index: 3 },
+            ShapeWrite::Patch {
+                source_index: 2,
+                patch: Box::new(text_patch("Charlie edited")),
+            },
+            ShapeWrite::Keep { source_index: 1 },
+            ShapeWrite::Keep { source_index: 0 },
+        ],
+        None,
+    );
+    let xml = saved_slide(&saved);
+    for survivor in [&first, &second, &fourth] {
+        assert!(
+            xml.contains(survivor.as_str()),
+            "reordered survivor bytes require the splice: {xml}"
+        );
+    }
+    assert!(xml.contains("Charlie edited"), "{xml}");
+    assert!(!xml.contains("<a:t>Charlie text</a:t>"), "{xml}");
+}
+
+#[test]
+fn a_large_table_of_identical_rows_splices_and_scales() {
+    use std::time::Instant;
+
+    let edited_row = TABLE_ROW.replace("<a:t>Same</a:t>", "<a:t>Edited</a:t>");
+    let mut durations = Vec::new();
+    for rows in [2_000usize, 4_000] {
+        let bytes = deck(&table_slide(rows));
+        let mut best = None::<std::time::Duration>;
+        let mut saved = Vec::new();
+        for _ in 0..3 {
+            let started = Instant::now();
+            saved = save(
+                &bytes,
+                vec![ShapeWrite::Patch {
+                    source_index: 0,
+                    patch: Box::new(table_patch(rows / 2, "Edited")),
+                }],
+                None,
+            );
+            let elapsed = started.elapsed();
+            best = Some(best.map_or(elapsed, |current| current.min(elapsed)));
+        }
+        let xml = saved_slide(&saved);
+        assert_eq!(xml.matches(TABLE_ROW).count(), rows - 1, "{rows} rows");
+        assert_eq!(xml.matches(edited_row.as_str()).count(), 1, "{rows} rows");
+        durations.push(best.unwrap());
+    }
+    let ratio = durations[1].as_secs_f64() / durations[0].as_secs_f64();
+    assert!(ratio < 2.8, "scaling ratio {ratio} for {durations:?}");
 }

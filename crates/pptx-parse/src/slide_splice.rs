@@ -159,14 +159,15 @@ impl Splicer<'_> {
         if span.children.len() != before_elems.len() {
             return None;
         }
-        if before_elems
-            .len()
-            .checked_mul(after_elems.len())
-            .is_none_or(|size| size > 1_000_000)
-        {
-            return None;
-        }
-        let ops = align(&before_elems, &after_elems);
+        let before_hashes: Vec<u64> = before_elems
+            .iter()
+            .map(|element| structural_hash(element))
+            .collect();
+        let after_hashes: Vec<u64> = after_elems
+            .iter()
+            .map(|element| structural_hash(element))
+            .collect();
+        let ops = align(&before_elems, &after_elems, &before_hashes, &after_hashes)?;
         let deleted: Vec<usize> = ops
             .iter()
             .filter_map(|op| match op {
@@ -190,14 +191,22 @@ impl Splicer<'_> {
                     cursor = child_span.range.end;
                 }
                 Op::Delete(before_index) => {
-                    cursor = span.children[before_index].range.end;
+                    let child_span = &span.children[before_index];
+                    let gap = &self.source[cursor..child_span.range.start];
+                    let gap_text = std::str::from_utf8(gap).unwrap_or("");
+                    let whitespace_only = !gap.is_empty() && gap_text.trim().is_empty();
+                    if !whitespace_only || after_texts.iter().any(|text| *text == gap_text) {
+                        output.extend_from_slice(gap);
+                    }
+                    cursor = child_span.range.end;
                 }
                 Op::Insert(after_index) => {
                     let patched = after_elems[after_index];
-                    let reused_index = deleted
-                        .iter()
-                        .copied()
-                        .find(|index| !reused.contains(index) && before_elems[*index] == patched);
+                    let reused_index = deleted.iter().copied().find(|index| {
+                        !reused.contains(index)
+                            && before_hashes[*index] == after_hashes[after_index]
+                            && before_elems[*index] == patched
+                    });
                     if let Some(index) = reused_index {
                         reused.insert(index);
                         let child_span = &span.children[index];
@@ -225,21 +234,64 @@ impl Splicer<'_> {
     }
 }
 
-fn align(before: &[&XmlElement], after: &[&XmlElement]) -> Vec<Op> {
+fn align(
+    before: &[&XmlElement],
+    after: &[&XmlElement],
+    before_hashes: &[u64],
+    after_hashes: &[u64],
+) -> Option<Vec<Op>> {
     let n = before.len();
     let m = after.len();
-    let mut dp = vec![vec![0i32; m + 1]; n + 1];
-    for (i, row) in dp.iter_mut().enumerate().take(n) {
-        row[m] = -((n - i) as i32);
+    let before_ids: Vec<Option<&str>> = before
+        .iter()
+        .map(|element| drawing_object_id(element))
+        .collect();
+    let after_ids: Vec<Option<&str>> = after
+        .iter()
+        .map(|element| drawing_object_id(element))
+        .collect();
+    let equal = |i: usize, j: usize| before_hashes[i] == after_hashes[j] && before[i] == after[j];
+    let can_match = |i: usize, j: usize| {
+        before[i].name == after[j].name
+            && match (before_ids[i], after_ids[j]) {
+                (Some(left), Some(right)) => left == right,
+                (Some(_), None) | (None, Some(_)) => false,
+                (None, None) => true,
+            }
+    };
+    let mut ops = Vec::new();
+    let mut prefix = 0;
+    while prefix < n && prefix < m && equal(prefix, prefix) {
+        ops.push(Op::Match(prefix, prefix));
+        prefix += 1;
     }
-    for (j, cell) in dp[n].iter_mut().enumerate().take(m) {
-        *cell = -((m - j) as i32);
+    let mut suffix = 0;
+    while suffix < n - prefix
+        && suffix < m - prefix
+        && equal(n - 1 - suffix, m - 1 - suffix)
+    {
+        suffix += 1;
     }
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
+    let middle_n = n - prefix - suffix;
+    let middle_m = m - prefix - suffix;
+    if middle_n
+        .checked_mul(middle_m)
+        .is_none_or(|size| size > 1_000_000)
+    {
+        return None;
+    }
+    let mut dp = vec![vec![0i32; middle_m + 1]; middle_n + 1];
+    for (i, row) in dp.iter_mut().enumerate().take(middle_n) {
+        row[middle_m] = -((middle_n - i) as i32);
+    }
+    for (j, cell) in dp[middle_n].iter_mut().enumerate().take(middle_m) {
+        *cell = -((middle_m - j) as i32);
+    }
+    for i in (0..middle_n).rev() {
+        for j in (0..middle_m).rev() {
             let mut best = i32::MIN / 2;
-            if before[i].name == after[j].name {
-                let score = if before[i] == after[j] { 100 } else { 10 };
+            if can_match(prefix + i, prefix + j) {
+                let score = if equal(prefix + i, prefix + j) { 100 } else { 10 };
                 best = best.max(score + dp[i + 1][j + 1]);
             }
             best = best.max(-1 + dp[i + 1][j]);
@@ -247,28 +299,93 @@ fn align(before: &[&XmlElement], after: &[&XmlElement]) -> Vec<Op> {
             dp[i][j] = best;
         }
     }
-    let mut ops = Vec::new();
     let mut i = 0;
     let mut j = 0;
-    while i < n || j < m {
-        if i < n && j < m && before[i].name == after[j].name {
-            let score = if before[i] == after[j] { 100 } else { 10 };
+    while i < middle_n || j < middle_m {
+        if i < middle_n && j < middle_m && can_match(prefix + i, prefix + j) {
+            let score = if equal(prefix + i, prefix + j) { 100 } else { 10 };
             if dp[i][j] == score + dp[i + 1][j + 1] {
-                ops.push(Op::Match(i, j));
+                ops.push(Op::Match(prefix + i, prefix + j));
                 i += 1;
                 j += 1;
                 continue;
             }
         }
-        if i < n && dp[i][j] == -1 + dp[i + 1][j] {
-            ops.push(Op::Delete(i));
+        if i < middle_n && dp[i][j] == -1 + dp[i + 1][j] {
+            ops.push(Op::Delete(prefix + i));
             i += 1;
             continue;
         }
-        ops.push(Op::Insert(j));
+        ops.push(Op::Insert(prefix + j));
         j += 1;
     }
-    ops
+    for offset in 0..suffix {
+        ops.push(Op::Match(n - suffix + offset, m - suffix + offset));
+    }
+    Some(ops)
+}
+
+fn drawing_object_id(element: &XmlElement) -> Option<&str> {
+    if element.local_name() == "AlternateContent" {
+        return element
+            .child_elements()
+            .flat_map(|branch| branch.child_elements())
+            .find_map(drawing_object_id);
+    }
+    let non_visual = if matches!(
+        element.local_name(),
+        "nvSpPr" | "nvPicPr" | "nvGrpSpPr" | "nvGraphicFramePr" | "nvCxnSpPr"
+    ) {
+        Some(element)
+    } else {
+        element.child_elements().find(|child| {
+            matches!(
+                child.local_name(),
+                "nvSpPr" | "nvPicPr" | "nvGrpSpPr" | "nvGraphicFramePr" | "nvCxnSpPr"
+            )
+        })
+    }?;
+    non_visual
+        .child_elements()
+        .find(|child| child.local_name() == "cNvPr")?
+        .attribute("id")
+}
+
+fn structural_hash(element: &XmlElement) -> u64 {
+    fn mix(hash: &mut u64, bytes: &[u8]) {
+        for byte in (bytes.len() as u64).to_le_bytes() {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    fn hash_element(hash: &mut u64, element: &XmlElement) {
+        mix(hash, element.name.as_bytes());
+        mix(hash, &(element.attributes.len() as u64).to_le_bytes());
+        for (key, value) in &element.attributes {
+            mix(hash, key.as_bytes());
+            mix(hash, value.as_bytes());
+        }
+        mix(hash, &(element.children.len() as u64).to_le_bytes());
+        for child in &element.children {
+            match child {
+                XmlNode::Text(text) => {
+                    mix(hash, b"text");
+                    mix(hash, text.as_bytes());
+                }
+                XmlNode::Element(child) => {
+                    mix(hash, b"element");
+                    hash_element(hash, child);
+                }
+            }
+        }
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    hash_element(&mut hash, element);
+    hash
 }
 
 fn collect_declared(element: &XmlElement, declared: &mut HashSet<String>) {
@@ -303,16 +420,31 @@ fn equivalent(before: &XmlElement, after: &XmlElement) -> bool {
     if before.name != after.name || before.attributes != after.attributes {
         return false;
     }
-    if before.children.len() != after.children.len() {
+    enum Child<'a> {
+        Element(&'a XmlElement),
+        Text(String),
+    }
+    let merged = |element: &XmlElement| {
+        let mut children: Vec<Child<'_>> = Vec::new();
+        for child in &element.children {
+            match (children.last_mut(), child) {
+                (Some(Child::Text(previous)), XmlNode::Text(text)) => previous.push_str(text),
+                (_, XmlNode::Text(text)) => children.push(Child::Text(text.clone())),
+                (_, XmlNode::Element(child)) => children.push(Child::Element(child)),
+            }
+        }
+        children
+    };
+    let left = merged(before);
+    let right = merged(after);
+    if left.len() != right.len() {
         return false;
     }
-    before
-        .children
-        .iter()
-        .zip(after.children.iter())
+    left.iter()
+        .zip(right.iter())
         .all(|(left, right)| match (left, right) {
-            (XmlNode::Element(left), XmlNode::Element(right)) => equivalent(left, right),
-            (XmlNode::Text(left), XmlNode::Text(right)) => left == right,
+            (Child::Element(left), Child::Element(right)) => equivalent(left, right),
+            (Child::Text(left), Child::Text(right)) => left == right,
             _ => false,
         })
 }
