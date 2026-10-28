@@ -86,18 +86,7 @@ pub(crate) fn paragraph_sizes(
 ) -> Option<ParagraphSizes> {
     let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).ok()?;
     let parsed = parse_paragraph(
-        paragraph,
-        None,
-        None,
-        None,
-        None,
-        None,
-        path,
-        budget,
-        &mut ids,
-        None,
-        false,
-        0,
+        paragraph, None, None, None, None, None, path, budget, &mut ids, None, false, 0,
     )
     .ok()?;
     let scratch = EditingDoc::new(0);
@@ -240,6 +229,141 @@ mod tests {
     use crate::identity::{RUN_SIZE_FINGERPRINTS, RUN_SIZE_SOURCE_PARTS, STORY_FINGERPRINTS};
     use crate::seed::fixture::{Package, image, para, run};
     use crate::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
+
+    #[test]
+    fn word_shaped_toc_fields_prove_inherited_entry_sizes() {
+        use yrs::{Text, Transact};
+
+        let styles = concat!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr>"#,
+            r#"</w:rPrDefault></w:docDefaults>"#,
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>"#,
+            r#"<w:style w:type="character" w:styleId="Hyperlink">"#,
+            r#"<w:rPr><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#,
+        );
+        let env = RenderEnv {
+            paragraph_style_font_sizes: BTreeMap::from([("Normal".to_owned(), 10.0)]),
+            hyperlink_style_font_sizes: BTreeMap::from([("Hyperlink".to_owned(), 14.0)]),
+            doc_default_font_size: Some(10.0),
+            ..Default::default()
+        };
+        let result = concat!(
+            r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/>"#,
+            r#"</w:rPr><w:t>3</w:t></w:r>"#,
+        );
+        let simple =
+            format!(r#"<w:fldSimple w:instr=" PAGEREF _Toc1 \h ">{result}</w:fldSimple>"#);
+        let complex = format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText> PAGEREF _Toc1 \h </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            result = result,
+        );
+        for page in [simple, complex] {
+            for direct in ["", r#"<w:sz w:val="28"/>"#] {
+                let body = para(
+                    "10000001",
+                    &format!(
+                        concat!(
+                            r#"<w:pPr><w:pStyle w:val="Normal"/></w:pPr>"#,
+                            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                            r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
+                            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                            r#"<w:hyperlink w:anchor="_Toc1"><w:r><w:rPr>"#,
+                            r#"<w:rStyle w:val="Hyperlink"/>{direct}</w:rPr>"#,
+                            r#"<w:t>Entry one</w:t></w:r><w:r><w:rPr>"#,
+                            r#"<w:sz w:val="28"/></w:rPr><w:tab/></w:r>{page}"#,
+                            r#"</w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                        ),
+                        direct = direct,
+                        page = page,
+                    ),
+                );
+                let bytes = Package::new(&body).styles(styles).bytes();
+                let doc = EditingDoc::new(77113);
+                seed_from_docx(&doc, &bytes).unwrap();
+                let txn = doc.yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                let chunks = story.diff(&txn, YChange::identity);
+                let source = Arc::downgrade(&doc.source_metadata().unwrap());
+                let proof = Sources::new(&doc)
+                    .unchanged("10000001", "body", &source, &txn, &chunks)
+                    .expect("unchanged TOC entry must match its source paragraph");
+                assert_eq!(proof.inherited(0..9, false), direct.is_empty());
+                drop(txn);
+                let blocks = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+                let value = serde_json::to_value(blocks).unwrap();
+                let expected = if direct.is_empty() { 10.0 } else { 14.0 };
+                assert_eq!(value[0]["runs"][0]["text"], "Entry one");
+                assert_eq!(value[0]["runs"][0]["fontSize"], expected);
+                for run in value[0]["runs"].as_array().unwrap() {
+                    let size = run["fontSize"].as_f64().unwrap();
+                    if direct.is_empty() {
+                        assert_eq!(size, 10.0, "{run}");
+                    } else {
+                        assert!(size <= 14.0, "{run}");
+                    }
+                }
+                doc.insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("body", 5),
+                    " typed",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+                let txn = doc.yrs_doc().transact();
+                let chunks = story.diff(&txn, YChange::identity);
+                assert!(
+                    Sources::new(&doc)
+                        .unchanged("10000001", "body", &source, &txn, &chunks)
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_proof_ignores_json_key_order_and_preserves_field_changes() {
+        use crate::{ParagraphProperties, identity::run_size_fingerprint};
+        use yrs::Any;
+
+        let fingerprint = |data: &str| {
+            let segments = [
+                StorySegment {
+                    content: SegmentContent::OtherEmbed {
+                        kind: "field".to_owned(),
+                        payload: BTreeMap::from([("fieldData".to_owned(), Any::from(data))]),
+                    },
+                    attributes: BTreeMap::new(),
+                },
+                StorySegment {
+                    content: SegmentContent::Pilcrow(ParagraphProperties {
+                        para_id: "10000001".to_owned(),
+                        values: BTreeMap::new(),
+                    }),
+                    attributes: BTreeMap::new(),
+                },
+            ];
+            run_size_fingerprint(segments.into_iter())
+        };
+        let original = fingerprint(r#"{"type":"simpleField","content":[{"text":"3","size":28}]}"#);
+        assert!(original.is_some());
+        assert_eq!(
+            original,
+            fingerprint(r#"{"content":[{"size":28,"text":"3"}],"type":"simpleField"}"#),
+        );
+        for changed in [
+            r#"{"type":"simpleField","content":[{"text":"4","size":28}]}"#,
+            r#"{"type":"simpleField","content":[{"text":"3","size":30}]}"#,
+        ] {
+            assert_ne!(original, fingerprint(changed));
+        }
+        assert!(fingerprint("invalid JSON").is_none());
+    }
 
     #[test]
     fn ordinary_body_typing_checks_only_toc_paragraph_sizes() {

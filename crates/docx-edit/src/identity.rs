@@ -1147,6 +1147,34 @@ thread_local! {
     };
 }
 
+fn normalize_run_size_field_data(key: &str, value: &mut Any) -> Option<()> {
+    if key == "fieldData" {
+        let Any::String(json) = value else {
+            return None;
+        };
+        let parsed = Any::from_json(json).ok()?;
+        if !matches!(parsed, Any::Map(_)) {
+            return None;
+        }
+        *value = parsed;
+        return Some(());
+    }
+    match value {
+        Any::Map(values) => {
+            for (key, value) in Arc::make_mut(values) {
+                normalize_run_size_field_data(key, value)?;
+            }
+        }
+        Any::Array(values) => {
+            for value in Arc::make_mut(values) {
+                normalize_run_size_field_data("", value)?;
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
 pub(crate) fn run_size_fingerprint(
     segments: impl Iterator<Item = crate::StorySegment>,
 ) -> Option<[u8; 32]> {
@@ -1158,13 +1186,18 @@ pub(crate) fn run_size_fingerprint(
     let mut bytes = Vec::new();
     let mut section = Vec::new();
     let mut closed = false;
-    for segment in segments {
+    for mut segment in segments {
         if closed {
             return None;
         }
-        match &segment.content {
+        match &mut segment.content {
             crate::SegmentContent::Pilcrow(_) => closed = true,
-            crate::SegmentContent::OtherEmbed { kind, .. } if kind != "field" => return None,
+            crate::SegmentContent::OtherEmbed { kind, .. } if kind.as_str() != "field" => return None,
+            crate::SegmentContent::OtherEmbed { payload, .. } => {
+                for (key, value) in payload {
+                    normalize_run_size_field_data(key, value)?;
+                }
+            }
             _ => {}
         }
         segment_canonical(&segment, &mut bytes, &mut section);

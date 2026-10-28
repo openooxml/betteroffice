@@ -63,8 +63,8 @@ pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
 pub use group_pictures::GroupPictureSources;
-mod shapes;
 pub(crate) mod run_size_provenance;
+mod shapes;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
