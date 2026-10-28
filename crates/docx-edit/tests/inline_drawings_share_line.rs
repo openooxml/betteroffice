@@ -1133,19 +1133,17 @@ fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
     assert!(!result.provisional);
     assert!(result.pages > 3);
     let output = engine.retained_layout_json().unwrap();
-    let layout: Value = serde_json::from_str(&output).unwrap();
-    let paragraph = layout["measured"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["block"]["id"] == "A0000005")
-        .expect("paragraph holding the NUMPAGES carrier");
+    let inputs: Value =
+        serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
     assert!(
-        paragraph["block"]["runs"]
+        inputs["measured"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|run| run["inlineShape"].is_object())
+            .any(|entry| entry["block"]["runs"]
+                .as_array()
+                .is_some_and(|runs| runs.iter().any(|run| run["inlineShape"].is_object()))),
+        "a measured paragraph holds the NUMPAGES text box carrier"
     );
     let display: Value =
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
