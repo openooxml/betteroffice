@@ -1173,7 +1173,7 @@ fn line_unit_paragraph_spacing_honors_style_precedence_and_auto_spacing() {
         (0, 8.0, 16.0),
         (1, 8.0, 16.0),
         (2, 80.0 / 15.0, 80.0 / 15.0),
-        (3, 14.0, 14.0),
+        (3, 280.0 / 15.0, 280.0 / 15.0),
         (4, 4.0, 4.0),
         (5, 8.0, 16.0),
     ] {
@@ -1246,11 +1246,15 @@ fn table_cell_auto_spacing_preserves_explicit_sides_and_interior_spacing() {
     )
     .unwrap();
     for index in [0, 2] {
-        assert_eq!(blocks[index]["attrs"]["spacing"]["before"], 14.0);
-        assert_eq!(blocks[index]["attrs"]["spacing"]["after"], 14.0);
+        assert_eq!(blocks[index]["attrs"]["spacing"]["before"], 280.0 / 15.0);
+        assert_eq!(blocks[index]["attrs"]["spacing"]["after"], 280.0 / 15.0);
     }
     let paragraphs = &blocks[1]["rows"][0]["cells"][0]["blocks"];
-    for (index, before, after) in [(0, 0.0, 14.0), (1, 14.0, 14.0), (2, 14.0, 0.0)] {
+    for (index, before, after) in [
+        (0, 0.0, 280.0 / 15.0),
+        (1, 280.0 / 15.0, 280.0 / 15.0),
+        (2, 280.0 / 15.0, 0.0),
+    ] {
         assert_eq!(paragraphs[index]["attrs"]["spacing"]["before"], before);
         assert_eq!(paragraphs[index]["attrs"]["spacing"]["after"], after);
     }
@@ -1280,16 +1284,16 @@ fn table_cell_auto_spacing_follows_styles_nested_cells_and_content_controls() {
     .unwrap();
     let outer = &blocks[0]["rows"][0]["cells"][0]["blocks"];
     assert_eq!(outer[0]["attrs"]["spacing"]["before"], 0.0);
-    assert_eq!(outer[0]["attrs"]["spacing"]["after"], 14.0);
-    assert_eq!(outer[2]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(outer[0]["attrs"]["spacing"]["after"], 280.0 / 15.0);
+    assert_eq!(outer[2]["attrs"]["spacing"]["before"], 280.0 / 15.0);
     assert_eq!(outer[2]["attrs"]["spacing"]["after"], 0.0);
     let inner = &outer[1]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"];
     assert_eq!(inner["before"], 0.0);
     assert_eq!(inner["after"], 0.0);
     let controlled = &blocks[1]["rows"][0]["cells"][0]["blocks"];
     assert_eq!(controlled[0]["attrs"]["spacing"]["before"], 0.0);
-    assert_eq!(controlled[0]["attrs"]["spacing"]["after"], 14.0);
-    assert_eq!(controlled[1]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(controlled[0]["attrs"]["spacing"]["after"], 280.0 / 15.0);
+    assert_eq!(controlled[1]["attrs"]["spacing"]["before"], 280.0 / 15.0);
     assert_eq!(controlled[1]["attrs"]["spacing"]["after"], 0.0);
     let disabled = &blocks[2]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"];
     assert_eq!(disabled["before"], 100.0 / 15.0);
@@ -1324,8 +1328,8 @@ fn table_cell_auto_spacing_recomputes_boundaries_after_a_split() {
     let split = lower();
     let paragraphs = &split[0]["rows"][0]["cells"][0]["blocks"];
     assert_eq!(paragraphs[0]["attrs"]["spacing"]["before"], 0.0);
-    assert_eq!(paragraphs[0]["attrs"]["spacing"]["after"], 14.0);
-    assert_eq!(paragraphs[1]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(paragraphs[0]["attrs"]["spacing"]["after"], 280.0 / 15.0);
+    assert_eq!(paragraphs[1]["attrs"]["spacing"]["before"], 280.0 / 15.0);
     assert_eq!(paragraphs[1]["attrs"]["spacing"]["after"], 0.0);
 }
 

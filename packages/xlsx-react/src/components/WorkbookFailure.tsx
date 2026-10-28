@@ -42,6 +42,7 @@ export function WorkbookFailure({ kind, details, onReload, className, style }: {
   const [title, description] = COPY[kind];
   return (
     <div
+      dir="ltr"
       data-testid="xlsx-error"
       data-failure={kind}
       role="alert"

@@ -1628,7 +1628,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const integrity = diagnostics.filter((diagnostic) => diagnostic.category === 'integrity');
   useEffect(syncRulerScroll, [syncRulerScroll, model.frame, showRulers]);
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
-  return <div ref={editorRootRef} className={className} style={styles.root} aria-label={t('editor.appLabel')} onKeyDown={onEditorKeyDown}>
+  return <div dir="ltr" ref={editorRootRef} className={className} style={styles.root} aria-label={t('editor.appLabel')} onKeyDown={onEditorKeyDown}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
     <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} frame={model.frame} clipboard={clipboard} onClipboardChange={setClipboard} onSelectShape={(next) => setSelection([next])} pageBreaks={pageBreakToggle} probes={writeProbes} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />

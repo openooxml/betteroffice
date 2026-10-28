@@ -695,44 +695,6 @@ export function splitCell(table: Table, rowIndex: number, columnIndex: number): 
   };
 }
 
-/** Simple (string) table actions */
-type SimpleTableAction = Exclude<TableAction, { type: string }>;
-
-/**
- * Get action label for display
- */
-export function getActionLabel(action: TableAction): string {
-  if (typeof action === 'object') {
-    if (action.type === 'cellFillColor') return 'Cell Fill Color';
-    if (action.type === 'borderColor') return 'Border Color';
-    return 'Unknown Action';
-  }
-
-  const labels: Record<SimpleTableAction, string> = {
-    addRowAbove: 'Insert Row Above',
-    addRowBelow: 'Insert Row Below',
-    addColumnLeft: 'Insert Column Left',
-    addColumnRight: 'Insert Column Right',
-    deleteRow: 'Delete Row',
-    deleteColumn: 'Delete Column',
-    mergeCells: 'Merge Cells',
-    splitCell: 'Split Cell',
-    deleteTable: 'Delete Table',
-    selectTable: 'Select Table',
-    selectRow: 'Select Row',
-    selectColumn: 'Select Column',
-    borderAll: 'All Borders',
-    borderOutside: 'Outside Borders',
-    borderInside: 'Inside Borders',
-    borderNone: 'No Borders',
-    borderTop: 'Top Border',
-    borderBottom: 'Bottom Border',
-    borderLeft: 'Left Border',
-    borderRight: 'Right Border',
-  };
-  return labels[action];
-}
-
 /**
  * Check if an action is a delete action
  */

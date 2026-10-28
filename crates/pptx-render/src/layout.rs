@@ -11,16 +11,20 @@ use ooxml_drawingml::{
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_effects, style_fill,
     style_outline, style_reference_color,
 };
+use ooxml_text::family_metrics::{
+    FamilyMetrics, family_advance, family_metrics, runs_at_own_widths,
+};
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
     presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, find_placeholder, table_style_text_body,
-    table_text_levels,
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
+    slide_number_run_texts, source_paragraph, table_style_text_body, table_text_levels,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
+    style_from_run_properties,
 };
 use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
@@ -33,7 +37,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
-use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
@@ -1168,7 +1171,12 @@ impl<'a> LayoutBuilder<'a> {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
                 shape.text_stories.first().map(|story| {
-                    let mut content = content_from_story(story);
+                    let mut content = content_from_story(
+                        story,
+                        body_cascade.primary,
+                        self.slide_number,
+                        self.theme,
+                    );
                     content.refit_autofit =
                         matches!(body_cascade.autofit(), Some(TextAutofit::Normal { .. }))
                             && body_cascade.primary.is_some_and(|body| {
@@ -1971,7 +1979,9 @@ impl<'a> LayoutBuilder<'a> {
                 let span = (cell.grid_span as usize).clamp(1, column_count - column);
                 let row_span = (cell.row_span as usize).clamp(1, row_count - row_index);
                 let content = match story {
-                    Some(story) => content_from_story(story),
+                    Some(story) => {
+                        content_from_story(story, Some(&cell.text), self.slide_number, self.theme)
+                    }
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
                         &cell.text,
@@ -2876,28 +2886,68 @@ struct ContentRun {
     style: TextStyle,
 }
 
-fn content_from_story(story: &StorySnapshot) -> TextContent {
+fn content_from_story(
+    story: &StorySnapshot,
+    source: Option<&TextBody>,
+    slide_number: i64,
+    theme: &Theme,
+) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
         refit_autofit: false,
         paragraphs: story
             .paragraphs
             .iter()
-            .map(|paragraph| ContentParagraph {
-                alignment: paragraph.alignment.clone(),
-                level: paragraph.level,
-                bullet: paragraph
-                    .bullet_json
-                    .as_deref()
-                    .and_then(|json| serde_json::from_str(json).ok()),
-                runs: paragraph
-                    .runs
-                    .iter()
-                    .map(|run| ContentRun {
-                        text: run.text.clone(),
+            .map(|paragraph| {
+                let source_para =
+                    source.and_then(|body| source_paragraph(body, &story.id, &paragraph.id));
+                let live: Vec<&str> = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+                let replacements =
+                    source_para.map(|source| slide_number_run_texts(source, &live, slide_number));
+                let insertions = source_para
+                    .map(|source| slide_number_insertions(source, &live))
+                    .unwrap_or_default();
+                let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
+                let mut insertion_index = 0;
+                let mut offset = 0;
+                for (run_index, run) in paragraph.runs.iter().enumerate() {
+                    while insertion_index < insertions.len()
+                        && insertions[insertion_index].0 == offset
+                    {
+                        let source_run = insertions[insertion_index].1;
+                        runs.push(ContentRun {
+                            text: slide_number.to_string(),
+                            style: style_from_run_properties(&source_run.properties, Some(theme)),
+                        });
+                        insertion_index += 1;
+                    }
+                    offset += run.text.len();
+                    runs.push(ContentRun {
+                        text: replacements
+                            .as_ref()
+                            .and_then(|values| values.get(run_index))
+                            .and_then(|value| value.clone())
+                            .unwrap_or_else(|| run.text.clone()),
                         style: run.style.clone(),
-                    })
-                    .collect(),
+                    });
+                }
+                while insertion_index < insertions.len() {
+                    let source_run = insertions[insertion_index].1;
+                    runs.push(ContentRun {
+                        text: slide_number.to_string(),
+                        style: style_from_run_properties(&source_run.properties, Some(theme)),
+                    });
+                    insertion_index += 1;
+                }
+                ContentParagraph {
+                    alignment: paragraph.alignment.clone(),
+                    level: paragraph.level,
+                    bullet: paragraph
+                        .bullet_json
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str(json).ok()),
+                    runs,
+                }
             })
             .collect(),
     }
@@ -3362,32 +3412,6 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.caps))
             .unwrap_or(TextCaps::None),
     })
-}
-
-/// Characters used to check whether a registered face matches a metric table.
-const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
-
-/// Preserve the face's kerning when its individual advances already match.
-fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
-    let Ok(own) = fonts.metrics(id) else {
-        return true;
-    };
-    let units = f32::from(own.units_per_em);
-    if units <= 0.0 {
-        return true;
-    }
-    for character in ADVANCE_SAMPLE.chars() {
-        let Some(wanted) = family_advance(metrics, character) else {
-            continue;
-        };
-        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
-            return false;
-        };
-        if (wanted - advance / units).abs() > 0.002 {
-            return false;
-        }
-    }
-    true
 }
 
 /// Whether `id` already stacks its lines the way `metrics` does.
@@ -6359,7 +6383,9 @@ mod tests {
             base: ShapeBase {
                 id: 1,
                 name: "Photo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform::default(),
@@ -8360,8 +8386,8 @@ mod tests {
             assert_eq!(line, number);
             if index == 1 {
                 let (runs, line) = drawn_text(&rendered, &slide_probe.id);
-                assert_eq!(runs, [run("77", 19.0, false, "#AA5500")]);
-                assert_eq!(line, "77");
+                assert_eq!(runs, [run(number, 19.0, false, "#AA5500")]);
+                assert_eq!(line, number);
             }
         }
     }
@@ -8625,7 +8651,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_002,
                     name: "Filled".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform {
@@ -9274,7 +9302,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform,
@@ -10728,7 +10758,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 4_242,
                 name: "Logo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform {
@@ -11187,6 +11219,9 @@ mod tests {
             source_id: 1,
             kind: ShapeKind::Shape,
             name: "Title".to_owned(),
+            title: None,
+            description: None,
+            decorative: false,
             x: 0,
             y: 0,
             width: 0,
@@ -11219,7 +11254,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 2,
                 name: "Layout title".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: Some(title),
                 transform: ShapeTransform {

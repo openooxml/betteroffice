@@ -1,6 +1,7 @@
 //! From-scratch DrawingML emission over neutral inputs.
 
 use crate::GeometryPathCommand;
+use crate::fmath;
 
 pub const EMU_PER_INCH: f64 = 914400.0;
 const EMU_PER_DEGREE: f64 = 60000.0;
@@ -163,8 +164,8 @@ fn affine_placement(matrix: Matrix) -> Option<(i64, bool, bool)> {
     if matrix.b.abs() <= EPSILON && matrix.c.abs() <= EPSILON {
         return Some((0, matrix.a < -EPSILON, matrix.d < -EPSILON));
     }
-    let x_scale = f64::from(matrix.a).hypot(f64::from(matrix.b));
-    let y_scale = f64::from(matrix.c).hypot(f64::from(matrix.d));
+    let x_scale = fmath::hypot(f64::from(matrix.a), f64::from(matrix.b));
+    let y_scale = fmath::hypot(f64::from(matrix.c), f64::from(matrix.d));
     if x_scale <= f64::from(EPSILON) || y_scale <= f64::from(EPSILON) {
         return None;
     }
@@ -176,7 +177,7 @@ fn affine_placement(matrix: Matrix) -> Option<(i64, bool, bool)> {
         return None;
     }
     Some((
-        (-sin.atan2(cos).to_degrees() * EMU_PER_DEGREE).round() as i64,
+        (-fmath::atan2(sin, cos).to_degrees() * EMU_PER_DEGREE).round() as i64,
         false,
         cos * y_y - sin * y_x < 0.0,
     ))
@@ -491,7 +492,7 @@ mod tests {
 
     #[test]
     fn rotation_uses_the_pre_rotation_frame() {
-        let (sin, cos) = FRAC_PI_4.sin_cos();
+        let (sin, cos) = fmath::sin_cosf(FRAC_PI_4);
         let placed = place_rect(
             0.0,
             0.0,

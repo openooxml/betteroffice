@@ -1,4 +1,4 @@
-import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { createPublicKey, randomUUID, verify, type KeyObject } from "node:crypto";
 import {
   buildProofBytes,
   proofKeyAttributes,
@@ -7,6 +7,7 @@ import {
   type ProofKeyPair,
   type ProofSigner,
 } from "../../src/proof";
+import { cancelStream } from "../../src/host/streams";
 import { decodeUtf7, encodeUtf7 } from "../../src/host/utf7";
 
 export interface ReferenceToken {
@@ -15,6 +16,7 @@ export interface ReferenceToken {
   canWrite?: boolean;
   userCanWrite?: boolean;
   expiresAt?: number;
+  fileIds?: Set<string>;
 }
 
 export interface ReferenceFile {
@@ -73,35 +75,29 @@ function isAttributes(value: unknown): value is ProofKeyAttributes {
   return typeof value === "object" && value !== null && "modulus" in value && "exponent" in value;
 }
 
-function collectKeys(input: unknown, out: KeyObject[]): void {
-  if (input === undefined || input === null) return;
+function verificationKey(input: unknown): KeyObject | undefined {
+  if (input === undefined || input === null) return undefined;
+  try {
+    return publicKeyFromAttributes(isAttributes(input) ? input : proofKeyAttributes(input as ProofKeyInput));
+  } catch {
+    return undefined;
+  }
+}
+
+function verificationKeys(input: VerifyProofInput | undefined): { current?: KeyObject; old?: KeyObject } {
+  if (input === undefined || input === null) return {};
   if (Array.isArray(input)) {
-    for (const entry of input) collectKeys(entry, out);
-    return;
+    return { current: verificationKey(input[0]), old: verificationKey(input[1]) };
   }
   if (typeof input === "object" && "signProof" in input && "proofKeyAttributes" in input) {
     const signer = input as ProofSigner;
-    out.push(publicKeyFromAttributes(signer.proofKeyAttributes()));
-    out.push(publicKeyFromAttributes(signer.oldProofKeyAttributes()));
-    return;
-  }
-  if (isAttributes(input)) {
-    out.push(publicKeyFromAttributes(input));
-    return;
+    return { current: verificationKey(signer.proofKeyAttributes()), old: verificationKey(signer.oldProofKeyAttributes()) };
   }
   if (typeof input === "object" && ("current" in input || "old" in input || "currentKey" in input || "oldKey" in input)) {
     const record = input as Record<string, unknown>;
-    collectKeys(record.current ?? record.currentKey, out);
-    collectKeys(record.old ?? record.oldKey, out);
-    return;
+    return { current: verificationKey(record.current ?? record.currentKey), old: verificationKey(record.old ?? record.oldKey) };
   }
-  if (typeof input === "object" && "publicKey" in input) {
-    collectKeys((input as ProofKeyPair).publicKey, out);
-    return;
-  }
-  try {
-    out.push(publicKeyFromAttributes(proofKeyAttributes(input as ProofKeyInput)));
-  } catch {}
+  return { current: verificationKey(input) };
 }
 
 function fileIdFromPath(pathname: string): string {
@@ -144,8 +140,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   const quirks = options.quirks ?? {};
   const files = new Map<string, ReferenceFile>();
   const tokens = new Map<string, ReferenceToken | string>();
-  const keys: KeyObject[] = [];
-  collectKeys(options.verifyProof, keys);
+  const keys = verificationKeys(options.verifyProof);
   let nextFileNumber = 1;
 
   function uniqueFileId(): string {
@@ -171,8 +166,21 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     return null;
   }
 
+  function relativeUrl(request: Request, fileId: string, user: ReferenceToken): string {
+    const url = new URL(request.url);
+    const sourceToken = url.searchParams.get("access_token");
+    if (sourceToken !== null && !tokens.has(sourceToken)) tokens.set(sourceToken, user);
+    user.fileIds?.add(fileId);
+    const token = quirks.relativeUrlToken ?? randomUUID();
+    tokens.set(token, user);
+    url.pathname = url.pathname.replace(/[^/]+$/, encodeURIComponent(fileId));
+    url.search = "";
+    url.searchParams.set("access_token", token);
+    return url.toString();
+  }
+
   function verifyRequestProof(request: Request, token: string): boolean {
-    if (keys.length === 0) return true;
+    if (options.verifyProof === undefined) return true;
     const timestampHeader = request.headers.get("X-WOPI-TimeStamp");
     if (!timestampHeader) return false;
     let ticks: bigint;
@@ -184,15 +192,17 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     const timestampMs = Number((ticks - DOTNET_EPOCH_TICKS) / 10000n);
     if (Math.abs(now() - timestampMs) > PROOF_WINDOW_MS) return false;
     const bytes = buildProofBytes(token, request.url, ticks);
-    for (const headerName of ["X-WOPI-Proof", "X-WOPI-ProofOld"]) {
+    for (const [headerName, key] of [
+      ["X-WOPI-Proof", keys.current],
+      ["X-WOPI-Proof", keys.old],
+      ["X-WOPI-ProofOld", keys.current],
+    ] as const) {
       const proof = request.headers.get(headerName);
-      if (!proof) continue;
+      if (!proof || !key) continue;
       const signature = Buffer.from(proof, "base64");
-      for (const key of keys) {
-        try {
-          if (verify("RSA-SHA256", bytes, key, signature)) return true;
-        } catch {}
-      }
+      try {
+        if (verify("RSA-SHA256", bytes, key, signature)) return true;
+      } catch {}
     }
     return false;
   }
@@ -203,6 +213,31 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       file.lockExpiresAt = null;
     }
     return file.lock;
+  }
+
+  function timestampConflict(request: Request, file: ReferenceFile): Response | null {
+    const stamp = request.headers.get("X-COOL-WOPI-Timestamp");
+    return quirks.timestampConflict && stamp !== null && stamp !== file.lastModifiedTime
+      ? json({ COOLStatusCode: 1010 }, 409) : null;
+  }
+
+  function validatePutFile(request: Request, file: ReferenceFile): Response | null {
+    const conflict = timestampConflict(request, file);
+    if (conflict) return conflict;
+    const currentLock = liveLock(file);
+    if (currentLock !== null) {
+      if (request.headers.get("X-WOPI-Lock") !== currentLock) return lockConflict(currentLock);
+    } else if (file.bytes.byteLength !== 0) {
+      return lockConflict(null, "File is not locked");
+    }
+    return null;
+  }
+
+  function validateRelativeTarget(request: Request, file: ReferenceFile, overwrite: boolean): Response | null {
+    const targetLock = liveLock(file);
+    if (targetLock !== null) return lockConflict(targetLock);
+    if (!overwrite) return lockConflict(null, "Target exists");
+    return timestampConflict(request, file);
   }
 
   function setFile(id: string, data: Uint8Array | string, opts: { name?: string; lastModifiedTime?: string } = {}): ReferenceFile {
@@ -224,10 +259,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   }
 
   async function readBody(request: Request): Promise<Uint8Array | null> {
-    if (!request.body) return new Uint8Array(await request.arrayBuffer());
-    const reader = request.body.getReader();
     const lengthHeader = request.headers.get("Content-Length");
     const announced = lengthHeader !== null && /^\d+$/.test(lengthHeader.trim()) ? Number(lengthHeader.trim()) : null;
+    if (!request.body) {
+      return announced !== null && Number.isSafeInteger(announced) && announced !== 0 ? null : new Uint8Array(0);
+    }
+    const reader = request.body.getReader();
     if (announced === null || !Number.isSafeInteger(announced)) {
       const chunks: Uint8Array[] = [];
       let total = 0;
@@ -251,15 +288,13 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       const chunk = await reader.read();
       if (chunk.done) break;
       if (offset + chunk.value.byteLength > out.length) {
-        try {
-          await reader.cancel();
-        } catch {}
+        cancelStream(reader);
         return null;
       }
       out.set(chunk.value, offset);
       offset += chunk.value.byteLength;
     }
-    return offset === out.length ? out : out.subarray(0, offset);
+    return offset === out.length ? out : null;
   }
 
   function chunkedBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
@@ -288,6 +323,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
 
     const isContents = url.pathname.endsWith("/contents");
     const fileId = fileIdFromPath(url.pathname);
+    if (user.fileIds && !user.fileIds.has(fileId)) return json({ error: "unauthorized" }, 401);
     const file = files.get(fileId);
     if (!file) return json({ error: "not found" }, 404);
     const canWrite = user.canWrite ?? user.userCanWrite ?? true;
@@ -333,20 +369,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     if (isContents && request.method === "POST") {
       if (override !== "PUT") return json({ error: "X-WOPI-Override PUT is required" }, 400);
       if (!canWrite) return json({ error: "unauthorized" }, 401);
-      if (quirks.timestampConflict) {
-        const stamp = request.headers.get("X-COOL-WOPI-Timestamp");
-        if (stamp !== null && stamp !== file.lastModifiedTime) {
-          return json({ COOLStatusCode: 1010 }, 409);
-        }
-      }
-      const requestLock = request.headers.get("X-WOPI-Lock");
-      if (currentLock !== null) {
-        if (requestLock !== currentLock) return lockConflict(currentLock);
-      } else if (file.bytes.byteLength !== 0) {
-        return lockConflict(null, "File is not locked");
-      }
+      const initialConflict = validatePutFile(request, file);
+      if (initialConflict) return initialConflict;
       const putBody = await readBody(request);
-      if (putBody === null) return json({ error: "body exceeds Content-Length" }, 413);
+      if (putBody === null) return json({ error: "body does not match Content-Length" }, 413);
+      const conflict = validatePutFile(request, file);
+      if (conflict) return conflict;
       file.bytes = putBody;
       file.version += 1;
       file.itemVersion = String(file.version);
@@ -399,33 +427,34 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         if ((suggested === null && relative === null) || (suggested !== null && relative !== null) || suggested === "" || relative === "") {
           return json({ error: "exactly one target header is required" }, 400);
         }
-        const overwrite = (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
-        const targetName = decodeUtf7(relative ?? suggested ?? "copy");
+        const overwrite = relative !== null && (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
+        let targetName = decodeUtf7(relative ?? suggested ?? "copy");
         if (targetName === "") return json({ error: "target header is required" }, 400);
+        if (suggested !== null && targetName.startsWith(".")) {
+          const ext = extensionOf(file.name);
+          targetName = `${ext ? file.name.slice(0, -ext.length) : file.name}${targetName}`;
+        }
         let finalName = targetName;
         const existing = [...files.values()].find((entry) => entry.name === targetName);
-        if (existing && relative && !overwrite) {
-          return json({ error: "target exists" }, 412);
-        }
-        if (existing && overwrite) {
-          const targetLock = liveLock(existing);
-          const requestLock = request.headers.get("X-WOPI-Lock");
-          if (targetLock !== null && requestLock !== targetLock) return lockConflict(targetLock);
-          const body = await readBody(request);
-          if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
-          existing.bytes = body;
-          existing.version += 1;
-          existing.itemVersion = String(existing.version);
-          existing.lastModifiedTime = new Date(now()).toISOString();
-          const existingUrl = new URL(request.url);
-          existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(existing.id));
-          existingUrl.search = "";
-          if (quirks.relativeUrlToken) existingUrl.searchParams.set("access_token", quirks.relativeUrlToken);
-          return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": existing.itemVersion });
+        if (existing && relative !== null) {
+          if (user.fileIds && !user.fileIds.has(existing.id)) return json({ error: "unauthorized" }, 401);
+          const conflict = validateRelativeTarget(request, existing, overwrite);
+          if (conflict) return conflict;
         }
         const body = await readBody(request);
-        if (body === null) return json({ error: "body exceeds Content-Length" }, 413);
-        if (existing && suggested && !overwrite) {
+        if (body === null) return json({ error: "body does not match Content-Length" }, 413);
+        const current = [...files.values()].find((entry) => entry.name === targetName);
+        if (current && relative !== null) {
+          if (user.fileIds && !user.fileIds.has(current.id)) return json({ error: "unauthorized" }, 401);
+          const conflict = validateRelativeTarget(request, current, overwrite);
+          if (conflict) return conflict;
+          current.bytes = body;
+          current.version += 1;
+          current.itemVersion = String(current.version);
+          current.lastModifiedTime = new Date(now()).toISOString();
+          return json({ Name: finalName, Url: relativeUrl(request, current.id, user) }, 200, { "X-WOPI-ItemVersion": current.itemVersion });
+        }
+        if (current && suggested !== null) {
           const ext = extensionOf(targetName);
           const stem = ext ? targetName.slice(0, -ext.length) : targetName;
           let counter = 1;
@@ -446,13 +475,9 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           lastModifiedTime: new Date(now()).toISOString(),
         };
         files.set(newId, created);
-        const newUrl = new URL(request.url);
-        newUrl.pathname = newUrl.pathname.replace(/[^/]+$/, encodeURIComponent(newId));
-        newUrl.search = "";
-        if (quirks.relativeUrlToken) newUrl.searchParams.set("access_token", quirks.relativeUrlToken);
         const headers: Record<string, string> = { "X-WOPI-ItemVersion": "1" };
         if (finalName !== targetName) headers["X-WOPI-ValidRelativeTarget"] = encodeUtf7(finalName);
-        return json({ Name: finalName, Url: newUrl.toString() }, 200, headers);
+        return json({ Name: finalName, Url: relativeUrl(request, newId, user) }, 200, headers);
       }
       if (override === "RENAME_FILE") {
         if (!canWrite) return json({ error: "unauthorized" }, 401);
@@ -463,9 +488,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         const requested = decodeUtf7(requestedHeader);
         if (requested === "") return json({ error: "X-WOPI-RequestedName is required" }, 400);
         const ext = extensionOf(file.name);
-        const newName = requested.includes(".") ? requested : `${requested}${ext}`;
+        const newName = `${requested}${ext}`;
+        if ([...files.values()].some((entry) => entry.id !== file.id && entry.name === newName)) {
+          return empty(400, { "X-WOPI-InvalidFileNameError": "A file with that name already exists" });
+        }
         file.name = newName;
-        return json({ Name: ext && !requested.includes(".") ? requested : newName });
+        return json({ Name: requested });
       }
       return json({ error: "unknown override" }, 400);
     }

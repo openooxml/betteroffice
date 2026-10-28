@@ -1129,7 +1129,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const data = kind === 'cut' && reachesSheetEdge(range) ?
           await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
         const edits = kind === 'paste' ? [] : clearedCells(range, () => data?.usedRange);
-        if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+        if (!edits) throw new WorkerInputRefusal(t('editor.clearExceedsLimit'));
         if (kind === 'cut' && edits.length === 0) return;
         if (kind === 'paste') {
           fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
@@ -1188,7 +1188,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const data = reachesSheetEdge(range) ?
         await (run!.peer ?? run!.session.call).selectionData?.(sheet, 0, 0, 'usedRange') : undefined;
       const edits = clearedCells(range, () => data?.usedRange);
-      if (!edits) throw new WorkerInputRefusal('Clear exceeds the cell limit');
+      if (!edits) throw new WorkerInputRefusal(t('editor.clearExceedsLimit'));
       if (edits.length === 0) return;
       op = { method: 'editCells', args: [sheet, edits] };
       if (!reachesSheetEdge(range)) discardPreview = await previewEdits(sheet, edits, op);
@@ -1788,7 +1788,7 @@ function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   return <XlsxCommandContext.Provider value={commands.store}>
     <EditorChromeContext.Provider value={true}>
       <FormulaBarContext.Provider value={formulaBar}>
-        <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
+        <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
           style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%',
             minWidth: 0, color: '#202124', background: '#ffffff', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
           {toolbar != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbar}</div>}

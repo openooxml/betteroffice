@@ -1856,7 +1856,7 @@ function XlsxEditorContent({
       if (handleRef.current !== handle || readOnlyRef.current) return;
       try {
         const edits = clearedCells(range, () => handle.selectionData(sheet, 0, 0, 'usedRange').usedRange);
-        if (!edits) { setError('Clear exceeds the cell limit'); return; }
+        if (!edits) { setError(t('editor.clearExceedsLimit')); return; }
         applyResult(handle.editCells(sheet, edits));
         return true;
       } catch (e) {
@@ -1864,7 +1864,7 @@ function XlsxEditorContent({
         return false;
       }
     },
-    [applyResult]
+    [applyResult, t]
   );
 
   const clearCells = useCallback(() => {
@@ -2592,6 +2592,7 @@ function XlsxEditorContent({
 
   const editor = (
     <div
+      dir="ltr"
       ref={rootRef}
       className={className}
       role="application"
