@@ -2496,7 +2496,7 @@ fn extract_shape_zone(
         shape.wrap_text.as_deref(),
         shape.width,
         shape.height,
-        shape.wrap_distances.as_deref(),
+        shape.wrap_distances.as_ref(),
         block_index,
         content_width,
         geometry,
