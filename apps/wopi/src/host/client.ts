@@ -597,7 +597,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     }
     const headers = new Headers(extra);
     if (args.lock) headers.set("X-WOPI-Lock", args.lock);
-    return execute(input, {
+    const result = await execute(input, {
       op,
       contents,
       method: "POST",
@@ -607,6 +607,11 @@ export function createHostClient(options: HostClientOptions): HostClient {
       size: declaredSize,
       idempotent: false,
     });
+    if (result.response.status !== 200) {
+      discard(result);
+      throw new WopiHostError("invalidResponse", `${op} returned status ${result.response.status} instead of a completed write`);
+    }
+    return result;
   }
 
   async function putFile(args: PutFileArgs): Promise<PutFileResult> {

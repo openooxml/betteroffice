@@ -755,6 +755,19 @@ describe("content length and truncation", () => {
     }
   }, 1000);
 
+  test("writes reject success statuses other than 200", async () => {
+    for (const status of [202, 204]) {
+      let signal: AbortSignal | null | undefined;
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(status === 204 ? null : "queued", { status });
+      });
+      expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]) }))).kind).toBe("invalidResponse");
+      expect(signal?.aborted).toBe(true);
+      expect((await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: ".docx" }))).kind).toBe("invalidResponse");
+    }
+  });
+
   test("GetFile rejects partial and empty success statuses", async () => {
     for (const [status, body, headers] of [
       [206, new Uint8Array([1, 2, 3]), { "Content-Length": "3", "Content-Range": "bytes 0-2/10" }],
