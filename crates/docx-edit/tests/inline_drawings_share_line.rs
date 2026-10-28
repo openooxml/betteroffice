@@ -1132,7 +1132,6 @@ fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
         .unwrap();
     assert!(!result.provisional);
     assert!(result.pages > 3);
-    let output = engine.retained_layout_json().unwrap();
     let inputs: Value =
         serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
     assert!(
@@ -1145,6 +1144,9 @@ fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
                 .is_some_and(|runs| runs.iter().any(|run| run["inlineShape"].is_object()))),
         "a measured paragraph holds the NUMPAGES text box carrier"
     );
+    let output = engine
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
     let display: Value =
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
     let total = display["pages"].as_array().unwrap().len().to_string();
