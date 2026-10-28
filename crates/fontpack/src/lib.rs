@@ -27,6 +27,7 @@ use core::fmt;
 mod allocator;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
+mod woff2t;
 
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
@@ -259,36 +260,7 @@ pub fn decode_face(
 }
 
 fn reconstruct_woff2t(payload: &[u8], max_output: usize) -> Result<Vec<u8>, DecodeError> {
-    if payload.len() < 48 || !payload.starts_with(b"wOF2\0\x01\0\0") {
-        return Err(DecodeError::Woff2Reconstruction);
-    }
-    let read_u32 = |offset: usize| {
-        u32::from_be_bytes([
-            payload[offset],
-            payload[offset + 1],
-            payload[offset + 2],
-            payload[offset + 3],
-        ])
-    };
-    let tables = u16::from_be_bytes([payload[12], payload[13]]);
-    if !(1..=4095).contains(&tables)
-        || read_u32(8) as u64 != payload.len() as u64
-        || read_u32(20) as u64 > payload.len() as u64
-    {
-        return Err(DecodeError::Woff2Reconstruction);
-    }
-    for (offset, length) in [(28, 32), (40, 44)] {
-        if read_u32(offset) as u64 + read_u32(length) as u64 > payload.len() as u64 {
-            return Err(DecodeError::Woff2Reconstruction);
-        }
-    }
-    let size = read_u32(16);
-    if size as u64 > max_output as u64 {
-        return Err(DecodeError::TooLarge {
-            size: size as u64,
-            max: max_output,
-        });
-    }
+    woff2t::validate(payload, max_output)?;
     let mut identity_error = None;
     let result = wuff::decompress_woff2_with_custom_brotli(payload, &mut |data, expected| {
         if data.len() != expected || expected > max_output {

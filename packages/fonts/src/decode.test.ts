@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
 import { existsSync, readFileSync } from 'node:fs';
 import * as nodeZlib from 'node:zlib';
@@ -159,6 +159,36 @@ describe('internal font decoder', () => {
     expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
   });
 
+  test.skipIf(!hasWasm)('a trapping wasm instance is discarded and the next decode reloads it', async () => {
+    const trapUrl = new URL('https://font-decoder.invalid/trap-recovery.wasm');
+    const trapModule = trappingDecoder();
+    const originalFetch = globalThis.fetch;
+    let loads = 0;
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== trapUrl.href) return originalFetch(input, init);
+      loads++;
+      const bytes = loads === 1 ? trapModule : new Uint8Array(readFileSync(wasmUrl));
+      return Promise.resolve(new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } }));
+    }) as typeof fetch);
+    try {
+      await expect(decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }))
+        .rejects.toThrow('Font face could not be decoded');
+      expect(loads).toBe(1);
+      expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl })))
+        .toEqual(hello);
+      expect(loads).toBe(2);
+      const corrupt = helloFrame.slice();
+      corrupt[corrupt.length - 1] ^= 1;
+      await expect(decodeFontBytes(corrupt, undefined, { wasmUrl: trapUrl })).rejects.toThrow('checksum');
+      expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl })))
+        .toEqual(hello);
+      expect(loads).toBe(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   test.skipIf(!hasWasm)('wasm linear memory cannot grow past 1 GiB', async () => {
     const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
     const memory = instance.exports.memory as WebAssembly.Memory;
@@ -194,6 +224,39 @@ describe('internal font decoder', () => {
 
 function fixture(name: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(readFileSync(new URL(`../../../crates/fontpack/tests/fixtures/${name}`, import.meta.url)));
+}
+
+function trappingDecoder(): Uint8Array<ArrayBuffer> {
+  function leb(value: number): number[] {
+    const bytes: number[] = [];
+    do {
+      const byte = value & 127;
+      value >>>= 7;
+      bytes.push(byte | (value === 0 ? 0 : 128));
+    } while (value !== 0);
+    return bytes;
+  }
+  function section(id: number, bytes: number[]): number[] {
+    return [id, ...leb(bytes.length), ...bytes];
+  }
+  const names = [
+    'fp_alloc', 'fp_free', 'fp_decode', 'fp_decode_face',
+    'fp_out_ptr', 'fp_out_len', 'fp_out_free',
+    'fp_payload_ptr', 'fp_payload_len', 'fp_payload_free',
+  ];
+  const exports = [1 + names.length, 6, ...new TextEncoder().encode('memory'), 2, 0];
+  for (const name of names) {
+    const bytes = new TextEncoder().encode(name);
+    exports.push(...leb(bytes.length), ...bytes, 0, 0);
+  }
+  return new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    ...section(1, [1, 96, 1, 127, 1, 127]),
+    ...section(3, [1, 0]),
+    ...section(5, [1, 0, 1]),
+    ...section(7, exports),
+    ...section(10, [1, 3, 0, 0, 11]),
+  ]);
 }
 
 function glyphCount(font: ArrayBuffer): number {
@@ -252,7 +315,7 @@ describe('internal woff2t font decoder', () => {
     const decoded = await decodeFontFace(frame, undefined, woff2t);
     expect(decoded.font.byteLength).toBeGreaterThan(payload.length);
     await expect(decodeFontFace(frame, undefined, { ...woff2t, maxOutput: decoded.font.byteLength - 1 }))
-      .rejects.toThrow('too large');
+      .rejects.toThrow('WOFF2 reconstruction');
   });
 
   test.skipIf(!hasWasm)('font and payload buffers remain owned across calls and transfers', async () => {

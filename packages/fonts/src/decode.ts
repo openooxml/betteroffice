@@ -44,8 +44,14 @@ interface Decoder {
   fp_payload_free(): void;
 }
 
+interface DecoderInstance {
+  wasm: Decoder;
+  failed: boolean;
+  invalidate(): void;
+}
+
 const DEFAULT_MAX_OUTPUT = 64 * 1024 * 1024;
-const instances = new Map<string, Promise<Decoder>>();
+const instances = new Map<string, Promise<DecoderInstance>>();
 
 function builtinModule<T>(name: string): T | undefined {
   const proc = (
@@ -161,11 +167,21 @@ async function instantiate(url: URL): Promise<Decoder> {
   return exports as unknown as Decoder;
 }
 
-function decoder(url: URL): Promise<Decoder> {
+function decoder(url: URL): Promise<DecoderInstance> {
   const key = url.href;
   const cached = instances.get(key);
   if (cached) return cached;
-  const promise = instantiate(url);
+  const promise = instantiate(url).then((wasm) => {
+    const instance: DecoderInstance = {
+      wasm,
+      failed: false,
+      invalidate() {
+        instance.failed = true;
+        if (instances.get(key) === promise) instances.delete(key);
+      },
+    };
+    return instance;
+  });
   instances.set(key, promise);
   promise.catch(() => {
     if (instances.get(key) === promise) instances.delete(key);
@@ -195,44 +211,55 @@ function wasmError(code: number): Error {
 }
 
 function decodeWasm(
-  wasm: Decoder,
+  instance: DecoderInstance,
   bytes: Uint8Array,
   dict: Uint8Array | undefined,
   maxOutput: number,
   expectedSize: number,
   codec: 'zstd' | 'woff2t+zstd',
 ): { font: ArrayBuffer; payload?: ArrayBuffer } {
+  const { wasm } = instance;
+  function invoke<T>(call: () => T): T {
+    try {
+      return call();
+    } catch {
+      instance.invalidate();
+      throw new Error('Font face could not be decoded');
+    }
+  }
   let srcPtr = 0;
   let dictPtr = 0;
   try {
-    srcPtr = wasm.fp_alloc(bytes.length) >>> 0;
+    srcPtr = invoke(() => wasm.fp_alloc(bytes.length)) >>> 0;
     if (!srcPtr) throw wasmError(-7);
     new Uint8Array(wasm.memory.buffer, srcPtr, bytes.length).set(bytes);
     if (dict?.length) {
-      dictPtr = wasm.fp_alloc(dict.length) >>> 0;
+      dictPtr = invoke(() => wasm.fp_alloc(dict.length)) >>> 0;
       if (!dictPtr) throw wasmError(-7);
       new Uint8Array(wasm.memory.buffer, dictPtr, dict.length).set(dict);
     }
-    const code = codec === 'zstd'
+    const code = invoke(() => codec === 'zstd'
       ? wasm.fp_decode(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput)
-      : wasm.fp_decode_face(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput, 1);
+      : wasm.fp_decode_face(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput, 1));
     if (code !== 0) throw wasmError(code);
-    const len = wasm.fp_out_len() >>> 0;
+    const len = invoke(() => wasm.fp_out_len()) >>> 0;
     if (len > maxOutput) throw wasmError(-3);
-    const font = copy(new Uint8Array(wasm.memory.buffer, wasm.fp_out_ptr() >>> 0, len));
+    const font = copy(new Uint8Array(wasm.memory.buffer, invoke(() => wasm.fp_out_ptr()) >>> 0, len));
     if (codec === 'zstd') {
       if (len !== expectedSize) throw corrupt();
       return { font };
     }
-    const payloadLen = wasm.fp_payload_len() >>> 0;
+    const payloadLen = invoke(() => wasm.fp_payload_len()) >>> 0;
     if (payloadLen !== expectedSize) throw corrupt();
-    const payload = copy(new Uint8Array(wasm.memory.buffer, wasm.fp_payload_ptr() >>> 0, payloadLen));
+    const payload = copy(new Uint8Array(wasm.memory.buffer, invoke(() => wasm.fp_payload_ptr()) >>> 0, payloadLen));
     return { font, payload };
   } finally {
-    wasm.fp_out_free();
-    wasm.fp_payload_free();
-    if (dictPtr) wasm.fp_free(dictPtr, dict?.length ?? 0);
-    if (srcPtr) wasm.fp_free(srcPtr, bytes.length);
+    if (!instance.failed) {
+      invoke(() => wasm.fp_out_free());
+      invoke(() => wasm.fp_payload_free());
+      if (dictPtr) invoke(() => wasm.fp_free(dictPtr, dict?.length ?? 0));
+      if (srcPtr) invoke(() => wasm.fp_free(srcPtr, bytes.length));
+    }
   }
 }
 
@@ -282,6 +309,8 @@ export async function decodeFontFace(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const wasm = await decoder(options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url));
-  return decodeWasm(wasm, input, dictionary, maxOutput, expectedSize, codec);
+  const url = options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url);
+  let instance = await decoder(url);
+  while (instance.failed) instance = await decoder(url);
+  return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);
 }

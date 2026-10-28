@@ -77,13 +77,26 @@ TypeScript `maxOutput` is 64 MiB; Rust callers supply their own limit. Oversized
 frames fail before output allocation. Decoders reject missing checksums,
 corruption, truncation and output lengths that disagree with the header.
 For `woff2t+zstd`, `maxOutput` bounds both the zstd payload and the reconstructed
-font. Reconstruction errors are reported as errors, without a passthrough retry.
+font. Before wuff runs, an allocation-free preflight validates the WOFF2 header,
+directory and all transformed glyph streams. There may be at most 256 tables;
+stored lengths must fit the raw table stream, and no original table length may
+exceed eight times the payload length. The declared sfnt size and the sum of
+padded original table lengths plus the sfnt directory must fit `maxOutput`.
+Glyph counts use the format's 16-bit field. A glyph has at most 65,536 points;
+the total point count must fit the original `glyf` length, and point and glyph
+scratch sizes must fit the output budget. The preflight also calculates the
+reconstructed glyph and font sizes before reconstruction. These validation
+failures report a WOFF2 reconstruction error (`-10`).
+Reconstruction errors are reported as errors, without a passthrough retry.
 Passthrough does not apply the decoded-output limit.
 
 TypeScript always returns a fresh, independently owned `ArrayBuffer`, including
 for passthrough. A caller may transfer that buffer. The wasm instance is reused,
 but its output is copied and freed after each call. Rust passthrough returns a
 borrowed `Cow`; decoded output is owned.
+If any wasm export throws, TypeScript discards that instance and reports
+`Font face could not be decoded`. It makes no further calls into that instance;
+the next decode loads a fresh module instance.
 
 The internal `decodeFontFace` returns `{ font, payload? }`; `decodeFontBytes`
 returns only the font. `payload` is present for decoded woff2t faces and has its

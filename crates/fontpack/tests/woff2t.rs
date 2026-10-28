@@ -112,10 +112,7 @@ fn both_payload_and_reconstructed_font_are_bounded() {
             Codec::Woff2tZstd,
             65536
         ),
-        Err(DecodeError::TooLarge {
-            size: 65537,
-            max: 65536
-        })
+        Err(DecodeError::Woff2Reconstruction)
     );
     let font = decode_face(&frame, None, Codec::Woff2tZstd, 65536)
         .unwrap()
@@ -129,7 +126,7 @@ fn both_payload_and_reconstructed_font_are_bounded() {
             Codec::Woff2tZstd,
             font.len() - 1
         ),
-        Err(DecodeError::TooLarge { .. })
+        Err(DecodeError::Woff2Reconstruction)
     ));
 }
 
