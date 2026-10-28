@@ -55,7 +55,7 @@ export function fontProvider(
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
-      return face ? Object.assign(load(face), { measureAs: face.family === 'Selawik' ? 'Segoe UI' : undefined }) : undefined;
+      return face ? Object.assign(load(face), { measureAs: face.family === 'Selawik' ? face.metricCompatWith : undefined }) : undefined;
     },
     resolveFamily(family, bold, italic) {
       const face = resolveBundledFamilyFace(family, bold, italic);

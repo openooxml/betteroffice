@@ -22,10 +22,11 @@ use crate::deck::{
     shape_base, shape_parts, slide_notes, slide_parts, slide_ref,
 };
 use crate::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, effective_list, shape_cascade, slide_hidden,
+    ListCounters, ParagraphCascade, SlideParents, common_ends, effective_list, shape_cascade,
+    slide_hidden, source_paragraph,
 };
 use crate::story::{snapshot_story, story_ref};
-use crate::target::{ParagraphView, StoryView, common_ends, source_paragraph};
+use crate::target::{ParagraphView, StoryView};
 use crate::{
     COMMENTS, CommentSnapshot, DeckSession, EditError, META, SHAPES, SLIDES, ShapeKind,
     ShapeSnapshot, SlideSnapshot, StorySnapshot, TextCaps, TextStyle,

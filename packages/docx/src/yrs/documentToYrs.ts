@@ -839,13 +839,13 @@ function runContentToUnits(
         }),
       ];
     case 'drawing':
-      return [embedUnit('image', imagePayload(content.image), trackedMarks(marks))];
+      return [embedUnit('image', { ...imagePayload(content.image), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
-      return [embedUnit('shape', shapePayload(content.shape), trackedMarks(marks))];
+      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'chart':
-      return [embedUnit('chart', chartPayload(content.chart), trackedMarks(marks))];
+      return [embedUnit('chart', { ...chartPayload(content.chart), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'opaqueDrawing':
       return [embedUnit('opaqueDrawing', {
         kind: content.kind,
@@ -853,6 +853,7 @@ function runContentToUnits(
         ...(content.preview ? { preview: imagePayload(content.preview) } : {}),
         ...(content.previews?.length ? { previews: content.previews.map(imagePayload) } : {}),
         ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox, withoutSourceOrdinal) } : {}),
+        ...(content.drawing ? { docPr: content.drawing } : {}),
       }, drawingMarks(marks))];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
@@ -1111,8 +1112,11 @@ function runBoundary(
   const marks = noteRefMarkTypes(run);
   const breaks = flowBreakOffsets(run);
   const key = keys[0];
+  const text = unitsText(units);
+  const storyText = units.map((unit) => unit.kind === 'text' ? unit.text : '\uFFFC').join('');
   return {
-    text: unitsText(units),
+    text,
+    ...(storyText !== text ? { storyText } : {}),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),

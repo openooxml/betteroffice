@@ -347,8 +347,8 @@ fn serialize_run_content(
         RunContent::NoBreakHyphen => {
             writer.start_element("w:noBreakHyphen").end_element();
         }
-        RunContent::Drawing { image } => return serialize_drawing_content(image, context),
-        RunContent::Shape { shape } => return serialize_shape_content(shape, context),
+        RunContent::Drawing { image, .. } => return serialize_drawing_content(image, context),
+        RunContent::Shape { shape, .. } => return serialize_shape_content(shape, context),
         RunContent::HorizontalRule { rule } => {
             validate_replayed_fragment(&rule.xml)?;
             return Ok(rule.xml.clone());
@@ -360,7 +360,7 @@ fn serialize_run_content(
             }
             writer.end_element();
         }
-        RunContent::Chart { chart } => {
+        RunContent::Chart { chart, .. } => {
             if let Some(xml) = chart.drawing_xml.as_deref() {
                 validate_raw_subtree(xml, "w", "drawing")?;
                 return Ok(xml.to_owned());
@@ -1607,6 +1607,7 @@ mod tests {
                 preview: None,
                 previews: vec![crate::image::placeholder_image("rId1")],
                 text_box: None,
+                drawing_properties: None,
             }],
         };
         let saved = serialize_deleted_run(&run, &mut context()).unwrap();

@@ -405,7 +405,7 @@ export function createWorkerXlsxCommandBinding(
         try {
           const result = await operation(readOnly);
           if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
-            const reason = 'failure' in result ? result.failure as { message: string } : { message: 'Command was refused' };
+            const reason = 'failure' in result ? result.failure as { message: string } : { message: bridge().translate('commands.reasons.commandRefused') };
             applied.refuse(new WorkerInputRefusal(reason.message), id !== undefined && XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument);
           }
           return result;

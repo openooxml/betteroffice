@@ -8,7 +8,6 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import { useTranslation } from '../i18n';
-import { en as defaultLocale } from '@betteroffice/docx-i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import { Z_INDEX } from '../styles/zIndex';
 
@@ -810,36 +809,6 @@ export function useTextContextMenu(
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-/**
- * Get action label
- */
-export function getTextActionLabel(action: TextContextAction): string {
-  const labels: Partial<Record<TextContextAction, string>> = {
-    cut: 'Cut',
-    copy: 'Copy',
-    paste: 'Paste',
-    pasteAsPlainText: 'Paste as Plain Text',
-    selectAll: 'Select All',
-    delete: 'Delete',
-    separator: '',
-    addRowAbove: 'Insert row above',
-    addRowBelow: 'Insert row below',
-    deleteRow: 'Delete row',
-    addColumnLeft: 'Insert column left',
-    addColumnRight: 'Insert column right',
-    deleteColumn: 'Delete column',
-    mergeCells: defaultLocale.table.mergeCells,
-    splitCell: defaultLocale.table.splitCell,
-    selectTable: defaultLocale.table.selectTable,
-    deleteTable: defaultLocale.table.deleteTable,
-    addComment: 'Comment',
-    resizeImage: 'Resize image',
-    moveImage: 'Move image',
-    resizeColumn: 'Column width',
-  };
-  return labels[action] ?? '';
-}
 
 /**
  * Get action shortcut

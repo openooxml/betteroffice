@@ -47,6 +47,35 @@ export function validFontEnvironment(value: unknown): value is DocxFontEnvironme
     Array.isArray(env.families) && env.families.every(name);
 }
 
+/** The characters docx-layout's `paragraph_scripts` gives a script fallback face. */
+const FALLBACK_SCRIPT_TEXT = /[\u0590-\u06ff\u0750-\u077f\u0870-\u08ff\u1100-\u11ff\u3000-\u30ff\u3130-\u318f\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7ff\uf900-\ufaff\ufb1d-\ufdff\ufe30-\ufe4f\ufe70-\ufeff\uff00-\uffdc\u{20000}-\u{3ffff}]/u;
+/**
+ * Commands that can bring back or reveal text, or change the fonts runs use, without naming
+ * either. A remote merge can also integrate updates held back for a missing dependency.
+ */
+const FONT_RESHAPING_COMMANDS = new Set(['pasteFragment', 'undo', 'redo', 'toggleMark', 'formatSelection', 'formatRange',
+  'clearFormatting', 'applyParagraphStyle', 'acceptRevision', 'rejectRevision', 'setProposalStates', 'applyRemoteUpdate',
+  'applyRemoteUpdateChunks', 'collabPipe']);
+
+/** Fallback-script text in a string field, or a paragraph style set by a step such as `setParagraphStyle`. */
+function carriesFallbackScript(value: unknown, depth = 0): boolean {
+  if (typeof value === 'string') return FALLBACK_SCRIPT_TEXT.test(value);
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return false;
+  if (!value || typeof value !== 'object' || depth > 8) return false;
+  if (!Array.isArray(value) && typeof (value as { styleId?: unknown }).styleId === 'string') return true;
+  return (Array.isArray(value) ? value : Object.values(value)).some(item => carriesFallbackScript(item, depth + 1));
+}
+
+/**
+ * Whether an applied command may need fonts the open-time requirements lacked: text in a script
+ * with its own fallback face, a paragraph style it sets, or a change the payload does not spell out.
+ * Showing or hiding hidden text is judged by the worker, which knows the setting before and after.
+ */
+export function commandMayNeedNewFonts(kind: string, payload: unknown): boolean {
+  if (kind === 'setFontEnvironment' || kind === 'setRenderEnvironment') return false;
+  return FONT_RESHAPING_COMMANDS.has(kind) || carriesFallbackScript(payload);
+}
+
 export class ResidentSessionFonts {
   private css: FontFace[] = [];
   private disposed = false;

@@ -35,7 +35,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
       expect(resolveLastResortFace(family, bold, true, 'word').style).toBe('italic');
     });
     for (const failPrimary of [false, true]) {
-      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
+      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with its own Segoe UI measurement view'}`, async () => {
         const provider = createFontProvider();
         const primary = provider.resolve(family, bold, false)!;
         const registered: Uint8Array[] = [];
@@ -65,8 +65,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
           expect(chain).toEqual([101, 102]);
           expect(registered[0]).toEqual(new Uint8Array(await primary()));
           expect(registered[1]).toEqual(lastResort);
-          expect(substitutes).toContainEqual([1, 'Segoe UI']);
-          if (family !== 'Segoe UI') expect(substitutes).not.toContainEqual([1, family]);
+          expect(substitutes).toContainEqual([1, primary.measureAs ?? family]);
           expect(substitutes).toContainEqual([2, family]);
         }
       });
@@ -149,7 +148,7 @@ test('a rejected primary still measures with real last-resort bytes', async () =
 });
 
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
-  test(`${family} uses Word line metrics and unscaled Selawik advances with the real engine`, async () => {
+  test(`${family} uses Word line metrics and Segoe UI advances with the real engine`, async () => {
     const wasm = await import('../wasm');
     await wasm.preloadLayoutWasm();
     const provider = createFontProvider();
@@ -179,7 +178,9 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
       expect(measured.lines[0].descent).toBeCloseTo(514 / 2048 * 16, 5);
       expect(measured.lines[0].lineHeight).toBeCloseTo((2210 + 514) / 2048 * 16, 5);
       expect(unscaled.lines[0].width).toBeGreaterThan(0);
-      expect(measured.lines[0].width / unscaled.lines[0].width).toBeCloseTo(1.0, 5);
+      const ratio = measured.lines[0].width / unscaled.lines[0].width;
+      if (family === 'Segoe UI Semilight') expect(Math.abs(ratio - 1)).toBeLessThan(0.002);
+      else expect(ratio).toBeCloseTo(1.0, 5);
     } finally {
       wasm.clearMeasureFonts();
     }

@@ -164,12 +164,17 @@ export type TableRow = {
 const TABLE_ONLY = /^(scored\/total|parse success)$/i;
 const lowerIsBetter = (label: string) => /error|time/i.test(label);
 const isTime = (label: string) => /time/i.test(label);
+const isSsim = (label: string) => /^ssim$/i.test(label);
 
-// every other row the README publishes for each format, quality rows before timing rows, sized for a bar:
+// every other row the README publishes for each format, SSIM first, then the other quality rows, then timing rows, sized for a bar:
 // ratios, percentages and SSIM sit on a fixed 0 to 1 scale, errors and times on the larger of the two
 export function tableRows(formats: FidelityFormat[]): TableRow[] {
   return formats.flatMap((f) =>
-    [...f.rows.filter((row) => !isTime(row.label)), ...f.rows.filter((row) => isTime(row.label))]
+    [
+      ...f.rows.filter((row) => isSsim(row.label)),
+      ...f.rows.filter((row) => !isSsim(row.label) && !isTime(row.label)),
+      ...f.rows.filter((row) => isTime(row.label)),
+    ]
       .filter((row) => !TABLE_ONLY.test(row.label))
       .map((row) => {
         const ours = quantity(row.ours);

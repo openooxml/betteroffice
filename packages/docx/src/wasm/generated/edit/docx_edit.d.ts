@@ -1380,6 +1380,7 @@ export class EditSession {
      * "pageContentHeight":number|null,"numericIds":{yrsId: number},
      * "tocStyleIds":[styleId],"showHiddenText":bool,
      * "defaultParagraphStyleId":string,
+     * "paragraphStyleFontSizes":{styleId: pt},"docDefaultFontSize":number,
      * "revisionPreview":{revisionId: "accepted"|"rejected"}}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an

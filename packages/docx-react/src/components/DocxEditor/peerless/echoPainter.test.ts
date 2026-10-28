@@ -4,7 +4,7 @@ import type {
 } from '../../../../../../shared/office-session/commands/types';
 import { createWorkerEditSession } from '../../../../../../shared/office-session/commands/session';
 import type { DocxCommandEchoContext, DocxCommandFrame, DocxEchoGlyphSet } from '@betteroffice/docx/worker';
-import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter } from './echoPainter';
+import { createEchoPainter, type PeerlessEchoIntent, type PeerlessEchoPainter, type PeerlessPredictedCaret } from './echoPainter';
 import type { PeerlessTextIntent } from './inputEvents';
 import { testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
 
@@ -40,7 +40,7 @@ function entry(id: number, value: PeerlessEchoIntent): EchoEntry<PeerlessEchoInt
 const scope = globalThis as { Path2D?: unknown };
 scope.Path2D = class { glyph?: number; moveTo(x: number) { this.glyph ??= x; } lineTo() {} closePath() {} };
 
-function setup(options: { requestFullFrame?(): void; onPaint?(): void } = {}) {
+function setup(options: { requestFullFrame?(): void; onPaint?(predicted?: PeerlessPredictedCaret): void } = {}) {
   const draws: unknown[][] = [];
   const texts: string[] = [];
   const transforms: number[][] = [];
@@ -594,4 +594,124 @@ test('echo declines ink that would end past the line even when the line does not
   expect(painter.preview({ kind: 'replaceSelection', payload: { text: 'c' } }), 'a trailing space replaced by ink past the line').toBeUndefined();
   painter.installContext({ ...hanging, selection: { anchorGrapheme: 2, focusGrapheme: 2 } });
   expect(painter.preview({ kind: 'deleteForward', payload: {} }), 'removing a hanging space keeps the ink inside').toBeDefined();
+});
+
+function predictedSetup() {
+  const calls: Array<PeerlessPredictedCaret | undefined> = [];
+  const result = setup({ onPaint: (predicted) => { calls.push(predicted); } });
+  const preview = result.painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(preview).toBeDefined();
+  result.painter.paint([entry(1, preview!)]);
+  expect(calls[0]?.rect.x).toBeCloseTo(0.3, 5);
+  return { ...result, calls };
+}
+
+test('predicted caret sits at the echoed glyph edge for the painted draft', () => {
+  const calls: Array<PeerlessPredictedCaret | undefined> = [];
+  const { painter } = setup({ onPaint: (predicted) => { calls.push(predicted); } });
+  const preview = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(preview).toBeDefined();
+  painter.paint([entry(7, preview!)]);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ throughSeq: 7, pageIndex: 0, rect: { y: 0, width: 1, height: 20 } });
+  expect(calls[0]!.rect.x).toBeCloseTo(0.3, 5);
+});
+
+test('predicted caret reads its sequence from the ticket once the session assigns it', () => {
+  const calls: Array<PeerlessPredictedCaret | undefined> = [];
+  const { painter } = setup({ onPaint: (predicted) => { calls.push(predicted); } });
+  let seq: number | undefined;
+  const ticket = { id: 11, get seq() { return seq; },
+    ack: Promise.resolve({ status: 'applied' as const, seq: 11 }), presented: Promise.resolve('presented' as const) };
+  const preview = painter.preview({ kind: 'insertText', payload: { text: 'x' } });
+  expect(preview).toBeDefined();
+  painter.paint([{ ticket, value: preview! }]);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toBeDefined();
+  expect(calls[0]!.throughSeq).toBeUndefined();
+  expect(calls[0]!.rect.x).toBeCloseTo(0.3, 5);
+  seq = 11;
+  expect(calls[0]!.throughSeq).toBe(11);
+});
+
+test('predicted caret follows backspace, selection replace and multi character inserts', () => {
+  const backspace: Array<PeerlessPredictedCaret | undefined> = [];
+  const first = setup({ onPaint: (predicted) => { backspace.push(predicted); } });
+  const deleted = first.painter.preview({ kind: 'deleteBackward', payload: {} });
+  expect(deleted).toBeDefined();
+  first.painter.paint([entry(3, deleted!)]);
+  expect(backspace[0]).toMatchObject({ throughSeq: 3, pageIndex: 0 });
+  expect(backspace[0]!.rect.x).toBeCloseTo(0.1, 5);
+
+  const replaced: Array<PeerlessPredictedCaret | undefined> = [];
+  const second = setup({ onPaint: (predicted) => { replaced.push(predicted); } });
+  second.painter.installContext({ ...context(), selection: { anchorGrapheme: 0, focusGrapheme: 2 } });
+  const replacement = second.painter.preview({ kind: 'replaceSelection', payload: { text: 'cd' } });
+  expect(replacement).toBeDefined();
+  second.painter.paint([entry(4, replacement!)]);
+  expect(replaced[0]).toMatchObject({ throughSeq: 4, pageIndex: 0 });
+  expect(replaced[0]!.rect.x).toBeCloseTo(0.2, 5);
+
+  const inserted: Array<PeerlessPredictedCaret | undefined> = [];
+  const third = setup({ onPaint: (predicted) => { inserted.push(predicted); } });
+  const multi = third.painter.preview({ kind: 'insertText', payload: { text: 'cd' } });
+  expect(multi).toBeDefined();
+  third.painter.paint([entry(5, multi!)]);
+  expect(inserted[0]).toMatchObject({ throughSeq: 5, pageIndex: 0 });
+  expect(inserted[0]!.rect.x).toBeCloseTo(0.4, 5);
+
+  const forward: Array<PeerlessPredictedCaret | undefined> = [];
+  const fourth = setup({ onPaint: (predicted) => { forward.push(predicted); } });
+  fourth.painter.installContext({ ...context(), selection: { anchorGrapheme: 1, focusGrapheme: 1 } });
+  const erased = fourth.painter.preview({ kind: 'deleteForward', payload: {} });
+  expect(erased).toBeDefined();
+  fourth.painter.paint([entry(6, erased!)]);
+  expect(forward[0]!.rect.x).toBeCloseTo(0.1, 5);
+
+  const emptied: Array<PeerlessPredictedCaret | undefined> = [];
+  const fifth = setup({ onPaint: (predicted) => { emptied.push(predicted); } });
+  const all = fifth.painter.preview({ kind: 'deleteBackward', payload: { count: 2 } });
+  expect(all).toBeDefined();
+  fifth.painter.paint([entry(7, all!)]);
+  expect(emptied[0]!.rect.x).toBe(0);
+});
+
+test('paste, paragraph break, composition fence and an overflowing line publish no prediction', () => {
+  const paste = predictedSetup();
+  paste.painter.paint([entry(2, { intent: { kind: 'replaceSelection', payload: { text: 'a\nb' } },
+    originalIntentCount: 1, contextFrameEpoch: 1 })]);
+  expect(paste.calls).toHaveLength(2);
+  expect(paste.calls[1]).toBeUndefined();
+
+  const paragraph = predictedSetup();
+  paragraph.painter.paint([entry(2, { intent: { kind: 'paragraphBreak', payload: {} },
+    originalIntentCount: 1, contextFrameEpoch: 1 })]);
+  expect(paragraph.calls).toHaveLength(2);
+  expect(paragraph.calls[1]).toBeUndefined();
+
+  const composition = predictedSetup();
+  composition.painter.disable('fence');
+  expect(composition.calls).toHaveLength(2);
+  expect(composition.calls[1]).toBeUndefined();
+
+  const overflow = predictedSetup();
+  overflow.painter.installContext({ ...context(), glyphs: { ...context().glyphs!, right: 0.0003 } });
+  overflow.painter.paint([entry(2, { intent: { kind: 'insertText', payload: { text: 'x' } },
+    originalIntentCount: 1, contextFrameEpoch: 1 })]);
+  expect(overflow.calls).toHaveLength(2);
+  expect(overflow.calls[1]).toBeUndefined();
+});
+
+test('disable, drop and dispose clear a published prediction', () => {
+  const disabled = predictedSetup();
+  disabled.painter.disable('unsupported');
+  expect(disabled.calls.at(-1)).toBeUndefined();
+
+  const dropped = predictedSetup();
+  dropped.painter.drop([entry(1, dropped.painter.preview({ kind: 'insertText', payload: { text: 'c' } })!)], 'refused');
+  expect(dropped.calls.at(-1)).toBeUndefined();
+
+  const disposed = predictedSetup();
+  disposed.painter.dispose();
+  expect(disposed.calls.at(-1)).toBeUndefined();
 });

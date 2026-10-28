@@ -118,7 +118,15 @@ describe('saving merged table cells after an earlier save', () => {
     try {
       await saveYrsDocx(session);
       session.mergeCells(FIRST_ROW);
-      const saved = await saveLegacyTable(session);
+      const part = session.paragraphSavePlan().splicedParts?.find(
+        ({ part }) => part === 'word/document.xml'
+      );
+      expect(part?.tablePatches ?? []).toHaveLength(1);
+      const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      expect(xml).toContain('<w:gridSpan w:val="2"/>');
+      expect(xml).toContain(paragraph('Before'));
+      expect(xml).toContain(paragraph('After'));
       expect(await reopenedStoryTexts(saved.bytes)).toEqual({ 'body:t0:r0c0': ['CellA', 'CellB'] });
     } finally {
       session.destroy();
