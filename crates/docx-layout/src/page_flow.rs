@@ -532,6 +532,7 @@ impl Paginator {
     /// Sets ownership for future pages and the untouched current page, which
     /// then opens the section.
     pub fn set_section_index(&mut self, section_index: usize) {
+        let physical_changed = section_index != self.section_index;
         let previous_region = self.region_section_index();
         self.section_index = section_index;
         let entering = previous_region != self.region_section_index();
@@ -546,6 +547,8 @@ impl Paginator {
                 self.section_started = true;
                 self.displayed_parity_offset =
                     self.page_parity_offset(true, self.pages[page_index].number);
+            }
+            if physical_changed {
                 if self.states[idx].column_index == 0 && self.promote_pending_geometry() {
                     self.restamp_pristine_page();
                 } else {
@@ -1574,6 +1577,66 @@ mod tests {
             separator: None,
             columns: None,
         }
+    }
+
+    #[test]
+    fn physical_section_change_refreshes_footer_bands_without_restarting_caller() {
+        let initial = margins(60.0, 80.0);
+        let next = PageMargins {
+            top: 70.0,
+            left: 120.0,
+            ..initial.clone()
+        };
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            initial.clone(),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: None,
+            restart: Some(2),
+        }]);
+        paginator.set_section_page_float_bands(vec![
+            SectionPageFloatBands {
+                default: vec![band(400.0, 520.0)],
+                anchor_margins: Some(initial),
+                ..SectionPageFloatBands::default()
+            },
+            SectionPageFloatBands {
+                default: vec![band(800.0, 920.0)],
+                anchor_margins: Some(next.clone()),
+                ..SectionPageFloatBands::default()
+            },
+        ]);
+        let first = paginator.get_current();
+        paginator.set_pen_y(first, 200.0);
+        paginator
+            .update_page_layout(Some(Size { w: 600.0, h: 1000.0 }), Some(next), true)
+            .unwrap();
+        let following = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.pages[following].float_bands, vec![band(400.0, 520.0)]);
+        let parity = paginator.displayed_parity_offset;
+
+        paginator.set_section_index(1);
+
+        let page = &paginator.pages[following];
+        assert_eq!(page.float_bands, vec![band(800.0, 920.0)]);
+        assert_eq!(page.margins.left, 120.0);
+        assert_eq!(page.margins.top, 70.0);
+        assert_eq!(page.body_margins.as_ref().unwrap().bottom, 200.0);
+        assert_eq!(paginator.states[following].content_limit, 800.0);
+        assert_eq!(page.region_section_index, 0);
+        assert!(!paginator.opens_section[following]);
+        assert_eq!(paginator.displayed_parity_offset, parity);
     }
 
     #[test]

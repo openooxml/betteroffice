@@ -213,8 +213,7 @@ fn consecutive_wrapped_sections_inherit_authored_margins_after_a_tall_header() {
     }
 }
 
-#[test]
-fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_position() {
+fn short_page_floating_footer_output(last: &str, client_id: u64) -> Value {
     let lines = (0..22)
         .map(|index| {
             let line = r(&format!("Cover line {index}"));
@@ -242,7 +241,7 @@ fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_positio
             "<w:sdtContent>{cover}</w:sdtContent></w:sdt>{last}{section}"
         ),
         cover = cover,
-        last = p("00000002", &r("Last")),
+        last = last,
         section = section(
             9000,
             15000,
@@ -329,15 +328,20 @@ fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_positio
     ));
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let engine = EngineSession::new(75214);
+    let engine = EngineSession::new(client_id);
     seed_from_docx(engine.doc(), &bytes).unwrap();
     let request = region_request(&engine, &bytes, font);
-    let output: Value = serde_json::from_str(
+    serde_json::from_str(
         &engine
             .layout_document_with_regions_json(&request.to_string())
             .unwrap(),
     )
-    .unwrap();
+    .unwrap()
+}
+
+#[test]
+fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_position() {
+    let output = short_page_floating_footer_output(&p("00000002", &r("Last")), 75214);
     let pages = output["layout"]["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 3);
     for page in &pages[..2] {
@@ -351,6 +355,46 @@ fn wrapped_short_page_reserves_its_floating_footer_image_at_the_rendered_positio
     }
     assert_eq!(pages[2]["size"]["h"], 1000.0);
     assert_eq!(pages[2]["bodyMargins"]["bottom"], 200.0);
+}
+
+#[test]
+fn first_tall_page_after_wrapped_section_refreshes_its_footer_exclusion() {
+    let lines = (0..43)
+        .map(|index| {
+            let line = r(&format!("Following line {index}"));
+            if index == 42 {
+                line
+            } else {
+                format!("{line}<w:r><w:br/></w:r>")
+            }
+        })
+        .collect::<String>();
+    let last = p(
+        "00000002",
+        &format!(
+            concat!(
+                "<w:pPr><w:spacing w:before=\"0\" w:after=\"0\" ",
+                "w:line=\"300\" w:lineRule=\"exact\"/></w:pPr>{lines}"
+            ),
+            lines = lines,
+        ),
+    );
+    let output = short_page_floating_footer_output(&last, 75215);
+    let pages = output["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 4);
+    let first_tall = &pages[2];
+    assert_eq!(first_tall["size"]["h"], 1000.0);
+    assert_eq!(first_tall["sectionPageIndex"], 2);
+    assert_eq!(first_tall["margins"]["bottom"], 80.0);
+    assert_eq!(first_tall["bodyMargins"]["bottom"], 200.0);
+    let fragments = first_tall["fragments"].as_array().unwrap();
+    let mut body_bottom = 0.0_f64;
+    for fragment in fragments {
+        let bottom = fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap();
+        assert!(bottom <= 800.0, "body overlaps the footer: {fragment}");
+        body_bottom = body_bottom.max(bottom);
+    }
+    assert_eq!(body_bottom, 800.0);
 }
 
 fn section(width: u32, height: u32, top: u32, bottom: u32, extra: &str) -> String {
