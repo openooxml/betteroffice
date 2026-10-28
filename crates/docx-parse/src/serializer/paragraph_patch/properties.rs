@@ -197,8 +197,18 @@ pub(super) fn paragraph_properties(
     for delta in deltas {
         let key = delta.path.first().map(String::as_str).unwrap_or_default();
         if restyle && key != "pStyle" {
-            if present_slot(&delta.before) == attr_at(seed_inherit, &delta.path)
-                && present_slot(&delta.after) == attr_at(inherit, &delta.path)
+            let list_indent = matches!(
+                key,
+                "indentLeft"
+                    | "indentFirstLine"
+                    | "hangingIndent"
+                    | "indentLeftChars"
+                    | "indentFirstLineChars"
+                    | "hangingIndentChars"
+            );
+            if present_slot(&delta.after) == attr_at(inherit, &delta.path)
+                && (present_slot(&delta.before) == attr_at(seed_inherit, &delta.path)
+                    || list_indent)
             {
                 continue;
             }

@@ -1164,11 +1164,16 @@ pub(crate) fn plan_paragraph_style(
         .collect();
     let direct_numbering = present(properties.get("numPr")).is_some_and(|_| {
         match properties.get("_originalFormatting") {
-            Some(Any::Map(original)) => present(original.get("numPr")).is_some(),
+            Some(Any::Map(original)) => {
+                present(original.get("numPr")).is_some()
+                    && present(original.get("numPrFromStyle")) != present(original.get("numPr"))
+            }
             _ => present(properties.get("numPrFromStyle"))
                 .is_none_or(|style| Some(style) != present(properties.get("numPr"))),
         }
     });
+    let clears_numbering =
+        present(properties.get("numPr")).is_some() && !target.contains_key("numPr");
     let mut changes = Vec::new();
     for key in crate::seed::style_resolved_keys() {
         if direct_numbering
@@ -1183,7 +1188,7 @@ pub(crate) fn plan_paragraph_style(
         }
     }
     if !direct_numbering {
-        if present(properties.get("numPr")).is_some() && !target.contains_key("numPr") {
+        if clears_numbering {
             for key in [
                 "numPr",
                 "numPrFromStyle",
@@ -1215,6 +1220,10 @@ pub(crate) fn plan_paragraph_style(
         if !direct_numbering {
             for key in crate::seed::style_resolved_keys() {
                 direct.remove(formatting_key(key));
+            }
+            if clears_numbering {
+                direct.remove("numPr");
+                direct.remove("numPrFromStyle");
             }
         }
         direct.insert("styleId".to_owned(), Any::from(style_id));

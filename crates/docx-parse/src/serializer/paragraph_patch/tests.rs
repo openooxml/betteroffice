@@ -1213,10 +1213,11 @@ fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
     );
     let units = vec![text("x", json!({"bold": true}))];
     let before = attrs(json!({
-        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}
+        "pStyle": "ListParagraph", "numPr": {"numId": 43, "ilvl": 0}, "spaceAfter": 160
     }));
     let after = attrs(json!({
-        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "outlineLevel": 0
+        "pStyle": "Heading1", "numPr": {"numId": 43, "ilvl": 0}, "outlineLevel": 0,
+        "spaceAfter": 160
     }));
     let mut plan = patch(units.clone(), units);
     plan.seed.properties = before.clone();

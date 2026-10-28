@@ -760,7 +760,11 @@ fn validate_indent_kinds(
     before: &Snapshot,
     after: &Snapshot,
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
+    if patchable_restyle {
+        return Ok(());
+    }
     let source = before.carriers.get("_originalFormatting");
     let live = after.carriers.get("_originalFormatting");
     let ambiguous = |key| {
@@ -1072,9 +1076,19 @@ pub(crate) fn diff_paragraph_v1(
                         .and_then(|object| object.get(key))
                         .is_some_and(|value| !value.is_null())
                 });
+            let list_indent = matches!(
+                key.as_str(),
+                "indentLeft"
+                    | "indentFirstLine"
+                    | "hangingIndent"
+                    | "indentLeftChars"
+                    | "indentFirstLineChars"
+                    | "hangingIndentChars"
+            );
             !direct
-                && slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
                 && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
+                && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
+                    || list_indent)
         });
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
         && before.properties.get("numPr") == after.properties.get("numPr")
@@ -1127,7 +1141,7 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     let para_deltas = deltas(&before.properties, &after.properties);
-    validate_indent_kinds(&before, &after, &context)?;
+    validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
     validate_carriers(&before, &after, &para_inherit, &context, patchable_restyle)?;
     validate_deltas(
