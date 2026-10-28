@@ -64,6 +64,8 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
+/// Larger edited shapes save unfitted, as when no fonts are registered.
+const MAX_FITTED_TEXT_UTF16: u32 = 65_536;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
 /// Metafile fills and strokes one slide may draw, shared across its pictures.
@@ -787,6 +789,12 @@ fn collect_autofit_edited_shapes(
         }
         has_edits |= child_edited;
         if base.is_some_and(|base| base.text_stories == shape.text_stories) {
+            continue;
+        }
+        let text_utf16 = shape.text_stories.iter().fold(0_u32, |length, story| {
+            length.saturating_add(story.length.saturating_sub(1))
+        });
+        if text_utf16 > MAX_FITTED_TEXT_UTF16 {
             continue;
         }
         let original = parents
@@ -4358,13 +4366,16 @@ fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
         out.push(run);
         return;
     }
+    let mut offset = run.start;
     for (position, start) in cuts.iter().enumerate() {
         let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        let text = &run.text[*start..end];
         out.push(ResolvedRun {
-            text: run.text[*start..end].to_owned(),
-            start: run.start + utf16_len(&run.text[..*start]),
+            text: text.to_owned(),
+            start: offset,
             style: run.style.clone(),
         });
+        offset += utf16_len(text);
     }
 }
 
@@ -9504,6 +9515,44 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_with_a_large_mixed_direction_run_lays_out_in_linear_time() {
+        let text = "a\u{5d0}".repeat(100_000);
+        let body = TextBody {
+            paragraphs: vec![pptx_parse::TextParagraph {
+                properties: ParagraphProperties {
+                    rtl: Some(true),
+                    ..ParagraphProperties::default()
+                },
+                runs: vec![pptx_parse::TextRun {
+                    text: text.clone(),
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let start = std::time::Instant::now();
+        let rendered = text_columns_slide(body);
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let lines = text_columns_lines(&rendered);
+        let laid_out: String = lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(laid_out, text);
+        assert_eq!(lines.last().unwrap().end, 200_000);
+    }
+
+    #[test]
     fn text_columns_fill_then_continue_at_the_next_column() {
         let rendered = text_columns_slide(text_columns_body());
         let lines = text_columns_lines(&rendered);
@@ -10415,17 +10464,21 @@ mod tests {
             })
             .collect();
         let mut current = baseline.clone();
-        current.last_mut().unwrap().text_stories.push(StorySnapshot {
-            id: "changed".to_owned(),
-            length: 7,
-            paragraphs: vec![pptx_edit::ParagraphSnapshot {
-                runs: vec![pptx_edit::TextRunSnapshot {
-                    text: "Changed".to_owned(),
-                    style: TextStyle::default(),
+        current
+            .last_mut()
+            .unwrap()
+            .text_stories
+            .push(StorySnapshot {
+                id: "changed".to_owned(),
+                length: 7,
+                paragraphs: vec![pptx_edit::ParagraphSnapshot {
+                    runs: vec![pptx_edit::TextRunSnapshot {
+                        text: "Changed".to_owned(),
+                        style: TextStyle::default(),
+                    }],
+                    ..pptx_edit::ParagraphSnapshot::default()
                 }],
-                ..pptx_edit::ParagraphSnapshot::default()
-            }],
-        });
+            });
         let start = std::time::Instant::now();
         let edited = autofit_edited_shapes(&current, &baseline, &SlideParents::default());
         let elapsed = start.elapsed();
@@ -10440,7 +10493,8 @@ mod tests {
     ) -> (DeckSession, StorySnapshot) {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let normal = r#"<a:normAutofit fontScale="100000"/>"#;
-        let transform = r#"<a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1905000" cy="952500"/></a:xfrm>"#;
+        let transform =
+            r#"<a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1905000" cy="952500"/></a:xfrm>"#;
         let title = format!(
             r#"<p:sp>
 <p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
@@ -10495,6 +10549,73 @@ mod tests {
             )
             .unwrap();
         (session, story)
+    }
+
+    fn edited_autofit_session_with_text(text: &str, inherited: bool, grouped: bool) -> DeckSession {
+        let (session, story) = edited_autofit_session("Untouched", inherited, grouped);
+        let story = session.story(&story.id).unwrap();
+        let context = EditCtx::local("test");
+        session
+            .delete_text(&context, &story.id, 0, story.length - 1)
+            .unwrap();
+        session
+            .insert_text(
+                &context,
+                &story.id,
+                0,
+                text,
+                &story.paragraphs[0].runs[0].style,
+            )
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn fitted_save_skips_edited_text_over_the_utf16_limit() {
+        let text = format!("{}x", "\u{1f600}".repeat(32_768));
+        assert_eq!(utf16_len(&text), 65_537);
+        for inherited in [false, true] {
+            for grouped in [false, true] {
+                let session = edited_autofit_session_with_text(&text, inherited, grouped);
+                let plain = pptx_parse::parse_pptx(&session.save().unwrap()).unwrap();
+                let renderer = renderer();
+                let start = std::time::Instant::now();
+                let saved = renderer.save(&session).unwrap();
+                let elapsed = start.elapsed();
+                assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                let part = &reopened.slides[0].part_path;
+                assert_eq!(
+                    reopened.part_bytes(part).unwrap(),
+                    plain.part_bytes(part).unwrap()
+                );
+                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                assert_eq!(
+                    title.autofit,
+                    node_text(find_node(&plain.slides[0].shapes, 2).unwrap())
+                        .unwrap()
+                        .autofit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fitted_save_fits_edited_text_at_the_utf16_limit() {
+        let text = "\u{1f600}".repeat(32_768);
+        assert_eq!(utf16_len(&text), 65_536);
+        for inherited in [false, true] {
+            for grouped in [false, true] {
+                let session = edited_autofit_session_with_text(&text, inherited, grouped);
+                let saved = renderer().save(&session).unwrap();
+                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                assert!(matches!(
+                    title.autofit,
+                    Some(TextAutofit::Normal { font_scale: Some(scale), .. }) if scale < 1.0
+                ));
+            }
+        }
     }
 
     #[test]
