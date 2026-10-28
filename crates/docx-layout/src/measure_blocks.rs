@@ -828,7 +828,7 @@ pub fn measure_blocks_with_column_frames(
             &marks,
         );
     }
-    let mut flow = FlowState::default();
+    let mut flow = FlowState::new(blocks);
     blocks
         .iter_mut()
         .enumerate()
@@ -856,6 +856,24 @@ pub fn resets_float_flow(block: &LayoutBlock) -> bool {
         block,
         LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
     ) || crate::keep_together::paragraph_breaks_before(block)
+}
+
+pub fn float_flow_breaks<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> Vec<bool> {
+    let blocks: Vec<_> = blocks.into_iter().collect();
+    let mut breaks: Vec<_> = blocks
+        .iter()
+        .map(|block| resets_float_flow(block))
+        .collect();
+    let mut owners = crate::anchor::FloatingGroupOwner::default();
+    for index in 0..blocks.len() {
+        if let Some(owner) = owners.at(blocks.len(), index, |index| blocks[index])
+            && breaks[owner]
+        {
+            breaks[index] = true;
+            breaks[owner] = false;
+        }
+    }
+    breaks
 }
 
 /// `(anchors a floating zone, anchors a margin-relative one)` for `blocks`.
@@ -1146,7 +1164,7 @@ fn measure_float_flow(
     zones_by_anchor: &AnchorZones,
     section_break_marks: &[bool],
 ) -> Result<Vec<BlockExtent>, String> {
-    let mut flow = FlowState::default();
+    let mut flow = FlowState::new(blocks);
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
         measured.push(flow.measure(
@@ -1175,7 +1193,7 @@ fn measure_float_flow_recorded(
     section_break_marks: &[bool],
     zone_dependencies: &[FontChainDependencies],
 ) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
-    let mut flow = FlowState::default();
+    let mut flow = FlowState::new(blocks);
     let mut measured = Vec::with_capacity(blocks.len());
     let mut dependencies = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
@@ -1203,13 +1221,21 @@ fn measure_float_flow_recorded(
 }
 
 /// Where the float flow stands between two blocks.
-#[derive(Default)]
 struct FlowState {
     cumulative_y: f64,
     active_zones: Vec<FloatingZone>,
+    breaks: Vec<bool>,
 }
 
 impl FlowState {
+    fn new(blocks: &[LayoutBlock]) -> Self {
+        Self {
+            cumulative_y: 0.0,
+            active_zones: Vec::new(),
+            breaks: float_flow_breaks(blocks),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn measure(
         &mut self,
@@ -1226,8 +1252,9 @@ impl FlowState {
         let Self {
             cumulative_y,
             active_zones,
+            breaks,
         } = self;
-        if resets_float_flow(block) {
+        if breaks[index] {
             active_zones.clear();
             *cumulative_y = 0.0;
         }
@@ -1386,7 +1413,7 @@ impl FloatFlow {
             paragraph_zones,
             zones_by_anchor,
             marks: section_break_marks(blocks),
-            state: FlowState::default(),
+            state: FlowState::new(blocks),
             measured: Vec::with_capacity(blocks.len()),
             font_dependencies: Vec::with_capacity(blocks.len()),
             zone_dependencies,
@@ -2713,9 +2740,10 @@ fn extract_image_zones(
 /// passed to [`measure_blocks_with_table_wrap_frames`] must be false there.
 pub fn negative_indent_float_flows(blocks: &[&LayoutBlock]) -> Vec<bool> {
     let mut flows = vec![false; blocks.len()];
+    let breaks = float_flow_breaks(blocks.iter().copied());
     let mut start = 0;
     for index in 1..=blocks.len() {
-        if index == blocks.len() || resets_float_flow(blocks[index]) {
+        if index == blocks.len() || breaks[index] {
             let negative = blocks[start..index]
                 .iter()
                 .any(|block| has_negative_side_indent(block));
@@ -5569,6 +5597,109 @@ mod tests {
             };
             assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
             assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn owned_chart_wrapping_survives_its_paragraph_page_break() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        for wrap in ["topAndBottom", "square", "tight", "through"] {
+            for split in [false, true] {
+                let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                    {"kind":"shape","id":"previous-float","shapeType":"rect",
+                     "geometryPath":[],"children":[],"width":140,"height":400,
+                     "wrapType":"square","position":{
+                         "horizontal":{"relativeTo":"column","posOffset":0},
+                         "vertical":{"relativeTo":"paragraph","posOffset":0}},
+                     "pmStart":2,"pmEnd":3},
+                    {"kind":"paragraph","id":"previous","pmStart":0,"pmEnd":10,
+                     "runs":[{"kind":"text","text":"Previous"}]},
+                    {"kind":"chart","id":"chart","chart":{},"width":40,"height":40,
+                     "wrapType":wrap,"position":{
+                         "horizontal":{"relativeTo":"column","posOffset":0},
+                         "vertical":{"relativeTo":"paragraph","posOffset":0}},
+                     "pmStart":32,"pmEnd":33},
+                    {"kind":"paragraph","id":"owner","pmStart":20,"pmEnd":40,
+                     "attrs":{"pageBreakBefore":true},
+                     "runs":[{"kind":"text","text":"Owner words words words words"}]},
+                    {"kind":"pageBreak","id":"break"},
+                    {"kind":"paragraph","id":"after","pmStart":40,"pmEnd":50,
+                     "runs":[{"kind":"text","text":"After the break"}]}
+                ]))
+                .unwrap();
+                if split {
+                    let LayoutBlock::Paragraph(owner) = &mut blocks[3] else {
+                        panic!()
+                    };
+                    owner.pm_end = Some(30.0);
+                    owner.attrs.as_mut().unwrap().anchor_paragraph_offsets = Some((0.0, 20.0));
+                }
+                let source = blocks.clone();
+                let measures =
+                    measure_blocks_with_floats(&mut blocks, &[200.0; 6], &config, None).unwrap();
+                let BlockExtent::Paragraph(owner) = &measures[3] else {
+                    panic!()
+                };
+                let line = &owner.lines[0];
+                assert_eq!(
+                    line.float_skip_before.unwrap_or(0.0),
+                    if wrap == "topAndBottom" { 40.0 } else { 0.0 },
+                    "{wrap}, split={split}"
+                );
+                assert_eq!(
+                    line.left_offset.unwrap_or(0.0),
+                    if wrap == "topAndBottom" { 0.0 } else { 40.0 },
+                    "{wrap}, split={split}"
+                );
+                let BlockExtent::Paragraph(after) = &measures[5] else {
+                    panic!()
+                };
+                assert_eq!(after.lines[0].left_offset.unwrap_or(0.0), 0.0);
+                assert_eq!(after.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+
+                let mut chunks = source.clone();
+                let mut flow = FloatFlow::new(&chunks, &[200.0; 6], &config, None).unwrap();
+                for end in 1..=chunks.len() {
+                    flow.measure_until(&mut chunks, &[200.0; 6], &config, end)
+                        .unwrap();
+                }
+                assert_eq!(flow.into_extents(), measures);
+
+                let mut columns = source.clone();
+                let column_measures = measure_blocks_with_column_frames(
+                    &mut columns,
+                    &[200.0; 6],
+                    &[] as &[bool],
+                    &config,
+                    None,
+                    &BTreeMap::new(),
+                    &BTreeMap::from([(
+                        3,
+                        vec![ColumnWidthBand {
+                            top: 0.0,
+                            bottom: 1000.0,
+                            width: 200.0,
+                        }],
+                    )]),
+                )
+                .unwrap();
+                assert_eq!(column_measures, measures);
+
+                let mut segment = source[2..4].to_vec();
+                let segment_measures = measure_float_segment(
+                    &mut segment,
+                    &[200.0; 2],
+                    200.0,
+                    &config,
+                    None,
+                    &[false; 2],
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(segment_measures, measures[2..4]);
+            }
         }
     }
 

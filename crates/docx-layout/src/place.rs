@@ -33,6 +33,7 @@
 //! layout, so an edit late in a document does not re-place everything above it.
 
 use crate::LayoutError;
+use crate::anchor::{FloatingGroupOwner, is_floating_drawing, is_floating_text_box_block};
 use crate::hooks;
 use crate::keep_together::{
     measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_min_leading_slice,
@@ -151,75 +152,6 @@ fn pristine_paragraph_start(
                         LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
                     )
                 }))
-}
-
-fn is_floating_drawing(block: &LayoutBlock) -> bool {
-    match block {
-        LayoutBlock::Shape(shape) => shape.position.is_some(),
-        LayoutBlock::TextBox(text_box) => is_floating_text_box_block(text_box),
-        LayoutBlock::Table(table) => table.floating.is_some(),
-        LayoutBlock::Image(image) => is_anchored_image(image),
-        LayoutBlock::Chart(chart) => chart.position.is_some(),
-        _ => false,
-    }
-}
-
-fn chart_anchor_owner(
-    measured: &[MeasuredBlock],
-    index: usize,
-    end: usize,
-) -> Option<(usize, usize)> {
-    let LayoutBlock::Paragraph(paragraph) = &measured.get(end)?.block else {
-        return None;
-    };
-    let (Some(mut start), Some(mut stop)) = (paragraph.pm_start, paragraph.pm_end) else {
-        return None;
-    };
-    if let Some((from, to)) = paragraph
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.anchor_paragraph_offsets)
-    {
-        stop = start + to;
-        start += from;
-    }
-    let mut first = None;
-    let mut has_chart = false;
-    for (offset, measured) in measured[index..end].iter().enumerate() {
-        if measured
-            .block
-            .pm_start()
-            .is_some_and(|position| position > start && position < stop)
-        {
-            first.get_or_insert(index + offset);
-            has_chart |= matches!(measured.block, LayoutBlock::Chart(_));
-        }
-    }
-    has_chart.then_some((first?, end))
-}
-
-#[derive(Default)]
-struct FloatingGroupOwner {
-    end: usize,
-    owner: Option<(usize, usize)>,
-}
-
-impl FloatingGroupOwner {
-    fn at(&mut self, measured: &[MeasuredBlock], index: usize) -> Option<usize> {
-        if index >= self.end {
-            self.end = index + 1;
-            self.owner = None;
-            if is_floating_drawing(&measured[index].block) {
-                self.end = (index + 1..measured.len())
-                    .find(|&next| !is_floating_drawing(&measured[next].block))
-                    .unwrap_or(measured.len());
-                self.owner = chart_anchor_owner(measured, index, self.end);
-            }
-        }
-        self.owner
-            .filter(|&(first, _)| index >= first)
-            .map(|(_, owner)| owner)
-    }
 }
 
 fn is_anchored_image(image: &ImageBlock) -> bool {
@@ -509,21 +441,6 @@ fn get_paragraph_fragment_pm_range(
     }
 
     (pm_start, pm_end)
-}
-
-fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
-    matches!(
-        wrap_type,
-        Some("square") | Some("tight") | Some("through") | Some("behind") | Some("inFront")
-    )
-}
-
-/// A text box floats when it declares float display, a floating wrap type, or
-/// `topAndBottom` wrapping.
-fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
-    block.display_mode.as_deref() == Some("float")
-        || is_floating_wrap_type(block.wrap_type.as_deref())
-        || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
 /// The paginator a pass from the document's first block starts with.
@@ -1078,7 +995,7 @@ fn place<F: PartialEq>(
         let fragments_before = paginator.page_fragment_counts();
         let decision_index = prepared_paragraph
             .filter(|&owner| i <= owner)
-            .or_else(|| floating_group_owner.at(measured, i))
+            .or_else(|| floating_group_owner.at(measured.len(), i, |index| &measured[index].block))
             .unwrap_or(i);
         let prepare = prepared_paragraph != Some(decision_index);
         let decision = &measured[decision_index];

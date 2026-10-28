@@ -1556,17 +1556,18 @@ fn walk_story_chunks<T: ReadTxn>(
                 let values = shared_values(opaque, txn);
                 if map_string(&values, "kind").as_deref() == Some("alternateContent")
                     && let Some(source) = map_string(&values, "xml")
+                    && let Some(source) = alternate_content_source(
+                        &source,
+                        paragraph_pm_units,
+                        values.get("previews").is_some_and(
+                            |previews| matches!(previews, Any::Array(images) if !images.is_empty()),
+                        ),
+                    )
                 {
                     alternate_content_sources
                         .entry(paragraph_pm_start)
                         .or_default()
-                        .push(AlternateContentSource {
-                            offset: paragraph_pm_units,
-                            choices: alternate_content_choices(&source),
-                            grouped: values.get("previews").is_some_and(|previews| {
-                                matches!(previews, Any::Array(images) if !images.is_empty())
-                            }),
-                        });
+                        .push(source);
                 }
                 if let Some(block) = opaque_text_box(
                     &values,
@@ -2825,7 +2826,7 @@ enum DrawingContent {
 struct AlternateContentSource {
     offset: u32,
     choices: Vec<Option<DrawingProvenance>>,
-    grouped: bool,
+    single_preview_identity: Option<(String, Option<String>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2833,6 +2834,7 @@ struct FallbackTwin {
     offset: u32,
     choice: usize,
     required: usize,
+    single_preview: bool,
 }
 
 fn shape_drawing_provenance(shape: &Value) -> Option<DrawingProvenance> {
@@ -2917,27 +2919,58 @@ fn chart_drawing_provenance(chart: &Value) -> Option<DrawingProvenance> {
         .then_some(provenance)
 }
 
-fn alternate_content_choices(source: &str) -> Vec<Option<DrawingProvenance>> {
+fn alternate_content_source(
+    source: &str,
+    offset: u32,
+    grouped: bool,
+) -> Option<AlternateContentSource> {
     let limits = docx_parse::xml::ParseLimits::default();
-    let Ok(document) = docx_parse::xml::parse_xml(
+    let document = docx_parse::xml::parse_xml(
         source.as_bytes(),
         "alternateContent.xml",
         &mut docx_parse::xml::ParseBudget::new(&limits),
-    ) else {
-        return Vec::new();
-    };
-    let Some(root) = document
+    )
+    .ok()?;
+    let root = document
         .root()
-        .filter(|root| root.local_name() == "AlternateContent")
-    else {
-        return Vec::new();
-    };
-    root.child_elements()
+        .filter(|root| root.local_name() == "AlternateContent")?;
+    let choices = root
+        .child_elements()
         .filter(|branch| branch.local_name() == "Choice")
         .flat_map(|branch| branch.child_elements())
         .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
         .map(xml_drawing_provenance)
-        .collect()
+        .collect();
+    let single_preview_identity = (!grouped)
+        .then(|| {
+            let mut drawings = root
+                .child_elements()
+                .filter(|branch| branch.local_name() == "Fallback")
+                .flat_map(|branch| branch.child_elements());
+            let drawing = drawings.next()?;
+            if drawing.name != "w:drawing" || drawings.next().is_some() {
+                return None;
+            }
+            let container = drawing.child_by_full_name("wp:inline")?;
+            let data = container
+                .child_by_full_name("a:graphic")?
+                .child_by_full_name("a:graphicData")?;
+            let mut contents = data.child_elements();
+            if contents.next()?.name != "pic:pic" || contents.next().is_some() {
+                return None;
+            }
+            let properties = container.child_by_full_name("wp:docPr")?;
+            Some((
+                properties.attribute(None, "id")?.to_owned(),
+                properties.attribute(None, "name").map(str::to_owned),
+            ))
+        })
+        .flatten();
+    Some(AlternateContentSource {
+        offset,
+        choices,
+        single_preview_identity,
+    })
 }
 
 fn alternate_content_fallback(
@@ -2959,11 +2992,16 @@ fn alternate_content_fallback(
         Some(FallbackTwin {
             offset: source.offset,
             choice,
-            required: if source.grouped {
-                source.choices.len()
-            } else {
-                1
-            },
+            required: source.choices.len(),
+            single_preview: source
+                .single_preview_identity
+                .as_ref()
+                .is_some_and(|(id, name)| {
+                    id == &drawing.id
+                        && name
+                            .as_ref()
+                            .is_none_or(|name| drawing.name.as_ref() == Some(name))
+                }),
         })
     });
     let twin = matches.next()?;
@@ -4044,16 +4082,16 @@ fn inline_shared_drawings(
             return;
         }
     }
-    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>)>::new();
+    let mut converted_choices = BTreeMap::<u32, (usize, BTreeSet<usize>, bool)>::new();
     let mut kept = Vec::new();
     for drawing in drawings.drain(..) {
         if convertible(&drawing) {
             if let Some(twin) = drawing.fallback_twin {
-                converted_choices
+                let converted = converted_choices
                     .entry(twin.offset)
-                    .or_insert_with(|| (twin.required, BTreeSet::new()))
-                    .1
-                    .insert(twin.choice);
+                    .or_insert_with(|| (twin.required, BTreeSet::new(), false));
+                converted.1.insert(twin.choice);
+                converted.2 |= twin.single_preview;
             }
             raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
         } else {
@@ -4062,7 +4100,9 @@ fn inline_shared_drawings(
     }
     let converted_fallbacks: BTreeSet<_> = converted_choices
         .into_iter()
-        .filter_map(|(offset, (required, choices))| (choices.len() == required).then_some(offset))
+        .filter_map(|(offset, (required, choices, single_preview))| {
+            (single_preview || choices.len() == required).then_some(offset)
+        })
         .collect();
     if !converted_fallbacks.is_empty() {
         kept.retain(|drawing| {

@@ -9633,14 +9633,13 @@ impl EngineSession {
         }
         if let Some(geometry) = floats {
             let default_width = widths.first().copied().unwrap_or(0.0);
+            let flow_breaks = docx_layout::measure_blocks::float_flow_breaks(
+                (0..blocks.len()).map(|index| blocks.get(index).expect("body block")),
+            );
             let mut start = 0;
             while start < blocks.len() {
                 let end = (start + 1..blocks.len())
-                    .find(|&index| {
-                        docx_layout::measure_blocks::resets_float_flow(
-                            blocks.get(index).expect("body block"),
-                        )
-                    })
+                    .find(|&index| flow_breaks[index])
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
                     let mut segment: Vec<_> = (start..end)
@@ -10071,14 +10070,13 @@ impl EngineSession {
                 })
                 .collect();
             let default_width = widths.first().copied().unwrap_or(0.0);
+            let flow_breaks = docx_layout::measure_blocks::float_flow_breaks(
+                (0..blocks.len()).map(|index| blocks.get(index).expect("body block")),
+            );
             let mut start = 0;
             while start < blocks.len() {
                 let end = (start + 1..blocks.len())
-                    .find(|&index| {
-                        docx_layout::measure_blocks::resets_float_flow(
-                            blocks.get(index).expect("body block"),
-                        )
-                    })
+                    .find(|&index| flow_breaks[index])
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
                     let mut segment: Vec<_> = (start..end)

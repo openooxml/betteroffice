@@ -802,6 +802,12 @@ fn ordinary_picture() -> &'static str {
     )
 }
 
+fn text_box_picture_twin(extent: &str) -> String {
+    format!(
+        r#"<w:drawing><wp:inline><wp:extent {extent}/><wp:docPr id="4" name="Text Box 4"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdPicture"/></pic:blipFill><pic:spPr><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
+    )
+}
+
 fn text_box_with_opaque_picture_fallback(fallback: &str) -> String {
     let unsupported = concat!(
         r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/>"#,
@@ -842,9 +848,7 @@ fn ordinary_picture_before_matching_inline_chart_survives() {
 
 #[test]
 fn converted_choice_drops_only_its_own_differently_sized_picture_fallback() {
-    let fallback = ordinary_picture()
-        .replace("444.75pt", "100pt")
-        .replace("240pt", "50pt");
+    let fallback = text_box_picture_twin(r#"cx="1270000" cy="635000""#);
     let text_box = text_box_with_opaque_picture_fallback(&fallback);
     let body = paragraph(
         "40000006",
@@ -871,7 +875,7 @@ fn converted_choice_drops_only_its_own_differently_sized_picture_fallback() {
 
 #[test]
 fn matching_choice_doc_pr_drops_its_picture_twin() {
-    let text_box = text_box_with_opaque_picture_fallback(ordinary_picture());
+    let text_box = text_box_with_opaque_picture_fallback(&text_box_picture_twin(EXTENT));
     let body = paragraph(
         "40000007",
         &format!("{}{}", run(&text_box), text_run("After the Choice")),
@@ -945,6 +949,44 @@ fn converting_a_text_box_keeps_an_unsupported_charts_grouped_fallback() {
         "the grouped fallback keeps the unsupported chart visible: {display}"
     );
     let _ = text_origin(&display, "Selected Choice text");
+}
+
+#[test]
+fn converting_a_text_box_keeps_an_unsupported_charts_composite_preview() {
+    for fallback in [
+        ordinary_picture().to_owned(),
+        text_box_picture_twin(EXTENT).replace(r#"id="4""#, r#"id="99""#),
+        text_box_picture_twin(EXTENT).replace("Text Box 4", "Composite preview"),
+    ] {
+        let drawing = text_box_with_opaque_picture_fallback(&fallback);
+        let body = paragraph(
+            "80000001",
+            &format!(
+                "{}{}",
+                run(&drawing),
+                text_run("After the composite preview")
+            ),
+        );
+        let (layout, display) = render(&document_with_picture(&body), 78230);
+        assert!(
+            layout["measured"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| entry["block"]["runs"].as_array().into_iter().flatten())
+                .any(|run| run["inlineShape"].is_object()),
+            "the supported text box converts: {layout}"
+        );
+        assert_eq!(
+            primitives(&display)
+                .iter()
+                .filter(|primitive| primitive["kind"] == "image")
+                .count(),
+            1,
+            "the composite preview keeps the unsupported chart visible: {display}"
+        );
+        let _ = text_origin(&display, "Selected Choice text");
+    }
 }
 
 #[test]
@@ -1059,6 +1101,47 @@ fn page_break_before_moves_the_paragraph_and_its_trailing_anchored_chart() {
         .expect("chart on its owner's page");
     let owner = paragraph_fragment(&layout, "40000005").unwrap();
     near(num(chart, "y"), num(owner, "y"), 2.0, "chart owner origin");
+}
+
+#[test]
+fn page_break_before_preserves_owned_chart_wrapping() {
+    for (wrap, top_and_bottom) in [
+        ("<wp:wrapTopAndBottom/>", true),
+        (r#"<wp:wrapSquare wrapText="bothSides"/>"#, false),
+        (r#"<wp:wrapTight wrapText="bothSides"/>"#, false),
+        (r#"<wp:wrapThrough wrapText="bothSides"/>"#, false),
+    ] {
+        let drawing = anchored_chart_drawing_with(wrap, r#"cx="2857500" cy="1905000""#, 0);
+        let body = format!(
+            r#"{}<w:p w14:paraId="80000003"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}</w:p>"#,
+            paragraph("80000002", &text_run("Previous page")),
+            text_run("Wrapped owner text"),
+            run(&drawing),
+        );
+        let (layout, display) = render(&document(&body, 20160, 12240, 1080), 78231);
+        let pages = layout["layout"]["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 2, "{wrap}: {layout}");
+        let chart = pages[1]["fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fragment| fragment["kind"] == "chart")
+            .expect("chart on the owner's page");
+        let page = json!({"pages": [display["pages"][1].clone()]});
+        let (x, baseline) = text_origin(&page, "Wrapped owner text");
+        if top_and_bottom {
+            assert!(
+                baseline >= num(chart, "y") + num(chart, "height"),
+                "text clears the chart after the break: {display}"
+            );
+        } else {
+            assert!(
+                x >= num(chart, "x") + num(chart, "width") - 1.0,
+                "text wraps beside the chart after the break: {display}"
+            );
+            assert!(baseline < num(chart, "y") + num(chart, "height"));
+        }
+    }
 }
 
 #[test]
