@@ -924,8 +924,10 @@ fn comment_text_patch(
                 let edge_whitespace = matches!(replacement.chars().next(), Some(' ' | '\t'))
                     || matches!(replacement.chars().next_back(), Some(' ' | '\t'));
                 if edge_whitespace && !node.preserve {
-                    let at = node.tag.end - 1;
-                    patches.push((at..at, " xml:space=\"preserve\"".to_owned()));
+                    patches.push((
+                        node.tag.clone(),
+                        set_attribute(&fragment[node.tag.clone()], "xml:space", Some("preserve"))?,
+                    ));
                 }
             }
         }
@@ -1248,6 +1250,24 @@ mod tests {
                 "<w:t xml:space=\"preserve\"> gamma</w:t>",
             );
         assert_eq!(apply_patches(FRAGMENT, patch), expected);
+    }
+
+    #[test]
+    fn text_patch_replaces_default_space_with_preserve() {
+        let fragment = FRAGMENT.replace(
+            "<w:t>First identity proofed here. </w:t>",
+            "<w:t xml:space=\"default\">alpha</w:t>",
+        );
+        let source = comment("alpha", "Second identity ", "proofed there.");
+        let written = comment(" alpha ", "Second identity ", "proofed there.");
+        let patch = comment_text_patch(&source, &written, &fragment)
+            .unwrap()
+            .expect("a text-only change patches");
+        let expected = fragment.replace(
+            "<w:t xml:space=\"default\">alpha</w:t>",
+            "<w:t xml:space=\"preserve\"> alpha </w:t>",
+        );
+        assert_eq!(apply_patches(&fragment, patch), expected);
     }
 
     #[test]

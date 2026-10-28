@@ -359,16 +359,20 @@ function lastParagraph(comment: XmlElement): XmlElement | undefined {
 
 const XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space';
 
-function sameExceptCommentText(left: XmlElement, right: XmlElement): boolean {
+function sameExceptCommentText(left: XmlElement, right: XmlElement, paragraphIdTarget?: XmlElement): boolean {
+  const attributes = new Map(left.attributes);
   if (left.name === expanded(W, 't') && right.name === left.name) {
-    const attributes = new Map(left.attributes);
-    if (attributes.get(XML_SPACE) === 'preserve' && !right.attributes.has(XML_SPACE)) attributes.delete(XML_SPACE);
+    if (attributes.get(XML_SPACE) === 'preserve') {
+      if (!right.attributes.has(XML_SPACE)) attributes.delete(XML_SPACE);
+      else if (right.attributes.get(XML_SPACE) === 'default') attributes.set(XML_SPACE, 'default');
+    }
     if (attributes.size !== right.attributes.size
       || ![...attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
     return ![...left.content, ...right.content].some(node => typeof node !== 'string');
   }
-  if (left.name !== right.name || left.attributes.size !== right.attributes.size
-    || ![...left.attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
+  if (left === paragraphIdTarget) attributes.delete(expanded(W14, 'paraId'));
+  if (left.name !== right.name || attributes.size !== right.attributes.size
+    || ![...attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
   const significant = (element: XmlElement) => element.content.filter(node => typeof node !== 'string' || !/^[\t\r\n ]*$/.test(node));
   const content = significant(left);
   const other = significant(right);
@@ -376,7 +380,7 @@ function sameExceptCommentText(left: XmlElement, right: XmlElement): boolean {
     const kept = other[index];
     if (typeof node === 'string' || typeof kept === 'string') return node === kept;
     if ('markup' in node || 'markup' in kept) return 'markup' in node && 'markup' in kept && node.markup === kept.markup;
-    return sameExceptCommentText(node, kept);
+    return sameExceptCommentText(node, kept, paragraphIdTarget);
   });
 }
 
@@ -389,6 +393,7 @@ function preservesComment(saved: XmlPart, element: XmlElement, original: Comment
   const after = lastParagraph(element);
   const paraId = after?.attributes.get(expanded(W14, 'paraId'));
   if (!before || before.attributes.has(expanded(W14, 'paraId')) || !paraId) return false;
+  if (allowText && sameExceptCommentText(element, original.element, after)) return true;
   const end = before.contentStart - original.element.start;
   const at = end - (original.xml[end - 2] === '/' ? 2 : 1);
   return fragment === `${original.xml.slice(0, at)} w14:paraId="${paraId}"${original.xml.slice(at)}`;

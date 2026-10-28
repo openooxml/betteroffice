@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
-import { editFixture } from './fixture';
+import { readCommentPart, verifyCommentOutput } from '../src/comment-output';
+import { commentFixture, editFixture, EXISTING_COMMENT } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes?: Uint8Array) {
@@ -88,6 +89,84 @@ test('replace_comment_text preserves edge whitespace of patched runs on save and
   const edited = reopened.list({ story: 'comments', limit: 100 }).items.find(item => item.id === '0')!;
   expect(edited.text).toBe('First identity-proofed here. Second identity-proofed there.\nClosing line stays.');
 });
+
+test('replace_comment_text replaces an existing default xml:space value when adding edge whitespace', async () => {
+  const zip = await JSZip.loadAsync(await commentTextFixture());
+  const xml = (await zip.file('word/comments.xml')!.async('string'))
+    .replace('<w:t>Closing line stays.</w:t>', '<w:t xml:space="default">alpha</w:t>');
+  zip.file('word/comments.xml', xml);
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const doc = await open(source);
+  expect((await doc.edit({ version: doc.list().version, edits: [{ op: 'replace_comment_text', comment: '0', find: 'alpha', replace: ' alpha ' }] })).applied).toBe(true);
+  const bytes = await doc.export();
+  expect(await part(bytes, 'word/comments.xml')).toBe(xml.replace('<w:t xml:space="default">alpha</w:t>', '<w:t xml:space="preserve"> alpha </w:t>'));
+  for (const name of ['word/commentsExtended.xml', 'word/commentsIds.xml', 'word/commentsExtensible.xml', 'word/document.xml']) {
+    expect(await part(bytes, name)).toBe(await part(source, name));
+  }
+  const reopened = await open(bytes);
+  expect(reopened.list({ story: 'comments', limit: 100 }).items.find(comment => comment.id === '0')!.text).toEndWith('\n alpha ');
+});
+
+for (const op of ['reply_comment', 'resolve_comment'] as const) {
+  for (const separate of [false, true]) {
+    test(`replace_comment_text and ${op} add only the missing paragraph id in ${separate ? 'separate batches' : 'one batch'}`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture({ companions: [] }));
+      const original = COMMENT_ZERO.replace(/ w14:paraId="[^"]*"/g, '');
+      const xml = (await zip.file('word/comments.xml')!.async('string')).replace(EXISTING_COMMENT, `${original}${COMMENT_ONE}`);
+      zip.file('word/comments.xml', xml);
+      const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+      const doc = await open(source);
+      const edits: DocxAgentEdit[] = [
+        { op: 'replace_comment_text', comment: '0', find: 'Closing line stays.', replace: 'Closing line updated.' },
+        ...(op === 'reply_comment' ? [{ op, comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' } satisfies DocxAgentEdit] : []),
+        { op: 'resolve_comment', comment: '0' },
+      ];
+      let paragraphId: string | undefined;
+      let bytes = source;
+      for (const batch of separate ? edits.map(edit => [edit]) : [edits]) {
+        expect((await doc.edit({ version: doc.list().version, edits: batch })).applied).toBe(true);
+        bytes = await doc.export();
+        const saved = (await part(bytes, 'word/comments.xml'))!;
+        const comments = saved.match(/<w:comment\b[\s\S]*?<\/w:comment>/g)!;
+        const root = comments[0];
+        const ids = [...root.matchAll(/ w14:paraId="([^"]*)"/g)];
+        if (batch.every(edit => edit.op === 'replace_comment_text')) {
+          expect(ids).toHaveLength(0);
+        } else {
+          expect(ids).toHaveLength(1);
+          expect(root).toContain(`<w:p w14:textId="77777772" w:rsidR="00A3" w14:paraId="${ids[0][1]}">`);
+          if (paragraphId) expect(ids[0][1]).toBe(paragraphId);
+          paragraphId = ids[0][1];
+        }
+        expect(root.replace(/ w14:paraId="[^"]*"/g, '')).toBe(original.replace('Closing line stays.', 'Closing line updated.'));
+        expect(comments[1]).toBe(COMMENT_ONE);
+        const withoutReply = comments[2] ? saved.replace(comments[2], '') : saved;
+        expect(withoutReply.replace(root, root.replace(/ w14:paraId="[^"]*"/g, ''))).toBe(xml.replace('Closing line stays.', 'Closing line updated.'));
+      }
+      expect(paragraphId).toBeDefined();
+      const reopened = await open(bytes);
+      const comments = reopened.list({ story: 'comments', limit: 100 }).items;
+      expect(comments.find(comment => comment.id === '0')).toMatchObject({ done: true, text: 'First identity proofed here. Second identity proofed there.\nClosing line updated.' });
+      expect(comments).toHaveLength(op === 'reply_comment' ? 3 : 2);
+      if (op === 'reply_comment') expect(comments.find(comment => comment.text === 'Follow up')).toMatchObject({ parentId: '0', author: 'Editor' });
+      const input = await readCommentPart(await zip.generateAsync({ type: 'arraybuffer' }));
+      const expected = comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(comment.id === '0' ? { done: true } : {}) }));
+      const output = await JSZip.loadAsync(bytes);
+      const saved = (await part(bytes, 'word/comments.xml'))!;
+      for (const changed of [
+        saved.replace('w:author="First Reviewer"', 'w:author="Changed Reviewer"'),
+        saved.replace('w:rsidR="00A1"', 'w:rsidR="00FF"'),
+        saved.replace('<w:b/>', '<w:i/>'),
+        saved.replace('<w:p w14:textId="77777771"', '<w:p w14:paraId="12345678" w14:textId="77777771"'),
+      ]) {
+        output.file('word/comments.xml', changed);
+        const error = await refusal(verifyCommentOutput(input, await output.generateAsync({ type: 'uint8array' }), op === 'reply_comment' ? 1 : 0, expected, new Set(['0'])));
+        expect(error.code).toBe('UNSUPPORTED_TARGET');
+        expect(error.message).toContain('rewrite an existing comment');
+      }
+    });
+  }
+}
 
 test('replace_comment_text edits a reply without changing its thread or done state', async () => {
   const source = await commentTextFixture();
