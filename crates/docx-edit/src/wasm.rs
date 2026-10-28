@@ -852,6 +852,13 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
             }
         }
     }
+    if let Some(Value::Object(sizes)) = value.get("hyperlinkStyleFontSizes") {
+        for (key, entry) in sizes {
+            if let Some(size) = entry.as_f64() {
+                env.hyperlink_style_font_sizes.insert(key.clone(), size);
+            }
+        }
+    }
     env.doc_default_font_size = value.get("docDefaultFontSize").and_then(Value::as_f64);
     env.show_hidden_text = value
         .get("showHiddenText")

@@ -68,95 +68,80 @@ fn entry(text: &str, tab_size: Option<u32>, mark_size: Option<u32>) -> String {
 }
 
 fn chain_env(bytes: &[u8]) -> Value {
-    let parts = ooxml_opc::unzip_parts(bytes).unwrap();
-    let Some(styles_xml) = parts
-        .iter()
-        .find(|(name, _)| name == "word/styles.xml")
-        .map(|(_, value)| String::from_utf8(value.clone()).unwrap())
-    else {
-        return json!({});
-    };
-    let attr = |text: &str, name: &str| -> Option<String> {
-        text.split(&format!("{name}=\""))
-            .nth(1)?
-            .split('"')
-            .next()
-            .map(str::to_owned)
-    };
-    let sz_after = |text: &str, from: usize| -> Option<f64> {
-        let rest = &text[from..];
-        let start = rest.find("<w:sz ")?;
-        attr(&rest[start..], "w:val")?.parse().ok()
-    };
-    let doc_default_half = styles_xml
-        .find("<w:docDefaults>")
-        .and_then(|start| {
-            let chunk = &styles_xml[start..];
-            let end = chunk
-                .find("</w:docDefaults>")
-                .map_or(chunk.len(), |index| index);
-            sz_after(&chunk[..end], 0)
-        })
+    let definitions = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package
+        .styles
+        .unwrap_or_default();
+    let doc_default_half = definitions
+        .doc_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.r_pr.as_ref())
+        .and_then(|formatting| formatting.font_size)
         .unwrap_or(20.0);
-    let mut styles: Vec<(String, Option<String>, Option<f64>, bool)> = Vec::new();
-    let mut rest = styles_xml.as_str();
-    while let Some(start) = rest.find("<w:style ") {
-        let chunk = &rest[start..];
-        let end = chunk
-            .find("</w:style>")
-            .map_or(chunk.len(), |index| index + 10);
-        let chunk = &chunk[..end];
-        rest = &rest[start + 9..];
-        if attr(chunk, "w:type").as_deref() != Some("paragraph") {
+    let styles = &definitions.styles;
+    let mut sizes = serde_json::Map::new();
+    let mut hyperlink_sizes = serde_json::Map::new();
+    for style in styles {
+        let hyperlink = style.style_type == "character"
+            && [Some(style.style_id.as_str()), style.name.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|name| {
+                    matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "hyperlink" | "followedhyperlink"
+                    )
+                });
+        if style.style_type != "paragraph" && !hyperlink {
             continue;
         }
-        let Some(style_id) = attr(chunk, "w:styleId") else {
-            continue;
-        };
-        let based_on = chunk
-            .find("<w:basedOn ")
-            .and_then(|index| attr(&chunk[index..], "w:val"));
-        let own = chunk
-            .find("<w:rPr>")
-            .and_then(|index| sz_after(chunk, index));
-        styles.push((style_id, based_on, own, chunk.contains("w:default=\"1\"")));
-    }
-    let mut sizes = serde_json::Map::new();
-    for (style_id, _, _, _) in &styles {
         let mut size = None;
         let mut seen: Vec<&str> = Vec::new();
-        let mut current = Some(style_id.as_str());
-        while let Some(id) = current {
-            if seen.contains(&id) {
+        let mut current = Some(style);
+        while let Some(entry) = current {
+            if seen.contains(&entry.style_id.as_str()) {
                 break;
             }
-            seen.push(id);
-            let Some(entry) = styles.iter().find(|(entry_id, _, _, _)| entry_id == id) else {
-                break;
-            };
-            if let Some(found) = entry.2 {
+            seen.push(&entry.style_id);
+            if let Some(found) = entry
+                .r_pr
+                .as_ref()
+                .and_then(|formatting| formatting.font_size)
+            {
                 size = Some(found);
                 break;
             }
-            current = entry.1.as_deref();
+            current = entry
+                .based_on
+                .as_ref()
+                .and_then(|id| styles.iter().find(|style| &style.style_id == id));
         }
-        sizes.insert(
-            style_id.clone(),
-            json!(size.unwrap_or(doc_default_half) / 2.0),
-        );
+        if hyperlink {
+            if let Some(size) = size {
+                hyperlink_sizes.insert(style.style_id.clone(), json!(size / 2.0));
+            }
+        } else {
+            sizes.insert(
+                style.style_id.clone(),
+                json!(size.unwrap_or(doc_default_half) / 2.0),
+            );
+        }
     }
     let default_id = styles
         .iter()
-        .find(|(_, _, _, is_default)| *is_default)
-        .map(|(style_id, _, _, _)| style_id.clone())
+        .find(|style| style.style_type == "paragraph" && style.default == Some(true))
+        .map(|style| style.style_id.clone())
         .or_else(|| {
             styles
                 .iter()
-                .any(|(style_id, _, _, _)| style_id == "Normal")
+                .any(|style| style.style_type == "paragraph" && style.style_id == "Normal")
                 .then(|| "Normal".to_owned())
         });
     json!({
         "paragraphStyleFontSizes": sizes,
+        "hyperlinkStyleFontSizes": hyperlink_sizes,
         "docDefaultFontSize": doc_default_half / 2.0,
         "defaultParagraphStyleId": default_id,
     })
@@ -189,8 +174,12 @@ fn line_heights(bytes: &[u8]) -> Vec<f64> {
         .iter()
         .filter_map(|block| {
             let has_text = block["block"]["runs"].as_array().is_some_and(|runs| {
-                runs.iter()
-                    .any(|run| run["text"].as_str().is_some_and(|text| !text.is_empty()))
+                runs.iter().any(|run| {
+                    run["text"]
+                        .as_str()
+                        .or_else(|| run["fallback"].as_str())
+                        .is_some_and(|text| !text.is_empty())
+                })
             });
             if !has_text {
                 return None;
@@ -487,7 +476,7 @@ fn pageref_in_hyperlink_body() -> &'static str {
 fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
     let heights = heights_with_env(
         &document(pageref_in_hyperlink_body(), &styles(Some(20), Some(28))),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 10.0}, "docDefaultFontSize": 10.0}),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 10.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
     );
     assert_height(heights[0], 10.0);
 }
@@ -498,7 +487,7 @@ fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
 fn a_pageref_field_inside_the_hyperlink_takes_the_12pt_toc_chain_size() {
     let heights = heights_with_env(
         &document(pageref_in_hyperlink_body(), CHAIN12_STYLES),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "docDefaultFontSize": 10.0}),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
     );
     assert_height(heights[0], 12.0);
 }
@@ -511,7 +500,7 @@ fn a_12pt_toc1_entry_with_a_14pt_mark_and_no_field_run_stays_12pt() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
     let heights = heights_with_env(
         &document(body, CHAIN12_STYLES),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "docDefaultFontSize": 10.0}),
+        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
     );
     assert_height(heights[0], 12.0);
 }
@@ -793,6 +782,93 @@ fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+#[test]
+fn an_opaque_toc_field_keeps_its_14pt_cached_entry_text() {
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText> TOC </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>Entry one</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    );
+    let bytes = document(body, &styles(Some(20), None));
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["kind"], "field");
+    assert_eq!(runs[0]["fallback"], "Entry one");
+    assert_eq!(runs[0]["fontSize"], 14.0);
+    assert_height(line_heights(&bytes)[0], 14.0);
+}
+
+#[test]
+fn opaque_toc_entry_text_sets_the_cap_for_page_fields() {
+    for instruction in ["PAGEREF _Toc1", "PAGE", "NUMPAGES", "SECTIONPAGES"] {
+        let body = format!(
+            concat!(
+                r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr>"#,
+                r#"<w:fldSimple w:instr=" TOC "><w:r><w:rPr><w:sz w:val="28"/>"#,
+                r#"</w:rPr><w:t>Entry one</w:t></w:r></w:fldSimple>"#,
+                r#"<w:r><w:rPr><w:sz w:val="36"/></w:rPr><w:tab/></w:r>"#,
+                r#"<w:fldSimple w:instr=" {instruction} "><w:r><w:rPr>"#,
+                r#"<w:sz w:val="36"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:p>"#,
+            ),
+            instruction = instruction,
+        );
+        let bytes = document(&body, &styles(Some(20), None));
+        let runs = lowered_runs(&bytes, chain_env(&bytes));
+        assert_eq!(runs.len(), 3);
+        for run in &runs {
+            assert_eq!(run["fontSize"], 14.0, "{run}");
+        }
+        assert_height(line_heights(&bytes)[0], 14.0);
+    }
+}
+
+#[test]
+fn toc_hyperlink_sizes_are_derived_from_the_render_environment() {
+    for style_id in ["Hyperlink", "FollowedHyperlink"] {
+        for (direct_size, expected) in [("", 10.0), (r#"<w:sz w:val="36"/>"#, 18.0)] {
+            let body = format!(
+                concat!(
+                    r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+                    r#"<w:r><w:rPr><w:rStyle w:val="{style_id}"/>{direct_size}</w:rPr>"#,
+                    r#"<w:t>Entry one</w:t></w:r></w:p>"#,
+                ),
+                style_id = style_id,
+                direct_size = direct_size,
+            );
+            let styles = styles(Some(20), Some(28)).replace("Hyperlink", style_id);
+            let bytes = document(&body, &styles);
+            let runs = lowered_runs(&bytes, chain_env(&bytes));
+            assert_eq!(runs[0]["fontSize"], expected);
+        }
+    }
+}
+
+#[test]
+fn a_direct_size_matching_another_hyperlink_style_stays_direct() {
+    let styles = styles(Some(20), Some(28)).replace(
+        "</w:styles>",
+        concat!(
+            r#"<w:style w:type="character" w:styleId="FollowedHyperlink"><w:rPr>"#,
+            r#"<w:sz w:val="36"/></w:rPr></w:style></w:styles>"#,
+        ),
+    );
+    let styles = styles.replace(
+        r#"<w:sz w:val="28"/>"#,
+        r#"<w:sz w:val="28"/><w:color w:val="0000FF"/><w:u w:val="single"/>"#,
+    );
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>"#,
+        r#"<w:sz w:val="36"/></w:rPr><w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let bytes = document(body, &styles);
+    let runs = lowered_runs(&bytes, chain_env(&bytes));
+    assert_eq!(runs[0]["fontSize"], 18.0);
 }
 
 #[test]

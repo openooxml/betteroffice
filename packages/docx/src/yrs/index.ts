@@ -624,6 +624,8 @@ export interface YrsRenderEnv {
   defaultParagraphStyleId?: string;
   /** Resolved paragraph style chain font size in pt, keyed by style id. */
   paragraphStyleFontSizes?: Record<string, number>;
+  /** Resolved Hyperlink character style chain font size in pt, keyed by style id. */
+  hyperlinkStyleFontSizes?: Record<string, number>;
   /** The docDefaults font size in pt. */
   docDefaultFontSize?: number;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
