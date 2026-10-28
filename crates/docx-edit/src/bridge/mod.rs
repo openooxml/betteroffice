@@ -691,7 +691,7 @@ fn walk_story_chunks<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
     story: &yrs::TextRef,
-    comments: &[CommentInterval],
+    comments: &CommentIntervals,
     chunks: &[yrs::types::text::Diff<YChange>],
     initial: preview::WalkPosition,
     mut hidden_field_blocks: BTreeSet<String>,
@@ -817,20 +817,19 @@ fn walk_story_chunks<T: ReadTxn>(
                     local.run_size_sources.unchanged(
                         &para_id,
                         story_id,
-                        &local.source,
                         txn,
                         &chunks[paragraph_chunk_start..=chunk_index],
+                        comments.markers(paragraph_start, story_index + 1),
                     )
                 })
                 .flatten();
-                if let Some(proof) = proof {
+                if let Some(proof) = proof
+                    && proof.inherited(
+                        paragraph_runs.iter().any(|run| run.formatting.rtl == Some(true)),
+                    )
+                {
                     for run in &mut paragraph_runs {
-                        run.hyperlink_size_inherited = run.inherited_hyperlink.2
-                            && !run.atom
-                            && proof.inherited(
-                                run.story_start - paragraph_start..run.story_end - paragraph_start,
-                                run.formatting.rtl == Some(true),
-                            );
+                        run.hyperlink_size_inherited = run.inherited_hyperlink.2 && !run.atom;
                     }
                 }
                 let reserved = env.reservations.paragraph(story_id, &para_id);
@@ -3375,6 +3374,30 @@ fn lower_cell_border(
     })
 }
 
+#[derive(Clone, Debug, Default)]
+struct CommentIntervals {
+    intervals: Vec<CommentInterval>,
+    boundaries: BTreeMap<u32, Vec<(String, bool)>>,
+}
+
+impl std::ops::Deref for CommentIntervals {
+    type Target = [CommentInterval];
+
+    fn deref(&self) -> &Self::Target {
+        &self.intervals
+    }
+}
+
+impl CommentIntervals {
+    fn markers(&self, start: u32, end: u32) -> impl Iterator<Item = (u32, &str, bool)> {
+        self.boundaries
+            .range(start..end)
+            .flat_map(move |(at, markers)| {
+                markers.iter().map(move |(key, end)| (*at - start, key.as_str(), *end))
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CommentInterval {
     start: u32,
@@ -3497,11 +3520,12 @@ fn resolve_comment_intervals<T: ReadTxn>(
     txn: &T,
     story_id: &str,
     env: &RenderEnv,
-) -> Result<Vec<CommentInterval>, BridgeError> {
+) -> Result<CommentIntervals, BridgeError> {
     let comments = txn
         .get_map(COMMENTS)
         .expect("comments root is declared by EditingDoc::new");
     let mut intervals = Vec::new();
+    let mut boundaries = BTreeMap::<u32, Vec<(String, bool)>>::new();
 
     for (comment_id, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
@@ -3521,6 +3545,14 @@ fn resolve_comment_intervals<T: ReadTxn>(
             ) else {
                 continue;
             };
+            boundaries
+                .entry(start.index)
+                .or_default()
+                .push((comment_id.to_owned(), false));
+            boundaries
+                .entry(end.index)
+                .or_default()
+                .push((comment_id.to_owned(), true));
             if start.index < end.index {
                 intervals.push(CommentInterval {
                     start: start.index,
@@ -3537,7 +3569,13 @@ fn resolve_comment_intervals<T: ReadTxn>(
             .then(a.end.cmp(&b.end))
             .then(a.id.total_cmp(&b.id))
     });
-    Ok(intervals)
+    for markers in boundaries.values_mut() {
+        markers.sort_unstable();
+    }
+    Ok(CommentIntervals {
+        intervals,
+        boundaries,
+    })
 }
 
 /// Splits one formatted text chunk into runs. Cuts land at every comment

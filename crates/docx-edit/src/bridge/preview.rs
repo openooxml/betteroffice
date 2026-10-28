@@ -190,7 +190,7 @@ impl BoundaryState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PreviewUnits {
     records: Vec<UnitRecord>,
-    comments: Rc<Vec<CommentInterval>>,
+    comments: Rc<CommentIntervals>,
     /// The lowering numbered SEQ fields across the whole body.
     sequences: bool,
     untracked_state: bool,
@@ -754,7 +754,7 @@ impl UnitRecorder {
     pub(super) fn save_chunks(
         &mut self,
         chunks: &[yrs::types::text::Diff<YChange>],
-        comments: Rc<Vec<CommentInterval>>,
+        comments: Rc<CommentIntervals>,
     ) {
         for record in &mut self.units.records {
             if !record.chunks.is_empty() {
