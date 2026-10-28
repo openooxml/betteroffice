@@ -182,6 +182,24 @@ test('r4_resident_throwing_listener_does_not_block_other_listeners_or_the_edit',
   expect(seen[0]!.origin).toBe('local');
 });
 
+test('r5_resident_listener_that_mutates_its_update_leaves_later_resident_listeners_intact', async () => {
+  const state = await stateFor('alpha');
+  const engine = await residentFromState(state);
+  const pristine: Seen = [];
+  const seen: Seen = [];
+  engine.onUpdate((update, origin) => {
+    pristine.push({ update: update.slice(), origin });
+    update.fill(0);
+  });
+  engine.onUpdate(record(seen));
+  engine.applyRawOps('body', [{ op: 'insert', index: 0, text: 'R ' }]);
+  expect(seen).toHaveLength(1);
+  expect(bytes(seen)).toEqual(bytes(pristine));
+  const peer = await facadeFromState(state);
+  peer.applyUpdate(seen[0]!.update);
+  expect(bodyText(peer)).toBe(bodyText(engine));
+});
+
 test('g1_facade_listeners_run_before_mutating_calls_return', async () => {
   const facade = await facadeFromState(await stateFor('alpha beta'));
   const seen: Seen = [];
