@@ -442,7 +442,8 @@ describe("locks, conflicts and permissions", () => {
       await session.requestSave(a.user.id);
       expect(conflicts.length).toBe(1);
       expect(conflicts[0]?.name).toMatch(/\(conflict \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\)\.xlsx$/);
-      expect(conflicts[0]?.url).toBeTruthy();
+      expect(conflicts[0]?.url).toBeUndefined();
+      expect(JSON.stringify(conflicts)).not.toContain("access_token");
       expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
       const copies = [...h.host.files.values()].filter((f) => f.name.includes("(conflict"));
       expect(copies.length).toBe(1);
@@ -1068,25 +1069,24 @@ describe("session safety regressions", () => {
   });
 
   test("a 401 from a later host call during a relaunch also invalidates handles sharing the token", async () => {
-    let session: FileSession | null = null;
-    let revokedUnderLock = false;
+    let relaunchChecks: number | null = null;
     const h = makeHarness({
       beforeCheckFileInfo: async () => {
-        if (session?.lockHeld && !revokedUnderLock) {
-          revokedUnderLock = true;
-          h.host.tokens.delete("tok-shared");
-        }
+        if (relaunchChecks === null) return;
+        relaunchChecks += 1;
+        if (relaunchChecks === 2) h.host.tokens.delete("tok-shared");
       },
     });
     addToken(h, "tok-shared", "shared-user");
     const viewer = await joinEditor(h, "tok-shared", "view");
-    session = viewer.session;
+    const session = viewer.session;
     const invalidated: unknown[] = [];
     session.on("userInvalidated", (event) => invalidated.push(event));
     try {
       expect(session.lockHeld).toBe(false);
+      relaunchChecks = 0;
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
-      expect(revokedUnderLock).toBe(true);
+      expect(relaunchChecks).toBe(2);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
       expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
       expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
