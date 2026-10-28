@@ -27,7 +27,8 @@
     "workbookDisposed": "Edytor skoroszytu został zamknięty.",
     "presentationDisposed": "Edytor prezentacji został zamknięty.",
     "documentDisposed": "Edytor dokumentu został zamknięty.",
-    "stillOpening": "Edytor nadal otwiera plik. Spróbuj ponownie za chwilę."
+    "stillOpening": "Edytor nadal otwiera plik. Spróbuj ponownie za chwilę.",
+    "disconnected": "Rozłączono"
   },
   "start": {
     "dropFileHere": "Upuść plik tutaj",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Otwórz pliki .{ext} w BetterOffice {app}.",
     "couldNotRead": "Nie można odczytać pliku {name}.",
-    "chooseFile": "Wybierz plik .{ext}."
+    "chooseFile": "Wybierz plik .{ext}.",
+    "unsupportedFile": "Wybierz dokument programu Word, arkusz kalkulacyjny programu Excel lub prezentację programu PowerPoint."
   }
 }

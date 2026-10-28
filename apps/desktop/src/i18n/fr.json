@@ -27,7 +27,8 @@
     "workbookDisposed": "L’éditeur de classeur a été fermé.",
     "presentationDisposed": "L’éditeur de présentation a été fermé.",
     "documentDisposed": "L’éditeur de document a été fermé.",
-    "stillOpening": "L’éditeur ouvre encore le fichier. Réessayez dans un instant."
+    "stillOpening": "L’éditeur ouvre encore le fichier. Réessayez dans un instant.",
+    "disconnected": "Déconnecté"
   },
   "start": {
     "dropFileHere": "Déposez votre fichier ici",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Ouvrez les fichiers .{ext} dans BetterOffice {app}.",
     "couldNotRead": "Impossible de lire {name}.",
-    "chooseFile": "Choisissez un fichier .{ext}."
+    "chooseFile": "Choisissez un fichier .{ext}.",
+    "unsupportedFile": "Choisissez un document Word, un classeur Excel ou une présentation PowerPoint."
   }
 }

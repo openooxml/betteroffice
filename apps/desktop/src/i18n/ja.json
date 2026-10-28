@@ -27,7 +27,8 @@
     "workbookDisposed": "ブック エディターは破棄されました。",
     "presentationDisposed": "プレゼンテーション エディターは破棄されました。",
     "documentDisposed": "ドキュメント エディターは破棄されました。",
-    "stillOpening": "エディターはまだファイルを開いています。しばらくしてから再試行してください。"
+    "stillOpening": "エディターはまだファイルを開いています。しばらくしてから再試行してください。",
+    "disconnected": "切断されました"
   },
   "start": {
     "dropFileHere": "ここにファイルをドロップ",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": ".{ext} ファイルは BetterOffice {app} で開いてください。",
     "couldNotRead": "{name} を読み取れませんでした。",
-    "chooseFile": ".{ext} ファイルを選択してください。"
+    "chooseFile": ".{ext} ファイルを選択してください。",
+    "unsupportedFile": "Word 文書、Excel スプレッドシート、または PowerPoint プレゼンテーションを選択してください。"
   }
 }

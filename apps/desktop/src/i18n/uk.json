@@ -27,7 +27,8 @@
     "workbookDisposed": "Редактор книги було закрито.",
     "presentationDisposed": "Редактор презентації було закрито.",
     "documentDisposed": "Редактор документа було закрито.",
-    "stillOpening": "Редактор все ще відкриває файл. Спробуйте ще раз за мить."
+    "stillOpening": "Редактор все ще відкриває файл. Спробуйте ще раз за мить.",
+    "disconnected": "Від’єднано"
   },
   "start": {
     "dropFileHere": "Перетягніть файл сюди",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Відкривайте файли .{ext} у BetterOffice {app}.",
     "couldNotRead": "Не вдалося прочитати {name}.",
-    "chooseFile": "Виберіть файл .{ext}."
+    "chooseFile": "Виберіть файл .{ext}.",
+    "unsupportedFile": "Виберіть документ Word, електронну таблицю Excel або презентацію PowerPoint."
   }
 }

@@ -27,7 +27,8 @@
     "workbookDisposed": "تم إغلاق محرر المصنف.",
     "presentationDisposed": "تم إغلاق محرر العرض التقديمي.",
     "documentDisposed": "تم إغلاق محرر المستند.",
-    "stillOpening": "ما زال المحرر يفتح الملف. حاول مرة أخرى بعد لحظة."
+    "stillOpening": "ما زال المحرر يفتح الملف. حاول مرة أخرى بعد لحظة.",
+    "disconnected": "غير متصل"
   },
   "start": {
     "dropFileHere": "أسقط ملفك هنا",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "افتح ملفات .{ext} في BetterOffice {app}.",
     "couldNotRead": "تعذرت قراءة {name}.",
-    "chooseFile": "اختر ملف .{ext}."
+    "chooseFile": "اختر ملف .{ext}.",
+    "unsupportedFile": "اختر مستند Word أو جدول بيانات Excel أو عرضاً تقديمياً في PowerPoint."
   }
 }

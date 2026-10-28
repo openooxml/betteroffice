@@ -27,7 +27,8 @@
     "workbookDisposed": "통합 문서 편집기가 종료되었습니다.",
     "presentationDisposed": "프레젠테이션 편집기가 종료되었습니다.",
     "documentDisposed": "문서 편집기가 종료되었습니다.",
-    "stillOpening": "편집기가 아직 파일을 열고 있습니다. 잠시 후 다시 시도하세요."
+    "stillOpening": "편집기가 아직 파일을 열고 있습니다. 잠시 후 다시 시도하세요.",
+    "disconnected": "연결 끊김"
   },
   "start": {
     "dropFileHere": "여기에 파일을 놓으세요",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "BetterOffice {app}에서 .{ext} 파일을 여세요.",
     "couldNotRead": "{name}을(를) 읽을 수 없습니다.",
-    "chooseFile": ".{ext} 파일을 선택하세요."
+    "chooseFile": ".{ext} 파일을 선택하세요.",
+    "unsupportedFile": "Word 문서, Excel 스프레드시트 또는 PowerPoint 프레젠테이션을 선택하세요."
   }
 }

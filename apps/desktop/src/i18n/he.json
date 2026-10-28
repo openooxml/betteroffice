@@ -27,7 +27,8 @@
     "workbookDisposed": "עורך חוברת העבודה נסגר.",
     "presentationDisposed": "עורך המצגת נסגר.",
     "documentDisposed": "עורך המסמך נסגר.",
-    "stillOpening": "העורך עדיין פותח את הקובץ. נסו שוב בעוד רגע."
+    "stillOpening": "העורך עדיין פותח את הקובץ. נסו שוב בעוד רגע.",
+    "disconnected": "מנותק"
   },
   "start": {
     "dropFileHere": "שחררו את הקובץ כאן",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "פתחו קובצי .{ext} ב-BetterOffice {app}.",
     "couldNotRead": "לא ניתן היה לקרוא את {name}.",
-    "chooseFile": "בחרו קובץ .{ext}."
+    "chooseFile": "בחרו קובץ .{ext}.",
+    "unsupportedFile": "בחר מסמך Word, גיליון אלקטרוני של Excel או מצגת PowerPoint."
   }
 }

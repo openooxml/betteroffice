@@ -27,7 +27,8 @@
     "workbookDisposed": "工作簿编辑器已关闭。",
     "presentationDisposed": "演示文稿编辑器已关闭。",
     "documentDisposed": "文档编辑器已关闭。",
-    "stillOpening": "编辑器仍在打开文件。请稍后重试。"
+    "stillOpening": "编辑器仍在打开文件。请稍后重试。",
+    "disconnected": "已断开连接"
   },
   "start": {
     "dropFileHere": "将文件拖放到此处",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "请在 BetterOffice {app} 中打开 .{ext} 文件。",
     "couldNotRead": "无法读取 {name}。",
-    "chooseFile": "选择 .{ext} 文件。"
+    "chooseFile": "选择 .{ext} 文件。",
+    "unsupportedFile": "请选择 Word 文档、Excel 电子表格或 PowerPoint 演示文稿。"
   }
 }

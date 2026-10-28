@@ -27,7 +27,8 @@
     "workbookDisposed": "Editor buku kerja telah ditutup.",
     "presentationDisposed": "Editor presentasi telah ditutup.",
     "documentDisposed": "Editor dokumen telah ditutup.",
-    "stillOpening": "Editor masih membuka file. Coba lagi sebentar lagi."
+    "stillOpening": "Editor masih membuka file. Coba lagi sebentar lagi.",
+    "disconnected": "Terputus"
   },
   "start": {
     "dropFileHere": "Letakkan file Anda di sini",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Buka file .{ext} di BetterOffice {app}.",
     "couldNotRead": "Tidak dapat membaca {name}.",
-    "chooseFile": "Pilih file .{ext}."
+    "chooseFile": "Pilih file .{ext}.",
+    "unsupportedFile": "Pilih dokumen Word, lembar bentang Excel, atau presentasi PowerPoint."
   }
 }

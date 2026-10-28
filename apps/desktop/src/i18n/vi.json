@@ -27,7 +27,8 @@
     "workbookDisposed": "Trình soạn thảo sổ làm việc đã bị đóng.",
     "presentationDisposed": "Trình soạn thảo bản trình bày đã bị đóng.",
     "documentDisposed": "Trình soạn thảo tài liệu đã bị đóng.",
-    "stillOpening": "Trình soạn thảo vẫn đang mở tệp. Hãy thử lại sau giây lát."
+    "stillOpening": "Trình soạn thảo vẫn đang mở tệp. Hãy thử lại sau giây lát.",
+    "disconnected": "Đã ngắt kết nối"
   },
   "start": {
     "dropFileHere": "Thả tệp của bạn vào đây",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Mở tệp .{ext} trong BetterOffice {app}.",
     "couldNotRead": "Không thể đọc {name}.",
-    "chooseFile": "Chọn tệp .{ext}."
+    "chooseFile": "Chọn tệp .{ext}.",
+    "unsupportedFile": "Chọn một tài liệu Word, bảng tính Excel hoặc bản trình bày PowerPoint."
   }
 }

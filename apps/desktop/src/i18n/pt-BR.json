@@ -27,7 +27,8 @@
     "workbookDisposed": "O editor de pasta de trabalho foi fechado.",
     "presentationDisposed": "O editor de apresentação foi fechado.",
     "documentDisposed": "O editor de documento foi fechado.",
-    "stillOpening": "O editor ainda está abrindo o arquivo. Tente novamente em instantes."
+    "stillOpening": "O editor ainda está abrindo o arquivo. Tente novamente em instantes.",
+    "disconnected": "Desconectado"
   },
   "start": {
     "dropFileHere": "Solte seu arquivo aqui",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Abra arquivos .{ext} no BetterOffice {app}.",
     "couldNotRead": "Não foi possível ler {name}.",
-    "chooseFile": "Escolha um arquivo .{ext}."
+    "chooseFile": "Escolha um arquivo .{ext}.",
+    "unsupportedFile": "Escolha um documento do Word, uma planilha do Excel ou uma apresentação do PowerPoint."
   }
 }

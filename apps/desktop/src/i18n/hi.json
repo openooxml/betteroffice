@@ -27,7 +27,8 @@
     "workbookDisposed": "कार्यपुस्तिका संपादक बंद कर दिया गया था।",
     "presentationDisposed": "प्रस्तुति संपादक बंद कर दिया गया था।",
     "documentDisposed": "दस्तावेज़ संपादक बंद कर दिया गया था।",
-    "stillOpening": "संपादक अभी भी फ़ाइल खोल रहा है। कुछ क्षण बाद फिर से प्रयास करें।"
+    "stillOpening": "संपादक अभी भी फ़ाइल खोल रहा है। कुछ क्षण बाद फिर से प्रयास करें।",
+    "disconnected": "डिस्कनेक्ट किया गया"
   },
   "start": {
     "dropFileHere": "अपनी फ़ाइल यहाँ छोड़ें",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "BetterOffice {app} में .{ext} फ़ाइलें खोलें।",
     "couldNotRead": "{name} को पढ़ा नहीं जा सका।",
-    "chooseFile": ".{ext} फ़ाइल चुनें।"
+    "chooseFile": ".{ext} फ़ाइल चुनें।",
+    "unsupportedFile": "कोई Word दस्तावेज़, Excel स्प्रेडशीट या PowerPoint प्रस्तुति चुनें।"
   }
 }

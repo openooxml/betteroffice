@@ -27,7 +27,8 @@
     "workbookDisposed": "De werkmapeditor is gesloten.",
     "presentationDisposed": "De presentatie-editor is gesloten.",
     "documentDisposed": "De documenteditor is gesloten.",
-    "stillOpening": "De editor opent het bestand nog. Probeer het zo opnieuw."
+    "stillOpening": "De editor opent het bestand nog. Probeer het zo opnieuw.",
+    "disconnected": "Verbinding verbroken"
   },
   "start": {
     "dropFileHere": "Zet uw bestand hier neer",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "Open .{ext}-bestanden in BetterOffice {app}.",
     "couldNotRead": "{name} kan niet worden gelezen.",
-    "chooseFile": "Kies een .{ext}-bestand."
+    "chooseFile": "Kies een .{ext}-bestand.",
+    "unsupportedFile": "Kies een Word-document, Excel-werkmap of PowerPoint-presentatie."
   }
 }

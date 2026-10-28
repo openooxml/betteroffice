@@ -27,7 +27,8 @@
     "workbookDisposed": "活頁簿編輯器已關閉。",
     "presentationDisposed": "簡報編輯器已關閉。",
     "documentDisposed": "文件編輯器已關閉。",
-    "stillOpening": "編輯器仍在開啟檔案。請稍後再試。"
+    "stillOpening": "編輯器仍在開啟檔案。請稍後再試。",
+    "disconnected": "已中斷連線"
   },
   "start": {
     "dropFileHere": "將檔案拖放到此處",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": "請在 BetterOffice {app} 中開啟 .{ext} 檔案。",
     "couldNotRead": "無法讀取 {name}。",
-    "chooseFile": "選擇 .{ext} 檔案。"
+    "chooseFile": "選擇 .{ext} 檔案。",
+    "unsupportedFile": "請選擇 Word 文件、Excel 試算表或 PowerPoint 簡報。"
   }
 }

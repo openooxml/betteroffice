@@ -205,7 +205,13 @@ export default function Editor({
         : new PptxProvider(presentationReplica!, transport, options);
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
-      callbacks.current.onStatus(synced ? t("editor.connected") : status)
+      callbacks.current.onStatus(
+        synced || status === "connected"
+          ? t("editor.connected")
+          : status === "connecting"
+          ? t("titleBar.connecting")
+          : t("editor.disconnected")
+      )
     );
     const unsubscribeError = next.onError((error) =>
       callbacks.current.onError(error)

@@ -27,7 +27,8 @@
     "workbookDisposed": "Çalışma kitabı düzenleyicisi kapatıldı.",
     "presentationDisposed": "Sunu düzenleyicisi kapatıldı.",
     "documentDisposed": "Belge düzenleyicisi kapatıldı.",
-    "stillOpening": "Düzenleyici dosyayı hâlâ açıyor. Bir süre sonra tekrar deneyin."
+    "stillOpening": "Düzenleyici dosyayı hâlâ açıyor. Bir süre sonra tekrar deneyin.",
+    "disconnected": "Bağlantı kesildi"
   },
   "start": {
     "dropFileHere": "Dosyanızı buraya bırakın",
@@ -47,6 +48,7 @@
   "errors": {
     "openInApp": ".{ext} dosyalarını BetterOffice {app} içinde açın.",
     "couldNotRead": "{name} okunamadı.",
-    "chooseFile": "Bir .{ext} dosyası seçin."
+    "chooseFile": "Bir .{ext} dosyası seçin.",
+    "unsupportedFile": "Bir Word belgesi, Excel elektronik tablosu veya PowerPoint sunusu seçin."
   }
 }
