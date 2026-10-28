@@ -3288,6 +3288,13 @@ fn units_text(units: &[InlineUnit]) -> String {
         .collect()
 }
 
+fn unit_story_text(unit: &InlineUnit) -> &str {
+    match &unit.content {
+        UnitContent::Text(text) => text,
+        UnitContent::Embed { .. } => "\u{fffc}",
+    }
+}
+
 /// `w:br w:type="page"|"column"`, which the story carries as a block embed
 /// beside the paragraph instead of as an inline unit.
 fn flow_break_type(content: &Value) -> Option<&'static str> {
@@ -3343,7 +3350,12 @@ fn run_boundary(
     let note_marks = note_ref_mark_types(run);
     let breaks = flow_break_offsets(run, source);
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(units_text(units)));
+    let text = units_text(units);
+    let story_text: String = units.iter().map(unit_story_text).collect();
+    if story_text != text {
+        boundary.insert("storyText".to_owned(), Value::String(story_text));
+    }
+    boundary.insert("text".to_owned(), Value::String(text));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
     }
@@ -5592,13 +5604,7 @@ fn visit_story(
                     let runs = units
                         .iter()
                         .map(|unit| {
-                            let text = match &unit.content {
-                                UnitContent::Text(text) => text.clone(),
-                                UnitContent::Embed { .. } => {
-                                    "\u{fffc}".repeat(unit.pm_size as usize)
-                                }
-                            };
-                            json!({"text": text, "formatting": unit.direct_formatting.as_deref()})
+                            json!({"text": unit_story_text(unit), "formatting": unit.direct_formatting.as_deref()})
                         })
                         .collect();
                     context
@@ -9825,6 +9831,17 @@ mod tests {
             Some(Value::Bool(false)),
             "a direct off overrides a style that turns the toggle back on"
         );
+    }
+
+    #[test]
+    fn note_reference_boundaries_keep_source_text_and_story_placeholders() {
+        for kind in ["footnoteRef", "endnoteRef"] {
+            let run = json!({"type": "run", "content": [{"type": kind, "id": 12}]});
+            let units = run_to_units(&run, None, &StyleResolver::new(None), &[], &BTreeMap::new());
+            let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+            assert_eq!(boundary["text"], "12");
+            assert_eq!(boundary["storyText"], "\u{fffc}");
+        }
     }
 
     #[test]
