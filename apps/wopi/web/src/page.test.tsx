@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { afterAll, afterEach, expect, mock, spyOn, test } from "bun:test";
+import type { GlobalWindow } from "happy-dom";
+import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { useEffect } from "react";
 import type { EditorApi, EditorProps, PreparedFile } from "../../../../shared/editor-host/Editor";
 import { SessionApi } from "./api";
@@ -68,8 +69,14 @@ class TestSocket implements WebSocketLike {
 const socketDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
 Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: TestSocket });
 
+let previousUrl: string;
+beforeEach(() => {
+  previousUrl = window.location.href;
+  (window as unknown as GlobalWindow).happyDOM.setURL("https://office.example/wopi/edit");
+});
 afterEach(() => {
   cleanup();
+  (window as unknown as GlobalWindow).happyDOM.setURL(previousUrl);
   sockets.length = 0;
   mounts.length = 0;
   lifecycle.length = 0;
@@ -84,7 +91,7 @@ afterAll(async () => {
 
 async function mount() {
   const calls: string[] = [];
-  const messages: Array<{ MessageId: string; Values: Record<string, unknown> }> = [];
+  const messages: Array<{ MessageId: string; SendTime: number; Values: Record<string, unknown> }> = [];
   const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
   let sourceGate = Promise.resolve();
   let failSource = false;

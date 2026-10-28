@@ -1,8 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
+import type { ServerReplica } from "../replica/replica";
 import type { FileSession } from "../session/fileSession";
 import type { SessionRegistry } from "../session/registry";
-import type { UserSession } from "../session/userSession";
+import { UserSession } from "../session/userSession";
 import { requestOrderedSave } from "../sessionApi";
 import { encodeUpdateFrame } from "./frames";
 import { CollabRelay, type RelaySocket } from "./relay";
@@ -13,25 +14,46 @@ function setup() {
   const client = new Doc();
   client.getText("body").insert(0, "before");
   applyUpdate(server, encodeStateAsUpdate(client));
-  const user = { id: "user", canWrite: true } as UserSession;
+  const user = new UserSession({
+    hostId: "host", wopiSrc: "https://host.example/wopi/files/file", accessToken: "token", accessTokenTtl: 0,
+    userId: "user", friendlyName: "User", canWrite: true, joinedAt: 0,
+  });
   const saved: string[] = [];
   const closeCodes: Array<number | undefined> = [];
   const socket: RelaySocket = { send() {}, close(code) { closeCodes.push(code); } };
+  const replica = { version: 0, encodeStateVector: () => encodeStateVector(server) };
   const session = {
     fileKey: "file", viewOnly: false, users: [user],
-    replica: { version: 0, encodeStateVector: () => encodeStateVector(server) },
-    on() {}, heartbeat() {}, getUser: () => user, isUserTokenValid: () => true,
+    replica,
+    on() { return () => {}; },
+    connect(userId: string) {
+      if (userId !== user.id) throw new Error("unknown user");
+      const generation = ++user.connectionGeneration;
+      this.heartbeat(userId, generation);
+      return generation;
+    },
+    heartbeat(userId: string, generation = user.connectionGeneration) {
+      if (userId === user.id && generation === user.connectionGeneration) user.connected = true;
+    },
+    async disconnect(userId: string, generation = user.connectionGeneration) {
+      if (userId === user.id && generation === user.connectionGeneration) user.connected = false;
+    },
+    getUser: (userId: string) => userId === user.id ? user : null,
+    isUserTokenValid: (userId: string) => userId === user.id && user.isTokenValidAt(0),
     applyUpdate(_userId: string, update: Uint8Array) {
       expect(relay.appliedSequence(session as unknown as FileSession, user.id, connectionId)).toBe(seq - 1);
       applyUpdate(server, update);
-      this.replica.version += 1;
-      return { accepted: true as const };
+      replica.version += 1;
+      return { accepted: true as const, followUps: [] };
     },
     async requestSave() {
       saved.push(server.getText("body").toString());
       return { saved: true, itemVersion: "2", by: user.id };
     },
-  };
+  } satisfies Pick<FileSession,
+    "fileKey" | "viewOnly" | "users" | "on" | "connect" | "heartbeat" | "disconnect" |
+    "getUser" | "isUserTokenValid" | "applyUpdate" | "requestSave"
+  > & { replica: Pick<ServerReplica, "version" | "encodeStateVector"> };
   const file = session as unknown as FileSession;
   const registry = { list: () => [file] } as unknown as SessionRegistry;
   const relay = new CollabRelay(registry);
@@ -92,9 +114,13 @@ test("replacement sockets reset the applied sequence and cannot acknowledge an o
     h.client.getText("body").insert(6, " after");
     h.send(encodeStateAsUpdate(h.client));
     expect(h.relay.appliedSequence(h.file, h.user.id, h.connectionId)).toBe(1);
+    const generation = h.user.connectionGeneration;
     const socket: RelaySocket = { send() {}, close() {} };
     const connectionId = crypto.randomUUID();
     h.relay.attach(socket, { session: h.file, user: h.user });
+    expect(h.user.connectionGeneration).toBe(generation + 1);
+    h.relay.detach(h.socket);
+    expect(h.user.connected).toBe(true);
     h.relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq: 0 }));
     expect(h.relay.appliedSequence(h.file, h.user.id, h.connectionId)).toBeNull();
     expect(h.relay.appliedSequence(h.file, h.user.id, connectionId)).toBe(0);

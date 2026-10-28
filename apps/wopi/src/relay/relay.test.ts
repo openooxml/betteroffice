@@ -40,7 +40,10 @@ beforeAll(async () => {
 
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 let cleanups: Array<() => void | Promise<void>> = [];
+let frameClients: FrameClient[] = [];
 afterEach(async () => {
+  await Promise.all(frameClients.map((client) => client.disconnect()));
+  frameClients = [];
   for (const cleanup of cleanups.reverse()) {
     try {
       await cleanup();
@@ -104,6 +107,7 @@ class FrameClient {
   closeCode: number | null = null;
   closeReason = "";
   sequence: SocketSaveBarrier | null = null;
+  #onMessage: (event: MessageEvent) => void;
   #resolveClosed: () => void = () => {};
   #closed = new Promise<void>((resolve) => {
     this.#resolveClosed = resolve;
@@ -113,7 +117,7 @@ class FrameClient {
     this.client = client;
     this.ws = ws;
     ws.binaryType = "arraybuffer";
-    ws.addEventListener("message", (event) => {
+    this.#onMessage = (event) => {
       const data = event.data;
       if (typeof data === "string") return;
       const frame = new Uint8Array(data as ArrayBuffer);
@@ -124,12 +128,14 @@ class FrameClient {
           this.client.applyUpdate(message.update);
         }
       }
-    });
+    };
+    ws.addEventListener("message", this.#onMessage);
     ws.addEventListener("close", (event) => {
       this.closeCode = event.code;
       this.closeReason = event.reason;
       this.#resolveClosed();
     });
+    frameClients.push(this);
   }
 
   static async connect(s: Setup, handle: string, client: TestClient, sequenced = false): Promise<FrameClient> {
@@ -162,6 +168,12 @@ class FrameClient {
 
   get closed(): Promise<void> {
     return this.#closed;
+  }
+
+  async disconnect(): Promise<void> {
+    this.ws.removeEventListener("message", this.#onMessage);
+    if (this.ws.readyState !== WebSocket.CLOSED) this.ws.close();
+    await this.closed;
   }
 
   kill(): void {
@@ -968,7 +980,11 @@ describe("real CollaborationProvider clients", () => {
       const handleF = await joinPage(s, TOKENS[1]!);
       const provided = await providerClient(s, format, handleP, 980001);
       const frame = await FrameClient.connect(s, handleF, await hydrate(s, handleF, 980101));
-      cleanups.push(() => provided.provider.destroy(), () => frame.client.destroy(), () => provided.test.destroy());
+      cleanups.push(() => {
+        provided.provider.destroy();
+        provided.test.destroy();
+        frame.client.destroy();
+      });
       provided.provider.connect();
       await waitFor(() => provided.provider.synced, "provider synced");
 
