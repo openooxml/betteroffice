@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-DOCX saves keep untouched paragraphs byte for byte after agent and editor edits, across spanning comment ranges, bookmarks, content controls, merged cells and wide tables. Footnote text edits keep a direct automatic color and the original run boundaries instead of re-serializing the paragraph.
+DOCX saves keep untouched paragraphs unchanged after more agent and editor edits: inserts next to tables, content controls, bookmarks and comment ranges, and cell merges in plain tables. Text edits keep a direct automatic text color and the original runs.
