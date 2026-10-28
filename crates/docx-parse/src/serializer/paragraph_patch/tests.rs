@@ -1248,6 +1248,73 @@ fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
 }
 
 #[test]
+fn paragraph_patch_restyle_keeps_inherited_run_properties_out_of_xml() {
+    for direct_size in ["", "sz", "szCs"] {
+        for target_size in [32, 40] {
+            let size = if direct_size.is_empty() {
+                String::new()
+            } else {
+                format!("<w:{direct_size} w:val='24'/>")
+            };
+            let source = format!(
+                "<w:p><w:pPr><w:pStyle w:val='Body24'/><w:numPr><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr></w:pPr><w:r w:rsidR='12345678'><w:rPr><w:i/><w:noProof/>{size}</w:rPr><w:t>x</w:t></w:r></w:p>"
+            );
+            let mut old = json!({"fontSize": {"size": 24}, "italic": true});
+            let mut new = json!({"fontSize": {"size": target_size}, "italic": true, "bold": true});
+            if direct_size == "szCs" {
+                old["fontSize"]["sizeCs"] = json!(24);
+                new["fontSize"]["sizeCs"] = json!(24);
+            }
+            let before_size = old["fontSize"].clone();
+            let after_size = new["fontSize"].clone();
+            let mut plan = patch(vec![text("x", old)], vec![text("x", new.clone())]);
+            plan.seed.properties = attrs(json!({
+                "pStyle": "Body24", "numPr": {"numId": 43, "ilvl": 0}
+            }));
+            seed_inheritance(
+                &mut plan,
+                json!({}),
+                json!([{"fontSize": {"size": 24}}]),
+                json!({"fontSize": {"size": 24}}),
+            );
+            plan.mark_inherit = attrs(json!({"fontSize": {"size": 32}, "bold": true}));
+            plan.para_deltas = vec![delta(
+                "pStyle",
+                Some(json!("Body24")),
+                Some(json!("Heading1")),
+            )];
+            plan.run_edits = vec![RunEditV1 {
+                from: 0,
+                to: 1,
+                deltas: vec![
+                    delta("fontSize", Some(before_size), Some(after_size)),
+                    delta("bold", None, Some(json!(true))),
+                ],
+                target: attrs(new.clone()),
+                inherit: attrs(json!({"fontSize": {"size": 32}, "bold": true})),
+            }];
+            let mut after = plan.seed.properties.clone();
+            after.insert("pStyle".to_owned(), json!("Heading1"));
+            plan.result_sha256 = result_sha256(&[text("x", new)], &after);
+            let expected = source.replace("w:val='Body24'", "w:val='Heading1'");
+            let expected = if direct_size == "sz" {
+                expected.replace("w:val='24'", &format!("w:val='{target_size}'"))
+            } else if target_size == 40 {
+                let next = if direct_size == "szCs" {
+                    "<w:szCs"
+                } else {
+                    "</w:rPr>"
+                };
+                expected.replace(next, &format!("<w:sz w:val=\"40\"/>{next}"))
+            } else {
+                expected
+            };
+            assert_eq!(write(&source, &plan).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
 fn paragraph_patch_numbered_restyle_with_an_unexplained_delta_is_refused() {
     let source = concat!(
         "<w:p><w:pPr><w:pStyle w:val='ListParagraph'/>",

@@ -176,6 +176,7 @@ struct InlineUnit {
     attrs: JsonObject,
     pm_size: u32,
     marks: Vec<Mark>,
+    direct_formatting: Option<Arc<Value>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -278,6 +279,12 @@ struct SourceStructure {
     /// Paragraphs whose runs carry tracked formatting changes.
     #[serde(with = "crate::peer_bootstrap::sorted_set")]
     run_revisions: HashSet<(String, String)>,
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "crate::peer_bootstrap::sorted_map"
+    )]
+    restyle_runs: HashMap<(String, String), Vec<Value>>,
     #[serde(skip)]
     patch_table_styles: PatchTableStyles,
 }
@@ -339,6 +346,14 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn restyle_run_boundaries(&self, story: &str, para_id: &str) -> Option<Any> {
+        let runs = self
+            .structure
+            .restyle_runs
+            .get(&(story.to_owned(), para_id.to_owned()))?;
+        any_from_value(Value::Array(runs.clone())).ok()
+    }
+
     pub(crate) fn patch_table_styles(&self) -> &PatchTableStyles {
         &self.structure.patch_table_styles
     }
@@ -2049,6 +2064,7 @@ fn text_unit(text: String, marks: &[Mark]) -> InlineUnit {
         content: UnitContent::Text(text),
         attrs: marks_to_attrs(marks),
         marks: marks.to_vec(),
+        direct_formatting: None,
     }
 }
 
@@ -2061,6 +2077,7 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
         attrs: marks_to_attrs(marks),
         pm_size,
         marks: marks.to_vec(),
+        direct_formatting: None,
     }
 }
 
@@ -2754,9 +2771,14 @@ fn run_to_units(
         .into_iter()
         .chain(extra_marks.iter().cloned())
         .collect();
+    let direct = field(Some(run), "formatting").map(|formatting| Arc::new(formatting.clone()));
     array(field(Some(run), "content"))
         .iter()
         .flat_map(|content| run_content_to_units(content, &marks, source))
+        .map(|mut unit| {
+            unit.direct_formatting = direct.clone();
+            unit
+        })
         .collect()
 }
 
@@ -2803,14 +2825,18 @@ fn hyperlink_to_units(
     for child in array(children) {
         match string(field(Some(child), "type")).unwrap_or_default() {
             "run" => {
-                let marks: Vec<Mark> = run_marks(child, style_formatting, styles)
-                    .into_iter()
-                    .chain(extra_marks.iter().cloned())
+                let marks: Vec<Mark> = extra_marks
+                    .iter()
+                    .cloned()
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, source));
-                }
+                units.extend(run_to_units(
+                    child,
+                    style_formatting,
+                    styles,
+                    &marks,
+                    source,
+                ));
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
@@ -5562,6 +5588,24 @@ fn visit_story(
                     breaks,
                     opaque_sequences,
                 } = paragraph_units(block, &context.styles, None, &context.source_json);
+                if ppr.contains_key("numPr") && !ppr.contains_key("_originalRunBoundaries") {
+                    let runs = units
+                        .iter()
+                        .map(|unit| {
+                            let text = match &unit.content {
+                                UnitContent::Text(text) => text.clone(),
+                                UnitContent::Embed { .. } => {
+                                    "\u{fffc}".repeat(unit.pm_size as usize)
+                                }
+                            };
+                            json!({"text": text, "formatting": unit.direct_formatting.as_deref()})
+                        })
+                        .collect();
+                    context
+                        .source
+                        .restyle_runs
+                        .insert((story_id.clone(), block_id.clone()), runs);
+                }
                 context.opaque_sequences.extend(opaque_sequences);
                 let base = context.plans[plan_index].width();
                 let offsets: Vec<u32> = std::iter::once(0)

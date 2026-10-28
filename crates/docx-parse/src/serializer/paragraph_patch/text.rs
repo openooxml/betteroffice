@@ -106,6 +106,24 @@ pub(super) fn write(
         .map(|cell| Some(cell.unit.clone()))
         .collect();
     let mut formatting: Vec<Option<String>> = vec![None; retained.len()];
+    let restyle = patch
+        .para_deltas
+        .iter()
+        .any(|delta| delta.path == ["pStyle"]);
+    let empty = Attrs::new();
+    let inherited: Vec<_> = patch
+        .seed
+        .units
+        .iter()
+        .enumerate()
+        .flat_map(|(at, unit)| {
+            let count = match unit {
+                UnitV1::Text { text, .. } => text.chars().count(),
+                UnitV1::Atom { .. } => 1,
+            };
+            std::iter::repeat_n(patch.seed.inherit.runs.get(at).unwrap_or(&empty), count)
+        })
+        .collect();
     let mut run_ranges = Vec::new();
     for edit in &patch.run_edits {
         if edit.from >= edit.to || !boundary(edit.from) || !boundary(edit.to) {
@@ -135,15 +153,34 @@ pub(super) fn write(
                     Entry::Occupied(entry) => entry.into_mut(),
                     Entry::Vacant(entry) => {
                         let original = run_properties(source, lowered, cell.run);
-                        entry.insert(properties::run_properties(
+                        let written = properties::run_properties(
                             original,
                             &edit.deltas,
                             &edit.inherit,
                             &edit.target,
-                        )?)
+                        )?;
+                        let written = if restyle {
+                            let deltas = properties::restyle_run_deltas(
+                                original,
+                                &edit.deltas,
+                                inherited.get(at).copied().unwrap_or(&empty),
+                                &edit.inherit,
+                            )?;
+                            properties::run_properties(
+                                original,
+                                &deltas,
+                                &edit.inherit,
+                                &edit.target,
+                            )?
+                        } else {
+                            written
+                        };
+                        entry.insert(written)
                     }
                 };
-                formatting[at] = Some(properties.clone());
+                if properties.as_str() != run_properties(source, lowered, cell.run) {
+                    formatting[at] = Some(properties.clone());
+                }
                 *super::unit_attrs_mut(retained[at].as_mut().unwrap()) = attrs;
             }
         }

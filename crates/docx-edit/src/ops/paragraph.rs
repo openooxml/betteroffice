@@ -1067,15 +1067,15 @@ struct DirectRunFormatting {
 fn original_run_formatting(
     chunks: &[Chunk],
     properties: &BTreeMap<String, Any>,
+    retained: Option<&Any>,
     node_start: u32,
     pilcrow: u32,
 ) -> Option<Vec<DirectRunFormatting>> {
-    let Some(Any::Array(boundaries)) = properties.get("_originalRunBoundaries") else {
+    let Some(Any::Array(boundaries)) = properties.get("_originalRunBoundaries").or(retained) else {
         return None;
     };
-    let mut source = String::new();
+    let mut source = Vec::new();
     let mut runs = Vec::new();
-    let mut start = node_start;
     for boundary in boundaries.iter() {
         let Any::Map(boundary) = boundary else {
             return None;
@@ -1083,8 +1083,9 @@ fn original_run_formatting(
         let Some(Any::String(text)) = boundary.get("text") else {
             return None;
         };
-        let end = start + crate::ops::utf16_len(text);
-        source.push_str(text);
+        let start = source.len() as u32;
+        source.extend(text.chars());
+        let end = source.len() as u32;
         if start < end {
             runs.push(DirectRunFormatting {
                 start,
@@ -1095,19 +1096,68 @@ fn original_run_formatting(
                     .unwrap_or_default(),
             });
         }
-        start = end;
     }
-    let mut live = String::new();
+    if runs.is_empty() {
+        return None;
+    }
+    let mut live = Vec::new();
     for chunk in chunks {
         if chunk.start < node_start || chunk.start >= pilcrow {
             continue;
         }
-        let ChunkKind::Text(text) = &chunk.kind else {
-            return None;
-        };
-        live.push_str(text);
+        match &chunk.kind {
+            ChunkKind::Text(text) => live.extend(text.chars()),
+            _ => live.extend(std::iter::repeat_n('\u{fffc}', chunk.len as usize)),
+        }
     }
-    (start == pilcrow && source == live).then_some(runs)
+    let diff = ooxml_diff::diff_tokens(
+        &source,
+        &live,
+        ooxml_diff::DiffLimits::new(
+            1_000_000,
+            1_000_000,
+            ooxml_diff::LimitFallback::ReplaceMiddle,
+        ),
+    )
+    .ok()?;
+    let widths: Vec<u32> = std::iter::once(0)
+        .chain(live.iter().scan(0, |width, ch| {
+            *width += ch.len_utf16() as u32;
+            Some(*width)
+        }))
+        .collect();
+    let mut positions = vec![0; source.len() + 1];
+    for hunk in &diff.hunks {
+        match hunk.kind {
+            ooxml_diff::DiffKind::Equal => {
+                for (offset, position) in positions[hunk.old.start..=hunk.old.end]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *position = hunk.new.start + offset;
+                }
+            }
+            ooxml_diff::DiffKind::Delete => {
+                positions[hunk.old.start..=hunk.old.end].fill(hunk.new.start);
+            }
+            ooxml_diff::DiffKind::Insert => {
+                positions[hunk.old.start] = hunk.new.end;
+            }
+        }
+    }
+    positions[0] = 0;
+    let mapped = |offset: u32| node_start + widths[positions[offset as usize]];
+    let last = runs.len().saturating_sub(1);
+    for (index, run) in runs.iter_mut().enumerate() {
+        run.start = mapped(run.start);
+        run.end = if index == last {
+            pilcrow
+        } else {
+            mapped(run.end)
+        };
+    }
+    runs.retain(|run| run.start < run.end);
+    Some(runs)
 }
 
 fn rebase_attrs(
@@ -1274,6 +1324,8 @@ pub(crate) fn plan_paragraph_style(
     previous: &crate::seed::StyledParagraph,
     next: &crate::seed::StyledParagraph,
     style_id: &str,
+    source: &crate::seed::SourceMetadata,
+    story_id: &str,
 ) -> StylePlan {
     let target: HashMap<&str, &Any> = next
         .properties
@@ -1392,9 +1444,19 @@ pub(crate) fn plan_paragraph_style(
         .collect();
     keys.sort_unstable();
     keys.dedup();
-    let direct_runs = direct_numbering
-        .then(|| original_run_formatting(chunks, properties, node_start, pilcrow))
+    let retained = direct_numbering
+        .then(|| source.restyle_run_boundaries(story_id, para_id))
         .flatten();
+    let direct_runs = direct_numbering
+        .then(|| {
+            original_run_formatting(chunks, properties, retained.as_ref(), node_start, pilcrow)
+        })
+        .flatten();
+    let previous_style = match properties.get("pStyle") {
+        Some(Any::String(style)) => Some(style.as_ref()),
+        _ => None,
+    };
+    let mut inheritance = HashMap::new();
     let mut formats = Vec::new();
     for chunk in chunks {
         if !matches!(chunk.kind, crate::ops::ChunkKind::Text(_))
@@ -1404,6 +1466,29 @@ pub(crate) fn plan_paragraph_style(
             continue;
         }
         let linked = chunk.attr_active(crate::format::HYPERLINK);
+        let run_style = match chunk.attrs.get("runStyle") {
+            Some(Any::Map(style)) => match style.get("styleId") {
+                Some(Any::String(style)) => Some(style.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (old_inherited, new_inherited) = inheritance.entry(run_style).or_insert_with(|| {
+            let attrs = |style| {
+                crate::seed::payload(source.patch_inheritance(story_id, style, run_style).1)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>()
+            };
+            (attrs(previous_style), attrs(Some(style_id)))
+        });
+        let run_keys: BTreeSet<_> = keys
+            .iter()
+            .copied()
+            .chain(old_inherited.keys().map(String::as_str))
+            .chain(new_inherited.keys().map(String::as_str))
+            .filter(|key| !PROTECTED_ATTRS.contains(key))
+            .collect();
         let ranges: Vec<_> = match &direct_runs {
             Some(runs) => {
                 let start = runs.partition_point(|run| run.end <= chunk.start);
@@ -1423,21 +1508,18 @@ pub(crate) fn plan_paragraph_style(
         };
         for (start, end, direct) in ranges {
             let mut attrs = Vec::new();
-            for key in &keys {
+            for key in &run_keys {
                 if linked && matches!(*key, "textColor" | "underline") {
                     continue;
                 }
                 let current = present(chunk.attrs.get(*key));
                 let wanted = if direct_numbering {
-                    match direct {
-                        Some(direct) => rebase_style_attr(
-                            current,
-                            present(old_run.get(key).copied()),
-                            present(new_run.get(key).copied()),
-                            direct.get(*key),
-                        ),
-                        None => current.cloned(),
-                    }
+                    rebase_style_attr(
+                        current,
+                        present(old_inherited.get(*key)),
+                        present(new_inherited.get(*key)),
+                        direct.and_then(|direct| direct.get(*key)),
+                    )
                 } else {
                     let follows_style = STYLE_CONTROLLED_MARKS.contains(key)
                         || current == present(old_run.get(key).copied());

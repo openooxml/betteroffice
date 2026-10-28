@@ -96,6 +96,65 @@ struct Change {
     children: BTreeMap<&'static str, Change>,
 }
 
+pub(super) fn restyle_run_deltas(
+    source: &str,
+    deltas: &[AttrDeltaV1],
+    previous: &Attrs,
+    next: &Attrs,
+) -> Result<Vec<AttrDeltaV1>, Failure> {
+    let direct = if source.is_empty() {
+        serde_json::json!({})
+    } else {
+        super::verify::formatting(source, false)?
+    };
+    let authored = |path: &[String]| {
+        let has = |key: &str| direct.get(key).is_some_and(|value| !value.is_null());
+        match path.first().map(String::as_str) {
+            Some("fontSize") => match path.get(1).map(String::as_str) {
+                Some("size") => has("fontSize"),
+                Some("sizeCs") => has("fontSizeCs"),
+                _ => has("fontSize") || has("fontSizeCs"),
+            },
+            Some("fontFamily") if path.len() > 1 => direct
+                .get("fontFamily")
+                .and_then(|font| font.get(&path[1]))
+                .is_some_and(|value| !value.is_null()),
+            Some("textColor") => has("color"),
+            Some("strike" | "doubleStrike") => has("strike") || has("doubleStrike"),
+            Some("superscript" | "subscript") => has("vertAlign"),
+            Some("highlight") => has("highlight") || has("shading"),
+            Some(key) => has(key),
+            None => true,
+        }
+    };
+    let mut direct_deltas = Vec::new();
+    for delta in deltas {
+        expand(delta, &mut |path, after| {
+            let before = slot(&delta.before)
+                .and_then(|value| {
+                    path[delta.path.len()..]
+                        .iter()
+                        .try_fold(value, |value, key| value.get(key))
+                })
+                .filter(|value| !value.is_null());
+            if authored(path) || before != attr_at(previous, path) || after != attr_at(next, path) {
+                let slot = |value: Option<&Value>| {
+                    value.map_or(SlotV1::Missing, |value| SlotV1::Present {
+                        value: value.clone(),
+                    })
+                };
+                direct_deltas.push(AttrDeltaV1 {
+                    path: path.to_vec(),
+                    before: slot(before),
+                    after: slot(after),
+                });
+            }
+            Ok(())
+        })?;
+    }
+    Ok(direct_deltas)
+}
+
 pub(super) fn run_properties(
     source: &str,
     deltas: &[AttrDeltaV1],

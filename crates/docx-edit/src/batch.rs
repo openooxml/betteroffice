@@ -1701,6 +1701,8 @@ fn plan_style<T: ReadTxn>(
         &previous,
         &next,
         style_id,
+        source,
+        &target.story,
     );
     Ok(Planned {
         index,

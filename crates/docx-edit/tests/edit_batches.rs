@@ -1779,7 +1779,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
-        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style></w:styles>"#
     );
     parts
         .iter_mut()
@@ -1787,6 +1787,111 @@ fn open_numbered_restyle(body: &str) -> EditingDoc {
         .unwrap()
         .1 = styles.into_bytes();
     open_package(&ooxml_opc::rezip_parts(&parts).unwrap())
+}
+
+#[test]
+fn restyle_numbered_runs_recover_provenance_after_text_edits_and_hyperlinks() {
+    for linked in [false, true] {
+        for edited in [None, Some(0), Some(8), Some(17)] {
+            let runs = concat!(
+                r#"<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Explicit</w:t></w:r>"#,
+                "<w:r><w:t>Inherited</w:t></w:r>",
+            );
+            let content = if linked {
+                format!(r#"<w:hyperlink w:anchor="target">{runs}</w:hyperlink>"#)
+            } else {
+                runs.to_owned()
+            };
+            let doc = open_numbered_restyle(&format!(
+                r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>{content}</w:p>"#
+            ));
+            if let Some(at) = edited {
+                doc.insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("body", at),
+                    "!",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+            }
+            apply(
+                &doc,
+                &UndoSession::new(),
+                vec![set_style("00000001", "Heading1")],
+            );
+            for (text, expected) in [("Explicit", 24.0), ("Inherited", 32.0)] {
+                let attrs = marks(&doc, "body", text);
+                let Some(Any::Map(size)) = attrs.get("fontSize") else {
+                    panic!("missing run size");
+                };
+                assert_eq!(number(size.get("size")), Some(expected));
+                assert!(active(&attrs, "bold"));
+            }
+            if let Some(at) = edited {
+                let attrs = marks(&doc, "body", "!");
+                let Some(Any::Map(size)) = attrs.get("fontSize") else {
+                    panic!("missing inserted run size");
+                };
+                assert_eq!(
+                    number(size.get("size")),
+                    Some(if at == 17 { 32.0 } else { 24.0 })
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn restyle_numbered_runs_without_original_text_still_follow_the_style() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        "<w:r><w:t/></w:r></w:p>",
+    ));
+    doc.insert_text(
+        &EditCtx::local("", ""),
+        Position::new("body", 0),
+        "Inherited",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let attrs = marks(&doc, "body", "Inherited");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing run size");
+    };
+    assert_eq!(number(size.get("size")), Some(32.0));
+    assert!(active(&attrs, "bold"));
+}
+
+#[test]
+fn restyle_numbered_runs_resolve_the_character_style() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        r#"<w:r><w:rPr><w:rStyle w:val="Fixed24"/><w:i/></w:rPr><w:t>Character</w:t></w:r>"#,
+        "<w:r><w:t>Inherited</w:t></w:r></w:p>",
+    ));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "Heading1")],
+    );
+    let attrs = marks(&doc, "body", "Character");
+    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+        panic!("missing character style size");
+    };
+    assert_eq!(number(size.get("size")), Some(24.0));
+    assert!(active(&attrs, "italic"));
+    assert!(active(&attrs, "bold"));
+    let Some(Any::Map(style)) = attrs.get("runStyle") else {
+        panic!("missing character style");
+    };
+    assert_eq!(style.get("styleId"), Some(&Any::from("Fixed24")));
 }
 
 #[test]

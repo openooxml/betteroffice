@@ -156,6 +156,44 @@ test('restyling keeps a direct run size equal to the old style in a paragraph pa
     HEADING.replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
 }, 30_000);
 
+test('inherited run formatting stays inherited after saving and restyling back', async () => {
+  const source = await restyleFixture();
+  const zip = await JSZip.loadAsync(source.bytes);
+  zip.file('word/styles.xml', source.styles.replace(
+    '<w:contextualSpacing/></w:pPr></w:style>',
+    '<w:contextualSpacing/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style>'));
+  const inherited = HEADING.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/g, '');
+  zip.file('word/document.xml', source.document.replace(HEADING, inherited));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  await doc.edit({
+    version: doc.list().version,
+    edits: [{ op: 'set_paragraph_style', paragraph: item(doc, 'Some heading').ref, style: 'heading 1' }],
+  });
+  const part = doc.session.paragraphSavePlan().splicedParts!
+    .find(entry => entry.part === 'word/document.xml')!;
+  expect(part.paragraphPatches?.map(patch => patch.ordinal)).toContain(0);
+  expect((part.legacyParagraphs ?? []).filter(entry => entry.ordinal === 0)).toEqual([]);
+  const restyled = doc.session.storySegments('body')
+    .find(segment => segment.kind === 'text' && segment.text.includes('Some heading'))!;
+  expect(restyled.attributes).toMatchObject({ fontSize: { size: 32 }, bold: true });
+  const bytes = await doc.export();
+  const saved = await JSZip.loadAsync(bytes);
+  const xml = await saved.file('word/document.xml')!.async('string');
+  expect(byText(xml, 'Some heading')).toBe(
+    inherited.replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
+  const reopened = await open(bytes);
+  await reopened.edit({
+    version: reopened.list().version,
+    edits: [{ op: 'set_paragraph_style', paragraph: item(reopened, 'Some heading').ref, style: 'List Paragraph' }],
+  });
+  const restored = await JSZip.loadAsync(await reopened.export());
+  expect(byText(await restored.file('word/document.xml')!.async('string'), 'Some heading')).toBe(inherited);
+  const segments = reopened.session.storySegments('body');
+  const heading = segments.find(segment => segment.kind === 'text' && segment.text.includes('Some heading'))!;
+  expect(heading.attributes.fontSize).toMatchObject({ size: 24 });
+  expect(heading.attributes.bold ?? null).toBeNull();
+}, 30_000);
+
 test('set_paragraph_style still refuses a style that defines list numbering', async () => {
   const source = await restyleFixture();
   const doc = await open(source.bytes);
