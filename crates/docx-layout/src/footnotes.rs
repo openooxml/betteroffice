@@ -1049,12 +1049,12 @@ pub fn attach_note_areas(
                 y: Some(y),
                 height: Some(height),
                 columns: Some(columns),
-                separator: separator_heights
-                    .get_for_page(*kind, page)
-                    .map(|height| crate::types::NoteLayoutItemContract {
+                separator: separator_heights.get_for_page(*kind, page).map(|height| {
+                    crate::types::NoteLayoutItemContract {
                         height: Some(height),
                         ..Default::default()
-                    }),
+                    }
+                }),
                 notes: Some(group.iter().map(|content| note_item(content)).collect()),
             });
         }
@@ -1379,16 +1379,14 @@ mod tests {
             serde_json::to_value(&heights).unwrap(),
             json!({"footnote": {"0": 48.0}})
         );
-        assert_eq!(heights.height_for_page(NoteKind::Footnote, &pages.pages[1]), 48.0);
+        assert_eq!(
+            heights.height_for_page(NoteKind::Footnote, &pages.pages[1]),
+            48.0
+        );
         heights.insert_for_width(NoteKind::Footnote, 0, 96.0, 48.0);
         heights.insert_for_width(NoteKind::Footnote, 0, 624.0, 16.0);
-        let reserved = calculate_note_reserved_heights(
-            &page_map,
-            &contents,
-            &pages.pages,
-            &heights,
-            &regions,
-        );
+        let reserved =
+            calculate_note_reserved_heights(&page_map, &contents, &pages.pages, &heights, &regions);
         assert_eq!(reserved.get(&1), Some(&68.0));
         assert_eq!(reserved.get(&2), Some(&36.0));
         attach_note_areas(&mut pages, &page_map, &contents, &heights, &regions);
@@ -1396,7 +1394,10 @@ mod tests {
             let area = &page.note_areas.as_ref().unwrap()[0];
             assert_eq!(area.columns, Some(2));
             assert_eq!(area.height, Some(20.0 + separator_height));
-            assert_eq!(area.separator.as_ref().unwrap().height, Some(separator_height));
+            assert_eq!(
+                area.separator.as_ref().unwrap().height,
+                Some(separator_height)
+            );
         }
     }
 
