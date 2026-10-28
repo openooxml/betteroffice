@@ -366,6 +366,8 @@ function detectFontCategory(fontName: string): FontCategory {
     return 'monospace';
   }
 
+  if (/sans[ -]?serif/.test(lower)) return 'sans-serif';
+
   // Serif indicators
   if (
     lower.includes('times') ||
