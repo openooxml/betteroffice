@@ -7816,10 +7816,7 @@ mod tests {
             page_break_run(),
             run("Version Control Table")
         ]});
-        assert_eq!(
-            paragraph_flow_breaks(&paragraph),
-            (Vec::new(), Vec::new())
-        );
+        assert_eq!(paragraph_flow_breaks(&paragraph), (Vec::new(), Vec::new()));
         assert!(paragraph_starts_with_page_break(&paragraph));
     }
 
