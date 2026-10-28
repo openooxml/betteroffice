@@ -1656,7 +1656,9 @@ mod tests {
                 base: ShapeBase {
                     id,
                     name: format!("Chart {id}"),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform::default(),

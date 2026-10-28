@@ -149,6 +149,7 @@ export class DocxAgentDocument {
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
+  private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
   private readonly textEditedComments = new Set<string>();
 
@@ -584,8 +585,14 @@ export class DocxAgentDocument {
     const draft = await createYrsSession();
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
-      if (source) draft.openDocx(new Uint8Array(source), false);
-      draft.loadState(this.session.encodeState());
+      const state = this.session.encodeState();
+      if (source) {
+        const bytes = new Uint8Array(source);
+        const host = draft.openDocx(bytes, false);
+        draft.bootstrapPeer(state, this.session.encodePeerMetadata(), bytes, host);
+      } else {
+        draft.loadState(state);
+      }
       return draft;
     } catch (error) { draft.destroy(); throw error; }
   }
@@ -625,9 +632,10 @@ export class DocxAgentDocument {
             resolved = new Map(this.resolvedComments);
             for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
             const earlier = this.resolvedComments;
+            const baseline = await this.commentBaselineBytes(version);
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
               comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })),
-              new Set([...this.textEditedComments, ...edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])]));
+              new Set([...this.textEditedComments, ...edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])]), baseline);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -809,6 +817,13 @@ export class DocxAgentDocument {
     if (!source) return;
     if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
     return this.commentPartCheck.check;
+  }
+
+  private commentBaselineBytes(version: number): Promise<Uint8Array> {
+    if (this.commentPackageBaseline?.version !== version) {
+      this.commentPackageBaseline = { version, bytes: this.export() };
+    }
+    return this.commentPackageBaseline.bytes;
   }
 
   private styles(): ParagraphStyle[] {

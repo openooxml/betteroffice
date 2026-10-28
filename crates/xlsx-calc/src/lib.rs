@@ -17,6 +17,7 @@ mod coercion;
 pub mod deps;
 pub mod engine;
 pub mod eval;
+mod fmath;
 pub mod functions;
 pub mod graph;
 pub mod lexer;

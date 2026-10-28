@@ -3,6 +3,7 @@
 
 pub mod chart;
 pub mod display_list;
+mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
@@ -2243,8 +2244,8 @@ fn resolve_text_rotation(raw: Option<u16>) -> (Option<f32>, bool) {
 pub fn rotated_available_length(cell_w: f32, cell_h: f32, deg: f32, font_size_pt: f32) -> f32 {
     let line = font_size_pt * geometry::PX_PER_PT as f32 * 1.2;
     let rad = deg.abs().to_radians();
-    let cos = rad.cos().abs();
-    let sin = rad.sin().abs();
+    let cos = fmath::cos(rad).abs();
+    let sin = fmath::sin(rad).abs();
     let mut available = f32::INFINITY;
     if cos > 1e-6 {
         available = available.min((cell_w - line * sin) / cos);

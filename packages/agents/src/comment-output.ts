@@ -394,7 +394,7 @@ function preservesComment(saved: XmlPart, element: XmlElement, original: Comment
   return fragment === `${original.xml.slice(0, at)} w14:paraId="${paraId}"${original.xml.slice(at)}`;
 }
 
-export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], textEdited: ReadonlySet<string> = new Set()): Promise<void> {
+export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], textEdited: ReadonlySet<string> = new Set(), baseline?: Uint8Array): Promise<void> {
   const zip = await JSZip.loadAsync(bytes);
   const rels = await relationships(zip, DOCUMENT_RELS);
   requireOutput(new Set(rels.map(rel => rel.id)).size === rels.length, 'Saving comments would create duplicate relationship ids.');
@@ -477,7 +477,8 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   }
   await verifyCommentCompanions(source.zip, zip, elements, fresh, resolvedParagraphIds);
   const mutable = new Set(['word/document.xml', '[Content_Types].xml', DOCUMENT_RELS, 'docProps/core.xml', ...COMMENT_TYPES.keys()]);
-  for (const [name, file] of Object.entries(source.zip.files)) {
+  const before = baseline ? await JSZip.loadAsync(baseline) : source.zip;
+  for (const [name, file] of Object.entries(before.files)) {
     if (file.dir || mutable.has(name)) continue;
     const original = await file.async('uint8array');
     const saved = await zip.file(name)?.async('uint8array');

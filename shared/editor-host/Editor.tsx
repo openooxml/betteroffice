@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { DocxEditor, type DocxEditorRef, type DocxErrorInfo, type TrackedChangesOptions } from "@betteroffice/docx-react";
 import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
@@ -19,8 +19,32 @@ import { savedBytes } from "./session";
 import "@betteroffice/docx-react/styles.css";
 
 const EDITOR_READY_TIMEOUT_MS = 30_000;
-const WORKBOOK_DISPOSED = "The workbook editor was disposed.";
-const PRESENTATION_DISPOSED = "The presentation editor was disposed.";
+
+export interface EditorMessages {
+  connected: string;
+  connecting: string;
+  disconnected: string;
+  documentDisposed: string;
+  workbookDisposed: string;
+  presentationDisposed: string;
+  stillOpening: string;
+}
+
+export const DEFAULT_EDITOR_MESSAGES: EditorMessages = {
+  connected: "Connected",
+  connecting: "Connecting…",
+  disconnected: "Disconnected",
+  documentDisposed: "The document editor was disposed.",
+  workbookDisposed: "The workbook editor was disposed.",
+  presentationDisposed: "The presentation editor was disposed.",
+  stillOpening: "The editor is still opening the file. Try again in a moment.",
+};
+
+export interface EditorTranslations {
+  docx?: ComponentProps<typeof DocxEditor>["i18n"];
+  xlsx?: ComponentProps<typeof XlsxEditor>["i18n"];
+  pptx?: ComponentProps<typeof PptxEditor>["i18n"];
+}
 
 configureDefaultFonts({ load: () => import("@betteroffice/fonts") });
 setGoogleFontsEnabled(false);
@@ -137,6 +161,8 @@ export interface EditorProps {
   onReady(api: EditorApi | null): void;
   onOpen(file: File): Promise<void>;
   onStatus(status: string): void;
+  i18n?: EditorTranslations;
+  messages?: Partial<EditorMessages>;
 }
 
 export default function Editor({
@@ -152,7 +178,11 @@ export default function Editor({
   onReady,
   onOpen,
   onStatus,
+  i18n,
+  messages,
 }: EditorProps) {
+  const text = useRef(DEFAULT_EDITOR_MESSAGES);
+  text.current = { ...DEFAULT_EDITOR_MESSAGES, ...messages };
   const serialization = useRef<{ failure: Error | null; bytes?: Uint8Array } | null>(null);
   const serializations = useRef<Promise<unknown>>(Promise.resolve());
   const docx = useRef<DocxEditorRef>(null);
@@ -194,7 +224,13 @@ export default function Editor({
         : new PptxProvider(presentationReplica!, transport, options);
     setProvider(next);
     const unsubscribe = next.onStatus(({ status, synced }) =>
-      callbacks.current.onStatus(synced ? "Connected" : status)
+      callbacks.current.onStatus(
+        synced || status === "connected"
+          ? text.current.connected
+          : status === "connecting"
+          ? text.current.connecting
+          : text.current.disconnected
+      )
     );
     const unsubscribeError = next.onError((error) =>
       callbacks.current.onError(error)
@@ -243,11 +279,11 @@ export default function Editor({
     [apiUnavailable]
   );
   const workbookReady = useCallback(
-    (api: XlsxAsyncEditorApi) => apiReady(xlsx, api, WORKBOOK_DISPOSED),
+    (api: XlsxAsyncEditorApi) => apiReady(xlsx, api, text.current.workbookDisposed),
     [apiReady]
   );
   const presentationReady = useCallback(
-    (api: PptxAsyncEditorApi) => apiReady(pptx, api, PRESENTATION_DISPOSED),
+    (api: PptxAsyncEditorApi) => apiReady(pptx, api, text.current.presentationDisposed),
     [apiReady]
   );
 
@@ -261,7 +297,7 @@ export default function Editor({
     if (file.format === "docx" && !legacyDocx() && !painted) return;
     let active = true;
     const disposed = new Error(
-      file.format === "xlsx" ? WORKBOOK_DISPOSED : PRESENTATION_DISPOSED
+      file.format === "xlsx" ? text.current.workbookDisposed : text.current.presentationDisposed
     );
     const whenReady = async <Api,>(ref: { current: Api | null }): Promise<Api> => {
       if (!active) throw disposed;
@@ -274,9 +310,7 @@ export default function Editor({
           apiWaiter.current = waiter;
           timeout = setTimeout(() => {
             if (apiWaiter.current !== waiter) return;
-            apiUnavailable(new Error(
-              "The editor is still opening the file. Try again in a moment."
-            ));
+            apiUnavailable(new Error(text.current.stillOpening));
           }, EDITOR_READY_TIMEOUT_MS);
         }).finally(() => clearTimeout(timeout));
         api = ref.current;
@@ -287,7 +321,7 @@ export default function Editor({
     callbacks.current.onReady({
       ...(file.format === "docx" ? {
         async flushPendingInput() {
-          if (!active || !docx.current) throw new Error("The document editor was disposed.");
+          if (!active || !docx.current) throw new Error(text.current.documentDisposed);
           await docx.current.flushPendingInput();
         },
       } : {}),
@@ -314,7 +348,7 @@ export default function Editor({
                 : file.format === "xlsx"
                 ? await serializeWorkbook(await whenReady(xlsx))
                 : await (await whenReady(pptx)).saveAsync();
-            return savedBytes(bytes, current.failure);
+            return savedBytes(bytes, current.failure, text.current.stillOpening);
           } finally {
             serialization.current = null;
           }
@@ -334,6 +368,7 @@ export default function Editor({
   if (file.format === "docx")
     return (
       <DocxEditor
+        i18n={i18n?.docx}
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
         trackedChanges={TRACKED_CHANGES}
@@ -370,6 +405,7 @@ export default function Editor({
   if (file.format === "xlsx")
     return (
       <XlsxEditor
+        i18n={i18n?.xlsx}
         file={file.bytes}
         fileName={name}
         onSave={(bytes) => {
@@ -394,6 +430,7 @@ export default function Editor({
     );
   return (
     <PptxEditor
+      i18n={i18n?.pptx}
       file={file.bytes}
       fileName={name}
       fonts={file.fonts ?? []}

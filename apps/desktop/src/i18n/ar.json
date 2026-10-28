@@ -1,0 +1,54 @@
+{
+  "_lang": "ar",
+  "titleBar": {
+    "edited": "تم التحرير",
+    "collaborate": "تعاون",
+    "connecting": "جارٍ الاتصال…",
+    "home": "الرئيسية",
+    "open": "فتح…",
+    "save": "حفظ"
+  },
+  "notice": {
+    "dismissError": "تجاهل الخطأ"
+  },
+  "room": {
+    "roomId": "معرّف الغرفة",
+    "yourName": "اسمك",
+    "joinRoom": "الانضمام إلى الغرفة",
+    "leaveRoom": "مغادرة الغرفة",
+    "hint": "افتح الملف نفسه وأدخل معرّف الغرفة نفسه للتحرير معًا.",
+    "saveBeforeJoining": "احفظ تغييراتك قبل الانضمام إلى غرفة. يجب على الجميع فتح الملف نفسه."
+  },
+  "editor": {
+    "opening": "جارٍ فتح المحرر…",
+    "viewing": "عرض",
+    "editing": "تحرير",
+    "connected": "متصل",
+    "workbookDisposed": "تم إغلاق محرر المصنف.",
+    "presentationDisposed": "تم إغلاق محرر العرض التقديمي.",
+    "documentDisposed": "تم إغلاق محرر المستند.",
+    "stillOpening": "ما زال المحرر يفتح الملف. حاول مرة أخرى بعد لحظة.",
+    "disconnected": "غير متصل"
+  },
+  "start": {
+    "dropFileHere": "أسقط ملفك هنا",
+    "openDocument": "فتح مستند",
+    "openSpreadsheet": "فتح جدول بيانات",
+    "openPresentation": "فتح عرض تقديمي",
+    "intro": "تابع من حيث توقفت.",
+    "openFile": "فتح ملف…",
+    "opening": "جارٍ الفتح…",
+    "dropHint": "أو أسقط ملفًا هنا",
+    "recentFiles": "الملفات الأخيرة",
+    "recent": "الأخيرة"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "تجاهل التغييرات غير المحفوظة؟"
+  },
+  "errors": {
+    "openInApp": "افتح ملفات .{ext} في BetterOffice {app}.",
+    "couldNotRead": "تعذرت قراءة {name}.",
+    "chooseFile": "اختر ملف .{ext}.",
+    "unsupportedFile": "اختر مستند Word أو جدول بيانات Excel أو عرضاً تقديمياً في PowerPoint."
+  }
+}

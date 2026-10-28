@@ -317,7 +317,7 @@ fn spec_max_adjust(shape: &str, adjust: &str, aspect: f64) -> f64 {
 
 /// Aspect ratios from 1:64 to 64:1, where shortest-side mistakes are largest.
 fn aspect() -> impl Strategy<Value = f64> {
-    (-6.0f64..6.0).prop_map(f64::exp2)
+    (-6.0f64..6.0).prop_map(libm::exp2)
 }
 
 /// Any `f64` aspect, including the zero, infinite and NaN a degenerate extent yields.
@@ -436,7 +436,7 @@ fn turn(shape: &str, aspect: f64) -> (Rotation, f64) {
 }
 
 fn distance(a: (f64, f64), b: (f64, f64)) -> f64 {
-    (a.0 - b.0).hypot(a.1 - b.1)
+    libm::hypot(a.0 - b.0, a.1 - b.1)
 }
 
 /// The size of the feature an adjust controls, growing with the adjust.

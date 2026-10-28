@@ -9,6 +9,7 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "esModuleInterop": true,
+    "resolveJsonModule": true,
     "types": ["vite/client", "bun"],
     "paths": {
       "@betteroffice/docx-react/peerless-harness": ["../../packages/docx-react/dist/peerless-harness.d.mts"]

@@ -9,6 +9,8 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transfo
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_render::{Align, NumberFormatLayout, Rect as DlRect, TextValign};
 
+use crate::fmath;
+
 // synthetic bold nudges a second glyph pass right; synthetic italic shears.
 const BOLD_OFFSET_PX: f32 = 0.35;
 const ITALIC_SHEAR: f32 = 0.21;
@@ -313,7 +315,7 @@ pub fn paint_rotated_text(
     let descent = -face.descender() as f32 * scale;
     let line_h = ascent + descent;
     let a = -deg.to_radians();
-    let (sin, cos) = a.sin_cos();
+    let (sin, cos) = fmath::sin_cos(a);
     let bbox_w = (run_width * cos).abs() + (line_h * sin).abs();
     let bbox_h = (run_width * sin).abs() + (line_h * cos).abs();
     let bbox_left = match run.align {
