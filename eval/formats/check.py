@@ -1253,8 +1253,9 @@ def accept_revisions(root):
 
 
 def opening_run_props(paragraph, prefix):
-    for run in paragraph.findall(f'{prefix}:r', NS):
-        if any(node.text for node in run.findall(f'{prefix}:t', NS)):
+    runs = {q(prefix, 'r'), q(prefix, 'fld')} if prefix == 'a' else {w('r')}
+    for run in paragraph.iter():
+        if run.tag in runs and any(node.text for node in run.findall(f'{prefix}:t', NS)):
             return run.find(f'{prefix}:rPr', NS)
     return paragraph.find(f'{prefix}:r/{prefix}:rPr', NS)
 

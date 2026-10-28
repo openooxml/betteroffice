@@ -555,7 +555,11 @@ class OfficeEquivalentTests(unittest.TestCase):
         field = ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a </w:instrText></w:r>'
                  '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Field result</w:t></w:r>'
                  '<w:r><w:fldChar w:fldCharType="end"/></w:r>' + text_run(' tail.') + '</w:p>')
+        link = ('<w:p><w:hyperlink w:anchor="a"><w:r><w:rPr><w:i/></w:rPr><w:t>Linked</w:t></w:r></w:hyperlink>'
+                + text_run(' plain ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>later</w:t></w:r></w:p>')
         for name, template, inserted, accepted in (
+                ('italic like an opening hyperlink run', link, italic, True),
+                ('plain after an italic opening hyperlink run', link, plain, False),
                 ('plain like the opening run', body, plain, True),
                 ('italic like a later run', body, italic, False),
                 ('italic like a field result that opens the text', field, italic, True),
