@@ -53,7 +53,7 @@ pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
 #[doc(hidden)]
-pub use story::baseline_story;
+pub use story::{baseline_story, style_from_run_properties};
 pub use table::{TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
