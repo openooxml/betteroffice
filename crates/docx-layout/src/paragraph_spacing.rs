@@ -176,6 +176,117 @@ fn effective_style_id(block: &ParagraphBlock) -> &str {
         .unwrap_or("")
 }
 
+fn effective_num_id(block: &ParagraphBlock) -> Option<f64> {
+    block
+        .attrs
+        .as_ref()?
+        .num_pr
+        .as_ref()?
+        .num_id
+        .filter(|id| id.is_finite() && *id > 0.0)
+}
+
+pub fn suppress_document_auto_before(block: &mut LayoutBlock) {
+    if let LayoutBlock::Paragraph(paragraph) = block
+        && let Some(spacing) = paragraph
+            .attrs
+            .as_mut()
+            .and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub fn suppress_break_auto_before(block: &mut LayoutBlock, previous: Option<&LayoutBlock>) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let breaks_before = paragraph.attrs.as_ref().is_some_and(|attrs| {
+        attrs.page_break_before == Some(true) || attrs.page_break_before_run == Some(true)
+    }) || matches!(previous, Some(LayoutBlock::PageBreak(_)));
+    if !breaks_before {
+        return;
+    }
+    if let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+        && spacing.before_auto == Some(true)
+    {
+        spacing.before = Some(0.0);
+    }
+}
+
+pub fn suppress_list_auto_spacing(
+    block: &mut LayoutBlock,
+    previous: Option<&LayoutBlock>,
+    next: Option<&LayoutBlock>,
+) {
+    let LayoutBlock::Paragraph(paragraph) = block else {
+        return;
+    };
+    let Some(num_id) = effective_num_id(paragraph) else {
+        return;
+    };
+    let same_list = |neighbor: Option<&LayoutBlock>| {
+        matches!(neighbor, Some(LayoutBlock::Paragraph(other))
+            if effective_num_id(other) == Some(num_id))
+    };
+    let Some(spacing) = paragraph
+        .attrs
+        .as_mut()
+        .and_then(|attrs| attrs.spacing.as_mut())
+    else {
+        return;
+    };
+    if spacing.before_auto == Some(true) && same_list(previous) {
+        spacing.before = Some(0.0);
+    }
+    if spacing.after_auto == Some(true) && same_list(next) {
+        spacing.after = Some(0.0);
+    }
+}
+
+/// The indices of the blocks that take part in the text flow; anchored
+/// drawings are lowered ahead of their paragraph and sit outside it.
+fn flow_indices<T>(items: &[T], block: impl Fn(&T) -> &LayoutBlock) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&index| crate::header_footer::contributes_to_flow(block(&items[index])))
+        .collect()
+}
+
+/// Splits `items` into the flow neighbours of `flow[k]` and the item itself.
+fn flow_window<'a, T>(
+    items: &'a mut [T],
+    flow: &[usize],
+    k: usize,
+) -> (Option<&'a T>, &'a mut T, Option<&'a T>) {
+    let index = flow[k];
+    let (head, tail) = items.split_at_mut(index);
+    let (current, rest) = tail.split_first_mut().unwrap();
+    let previous = k.checked_sub(1).map(|j| &head[flow[j]]);
+    let next = flow.get(k + 1).map(|&n| &rest[n - index - 1]);
+    (previous, current, next)
+}
+
+pub fn apply_list_auto_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    let flow = flow_indices(blocks, |block| block);
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(blocks, &flow, k);
+        suppress_list_auto_spacing(current, previous, next);
+    }
+    for block in blocks.iter_mut() {
+        if let LayoutBlock::Table(table) = block {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    apply_list_auto_spacing_blocks(&mut cell.blocks);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     let LayoutBlock::Paragraph(c) = curr else {
         return;
@@ -216,6 +327,7 @@ pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutB
 }
 
 pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+    apply_list_auto_spacing_blocks(blocks);
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i], &mut tail[0]);
@@ -232,6 +344,19 @@ pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
 }
 
 pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
+    let flow = flow_indices(measured, |entry| &entry.block);
+    if let Some(&first) = flow.first() {
+        suppress_document_auto_before(&mut measured[first].block);
+    }
+    for k in 0..flow.len() {
+        let (previous, current, next) = flow_window(measured, &flow, k);
+        suppress_break_auto_before(&mut current.block, previous.map(|entry| &entry.block));
+        suppress_list_auto_spacing(
+            &mut current.block,
+            previous.map(|entry| &entry.block),
+            next.map(|entry| &entry.block),
+        );
+    }
     for i in 0..measured.len().saturating_sub(1) {
         let (head, tail) = measured.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i].block, &mut tail[0].block);

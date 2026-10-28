@@ -14,6 +14,7 @@ import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
+import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
@@ -131,9 +132,7 @@ export function usePeerlessPresentation(
     };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
     const recoveryBase = props.file instanceof Uint8Array ? props.file.slice() : new Uint8Array(props.file).slice();
-    let checkpoint = { bytes: recoveryBase, throughSeq: 0, version: '' };
-    let checkpointUpdate: Uint8Array | undefined;
-    let journal: { throughSeq: number; version: string; updates: Uint8Array[] }[] = [];
+    const recovery = peerlessRecoveryFactory.create(recoveryBase);
     let firstPainted = false;
     let published = false;
     let paintedFrame: PresentationCommandFrame | undefined;
@@ -284,12 +283,8 @@ export function usePeerlessPresentation(
     async function saveCheckpoint(client: PresentationCommandClient): Promise<void> {
       await base?.fence(); await whenPainted();
       if (!current()) return;
-      const result = await client.checkpoint?.();
-      if (current() && result && result.throughSeq >= checkpoint.throughSeq) {
-        checkpoint = { bytes: new Uint8Array(result.bytes).slice(), throughSeq: result.throughSeq, version: result.version };
-        checkpointUpdate = result.recoveryUpdate ? new Uint8Array(result.recoveryUpdate).slice() : undefined;
-        journal = journal.filter((entry) => entry.throughSeq > result.throughSeq);
-      }
+      const result = await client.checkpoint?.({ rebase: recovery.needsRebase() });
+      if (current() && result) recovery.checkpoint(result);
     }
 
     function scheduleCheckpoint(client: PresentationCommandClient): void {
@@ -380,6 +375,7 @@ export function usePeerlessPresentation(
       const owner = session;
       void owner.ready.then((client) => {
         if (!current()) return;
+        recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version);
         const cacheMedia = (assets: PresentationCommandFrame['media']) => {
           if (!current()) return;
           for (const asset of assets) pendingMedia.set(asset.assetId, asset.bytes);
@@ -395,8 +391,6 @@ export function usePeerlessPresentation(
       void Promise.all([owner.ready, fontsReady]).then(async ([client]) => {
         while (current() && openingModes.size) await Promise.all([...openingModes]);
         if (!current()) return;
-        checkpoint.version = client.state.version;
-        checkpointUpdate = client.state.recoveryUpdate ? new Uint8Array(client.state.recoveryUpdate).slice() : undefined;
         base = peerlessViewStoreFactory.create(client, {
           checkpoint(pixels) {
             const restoreFrame = framePainter?.checkpoint(pixels);
@@ -488,10 +482,7 @@ export function usePeerlessPresentation(
         }
         disposers.push(client.subscribe((ack) => {
           if (!current()) return;
-          if (ack.throughSeq > checkpoint.throughSeq && ack.updates?.length) {
-            journal.push({ throughSeq: ack.throughSeq, version: ack.version,
-              updates: ack.updates.map((update) => new Uint8Array(update.bytes).slice()) });
-          }
+          if (ack.updates?.length) recovery.append(ack.throughSeq, ack.version, ack.updates);
           if (ack.slides) {
             const restored = new Set(ack.slides.map((slide) => slide.id));
             for (const id of vanished) if (restored.has(id)) vanished.delete(id);
@@ -541,12 +532,13 @@ export function usePeerlessPresentation(
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             if (!fatal) await saveCheckpoint(client);
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            if (!journal.length) return { ...checkpoint, bytes: checkpoint.bytes.slice(), recovery: true };
-            if (!checkpointUpdate) throw new Error('Recovery baseline is unavailable');
-            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts, initialUpdate: checkpointUpdate });
+            if (!recovery.hasUncheckpointedUpdates()) return { ...recovery.saved, bytes: recovery.saved.bytes.slice(), recovery: true };
+            if (!recovery.baseline) throw new Error('Recovery baseline is unavailable');
+            const { baseline, journal } = recovery;
+            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts, initialUpdate: baseline.update });
             try {
               const replay = await recovering.ready;
-              for (const entry of journal) for (const update of entry.updates) {
+              for (const entry of journal.filter((entry) => entry.throughSeq > baseline.throughSeq)) for (const update of entry.updates) {
                 if (!currentFile()) throw new PptxWorkerEditorDisposedError();
                 const ack = await replay.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: update.slice().buffer,
                   inputTime: 0, undoGroup: 'recovery' } });

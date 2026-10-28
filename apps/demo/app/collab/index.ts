@@ -1,5 +1,5 @@
 export { CollaborationControls } from "./CollaborationControls";
-export { createRoomTransport } from "./createRoomTransport";
+export { createRoomTransport } from "../../../../shared/editor-host/collaboration/createRoomTransport";
 export {
   COLLAB_RELAY_ORIGIN,
   useCollabRoom,
@@ -15,4 +15,4 @@ export type {
   CollaborationStatus,
   CollaborationTransport,
   CollaborationTransportEvent,
-} from "./types";
+} from "../../../../shared/editor-host/collaboration/types";

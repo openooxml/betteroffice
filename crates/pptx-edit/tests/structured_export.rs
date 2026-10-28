@@ -2072,7 +2072,10 @@ fn read_content_slide_title_visibility_and_layout() {
             let json = serde_json::to_value(slide).unwrap();
             assert_eq!(json["title"], json!(expected_title));
             assert_eq!(json["hidden"], json!(hidden));
-            assert_eq!(json["layout"], json!({"name": "Content", "type": "obj"}));
+            assert_eq!(
+                json["layout"],
+                json!({"name": "Content", "type": "obj", "headerFooter": null})
+            );
             assert_eq!(session.encode_state_as_update_v1(), state);
         }
     }

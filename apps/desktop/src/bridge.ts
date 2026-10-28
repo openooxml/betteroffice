@@ -1,4 +1,6 @@
-export type Format = "docx" | "xlsx" | "pptx";
+import type { Format } from "../../../shared/editor-host/Editor";
+
+export type { Format };
 export interface OpenFile {
   id: string;
   name: string;
