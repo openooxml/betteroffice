@@ -1,5 +1,5 @@
 use docx_edit::structured::{
-    Block, BlockKind, CachedResult, ExportOptions, Inline, InlineKind, RevisionView, StorySelection,
+    Block, BlockKind, ExportOptions, Inline, InlineKind, RevisionView, StorySelection,
 };
 use docx_edit::{
     DrawingProperties, EditCtx, EditTextView, EditingDoc, Position, ReadParagraphsRequest,
@@ -592,11 +592,7 @@ fn control_fixture(preview: bool) -> Vec<u8> {
 fn collect_inline_drawings<'a>(inlines: &'a [Inline], out: &mut Vec<&'a DrawingProperties>) {
     for inline in inlines {
         match &inline.content {
-            InlineKind::ContentControl { inlines, .. }
-            | InlineKind::Field {
-                cached_result: CachedResult::Inline { inlines },
-                ..
-            } => collect_inline_drawings(inlines, out),
+            InlineKind::ContentControl { inlines, .. } => collect_inline_drawings(inlines, out),
             InlineKind::Image {
                 drawing: Some(drawing),
                 ..
@@ -778,91 +774,6 @@ fn prepend_paragraphs(content: &str) -> Vec<u8> {
 }
 
 #[test]
-fn field_atoms_and_inline_controls_report_cached_result_drawings() {
-    let run = |id: &str| {
-        format!(
-            "<w:r>{}</w:r>",
-            inline_picture(
-                id,
-                &format!(r#"name="N-{id}" title="T-{id}" descr="D-{id}""#)
-            )
-        )
-    };
-    let simple = format!(
-        r#"<w:fldSimple w:instr="INCLUDEPICTURE logo">{}</w:fldSimple>"#,
-        run("201")
-    );
-    let complex = format!(
-        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>INCLUDEPICTURE logo</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
-        run("202")
-    );
-    let body = format!(
-        r#"<w:p w14:paraId="50000001">{simple}{complex}</w:p><w:p w14:paraId="50000002">{}</w:p>"#,
-        control(
-            &format!("{}{simple}{complex}{}", run("203"), run("204")),
-            "<w:richText/>"
-        )
-    );
-    let doc = open(&prepend_paragraphs(&body));
-    let read = doc
-        .read_paragraphs(&ReadParagraphsRequest {
-            story: Some("body".to_owned()),
-            para_ids: Some(vec!["50000001".to_owned(), "50000002".to_owned()]),
-            view: EditTextView::Accepted,
-            expect_version: None,
-        })
-        .unwrap();
-    let ids = |atom: &TextAtom| {
-        atom.drawings
-            .iter()
-            .map(|drawing| drawing.doc_pr_id.clone().unwrap())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(ids(&read.paragraphs[0].atoms[0]), ["201"]);
-    assert_eq!(ids(&read.paragraphs[0].atoms[1]), ["202"]);
-    assert_eq!(
-        ids(&read.paragraphs[1].atoms[0]),
-        ["203", "201", "202", "204"]
-    );
-    let content = doc
-        .export_structured(&ExportOptions::new(RevisionView::Accepted))
-        .unwrap()
-        .content;
-    let mut inlines = Vec::new();
-    for story in &content.stories {
-        collect_inlines(&story.blocks, &mut inlines);
-    }
-    let mut exported = Vec::new();
-    collect_inline_drawings(&inlines, &mut exported);
-    let exported: Vec<_> = exported
-        .into_iter()
-        .filter(|drawing| {
-            drawing
-                .doc_pr_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with("20"))
-        })
-        .cloned()
-        .collect();
-    let drawings: Vec<_> = read
-        .paragraphs
-        .iter()
-        .flat_map(|paragraph| {
-            paragraph
-                .atoms
-                .iter()
-                .flat_map(|atom| atom.drawings.iter().cloned())
-        })
-        .collect();
-    assert_eq!(drawings, exported);
-    for drawing in drawings {
-        let id = drawing.doc_pr_id.unwrap();
-        assert_eq!(drawing.title, Some(format!("T-{id}")));
-        assert_eq!(drawing.descr, Some(format!("D-{id}")));
-    }
-}
-
-#[test]
 fn inline_control_alternate_content_keeps_selected_picture_identity() {
     let selected = inline_picture(
         "401",
@@ -907,4 +818,73 @@ fn inline_control_alternate_content_keeps_selected_picture_identity() {
         }
     }
     assert_eq!(drawings, &exported.into_iter().cloned().collect::<Vec<_>>());
+}
+
+#[test]
+fn inline_control_multi_drawing_choice_matches_base_branch_parsing() {
+    let picture = inline_picture("401", r#"name="Picture" descr="Picture description""#);
+    let textbox = concat!(
+        r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="402" name="Text box" descr="Text box description"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+        r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr/><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+    );
+    for drawings in [format!("{picture}{textbox}"), format!("{textbox}{textbox}")] {
+        let alternate = format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="wps">{drawings}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#
+        );
+        let xml = format!(
+            r#"<w:r {NS} xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">{alternate}</w:r>"#
+        );
+        let limits = docx_parse::xml::ParseLimits::default();
+        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+        let xml =
+            docx_parse::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        let alternate_element = xml
+            .root()
+            .unwrap()
+            .child_by_full_name("mc:AlternateContent")
+            .unwrap();
+        let expected: Vec<_> = docx_parse::paragraph::parse_alternate_content_branch(
+            alternate_element,
+            None,
+            &mut budget,
+            None,
+            false,
+        )
+        .unwrap()
+        .map(|(_, contents)| {
+            contents
+                .into_iter()
+                .filter_map(|content| content.drawing_properties().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+        let doc = open(&prepend_paragraphs(&format!(
+            r#"<w:p w14:paraId="60000002">{}</w:p>"#,
+            control(&format!("<w:r>{alternate}</w:r>"), "<w:richText/>")
+        )));
+        let read = doc
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: Some("body".to_owned()),
+                para_ids: Some(vec!["60000002".to_owned()]),
+                view: EditTextView::Accepted,
+                expect_version: None,
+            })
+            .unwrap();
+        assert_eq!(read.paragraphs[0].atoms[0].drawings, expected);
+        let content = doc
+            .export_structured(&ExportOptions::new(RevisionView::Accepted))
+            .unwrap()
+            .content;
+        let mut inlines = Vec::new();
+        for story in &content.stories {
+            collect_inlines(&story.blocks, &mut inlines);
+        }
+        let mut exported = Vec::new();
+        for inline in &inlines {
+            if let InlineKind::ContentControl { inlines, .. } = &inline.content {
+                collect_inline_drawings(inlines, &mut exported);
+            }
+        }
+        assert_eq!(exported.into_iter().cloned().collect::<Vec<_>>(), expected);
+    }
 }

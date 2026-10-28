@@ -1208,18 +1208,13 @@ fn parse_run_with_context(
                     _ => true,
                 });
                 let has_text_box = alternate_content_has_text_box(child);
-                let control_text_box = in_control
-                    && branch
-                        .is_some_and(|branch| branch.child_elements().any(is_text_box_drawing));
+                let control_text_box =
+                    in_control && branch.and_then(single_text_box_drawing).is_some();
                 if control_text_box || (!modeled && !has_text_box) {
                     let fallback_properties = if control_text_box {
-                        branch.and_then(|branch| {
-                            branch.child_elements().find_map(|drawing| {
-                                is_text_box_drawing(drawing)
-                                    .then(|| crate::image::parse_drawing_properties(drawing))
-                                    .flatten()
-                            })
-                        })
+                        branch
+                            .and_then(single_text_box_drawing)
+                            .and_then(crate::image::parse_drawing_properties)
                     } else {
                         parsed
                             .iter()
@@ -1571,7 +1566,10 @@ fn parse_alternate_content_branch_with_context<'a>(
                     unsupported = Some((branch, parsed));
                 }
             }
-            if preserve_text_box && branch_text_box && text_box_branch.is_none() {
+            if preserve_text_box
+                && single_text_box_drawing(branch).is_some()
+                && text_box_branch.is_none()
+            {
                 text_box_branch = Some(branch);
                 unsupported = Some((branch, Vec::new()));
             }
@@ -1579,6 +1577,15 @@ fn parse_alternate_content_branch_with_context<'a>(
         }
     }
     Ok(unsupported)
+}
+
+fn single_text_box_drawing(branch: &XmlElement) -> Option<&XmlElement> {
+    let mut drawings = branch
+        .child_elements()
+        .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"));
+    let drawing = drawings.next()?;
+    (drawings.next().is_none() && drawing.local_name() == "drawing" && is_text_box_drawing(drawing))
+        .then_some(drawing)
 }
 
 fn contains_drawing_owned_content(element: &XmlElement) -> bool {

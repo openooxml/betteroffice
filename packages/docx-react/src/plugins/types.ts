@@ -242,8 +242,7 @@ export interface DocxPluginGeometry {
    * layout is complete and `layout-unavailable` before. A `drawing` target answers with the
    * drawn frame box of the drawing atom at its `offset`, on every page that paints it; an
    * optional `index` addresses a drawing inside a content-control atom. Invalid offsets or
-   * indices are `missing-target`. Cached field-result drawings have no individual display
-   * position and answer `missing-target`. Refuses stale or unrendered layouts.
+   * indices are `missing-target`. Refuses stale or unrendered layouts.
    * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
    * whose read failed is `read-failed`; overlays render again once either read settles.
    */
