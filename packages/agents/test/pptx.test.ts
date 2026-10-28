@@ -480,6 +480,28 @@ for (const mapped of [false, true]) {
   });
 }
 
+test('PPTX export falls back to a plain save when an untouched text box exceeds render limits', async () => {
+  const zip = await JSZip.loadAsync(await presentationFixture());
+  const path = 'ppt/slides/slide1.xml';
+  const bigText = 'x'.repeat(4_194_305);
+  const bigShape = `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Large text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="1000000"/><a:ext cx="8000000" cy="1000000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${bigText}</a:t></a:r></a:p></p:txBody></p:sp>`;
+  zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>').replace('<a:bodyPr/>', '<a:bodyPr><a:normAutofit/></a:bodyPr>').replace('</p:spTree>', `${bigShape}</p:spTree>`));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const deck = await openPptx(bytes);
+  const handle = openPresentation(bytes);
+  const plain = attachPptx(handle);
+  try {
+    const title = 'Punishments: 2011 to 2018 '.repeat(4).trim();
+    for (const presentation of [deck, plain]) apply(presentation, [{ op: 'replace_text', ...first(presentation), text: title }]);
+    const expected = await (await JSZip.loadAsync(handle.save())).file(path)!.async('string');
+    const exported = await (await JSZip.loadAsync(await deck.export())).file(path)!.async('string');
+    expect(exported).toBe(expected);
+    expect(exported).toContain(`<a:t>${title}</a:t>`);
+    expect(exported).toContain(`<a:t>${bigText}</a:t>`);
+    expect(exported).toContain('<a:normAutofit/>');
+  } finally { deck.close(); plain.close(); handle.dispose(); }
+}, 30_000);
+
 test('PPTX attached export fits inherited theme fonts with the live renderer', async () => {
   const zip = await JSZip.loadAsync(await layoutFixture());
   const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';

@@ -567,7 +567,12 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (version === this.sourceVersion) return handle.save();
       const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts, SAVE_FONT_STYLES));
       this.alive();
-      if (handle.version() === version) return handle.save(fonts);
+      if (handle.version() !== version) continue;
+      try { return handle.save(fonts); }
+      catch (error) {
+        if (error instanceof Error && /^(?:could not write PPTX: )?render resource limit exceeded(?::|$)/u.test(error.message)) return handle.save();
+        throw error;
+      }
     }
   }
   protected reopen(bytes: Uint8Array) { const reopened = openPresentation(bytes); reopened.dispose(); }

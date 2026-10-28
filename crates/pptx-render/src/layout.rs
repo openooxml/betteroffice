@@ -744,8 +744,12 @@ fn has_autofit_edits(
     baseline: &[ShapeSnapshot],
     parents: &SlideParents<'_>,
 ) -> bool {
+    let mut baseline_by_id = HashMap::with_capacity(baseline.len());
+    for shape in baseline {
+        baseline_by_id.entry(shape.id.as_str()).or_insert(shape);
+    }
     current.iter().any(|shape| {
-        let base = baseline.iter().find(|base| base.id == shape.id);
+        let base = baseline_by_id.get(shape.id.as_str()).copied();
         if has_autofit_edits(
             &shape.children,
             base.map_or(&[], |base| &base.children),
@@ -10287,6 +10291,65 @@ mod tests {
             plain[0].width
         );
         assert!(tight[0].width >= 0.0, "{}", tight[0].width);
+    }
+
+    #[test]
+    fn autofit_edit_scan_is_linear_for_large_unchanged_slides() {
+        let shape = ShapeSnapshot {
+            id: String::new(),
+            source_id: 0,
+            kind: ShapeKind::Shape,
+            name: String::new(),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            rotation_deg: 0.0,
+            flip_h: false,
+            flip_v: false,
+            inherited: None,
+            hidden: false,
+            text_box: false,
+            aspect_ratio_locked: false,
+            geometry: "rect".to_owned(),
+            adjust_values: BTreeMap::new(),
+            placeholder: None,
+            fill: None,
+            resolved_fill_color: None,
+            outline: None,
+            resolved_outline_color: None,
+            media_part_path: None,
+            pending_media: None,
+            blip_effects: Vec::new(),
+            table_structure: None,
+            graphic: None,
+            text_stories: Vec::new(),
+            children: Vec::new(),
+        };
+        let baseline: Vec<_> = (0..=50_000)
+            .map(|index| ShapeSnapshot {
+                id: format!("slide1/shape{index:05}"),
+                source_id: index,
+                ..shape.clone()
+            })
+            .collect();
+        let mut current = baseline.clone();
+        current.last_mut().unwrap().text_stories.push(StorySnapshot {
+            id: "changed".to_owned(),
+            length: 7,
+            paragraphs: vec![pptx_edit::ParagraphSnapshot {
+                runs: vec![pptx_edit::TextRunSnapshot {
+                    text: "Changed".to_owned(),
+                    style: TextStyle::default(),
+                }],
+                ..pptx_edit::ParagraphSnapshot::default()
+            }],
+        });
+        let start = std::time::Instant::now();
+        let edited = has_autofit_edits(&current, &baseline, &SlideParents::default());
+        let elapsed = start.elapsed();
+        assert!(!edited);
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
     }
 
     #[test]
