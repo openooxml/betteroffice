@@ -1229,13 +1229,20 @@ fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
     plan.para_inherit = attrs(json!({"outlineLevel": 0, "spaceAfter": 160}));
     plan.mark_inherit = attrs(json!({"bold": true}));
     plan.para_deltas = vec![
-        delta("pStyle", Some(json!("ListParagraph")), Some(json!("Heading1"))),
+        delta(
+            "pStyle",
+            Some(json!("ListParagraph")),
+            Some(json!("Heading1")),
+        ),
         delta("outlineLevel", None, Some(json!(0))),
     ];
     plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);
     assert_eq!(
         write(source, &plan).unwrap(),
-        source.replace("<w:pStyle w:val='ListParagraph'/>", "<w:pStyle w:val='Heading1'/>")
+        source.replace(
+            "<w:pStyle w:val='ListParagraph'/>",
+            "<w:pStyle w:val='Heading1'/>"
+        )
     );
 }
 
@@ -1258,7 +1265,11 @@ fn paragraph_patch_numbered_restyle_with_an_unexplained_delta_is_refused() {
     plan.para_inherit = attrs(json!({"outlineLevel": 0}));
     plan.mark_inherit = attrs(json!({"bold": true}));
     plan.para_deltas = vec![
-        delta("pStyle", Some(json!("ListParagraph")), Some(json!("Heading1"))),
+        delta(
+            "pStyle",
+            Some(json!("ListParagraph")),
+            Some(json!("Heading1")),
+        ),
         delta("alignment", None, Some(json!("center"))),
     ];
     plan.result_sha256 = result_sha256(&plan.seed.units.clone(), &after);

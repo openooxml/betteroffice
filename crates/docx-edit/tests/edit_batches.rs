@@ -1724,7 +1724,12 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         EditFailureCode::Unsupported
     );
     for style in ["ListNumber", "ListChild", "ListGrandchild"] {
-        let refusal = refuse(&doc, &UndoSession::new(), vec![set_style("00000002", style)]).failure;
+        let refusal = refuse(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000002", style)],
+        )
+        .failure;
         assert_eq!(refusal.code, EditFailureCode::Unsupported);
         assert_eq!(
             refusal.message,
