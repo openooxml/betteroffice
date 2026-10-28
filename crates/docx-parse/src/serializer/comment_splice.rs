@@ -1143,6 +1143,25 @@ mod tests {
 
     const FRAGMENT: &str = "<w:comment w:id=\"0\" w:author=\"Reviewer\" w:date=\"2026-01-05T09:00:00Z\" w:initials=\"R\"><w:p w14:paraId=\"1A2B3C4D\" w14:textId=\"77777777\" w:rsidR=\"00AB\" w:rsidRDefault=\"00CD\"><w:pPr><w:pStyle w:val=\"CommentText\"/></w:pPr><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>First identity proofed here. </w:t></w:r><w:proofErr w:type=\"spellStart\"/><w:r><w:rPr><w:b/></w:rPr><w:t>Second identity </w:t></w:r><w:r><w:rPr><w:color w:val=\"0066AA\"/></w:rPr><w:t>proofed there.</w:t></w:r><w:proofErr w:type=\"spellEnd\"/></w:p></w:comment>";
 
+    #[test]
+    fn source_guard_requires_preserve_for_edge_spaces_in_any_comment() {
+        let guarded = "<w:comment w:id=\"1\"><w:p><w:fldSimple w:instr=\" PAGE \"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:hyperlink w:anchor=\"target\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p></w:comment>";
+        let source = format!(
+            "<w:comments xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">{FRAGMENT}{guarded}</w:comments>"
+        );
+        assert!(!crate::xml::reads_as_written(source.as_bytes()));
+        let preserved = source
+            .replace(
+                "<w:t>First identity proofed here. </w:t>",
+                "<w:t xml:space=\"preserve\">First identity proofed here. </w:t>",
+            )
+            .replace(
+                "<w:t>Second identity </w:t>",
+                "<w:t xml:space=\"preserve\">Second identity </w:t>",
+            );
+        assert!(crate::xml::reads_as_written(preserved.as_bytes()));
+    }
+
     fn run(text: &str, formatting: Option<TextFormatting>) -> ParagraphContent {
         ParagraphContent::Inline(InlineNode::Run(Run {
             node_type: RunType::Run,

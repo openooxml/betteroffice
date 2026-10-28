@@ -18,8 +18,8 @@ async function refusal(promise: Promise<unknown>): Promise<DocumentToolError> {
   throw new Error('Expected the batch to be refused.');
 }
 
-const COMMENT_ZERO = '<w:comment w:id="0" w:author="First Reviewer" w:date="2026-01-05T09:00:00Z" w:initials="FR"><w:p w14:paraId="1A2B3C01" w14:textId="77777771" w:rsidR="00A1" w:rsidRDefault="00A2"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>First identity proofed here. </w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:rPr><w:b/></w:rPr><w:t>Second identity </w:t></w:r><w:r><w:rPr><w:color w:val="0066AA"/></w:rPr><w:t>proofed there.</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p><w:p w14:paraId="1A2B3C02" w14:textId="77777772" w:rsidR="00A3"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:t>Closing line stays.</w:t></w:r></w:p></w:comment>';
-const COMMENT_ONE = '<w:comment w:id="1" w:author="Second Reviewer" w:date="2026-01-06T09:00:00Z" w:initials="SR"><w:p w14:paraId="1A2B3C11" w14:textId="77777773" w:rsidR="00B1"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>Other page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>7</w:t></w:r></w:fldSimple><w:r><w:t> and </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>identity proofed link</w:t></w:r></w:hyperlink><w:r><w:t> done.</w:t></w:r></w:p></w:comment>';
+const COMMENT_ZERO = '<w:comment w:id="0" w:author="First Reviewer" w:date="2026-01-05T09:00:00Z" w:initials="FR"><w:p w14:paraId="1A2B3C01" w14:textId="77777771" w:rsidR="00A1" w:rsidRDefault="00A2"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t xml:space="preserve">First identity proofed here. </w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Second identity </w:t></w:r><w:r><w:rPr><w:color w:val="0066AA"/></w:rPr><w:t>proofed there.</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p><w:p w14:paraId="1A2B3C02" w14:textId="77777772" w:rsidR="00A3"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:t>Closing line stays.</w:t></w:r></w:p></w:comment>';
+const COMMENT_ONE = '<w:comment w:id="1" w:author="Second Reviewer" w:date="2026-01-06T09:00:00Z" w:initials="SR"><w:p w14:paraId="1A2B3C11" w14:textId="77777773" w:rsidR="00B1"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t xml:space="preserve">Other page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>7</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> and </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>identity proofed link</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> done.</w:t></w:r></w:p></w:comment>';
 const COMMENT_TWO = '<w:comment w:id="2" w:author="First Reviewer" w:date="2026-01-07T09:00:00Z" w:initials="FR"><w:p w14:paraId="1A2B3C21" w14:textId="77777774" w:rsidR="00C1"><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r><w:r><w:t>Reply identity proofed too.</w:t></w:r></w:p></w:comment>';
 
 async function commentTextFixture(): Promise<Uint8Array> {
@@ -57,8 +57,8 @@ test('replace_comment_text rewrites every occurrence in one comment and saves on
   const bytes = await doc.export();
   const saved = (await part(bytes, 'word/comments.xml'))!;
   const expected = (await part(source, 'word/comments.xml'))!
-    .replace('<w:t>First identity proofed here. </w:t>', '<w:t xml:space="preserve">First identity-proofed here. </w:t>')
-    .replace('<w:t>Second identity </w:t>', '<w:t>Second identity-proofed</w:t>')
+    .replace('<w:t xml:space="preserve">First identity proofed here. </w:t>', '<w:t xml:space="preserve">First identity-proofed here. </w:t>')
+    .replace('<w:t xml:space="preserve">Second identity </w:t>', '<w:t xml:space="preserve">Second identity-proofed</w:t>')
     .replace('<w:t>proofed there.</w:t>', '<w:t xml:space="preserve"> there.</w:t>');
   expect(saved).toBe(expected);
   expect(saved).toContain(COMMENT_ONE);
@@ -83,7 +83,7 @@ test('replace_comment_text preserves edge whitespace of patched runs on save and
   const saved = (await part(bytes, 'word/comments.xml'))!;
   expect(saved).toContain('<w:t xml:space="preserve">First identity-proofed here. </w:t>');
   expect(saved).toContain('<w:t xml:space="preserve"> there.</w:t>');
-  expect(saved).toContain('<w:t>Second identity-proofed</w:t>');
+  expect(saved).toContain('<w:t xml:space="preserve">Second identity-proofed</w:t>');
   const reopened = await open(bytes);
   const edited = reopened.list({ story: 'comments', limit: 100 }).items.find(item => item.id === '0')!;
   expect(edited.text).toBe('First identity-proofed here. Second identity-proofed there.\nClosing line stays.');
@@ -105,6 +105,18 @@ test('replace_comment_text edits a reply without changing its thread or done sta
   expect(comments.find(item => item.id === '2')).toMatchObject({ parentId: '0', done: false, text: 'Reply identity-proofed too.' });
   expect(comments.find(item => item.id === '0')!.done).toBe(false);
   expect(comments.find(item => item.id === '1')!.done).toBe(true);
+});
+
+test('replace_comment_text refuses source comments with unpreserved edge whitespace', async () => {
+  const zip = await JSZip.loadAsync(await commentTextFixture());
+  const xml = await zip.file('word/comments.xml')!.async('string');
+  zip.file('word/comments.xml', xml.replace('<w:t xml:space="preserve">Other page </w:t>', '<w:t>Other page </w:t>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const before = doc.list({ story: 'comments', limit: 100 });
+  const error = await refusal(doc.edit({ version: before.version, edits: [{ op: 'replace_comment_text', comment: '0', find: 'identity proofed', replace: 'identity-proofed' }] }));
+  expect(error.code).toBe('UNSUPPORTED_TARGET');
+  expect(error.message).toContain('Saving comments would rewrite an existing comment.');
+  expect(doc.list({ story: 'comments', limit: 100 }).items).toEqual(before.items);
 });
 
 test('replace_comment_text refuses missing text, unknown comments, line breaks and guarded content', async () => {
