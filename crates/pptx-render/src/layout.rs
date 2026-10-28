@@ -9491,13 +9491,27 @@ mod tests {
             .unwrap()
     }
 
+    fn best_of_three<T>(mut workload: impl FnMut() -> T) -> (std::time::Duration, T) {
+        let mut best: Option<std::time::Duration> = None;
+        let mut output = None;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let result = workload();
+            let elapsed = start.elapsed();
+            if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
+                best = Some(elapsed);
+            }
+            output = Some(result);
+        }
+        (best.unwrap(), output.unwrap())
+    }
+
     #[test]
     fn a_text_box_with_a_large_single_run_lays_out_in_linear_time() {
-        let text = "x".repeat(200_000);
-        let body = TextBody {
+        let make_body = |text: String| TextBody {
             paragraphs: vec![pptx_parse::TextParagraph {
                 runs: vec![pptx_parse::TextRun {
-                    text: text.clone(),
+                    text,
                     properties: RunProperties {
                         font_size_pt: Some(12.0),
                         font_family: Some("Arial".to_owned()),
@@ -9511,10 +9525,16 @@ mod tests {
             }],
             ..TextBody::default()
         };
-        let start = std::time::Instant::now();
-        let rendered = text_columns_slide(body);
-        let elapsed = start.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let (small_elapsed, _) =
+            best_of_three(|| text_columns_slide(make_body("x".repeat(25_000))));
+        let (large_elapsed, rendered) =
+            best_of_three(|| text_columns_slide(make_body("x".repeat(50_000))));
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 2.8,
+            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        let text = "x".repeat(50_000);
         let lines = text_columns_lines(&rendered);
         let laid_out: String = lines
             .iter()
@@ -9522,20 +9542,19 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert_eq!(laid_out, text);
-        assert_eq!(lines.last().unwrap().end, 200_000);
+        assert_eq!(lines.last().unwrap().end, 50_000);
     }
 
     #[test]
     fn a_text_box_with_a_large_mixed_direction_run_lays_out_in_linear_time() {
-        let text = "a\u{5d0}".repeat(100_000);
-        let body = TextBody {
+        let make_body = |text: String| TextBody {
             paragraphs: vec![pptx_parse::TextParagraph {
                 properties: ParagraphProperties {
                     rtl: Some(true),
                     ..ParagraphProperties::default()
                 },
                 runs: vec![pptx_parse::TextRun {
-                    text: text.clone(),
+                    text,
                     properties: RunProperties {
                         font_size_pt: Some(12.0),
                         font_family: Some("Arial".to_owned()),
@@ -9549,10 +9568,16 @@ mod tests {
             }],
             ..TextBody::default()
         };
-        let start = std::time::Instant::now();
-        let rendered = text_columns_slide(body);
-        let elapsed = start.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let (small_elapsed, _) =
+            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(12_500))));
+        let (large_elapsed, rendered) =
+            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(25_000))));
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 2.8,
+            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        let text = "a\u{5d0}".repeat(25_000);
         let lines = text_columns_lines(&rendered);
         let laid_out: String = lines
             .iter()
@@ -9560,7 +9585,7 @@ mod tests {
             .map(|run| run.text.as_str())
             .collect();
         assert_eq!(laid_out, text);
-        assert_eq!(lines.last().unwrap().end, 200_000);
+        assert_eq!(lines.last().unwrap().end, 50_000);
     }
 
     #[test]
@@ -10467,34 +10492,46 @@ mod tests {
             text_stories: Vec::new(),
             children: Vec::new(),
         };
-        let baseline: Vec<_> = (0..=50_000)
-            .map(|index| ShapeSnapshot {
-                id: format!("slide1/shape{index:05}"),
-                source_id: index,
-                ..shape.clone()
-            })
-            .collect();
-        let mut current = baseline.clone();
-        current
-            .last_mut()
-            .unwrap()
-            .text_stories
-            .push(StorySnapshot {
-                id: "changed".to_owned(),
-                length: 7,
-                paragraphs: vec![pptx_edit::ParagraphSnapshot {
-                    runs: vec![pptx_edit::TextRunSnapshot {
-                        text: "Changed".to_owned(),
-                        style: TextStyle::default(),
+        let make_shapes = |count: u32| {
+            let baseline: Vec<_> = (0..count)
+                .map(|index| ShapeSnapshot {
+                    id: format!("slide1/shape{index:05}"),
+                    source_id: index,
+                    ..shape.clone()
+                })
+                .collect();
+            let mut current = baseline.clone();
+            current
+                .last_mut()
+                .unwrap()
+                .text_stories
+                .push(StorySnapshot {
+                    id: "changed".to_owned(),
+                    length: 7,
+                    paragraphs: vec![pptx_edit::ParagraphSnapshot {
+                        runs: vec![pptx_edit::TextRunSnapshot {
+                            text: "Changed".to_owned(),
+                            style: TextStyle::default(),
+                        }],
+                        ..pptx_edit::ParagraphSnapshot::default()
                     }],
-                    ..pptx_edit::ParagraphSnapshot::default()
-                }],
-            });
-        let start = std::time::Instant::now();
-        let edited = autofit_edited_shapes(&current, &baseline, &SlideParents::default());
-        let elapsed = start.elapsed();
+                });
+            (current, baseline)
+        };
+        let (small_current, small_baseline) = make_shapes(15_000);
+        let (small_elapsed, _) = best_of_three(|| {
+            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default())
+        });
+        let (large_current, large_baseline) = make_shapes(30_000);
+        let (large_elapsed, edited) = best_of_three(|| {
+            autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default())
+        });
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 2.8,
+            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
         assert!(edited.is_empty());
-        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
     }
 
     fn edited_autofit_session(
@@ -10624,31 +10661,55 @@ mod tests {
 
     #[test]
     fn fitted_save_skips_edited_text_over_the_utf16_limit() {
-        let text = format!("{}x", "\u{1f600}".repeat(32_768));
-        assert_eq!(utf16_len(&text), 65_537);
-        for inherited in [false, true] {
-            for grouped in [false, true] {
-                let session = edited_autofit_session_with_text(&text, inherited, grouped);
-                let plain = pptx_parse::parse_pptx(&session.save().unwrap()).unwrap();
-                let renderer = renderer();
-                let start = std::time::Instant::now();
-                let saved = renderer.save(&session).unwrap();
-                let elapsed = start.elapsed();
-                assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
-                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
-                let part = &reopened.slides[0].part_path;
-                assert_eq!(
-                    reopened.part_bytes(part).unwrap(),
-                    plain.part_bytes(part).unwrap()
-                );
-                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
-                assert_eq!(
-                    title.autofit,
-                    node_text(find_node(&plain.slides[0].shapes, 2).unwrap())
+        let build = |text: &str| {
+            let mut contexts = Vec::new();
+            for inherited in [false, true] {
+                for grouped in [false, true] {
+                    let session = edited_autofit_session_with_text(text, inherited, grouped);
+                    let plain = pptx_parse::parse_pptx(&session.save().unwrap()).unwrap();
+                    let part = &plain.slides[0].part_path;
+                    let plain_bytes = plain.part_bytes(part).unwrap().to_vec();
+                    let plain_autofit = node_text(find_node(&plain.slides[0].shapes, 2).unwrap())
                         .unwrap()
                         .autofit
-                );
+                        .clone();
+                    contexts.push((session, plain_bytes, plain_autofit));
+                }
             }
+            contexts
+        };
+        let small_text = format!("{}x", "\u{1f600}".repeat(32_768));
+        assert_eq!(utf16_len(&small_text), 65_537);
+        let large_text = format!("{}xx", "\u{1f600}".repeat(65_536));
+        assert_eq!(utf16_len(&large_text), 131_074);
+        let small_contexts = build(&small_text);
+        let large_contexts = build(&large_text);
+        let renderer = renderer();
+        let (small_elapsed, _) = best_of_three(|| {
+            small_contexts
+                .iter()
+                .map(|(session, _, _)| renderer.save(session).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let (large_elapsed, large_saved) = best_of_three(|| {
+            large_contexts
+                .iter()
+                .map(|(session, _, _)| renderer.save(session).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 2.8,
+            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        for ((_, plain_bytes, plain_autofit), saved) in
+            large_contexts.iter().zip(large_saved.iter())
+        {
+            let reopened = pptx_parse::parse_pptx(saved).unwrap();
+            let part = &reopened.slides[0].part_path;
+            assert_eq!(reopened.part_bytes(part).unwrap(), plain_bytes.as_slice());
+            let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+            assert_eq!(&title.autofit, plain_autofit);
         }
     }
 
@@ -10778,15 +10839,18 @@ mod tests {
 
     #[test]
     fn fitted_save_skips_large_custom_geometry_and_gradient() {
-        let graphics = autofit_custom_graphics(3_000, 100_000);
-        let (session, story) =
-            edited_autofit_session_with_graphics("Untouched", false, false, &graphics, "!");
+        let build = |path_count: usize, stop_count: usize| {
+            let graphics = autofit_custom_graphics(path_count, stop_count);
+            edited_autofit_session_with_graphics("Untouched", false, false, &graphics, "!")
+        };
+        let (small_session, _) = build(750, 25_000);
+        let (session, story) = build(1_500, 50_000);
         assert_eq!(session.story(&story.id).unwrap().length, story.length + 1);
         let ShapeNode::Shape(shape) = find_node(&session.package().slides[0].shapes, 2).unwrap()
         else {
             panic!("a custom shape");
         };
-        assert_eq!(shape.paths.len(), 3_000);
+        assert_eq!(shape.paths.len(), 1_500);
         assert!(shape.paths.iter().all(|path| path.commands.len() == 4));
         assert_eq!(
             shape
@@ -10798,13 +10862,16 @@ mod tests {
                 .unwrap()
                 .stops
                 .len(),
-            100_000
+            50_000
         );
         let renderer = renderer();
-        let start = std::time::Instant::now();
-        let saved = renderer.save(&session).unwrap();
-        let elapsed = start.elapsed();
-        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let (small_elapsed, _) = best_of_three(|| renderer.save(&small_session).unwrap());
+        let (large_elapsed, saved) = best_of_three(|| renderer.save(&session).unwrap());
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 2.8,
+            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
         let reopened = pptx_parse::parse_pptx(&saved).unwrap();
         let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
         assert_eq!(
