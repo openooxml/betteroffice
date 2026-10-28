@@ -101,6 +101,19 @@ test('PPTX theme fonts scan large repetitive comments within two seconds', async
   expect(elapsed).toBeLessThan(2000);
 });
 
+test('PPTX save faces expand theme families once per style, not once per run', () => {
+  const theme = { major: Array.from({ length: 4000 }, (_, index) => `Major ${index}`), minor: Array.from({ length: 4000 }, (_, index) => `Minor ${index}`) };
+  const runs = Array.from({ length: 50000 }, (_, index) => ({ text: 'x', style: { bold: index % 2 === 0 } }));
+  const slides = [{ shapes: [{ textStories: [{ paragraphs: [{ runs }] }], children: [] }] }] as unknown as Parameters<typeof pptxFontFaces>[0];
+  const started = performance.now();
+  const faces = pptxFontFaces(slides, theme);
+  const limited = pptxFontFaces(slides, theme, 192);
+  expect(performance.now() - started).toBeLessThan(2000);
+  expect(faces).toHaveLength(1 + 2 * 8000);
+  expect(faces.slice(0, 3)).toEqual([{ family: 'Arial', bold: false, italic: false }, { family: 'Major 0', bold: true, italic: false }, { family: 'Major 1', bold: true, italic: false }]);
+  expect(limited).toEqual(faces.slice(0, 192));
+});
+
 test('PPTX theme fonts read only the font scheme, not font elements in extensions', async () => {
   const zip = new JSZip();
   const decoys = Array.from({ length: 20000 }, (_, index) => `<a:majorFont><a:latin typeface="Decoy ${index}"/></a:majorFont><a:minorFont><a:latin typeface="Other ${index}"/></a:minorFont>`).join('');

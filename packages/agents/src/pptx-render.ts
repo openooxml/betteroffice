@@ -108,24 +108,34 @@ export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
   return { major: [...fonts.major], minor: [...fonts.minor] };
 }
 
-/** Every run style the slides use, Arial first so the renderer's first face is the same for every call. */
-export function pptxFontFaces(slides: SlideSnapshot[], theme: PptxThemeFonts = { major: [], minor: [] }): PptxFontStyle[] {
-  const faces = new Map<string, PptxFontStyle>();
-  faces.set('Arial:false:false', { family: 'Arial', bold: false, italic: false });
+/** Every run style the slides use, Arial first so the renderer's first face is the same for every call, at most `limit` styles. */
+export function pptxFontFaces(slides: SlideSnapshot[], theme: PptxThemeFonts = { major: [], minor: [] }, limit = Infinity): PptxFontStyle[] {
+  const requests = new Map<string, { families: string[]; bold: boolean; italic: boolean }>();
   function collect(shapes: ShapeSnapshot[]) {
     for (const shape of shapes) {
       for (const story of shape.textStories) for (const paragraph of story.paragraphs) for (const run of paragraph.runs) {
         const named = run.style.fontFamily;
-        const themed = !named ? [...theme.major, ...theme.minor] : named.startsWith('+mj') ? theme.major : named.startsWith('+mn') ? theme.minor : [named];
         const bold = run.style.bold ?? false;
         const italic = run.style.italic ?? false;
-        for (const family of themed.length ? themed : ['Arial']) faces.set(`${family}:${bold}:${italic}`, { family, bold, italic });
+        const source = !named ? 'theme' : named.startsWith('+mj') ? 'major' : named.startsWith('+mn') ? 'minor' : undefined;
+        const key = `${source ? `@${source}` : named}:${bold}:${italic}`;
+        if (requests.has(key)) continue;
+        const families = source === 'theme' ? [...theme.major, ...theme.minor] : source ? theme[source] : [named!];
+        requests.set(key, { families: families.length ? families : ['Arial'], bold, italic });
       }
       collect(shape.children);
     }
   }
   for (const slide of slides) collect(slide.shapes);
-  return [...faces.values()];
+  const faces = new Map<string, PptxFontStyle>();
+  faces.set('Arial:false:false', { family: 'Arial', bold: false, italic: false });
+  for (const { families, bold, italic } of requests.values()) {
+    for (const family of families) {
+      if (faces.size >= limit) return [...faces.values()];
+      faces.set(`${family}:${bold}:${italic}`, { family, bold, italic });
+    }
+  }
+  return [...faces.values()].slice(0, limit);
 }
 
 /** The bundled face for each style, and the glyph coverage faces they need. */

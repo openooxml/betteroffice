@@ -565,7 +565,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
     for (;;) {
       const version = handle.version();
       if (version === this.sourceVersion) return handle.save();
-      const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts).slice(0, SAVE_FONT_STYLES));
+      const fonts = await loadPptxFonts(pptxFontFaces(handle.snapshot().slides, this.themeFonts, SAVE_FONT_STYLES));
       this.alive();
       if (handle.version() === version) return handle.save(fonts);
     }
