@@ -79,7 +79,9 @@ corruption, truncation and output lengths that disagree with the header.
 For `woff2t+zstd`, `maxOutput` bounds both the zstd payload and the reconstructed
 font, and is never more than 64 MiB whatever the caller passes: reconstruction
 briefly holds the payload, the table stream and growing glyph buffers at once, and
-that cap keeps the peak well inside the decoder's 1 GiB memory. Before wuff runs, an allocation-free preflight validates the WOFF2 header,
+that cap keeps the peak well inside the decoder's 1 GiB memory. The same 64 MiB
+limit applies to the encoded frame and to the dictionary of a `woff2t+zstd` face,
+checked before either is copied into the decoder. Before wuff runs, an allocation-free preflight validates the WOFF2 header,
 directory and all transformed glyph streams. There may be at most 256 tables;
 stored lengths must fit the raw table stream, and no original table length may
 exceed eight times the payload length. The declared sfnt size and the sum of

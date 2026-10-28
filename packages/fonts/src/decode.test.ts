@@ -275,6 +275,12 @@ function glyphCount(font: ArrayBuffer): number {
 describe('internal woff2t font decoder', () => {
   const woff2t = { wasmUrl, codec: 'woff2t+zstd' };
 
+  test('woff2t inputs above 64 MiB are refused before the decoder sees them', async () => {
+    const oversized = new Uint8Array(64 * 1024 * 1024 + 1);
+    await expect(decodeFontFace(helloFrame, oversized, { ...woff2t, maxOutput: 0x7fffffff }))
+      .rejects.toThrow('too large');
+  });
+
   test.skipIf(!hasWasm)('reconstructs synthetic faces and returns the raw dictionary payload', async () => {
     const regularFrame = fixture('Synthetic-Regular.ttf.zst');
     const boldFrame = fixture('Synthetic-Bold.ttf.zst');

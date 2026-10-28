@@ -244,6 +244,14 @@ pub fn decode_face(
     max_output: usize,
 ) -> Result<Decoded, DecodeError> {
     let max_output = face_limit(codec, max_output);
+    if codec == Codec::Woff2tZstd
+        && (frame.len() > max_output || dict.is_some_and(|dict| dict.len() > max_output))
+    {
+        return Err(DecodeError::TooLarge {
+            size: frame.len().max(dict.map_or(0, <[u8]>::len)) as u64,
+            max: max_output,
+        });
+    }
     let payload = decode(frame, dict, max_output)?;
     match codec {
         Codec::Zstd => Ok(Decoded {
@@ -312,6 +320,23 @@ mod tests {
         assert!(!matches!(
             decode_face(&frame, None, Codec::Zstd, 300 << 20),
             Err(DecodeError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn woff2t_inputs_larger_than_the_cap_are_rejected_before_decoding() {
+        let oversized = vec![0u8; WOFF2T_MAX_OUTPUT + 1];
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.extend_from_slice(&[0x24, 0x01, 0x09, 0x00, 0x00, 0x41, 0, 0, 0, 0]);
+        assert!(matches!(
+            decode_face(&frame, Some(&oversized), Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
+        ));
+        let mut big_frame = frame.clone();
+        big_frame.resize(WOFF2T_MAX_OUTPUT + 1, 0);
+        assert!(matches!(
+            decode_face(&big_frame, None, Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
         ));
     }
 

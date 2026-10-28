@@ -51,6 +51,7 @@ interface DecoderInstance {
 }
 
 const DEFAULT_MAX_OUTPUT = 64 * 1024 * 1024;
+const WOFF2T_MAX_OUTPUT = 64 * 1024 * 1024;
 const instances = new Map<string, Promise<DecoderInstance>>();
 
 function builtinModule<T>(name: string): T | undefined {
@@ -287,12 +288,16 @@ export async function decodeFontFace(
   ) {
     return { font: copy(input) };
   }
-  const maxOutput = options?.maxOutput ?? DEFAULT_MAX_OUTPUT;
-  if (!Number.isSafeInteger(maxOutput) || maxOutput < 0 || maxOutput > 0x7fffffff) {
+  const requested = options?.maxOutput ?? DEFAULT_MAX_OUTPUT;
+  if (!Number.isSafeInteger(requested) || requested < 0 || requested > 0x7fffffff) {
     throw new Error('Font face maxOutput must be an integer from 0 to 2147483647');
   }
+  const maxOutput = codec === 'woff2t+zstd' ? Math.min(requested, WOFF2T_MAX_OUTPUT) : requested;
   const expectedSize = contentSize(input, maxOutput);
   const dictionary = dict === undefined ? undefined : view(dict);
+  if (codec === 'woff2t+zstd' && (input.length > maxOutput || (dictionary?.length ?? 0) > maxOutput)) {
+    throw new Error('Font face is too large for maxOutput');
+  }
   const zlib = options?.wasmUrl || codec === 'woff2t+zstd'
     ? undefined : builtinModule<NodeZlibLike>('node:zlib');
   if (typeof zlib?.zstdDecompressSync === 'function') {
