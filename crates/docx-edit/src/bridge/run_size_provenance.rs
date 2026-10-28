@@ -204,8 +204,11 @@ pub(crate) fn paragraph_sizes(
                     }
                 } else if child.matches_name("w", "instrText") {
                     control = true;
-                    if let Some(field) = scan.fields.last_mut() {
-                        field.instruction.push_str(&child.text_content());
+                    match scan.fields.last_mut() {
+                        Some(field) if !field.result => {
+                            field.instruction.push_str(&child.text_content());
+                        }
+                        _ => return false,
                     }
                 } else if child.matches_name("w", "t") {
                     text |= !child.text_content().is_empty();
@@ -586,6 +589,11 @@ mod tests {
             (format!("{begin}{entry}"), true),
             (format!("{entry}{end}"), true),
             (format!("{begin}{entry}{end}{body}"), false),
+            (
+                format!(r#"{begin}{entry}<w:r><w:instrText>X</w:instrText></w:r>{end}{body}"#),
+                false,
+            ),
+            (format!(r#"<w:r><w:instrText> TOC </w:instrText></w:r>{entry}"#), false),
             (format!("{entry}{end}{body}"), false),
             (format!("{title}{begin}{entry}"), false),
             (format!("{begin}{entry}{end}{reference}"), false),
