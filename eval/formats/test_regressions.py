@@ -545,6 +545,58 @@ class OfficeEquivalentTests(unittest.TestCase):
                 f'{text_run("beta")}{ends}{text_run(" gamma.")}</w:p>', parent + reply, threaded), False),
         })
 
+    def test_inserted_paragraph_takes_the_opening_run_formatting(self):
+        task = {'format': 'docx', 'suite': 'v3', 'expected': {'insert_paragraphs': {'heading': 'Foreword', 'texts': ['New note.']}}}
+        heading = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Foreword</w:t></w:r></w:p>'
+        body = ('<w:p>' + text_run('Opening ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>Emphasis</w:t></w:r>'
+                + text_run(' tail.') + '</w:p>')
+        plain = '<w:p><w:r><w:t>New note.</w:t></w:r></w:p>'
+        italic = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>New note.</w:t></w:r></w:p>'
+        field = ('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a </w:instrText></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Field result</w:t></w:r>'
+                 '<w:r><w:fldChar w:fldCharType="end"/></w:r>' + text_run(' tail.') + '</w:p>')
+        link = ('<w:p><w:hyperlink w:anchor="a"><w:r><w:rPr><w:i/></w:rPr><w:t>Linked</w:t></w:r></w:hyperlink>'
+                + text_run(' plain ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>later</w:t></w:r></w:p>')
+        boxed = ('<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>'
+                 '<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>Boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>'
+                 + text_run('Body text.') + '</w:p>')
+        hyphen = '<w:p><w:r><w:rPr><w:i/></w:rPr><w:noBreakHyphen/></w:r>' + text_run('plain rest.') + '</w:p>'
+        deleted = ('<w:p><w:del w:id="9" w:author="A"><w:r><w:rPr><w:i/></w:rPr><w:tab/></w:r></w:del>'
+                   + text_run('Plain text.') + '</w:p>')
+        for name, template, inserted, accepted in (
+                ('plain like the first text after a deleted italic tab', deleted, plain, True),
+                ('italic like a deleted opening tab', deleted, italic, False),
+                ('italic like an opening non-breaking hyphen', hyphen, italic, True),
+                ('plain after an italic opening non-breaking hyphen', hyphen, plain, False),
+                ('plain like the body text after a text box', boxed, plain, True),
+                ('italic like the text box inside the paragraph', boxed, italic, False),
+                ('italic like an opening hyperlink run', link, italic, True),
+                ('plain after an italic opening hyperlink run', link, plain, False),
+                ('plain like the opening run', body, plain, True),
+                ('italic like a later run', body, italic, False),
+                ('italic like a field result that opens the text', field, italic, True),
+                ('plain after field control runs', field, plain, False)):
+            with self.subTest(output=name):
+                source = word_package(heading + template, '', '')
+                output = word_package(heading + inserted + template, '', '')
+                if accepted:
+                    runner.checker.check_real(task, source, output)
+                else:
+                    with self.assertRaises(ValueError):
+                        runner.checker.check_real(task, word_package(heading + template, '', ''), output)
+
+    def test_replaced_drawing_text_takes_the_opening_run_formatting(self):
+        body = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t>Plain</a:t></a:r>'
+                             '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(body, 'New text')
+        runs = body.findall('a:p/a:r', runner.checker.NS)
+        self.assertEqual([run.find('a:t', runner.checker.NS).text for run in runs], ['New text'])
+        self.assertIsNone(runs[0].find('a:rPr', runner.checker.NS))
+        empty_first = ET.fromstring(f'<p:txBody {P_NS}><a:bodyPr/><a:p><a:r><a:t/></a:r>'
+                                    '<a:r><a:rPr i="1"/><a:t>Italic</a:t></a:r></a:p></p:txBody>')
+        runner.checker.drawing_text(empty_first, 'New text')
+        self.assertEqual(empty_first.find('a:p/a:r/a:rPr', runner.checker.NS).get('i'), '1')
+
     def test_tracked_change_may_carry_its_boundary_space_on_either_side(self):
         def revision(kind, text):
             tag = 'delText' if kind == 'del' else 't'
