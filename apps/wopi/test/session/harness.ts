@@ -1,6 +1,6 @@
 import { generateKeyPair, createProofSigner } from "../../src/proof";
 import { createHostClient, type HostFetch } from "../../src/host/client";
-import { createReferenceHost, type ReferenceHost } from "../host/reference-host";
+import { createReferenceHost, type ReferenceHost, type ReferenceHostQuirks } from "../host/reference-host";
 import { sourceBytes } from "../replica/clients";
 import { SessionRegistry } from "../../src/session/registry";
 import type { SessionLogger, SessionScheduler } from "../../src/session/scheduler";
@@ -97,7 +97,7 @@ export function makeHarness(options: {
   journalDir?: string;
   maxEditorsPerFile?: number;
   instanceId?: string;
-  quirks?: { timestampConflict?: boolean };
+  quirks?: ReferenceHostQuirks;
   format?: Format;
   fileName?: string;
   lockFails?: boolean;

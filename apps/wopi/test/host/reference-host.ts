@@ -30,6 +30,7 @@ export interface ReferenceFile {
 
 export interface ReferenceHostQuirks {
   timestampConflict?: boolean;
+  relativeUrlToken?: boolean;
   tokenExpired?: boolean;
   slowBody?: boolean;
   noContentLength?: boolean;
@@ -419,6 +420,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           const existingUrl = new URL(request.url);
           existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(existing.id));
           existingUrl.search = "";
+          if (quirks.relativeUrlToken) existingUrl.searchParams.set("access_token", url.searchParams.get("access_token")!);
           return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": existing.itemVersion });
         }
         const body = await readBody(request);
@@ -447,6 +449,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         const newUrl = new URL(request.url);
         newUrl.pathname = newUrl.pathname.replace(/[^/]+$/, encodeURIComponent(newId));
         newUrl.search = "";
+        if (quirks.relativeUrlToken) newUrl.searchParams.set("access_token", url.searchParams.get("access_token")!);
         const headers: Record<string, string> = { "X-WOPI-ItemVersion": "1" };
         if (finalName !== targetName) headers["X-WOPI-ValidRelativeTarget"] = encodeUtf7(finalName);
         return json({ Name: finalName, Url: newUrl.toString() }, 200, headers);

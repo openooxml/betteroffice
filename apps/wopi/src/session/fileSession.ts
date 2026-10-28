@@ -35,12 +35,13 @@ export interface FileSessionEvents {
   leaderChanged: { leaderId: string | null; previousLeaderId: string | null };
   saved: { itemVersion: string | null; by: string | null };
   saveFailed: { kind: string };
-  conflict: { name: string; url: string; copyName: string; copyUrl: string };
+  conflict: { name: string; copyName: string };
   viewOnly: { reason: ViewOnlyReason };
   replicaUpdate: { update: Uint8Array };
   closed: Record<string, never>;
   lostFlush: Record<string, never>;
   tokenExpiring: { userId: string; hostUserId: string; expiresAt: number | null };
+  userInvalidated: { userId: string };
 }
 
 export type FileSessionEventName = keyof FileSessionEvents;
@@ -78,7 +79,6 @@ export interface SaveResult {
   itemVersion: string | null;
   by: string | null;
   conflictName?: string;
-  conflictUrl?: string;
 }
 
 /** Dependencies for one file session. */
@@ -596,6 +596,8 @@ export class FileSession {
       });
     }, handles);
     this.#setTimerAt(user.expiresAt, () => {
+      if (!this.#users.has(user.id) || this.#state !== "open") return;
+      this.#emit("userInvalidated", { userId: user.id });
       this.#enqueueTask(async () => {
         if (!this.#users.has(user.id) || this.#state !== "open") return;
         user.canWrite = false;
@@ -687,6 +689,7 @@ export class FileSession {
   #markTokenDead(user: UserSession): void {
     if (user.expiresAt === null || user.expiresAt > this.#now()) user.expiresAt = this.#now();
     user.canWrite = false;
+    this.#emit("userInvalidated", { userId: user.id });
     this.#syncLeader();
   }
 
@@ -766,15 +769,25 @@ export class FileSession {
     }
   }
 
-  /** Marks a user as alive and reconnects them when needed. */
-  heartbeat(userId: string): void {
+  /** Starts a new socket connection. */
+  connect(userId: string): number {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
+    const generation = ++user.connectionGeneration;
+    this.heartbeat(userId, generation);
+    return generation;
+  }
+
+  /** Marks the current connection as alive. */
+  heartbeat(userId: string, generation = this.#users.get(userId)?.connectionGeneration): void {
+    const user = this.#users.get(userId);
+    if (!user) throw new SessionError("unknownUser", "unknown user");
+    if (user.connectionGeneration !== generation) return;
     user.lastSeen = this.#now();
     if (user.connected) return;
     user.connected = true;
     this.#enqueueTask(async () => {
-      if (this.#state !== "open" || !this.#users.has(user.id) || !user.connected) return;
+      if (this.#state !== "open" || !this.#users.has(user.id) || !user.connected || user.connectionGeneration !== generation) return;
       if (this.#holdPending && this.#isConnectedEditor(user)) {
         this.#holdPending = false;
         this.#clearTimer("hold");
@@ -785,13 +798,13 @@ export class FileSession {
   }
 
   /** Marks a user disconnected and runs the departure policy. */
-  disconnect(userId: string): Promise<void> {
-    return this.#enqueue(() => this.#disconnectInternal(userId));
+  disconnect(userId: string, generation = this.#users.get(userId)?.connectionGeneration): Promise<void> {
+    return this.#enqueue(() => this.#disconnectInternal(userId, generation));
   }
 
-  async #disconnectInternal(userId: string): Promise<void> {
+  async #disconnectInternal(userId: string, generation: number | undefined): Promise<void> {
     const user = this.#users.get(userId);
-    if (!user) throw new SessionError("unknownUser", "unknown user");
+    if (!user || user.connectionGeneration !== generation) return;
     if (!user.connected) return;
     user.connected = false;
     await this.#refreshLeader();
@@ -810,6 +823,7 @@ export class FileSession {
     this.#users.delete(userId);
     this.#clearUserTimers(userId);
     user.connected = false;
+    this.#emit("userInvalidated", { userId });
     await this.#refreshLeader();
     const departing = leaderBefore && leaderBefore.id !== userId ? [leaderBefore, user] : [user];
     await this.#maybeCloseAfterDeparture(departing);
@@ -944,9 +958,9 @@ export class FileSession {
         try {
           this.#deps.journal?.flush();
         } catch {}
-        this.#emit("conflict", { name: result.name, url: result.url, copyName: result.name, copyUrl: result.url });
+        this.#emit("conflict", { name: result.name, copyName: result.name });
         this.#log("warn", "save conflict, wrote a conflict copy", { name: result.name });
-        return { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name, conflictUrl: result.url };
+        return { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name };
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
         if (kind === "unauthorized") {
@@ -1100,4 +1114,3 @@ export class FileSession {
     return this.#enqueue(() => this.#closeFinal(false));
   }
 }
-

@@ -20,7 +20,7 @@ import {
   encodeSyncStep2,
   encodeUpdateFrame,
 } from "./frames";
-import { CollabRelay } from "./relay";
+import { CollabRelay, type RelaySocket } from "./relay";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -169,6 +169,67 @@ async function expectNoTokens(s: Setup, extra: string[] = []): Promise<void> {
 }
 
 describe("collab relay", () => {
+  for (const failure of [0, -1, "throw"] as const) {
+    for (const delivery of ["broadcast", "sync"] as const) {
+      test(`${delivery} delivery ${failure} closes and detaches the dropped socket`, async () => {
+        const h = makeHarness();
+        addToken(h, TOKENS[0]!, "user-a");
+        addToken(h, TOKENS[1]!, "user-b");
+        const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
+        const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[1]!, accessTokenTtl: 0, mode: "edit" });
+        const relay = new CollabRelay(h.registry);
+        const closed: number[] = [];
+        const healthyClosed: number[] = [];
+        const healthyFrames: Uint8Array[] = [];
+        const healthy: RelaySocket = { send: (frame) => { healthyFrames.push(frame); return frame.length; }, close: (code) => { healthyClosed.push(code!); } };
+        let attempts = 0;
+        const dropped: RelaySocket = {
+          send: () => {
+            attempts += 1;
+            if (failure === "throw") throw new Error("send failed");
+            return failure;
+          },
+          close: (code) => { closed.push(code!); },
+        };
+        relay.attach(healthy, relay.resolve(a.user.id)!);
+        relay.attach(dropped, relay.resolve(b.user.id)!);
+        relay.handleMessage(dropped, encodeAwarenessFrame([{ clientId: 909101, clock: 1, state: { name: "Bob" } }]));
+        const client = await openTestClient(a.joinPayload, a.session.sourceBytes!, 909001);
+        const trigger = (): void => {
+          if (delivery === "broadcast") {
+            client.edit(`delivery-${attempts} `, 0);
+            relay.handleMessage(healthy, encodeUpdateFrame(client.encodeStateAsUpdate()));
+          } else {
+            relay.handleMessage(dropped, encodeSyncStep1(client.encodeStateVector()));
+          }
+        };
+        try {
+          trigger();
+          expect(closed).toEqual([1013]);
+          expect(attempts).toBe(1);
+          await h.clock.drain();
+          expect(b.user.connected).toBe(false);
+          expect(healthyFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "awareness" && message.entries.some((entry) => entry.clientId === 909101 && entry.isNull)))).toBe(true);
+          trigger();
+          expect(attempts).toBe(1);
+          const replacementFrames: Uint8Array[] = [];
+          const replacement: RelaySocket = { send: (frame) => { replacementFrames.push(frame); return frame.length; }, close: () => {} };
+          relay.attach(replacement, relay.resolve(b.user.id)!);
+          relay.handleMessage(replacement, encodeSyncStep1(client.encodeStateVector()));
+          expect(replacementFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "sync-step-2"))).toBe(true);
+          client.edit("delivery-recovers ", 0);
+          relay.handleMessage(replacement, encodeUpdateFrame(client.encodeStateAsUpdate()));
+          expect(healthyFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "update"))).toBe(true);
+          expect(healthyClosed).toEqual([]);
+          expect(a.session.state).toBe("open");
+        } finally {
+          client.destroy();
+          a.session.abandon();
+        }
+      });
+    }
+  }
+
   test("two clients converge, one autosave has every edit, late joiner catches up", async () => {
     const s = setup("xlsx");
     const handleA = await joinPage(s, TOKENS[0]!);
@@ -287,7 +348,7 @@ describe("collab relay", () => {
     expect(close.status).toBe(200);
     await close.text();
     await a.closed;
-    expect([1000, 4401].includes(a.closeCode ?? -1)).toBe(true);
+    expect(a.closeCode).toBe(4401);
     expect(b.closeCode).toBeNull();
     b.editAndSend("after-close ", 0);
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -298,7 +359,7 @@ describe("collab relay", () => {
     expect(closeB.status).toBe(200);
     await closeB.text();
     await b.closed;
-    expect([1000, 4401].includes(b.closeCode ?? -1)).toBe(true);
+    expect(b.closeCode).toBe(4401);
     await expectNoTokens(s);
   });
 
@@ -416,11 +477,11 @@ describe("collab relay", () => {
     await s.h.clock.advance(20000);
     await s.h.clock.drain();
     expect(a.closeCode).toBeNull();
-    expect(b.closeCode).toBeNull();
-    b.client.edit("after-expiry ", 1);
-    b.send(encodeUpdateFrame(b.client.encodeStateAsUpdate()));
     await b.closed;
-    expect(b.closeCode).toBe(4403);
+    expect(b.closeCode).toBe(4401);
+    a.editAndSend("after-expiry ", 1);
+    await waitFor(() => s.h.registry.list()[0]!.dirty, "valid peer keeps editing");
+    expect(b.client.contains("after-expiry")).toBe(false);
     await expectNoTokens(s);
   });
 
@@ -484,6 +545,59 @@ describe("collab relay", () => {
     await first.closed;
     expect(first.closeCode).toBe(1000);
     await expectNoTokens(s);
+  });
+
+  test("replacement during a pending save ignores the old socket's queued disconnect", async () => {
+    let releasePut = (): void => {};
+    let enteredPut = (): void => {};
+    const pendingPut = new Promise<void>((resolve) => { releasePut = resolve; });
+    const putEntered = new Promise<void>((resolve) => { enteredPut = resolve; });
+    const h = makeHarness({ beforePut: async () => { enteredPut(); await pendingPut; } });
+    addToken(h, TOKENS[0]!, "user-a");
+    const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
+    const relay = new CollabRelay(h.registry);
+    const first: RelaySocket = { send: (frame) => frame.length, close: () => {} };
+    const replacementClosed: number[] = [];
+    const replacement: RelaySocket = { send: (frame) => frame.length, close: (code) => { replacementClosed.push(code!); } };
+    relay.attach(first, relay.resolve(a.user.id)!);
+    const firstGeneration = a.user.connectionGeneration;
+    const client = await openTestClient(a.joinPayload, a.session.sourceBytes!, 955501);
+    let save: Promise<unknown> | undefined;
+    try {
+      client.edit("pending-save ", 0);
+      relay.handleMessage(first, encodeUpdateFrame(client.encodeStateAsUpdate()));
+      save = a.session.requestSave(a.user.id);
+      await putEntered;
+      relay.detach(first);
+      relay.attach(replacement, relay.resolve(a.user.id)!);
+      expect(a.user.connectionGeneration).toBeGreaterThan(firstGeneration);
+      releasePut();
+      await save;
+      await h.clock.drain();
+      expect(a.user.connected).toBe(true);
+      expect(a.session.state).toBe("open");
+      expect(a.session.lockHeld).toBe(true);
+      expect(h.callsFor("UNLOCK")).toHaveLength(0);
+      expect(replacementClosed).toEqual([]);
+      relay.websocket.close(first);
+      client.edit("replacement-edit ", 1);
+      relay.handleMessage(replacement, encodeUpdateFrame(client.encodeStateAsUpdate()));
+      expect(a.session.dirty).toBe(true);
+      await a.session.requestSave(a.user.id);
+      const saved = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 955601);
+      try {
+        expect(saved.contains("pending-save")).toBe(true);
+        expect(saved.contains("replacement-edit")).toBe(true);
+      } finally {
+        saved.destroy();
+      }
+      expect(replacementClosed).toEqual([]);
+    } finally {
+      releasePut();
+      await save;
+      client.destroy();
+      a.session.abandon();
+    }
   });
 
   test("replacement broadcasts awareness removal for the old client", async () => {

@@ -254,6 +254,37 @@ describe("leader handoff and explicit save", () => {
 });
 
 describe("last leave, disconnect and hold", () => {
+  test("stale connection generations cannot disconnect or heartbeat the current connection", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const b = await joinEditor(h, "tok-b");
+    const session = a.session;
+    try {
+      const stale = session.connect(a.user.id);
+      const current = session.connect(a.user.id);
+      expect(current).toBeGreaterThan(stale);
+      await session.disconnect(a.user.id, stale);
+      expect(a.user.connected).toBe(true);
+      const lastSeen = a.user.lastSeen;
+      await h.clock.advance(1000);
+      session.heartbeat(a.user.id, stale);
+      expect(a.user.lastSeen).toBe(lastSeen);
+      await session.disconnect(a.user.id, current);
+      expect(a.user.connected).toBe(false);
+      session.heartbeat(a.user.id, stale);
+      expect(a.user.connected).toBe(false);
+      session.heartbeat(a.user.id, current);
+      expect(a.user.connected).toBe(true);
+      expect(a.user.lastSeen).toBe(h.clock.t);
+      expect(b.user.connected).toBe(true);
+      expect(session.lockHeld).toBe(true);
+    } finally {
+      session.abandon();
+    }
+  });
+
   test("last leave flushes edits after the last autosave before unlock", async () => {
     const h = makeHarness();
     addToken(h, "tok-a", "user-a");
@@ -427,21 +458,24 @@ describe("locks, conflicts and permissions", () => {
   });
 
   test("timestamp conflict saves a conflict copy and leaves the original untouched", async () => {
-    const h = makeHarness({ quirks: { timestampConflict: true } });
+    const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     addToken(h, "tok-a", "user-a");
     const a = await joinEditor(h, "tok-a");
     const session = [...h.registry.list()][0]!;
     const client = await clientFor(session, a.joinPayload);
-    const conflicts: Array<{ name?: string; url?: string }> = [];
-    session.on("conflict", (e) => conflicts.push(e as { name?: string }));
+    const conflicts: Array<{ name: string; copyName: string }> = [];
+    session.on("conflict", (e) => conflicts.push(e));
     const originalBytes = h.host.files.get("file1")!.bytes.slice();
     try {
       edit(session, a.user.id, client, "conflict-edit ", 0);
       h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
-      await session.requestSave(a.user.id);
+      const saved = await session.requestSave(a.user.id);
       expect(conflicts.length).toBe(1);
       expect(conflicts[0]?.name).toMatch(/\(conflict \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\)\.xlsx$/);
-      expect(conflicts[0]?.url).toBeTruthy();
+      expect(saved.conflictName).toBe(conflicts[0]?.name);
+      expect(saved).not.toHaveProperty("conflictUrl");
+      expect(conflicts[0]).not.toHaveProperty("url");
+      expect(conflicts[0]).not.toHaveProperty("copyUrl");
       expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
       const copies = [...h.host.files.values()].filter((f) => f.name.includes("(conflict"));
       expect(copies.length).toBe(1);
@@ -490,18 +524,19 @@ describe("locks, conflicts and permissions", () => {
   });
 
   test("a distinctive token never appears in logs or events", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     const secret = "distinctive-secret-token-xyz";
     addToken(h, secret, "user-a");
     const a = await joinEditor(h, secret);
     const session = [...h.registry.list()][0]!;
     const events: string[] = [];
-    for (const name of ["leaderChanged", "saved", "saveFailed", "conflict", "viewOnly", "closed", "lostFlush", "tokenExpiring"] as const) {
+    for (const name of ["leaderChanged", "saved", "saveFailed", "conflict", "viewOnly", "closed", "lostFlush", "tokenExpiring", "userInvalidated"] as const) {
       session.on(name, (e) => events.push(JSON.stringify(e)));
     }
     const client = await clientFor(session, a.joinPayload);
     try {
       edit(session, a.user.id, client, "redact-edit ", 0);
+      h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
       await session.requestSave(a.user.id);
       await session.leave(a.user.id);
       const combined = [...h.logs, ...events, JSON.stringify(a.user), JSON.stringify(session.users)].join("\n");

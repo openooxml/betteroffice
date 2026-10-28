@@ -29,6 +29,7 @@ export class UserSession {
   readonly closeUrl: string;
   lastSeen: number;
   connected: boolean;
+  connectionGeneration = 0;
 
   constructor(init: UserSessionInit) {
     this.id = randomBytes(32).toString("base64url");

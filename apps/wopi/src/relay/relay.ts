@@ -41,6 +41,7 @@ interface SocketState {
   ws: RelaySocket;
   session: FileSession;
   user: UserSession;
+  generation: number;
   awareness: Map<number, number>;
   awarenessFrames: Map<number, Uint8Array>;
   bucketTokens: number;
@@ -55,6 +56,10 @@ function isEmptyUpdate(update: Uint8Array): boolean {
   return update.length === 0 || (update.length === 2 && update[0] === 0 && update[1] === 0);
 }
 
+export function isSessionUserAuthorized(session: FileSession, user: UserSession): boolean {
+  return session.getUser(user.id) === user && session.isUserTokenValid(user.id);
+}
+
 /** Finds the file and user session for a handle with a constant time compare. */
 export function findByHandle(registry: SessionRegistry, handle: string): ResolvedHandle | null {
   const candidate = Buffer.from(handle);
@@ -62,7 +67,7 @@ export function findByHandle(registry: SessionRegistry, handle: string): Resolve
   for (const session of registry.list()) {
     for (const user of session.users) {
       const expected = Buffer.from(user.id);
-      if (expected.length === candidate.length && timingSafeEqual(expected, candidate)) {
+      if (expected.length === candidate.length && timingSafeEqual(expected, candidate) && isSessionUserAuthorized(session, user)) {
         found = { session, user };
       }
     }
@@ -93,6 +98,7 @@ export class CollabRelay {
 
   /** Registers a socket, replacing any previous socket for that user. */
   attach(ws: RelaySocket, resolved: ResolvedHandle): SocketState {
+    const generation = resolved.session.connect(resolved.user.id);
     const previous = this.#byUser.get(resolved.user.id);
     if (previous && previous.ws !== ws) {
       this.#remove(previous, true);
@@ -103,6 +109,7 @@ export class CollabRelay {
     if (!this.#subscribed.has(resolved.session)) {
       this.#subscribed.add(resolved.session);
       resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
+      resolved.session.on("userInvalidated", ({ userId }) => this.closeUser(userId, 4401, "unauthorized"));
       resolved.session.on("replicaUpdate", ({ update }) => {
         this.#broadcastAll(resolved.session, encodeUpdateFrame(update));
       });
@@ -111,6 +118,7 @@ export class CollabRelay {
       ws,
       session: resolved.session,
       user: resolved.user,
+      generation,
       awareness: new Map(),
       awarenessFrames: new Map(),
       bucketTokens: AWARENESS_RATE_CAPACITY,
@@ -171,7 +179,7 @@ export class CollabRelay {
     this.#remove(state, isCurrent);
     if (!isCurrent) return;
     try {
-      void state.session.disconnect(state.user.id).catch(() => {});
+      void state.session.disconnect(state.user.id, state.generation).catch(() => {});
     } catch {}
   }
 
@@ -182,8 +190,9 @@ export class CollabRelay {
   }
 
   #heartbeat(state: SocketState): void {
+    if (!this.#authorize(state)) return;
     try {
-      state.session.heartbeat(state.user.id);
+      state.session.heartbeat(state.user.id, state.generation);
     } catch {}
   }
 
@@ -193,10 +202,22 @@ export class CollabRelay {
     } catch {}
   }
 
-  #send(state: SocketState, frame: Uint8Array): void {
+  #send(state: SocketState, frame: Uint8Array): boolean {
+    if (!this.#authorize(state)) return false;
     try {
-      state.ws.send(frame.slice());
+      const sent = state.ws.send(frame.slice());
+      if (sent !== 0 && sent !== -1) return true;
     } catch {}
+    this.#close(state, 1013, "delivery dropped, reconnect");
+    this.detach(state.ws);
+    return false;
+  }
+
+  #authorize(state: SocketState): boolean {
+    if (!this.#bySocket.has(state.ws)) return false;
+    if (isSessionUserAuthorized(state.session, state.user)) return true;
+    this.closeUser(state.user.id, 4401, "unauthorized");
+    return false;
   }
 
   #broadcast(from: SocketState, frame: Uint8Array): void {
@@ -232,10 +253,7 @@ export class CollabRelay {
   handleMessage(ws: RelaySocket, data: Uint8Array | ArrayBuffer | string): void {
     const state = this.#bySocket.get(ws);
     if (!state) return;
-    if (state.session.getUser(state.user.id) !== state.user) {
-      this.closeUser(state.user.id, 4401, "session closed");
-      return;
-    }
+    if (!this.#authorize(state)) return;
     if (typeof data === "string") {
       this.#close(state, 1003, "binary frames only");
       return;
@@ -267,13 +285,14 @@ export class CollabRelay {
     const canWrite =
       state.user.canWrite && !state.session.viewOnly && state.session.isUserTokenValid(state.user.id);
     for (const message of classified.messages) {
+      if (!this.#bySocket.has(ws)) return;
       if (message.type === "sync-step-1") {
         if (!replica) {
           this.#close(state, 1011, "session is not open");
           return;
         }
         try {
-          this.#send(state, encodeSyncStep2(replica.encodeStateAsUpdate(stripReservedSyncEntries(message.stateVector))));
+          if (!this.#send(state, encodeSyncStep2(replica.encodeStateAsUpdate(stripReservedSyncEntries(message.stateVector))))) return;
           if (canWrite) this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
         } catch {
           this.#close(state, 1011, "sync failed");
@@ -297,7 +316,7 @@ export class CollabRelay {
           if (result.reason === "causalGap") {
             if (replica) {
               try {
-                this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
+                if (!this.#send(state, encodeSyncStep1(replica.encodeStateVector()))) return;
               } catch {}
             }
             continue;
@@ -344,7 +363,7 @@ export class CollabRelay {
             for (const [clientId, payload] of peer.awarenessFrames) {
               if (sent.has(clientId)) continue;
               sent.add(clientId);
-              this.#send(state, bytesForAwareness(payload));
+              if (!this.#send(state, bytesForAwareness(payload))) return;
             }
           }
         }
