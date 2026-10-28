@@ -461,6 +461,89 @@ for (const format of FORMATS) {
   });
 }
 
+describe("docx rejected partial update", () => {
+  test("publishes an integrated prefix and marks it dirty when the suffix throws", async () => {
+    const source = sourceBytes("docx");
+    const server = await openServerReplica("docx", source, { clientId: clientId() });
+    const saveBefore = (await server.save()).bytes;
+    const author = await openTestClient(server.joinPayload(), source, clientId());
+    const peer = await openTestClient(server.joinPayload(), source, clientId());
+    const emitted: Uint8Array[] = [];
+    const off = server.onLocalUpdate((update) => emitted.push(update));
+    try {
+      const vectorBefore = server.encodeStateVector();
+      const versionBefore = server.version;
+      const marker = "integrated-prefix ";
+      author.edit(marker);
+      const prefix = author.encodeStateAsUpdate(vectorBefore);
+      const text = Y.decodeUpdate(prefix).structs.find(
+        (struct): struct is Y.Item => struct instanceof Y.Item &&
+          struct.id.client === author.clientId &&
+          struct.content instanceof Y.ContentString &&
+          struct.content.str.includes(marker),
+      );
+      expect(text).toBeDefined();
+      const suffixClock = stateVectorMap(author.encodeStateVector()).get(author.clientId)!;
+      const invalid = new Y.Item(
+        Y.createID(author.clientId, suffixClock),
+        null,
+        null,
+        null,
+        null,
+        Y.createID(text!.id.client, text!.id.clock),
+        null,
+        new Y.ContentString("invalid-suffix"),
+      );
+      const encoder = new Y.UpdateEncoderV1();
+      encoder.writeLen(1);
+      encoder.writeLen(1);
+      encoder.writeClient(author.clientId);
+      encoder.writeLen(suffixClock);
+      invalid.write(encoder, 0);
+      encoder.writeLen(0);
+      const update = Y.mergeUpdates([prefix, encoder.toUint8Array()]);
+      expect(hasCausalGap(update, vectorBefore)).toBe(false);
+
+      const result = server.applyUpdate(update);
+      expect(result.accepted).toBe(false);
+      if (result.accepted) throw new Error("invalid parent update was accepted");
+      expect(result.reason).toContain("engine rejected update");
+      if (byteEqual(server.encodeStateVector(), vectorBefore)) {
+        expect(server.version).toBe(versionBefore);
+        expect(result.followUps).toBeUndefined();
+        expect(emitted).toEqual([]);
+        expectDocxSavesEqual((await server.save()).bytes, saveBefore);
+        return;
+      }
+
+      expect(server.version).toBe(versionBefore + 1);
+      expect(result.followUps).toHaveLength(1);
+      expect(emitted).toEqual(result.followUps!);
+      const integrated = result.followUps![0]!;
+      expect(integrated).toEqual(server.encodeStateAsUpdate(vectorBefore));
+      expect(Y.parseUpdateMeta(integrated).to.get(author.clientId)).toBe(suffixClock);
+      peer.applyUpdate(integrated);
+      expect(peer.contains(marker)).toBe(true);
+      expect(peer.contains("invalid-suffix")).toBe(false);
+      expect([...peer.encodeStateVector()]).toEqual([...server.encodeStateVector()]);
+      const saved = await server.save();
+      expectDocxSavesEqual(saved.bytes, await peer.save());
+      const fresh = await openFreshClient("docx", saved.bytes, clientId());
+      try {
+        expect(fresh.contains(marker)).toBe(true);
+        expect(fresh.contains("invalid-suffix")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      off();
+      author.destroy();
+      peer.destroy();
+      server.destroy();
+    }
+  });
+});
+
 describe("docx save update", () => {
   test("save returns and emits the paragraph id update, then is byte-stable", async () => {
     const source = sourceBytes("docx");
