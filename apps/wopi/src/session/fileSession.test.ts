@@ -3,6 +3,7 @@ import { initEngines } from "../replica/engines";
 import { openFreshClient, openTestClient, sourceBytes, type TestClient } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC, ttl, type Harness } from "../../test/session/harness";
 import type { FileSession } from "./fileSession";
+import { WopiHostError } from "../host/errors";
 
 beforeAll(async () => {
   await initEngines();
@@ -968,6 +969,243 @@ describe("replica api adaptation", () => {
 });
 
 describe("session safety regressions", () => {
+  test("a reconnect relock validates the source before accepting more updates", async () => {
+    let releaseUnlock: () => void = () => {};
+    const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
+    let enteredUnlock: () => void = () => {};
+    const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
+    let releaseCheck: () => void = () => {};
+    const checkGate = new Promise<void>((resolve) => { releaseCheck = resolve; });
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-external", "external-app");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
+    const unlock = h.hostClient.unlock;
+    const checkFileInfo = h.hostClient.checkFileInfo;
+    let checkRelock = false;
+    let validationStarted = false;
+    try {
+      external.edit("external-between-locks ");
+      const externalBytes = await external.save();
+      h.hostClient.unlock = async (input) => {
+        enteredUnlock();
+        await unlockGate;
+        await unlock(input);
+        const externalLock = { wopiSrc: SRC, accessToken: "tok-external", lock: "external-app-lock" };
+        await h.hostClient.lock(externalLock);
+        await h.hostClient.putFile({ ...externalLock, body: externalBytes });
+        await unlock(externalLock);
+        checkRelock = true;
+      };
+      h.hostClient.checkFileInfo = async (input) => {
+        if (checkRelock) {
+          checkRelock = false;
+          validationStarted = true;
+          await checkGate;
+        }
+        return checkFileInfo(input);
+      };
+      const leaving = session.disconnect(a.user.id);
+      await unlockEntered;
+      session.heartbeat(a.user.id);
+      edit(session, a.user.id, client, "reconnected-before-relock ");
+      releaseUnlock();
+      await h.clock.drain();
+      expect(validationStarted).toBe(true);
+      client.edit("blocked-during-validation ", 1);
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+      releaseCheck();
+      await leaving;
+      expect(session.viewOnlyReason).toBe("externalChange");
+      const result = await session.requestSave(a.user.id);
+      expect(result.conflictName).toBeTruthy();
+      expect(h.host.files.get("file1")!.bytes).toEqual(externalBytes);
+      const copy = [...h.host.files.values()].find((file) => file.id !== "file1")!;
+      const fresh = await openFreshClient("xlsx", copy.bytes, nextId());
+      try {
+        expect(fresh.contains("reconnected-before-relock")).toBe(true);
+        expect(fresh.contains("blocked-during-validation")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      releaseUnlock();
+      releaseCheck();
+      client.destroy();
+      external.destroy();
+      await session.close();
+    }
+  });
+
+  for (const save of ["autosave", "last leave"] as const) {
+    test(`a reconnect relock failure recovers and ${save} writes the edit`, async () => {
+      let releaseUnlock: () => void = () => {};
+      const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
+      let enteredUnlock: () => void = () => {};
+      const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
+      const h = makeHarness({ beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
+      addToken(h, "tok-a", "user-a");
+      const a = await joinEditor(h, "tok-a");
+      const session = a.session;
+      const client = await clientFor(session, a.joinPayload);
+      const notices: unknown[] = [];
+      session.on("viewOnly", (event) => notices.push(event));
+      const lock = h.hostClient.lock;
+      let attempts = 0;
+      h.hostClient.lock = async (input) => {
+        attempts += 1;
+        if (attempts === 1) throw new WopiHostError("server", "relock failed", { status: 500 });
+        await lock(input);
+      };
+      try {
+        const leaving = session.disconnect(a.user.id);
+        await unlockEntered;
+        session.heartbeat(a.user.id);
+        edit(session, a.user.id, client, "retry-reconnect-edit ");
+        releaseUnlock();
+        await leaving;
+        await h.clock.advance(1000);
+        expect(notices).toContainEqual({ reason: "lockLost" });
+        expect(attempts).toBe(2);
+        expect(session.lockHeld).toBe(true);
+        expect(session.viewOnly).toBe(false);
+        if (save === "autosave") await h.clock.advance(30000);
+        else await session.leave(a.user.id);
+        expect(await savedContains(h, "retry-reconnect-edit")).toBe(true);
+        expect(h.putCount()).toBe(1);
+        expect(h.callsFor("PUT")[0]?.headers.get("X-COOL-WOPI-IsExitSave")).toBe(save === "last leave" ? "true" : "false");
+      } finally {
+        releaseUnlock();
+        client.destroy();
+        await session.close();
+      }
+    });
+  }
+
+  test("a delayed refresh response does not extend the lease beyond thirty minutes from its request", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const b = await joinEditor(h, "tok-b");
+    const session = a.session;
+    const client = await clientFor(session, b.joinPayload);
+    const refreshLock = h.hostClient.refreshLock;
+    let releaseRefresh: () => void = () => {};
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    let enteredRefresh: () => void = () => {};
+    const refreshEntered = new Promise<void>((resolve) => { enteredRefresh = resolve; });
+    let requestSentAt = 0;
+    h.hostClient.refreshLock = async (input) => {
+      if (requestSentAt) throw new WopiHostError("server", "refresh failed", { status: 500 });
+      requestSentAt = h.clock.t;
+      await refreshLock(input);
+      enteredRefresh();
+      await refreshGate;
+    };
+    h.hostClient.lock = async () => { throw new WopiHostError("server", "lock failed", { status: 500 }); };
+    try {
+      const leaving = session.leave(a.user.id);
+      await refreshEntered;
+      for (let i = 0; i < 40; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(b.user.id);
+      }
+      releaseRefresh();
+      await leaving;
+      expect(h.clock.t).toBe(requestSentAt + 20 * 60000);
+      expect(session.lockHeld).toBe(true);
+      expect(h.host.files.get("file1")!.lockExpiresAt).toBe(requestSentAt + 30 * 60000);
+      for (let i = 0; i < 20; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(b.user.id);
+      }
+      expect(h.clock.t).toBe(requestSentAt + 30 * 60000);
+      expect(session.lockHeld).toBe(false);
+      expect(session.viewOnlyReason).toBe("lockLost");
+      client.edit("blocked-after-host-lease ");
+      expect(session.applyUpdate(b.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+    } finally {
+      releaseRefresh();
+      client.destroy();
+      await session.close();
+    }
+  });
+
+  for (const kind of ["unauthorized", "server"] as const) {
+    test(`a post-save ${kind} error preserves the save and handles token validity`, async () => {
+      const h = makeHarness();
+      addToken(h, "tok-a", "user-a");
+      const a = await joinEditor(h, "tok-a");
+      const session = a.session;
+      const client = await clientFor(session, a.joinPayload);
+      const saved: unknown[] = [];
+      const failed: unknown[] = [];
+      session.on("saved", (event) => saved.push(event));
+      session.on("saveFailed", (event) => failed.push(event));
+      h.hostClient.checkFileInfo = async () => {
+        throw new WopiHostError(kind, "post-save check failed", { status: kind === "unauthorized" ? 401 : 500 });
+      };
+      try {
+        edit(session, a.user.id, client, "saved-before-check-failed ");
+        const result = await session.requestSave(a.user.id);
+        expect(result).toEqual({ saved: true, itemVersion: "2", by: a.user.id });
+        expect(session.itemVersion).toBe("2");
+        expect(session.dirty).toBe(false);
+        expect(h.putCount()).toBe(1);
+        expect(await savedContains(h, "saved-before-check-failed")).toBe(true);
+        expect(saved).toEqual([{ itemVersion: "2", by: a.user.id }]);
+        expect(failed).toEqual([]);
+        expect(a.user.canWrite).toBe(kind !== "unauthorized");
+        expect(a.user.isTokenValidAt(h.clock.t)).toBe(kind !== "unauthorized");
+        expect(session.leader?.id ?? null).toBe(kind === "unauthorized" ? null : a.user.id);
+      } finally {
+        client.destroy();
+        await session.close();
+      }
+    });
+  }
+
+  test("an unauthorized token invalidates both its edit and view handles", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-shared", "shared-user");
+    addToken(h, "tok-other", "other-user");
+    const writer = await joinEditor(h, "tok-shared");
+    const viewer = await joinEditor(h, "tok-shared", "view");
+    const fallback = await joinEditor(h, "tok-other");
+    const session = writer.session;
+    const client = await clientFor(session, writer.joinPayload);
+    const invalidated: unknown[] = [];
+    session.on("userInvalidated", (event) => invalidated.push(event));
+    try {
+      edit(session, writer.user.id, client, "shared-revoked-edit ");
+      h.host.tokens.delete("tok-shared");
+      const result = await session.requestSave(writer.user.id);
+      expect(result.saved).toBe(true);
+      expect(result.by).toBe(fallback.user.id);
+      expect(h.callsFor("PUT").map((call) => call.token)).toEqual(["tok-shared", "tok-other"]);
+      expect(await savedContains(h, "shared-revoked-edit")).toBe(true);
+      expect(invalidated).toEqual([
+        { userId: writer.user.id, reason: "unauthorized" },
+        { userId: viewer.user.id, reason: "unauthorized" },
+      ]);
+      for (const user of [writer.user, viewer.user]) {
+        expect(user.canWrite).toBe(false);
+        expect(user.isTokenValidAt(h.clock.t)).toBe(false);
+      }
+      expect(fallback.user.canWrite).toBe(true);
+      expect(fallback.user.isTokenValidAt(h.clock.t)).toBe(true);
+      expect(session.leader?.id).toBe(fallback.user.id);
+      expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+
   test("conflict results and events omit a token-bearing copy URL", async () => {
     const secret = "copy-only-distinctive-secret-xyz";
     const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: secret } });

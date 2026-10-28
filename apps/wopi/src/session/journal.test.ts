@@ -423,7 +423,7 @@ describe("journal durability regressions", () => {
     expect(recovered?.writtenVersions).toEqual(["2"]);
   });
 
-  test("a partial append failure marks the session journal broken and blocks further updates", async () => {
+  test("a partial append failure marks the journal broken and promptly saves the accepted edit", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const h = makeHarness();
     addToken(h, "tok-a", "user-a");
@@ -456,6 +456,19 @@ describe("journal durability regressions", () => {
       expect(h.logs.join("\n")).toContain("error journal broken");
       client.edit("must-not-accept ", 1);
       expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+      const appliedAt = h.clock.t;
+      await h.clock.drain();
+      expect(h.clock.t).toBe(appliedAt);
+      expect(h.putCount()).toBe(1);
+      expect(h.callsFor("PUT")[0]?.headers.get("X-COOL-WOPI-IsAutosave")).toBe("true");
+      expect(session.dirty).toBe(false);
+      const fresh = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 96002);
+      try {
+        expect(fresh.contains("append-failed")).toBe(true);
+        expect(fresh.contains("must-not-accept")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
     } finally {
       client.destroy();
       await session.close();
