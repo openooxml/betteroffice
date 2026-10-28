@@ -271,7 +271,7 @@ test('insert before a style numbered paragraph is refused like after unless a no
   const anchor = item(doc, 'Style one').ref;
   const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: anchor, paragraphs: [{ text: 'After style list', style: 'ListNumber' }] });
   const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: anchor, paragraphs: [{ text: 'Before style list' }] });
-  expect(afterCode).toBe('UNSUPPORTED_TARGET');
+  expect(afterCode).toBe('UNSUPPORTED');
   expect(beforeCode).toBe(afterCode);
   expect(doc.list().version).toBe(version);
   expect(await xmlOf(doc)).toBe(baseline);
@@ -289,7 +289,7 @@ test('explicit numbered style is refused like after and a missing default style 
   const plain = item(doc, 'Plain').ref;
   const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
   const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
-  expect(afterCode).toBe('UNSUPPORTED_TARGET');
+  expect(afterCode).toBe('UNSUPPORTED');
   expect(beforeCode).toBe(afterCode);
 
   const noDefault = await open(await numberedStyleFixture('Style one', true));
@@ -321,7 +321,7 @@ test('insert before an unstyled anchor with a numbered default style is refused 
   const anchor = item(doc, 'Default anchor').ref;
   const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: anchor, paragraphs: [{ text: 'After default list' }] });
   const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: anchor, paragraphs: [{ text: 'Before default list' }] });
-  expect(afterCode).toBe('UNSUPPORTED_TARGET');
+  expect(afterCode).toBe('UNSUPPORTED');
   expect(beforeCode).toBe(afterCode);
   expect(doc.list().version).toBe(version);
   expect(await xmlOf(doc)).toBe(baseline);
