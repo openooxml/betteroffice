@@ -68,9 +68,11 @@ function carriesFallbackScript(value: unknown, depth = 0): boolean {
 
 /**
  * Whether an applied command may need fonts the open-time requirements lacked: text in a script
- * with its own fallback face, a paragraph style it sets, or a change the payload does not spell out.
+ * with its own fallback face, a paragraph style it sets, shown hidden text, or a change the payload
+ * does not spell out.
  */
 export function commandMayNeedNewFonts(kind: string, payload: unknown): boolean {
+  if (kind === 'setRenderEnvironment') return (payload as { showHiddenText?: unknown } | null)?.showHiddenText === true;
   return FONT_RESHAPING_COMMANDS.has(kind) || (kind !== 'setFontEnvironment' && carriesFallbackScript(payload));
 }
 

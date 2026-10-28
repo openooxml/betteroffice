@@ -3879,3 +3879,26 @@ test('an edit in a script without a fallback face in the requirements hints the 
     client.destroy();
   }
 }, TIMEOUT);
+
+test('showing hidden text in a script without a fallback face hints, and requirements follow the shown text', async () => {
+  const { worker, client } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r>' +
+    '<w:r><w:rPr><w:vanish/></w:rPr><w:t>\u304b\u306a</w:t></w:r></w:p>',
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = (event) => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  const scripts = async () => (JSON.parse(await client.fontRequirements(LAYOUT)) as { scripts?: string[] }[])
+    .flatMap(({ scripts }) => scripts ?? []);
+  try {
+    expect(await scripts()).toEqual([]);
+    await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: true } as never));
+    expect(hints).toHaveLength(1);
+    expect(await scripts()).toContain('cjk-jp');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);

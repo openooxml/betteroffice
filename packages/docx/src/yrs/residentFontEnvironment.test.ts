@@ -135,4 +135,6 @@ test('commands that may need new fonts: fallback script text, reformatting and r
   const japanese = new TextEncoder().encode('\u65e5\u672c');
   expect(commandMayNeedNewFonts('insertImage', { image: { data: japanese, buffer: japanese.buffer } })).toBe(false);
   expect(commandMayNeedNewFonts('setFontEnvironment', { families: ['\u6e38\u660e\u671d'] })).toBe(false);
+  expect(commandMayNeedNewFonts('setRenderEnvironment', { themeColors: {}, showHiddenText: true })).toBe(true);
+  expect(commandMayNeedNewFonts('setRenderEnvironment', { themeColors: { accent1: '\u65e5' }, showHiddenText: false })).toBe(false);
 });
