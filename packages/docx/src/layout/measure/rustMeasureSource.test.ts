@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
+import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
 import { configureDefaultFonts } from './defaultFontProvider';
 import {
   createRustMeasureSource,
@@ -103,5 +104,18 @@ test('rejecting font loads settle to fallback metrics and warn once across passe
   } finally {
     source.clear();
     warn.mockRestore();
+  }
+});
+
+test('measurement forwards the document compatibility mode and defaults to 12', () => {
+  const source = createRustMeasureSource({
+    engine: { registerFont: () => 1, clearFonts() {} },
+  });
+  expect(source.measurementConfigForRequirements([])?.compat.compatibilityMode).toBe(12);
+  for (const compatibilityMode of [11, 12, 14, 15, 16]) {
+    source.setCompat({ ...DEFAULT_COMPATIBILITY_FLAGS, compatibilityMode });
+    expect(source.measurementConfigForRequirements([])?.compat.compatibilityMode).toBe(
+      compatibilityMode,
+    );
   }
 });

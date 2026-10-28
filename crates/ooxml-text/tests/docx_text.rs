@@ -1172,24 +1172,26 @@ fn segoe_ui_weight_families_measure_paragraphs_at_the_requested_span() {
     }
 }
 
-/// Segoe UI Light and Semilight fall back to Liberation Sans and are narrower
-/// than it; measured at the substitute's own advances their lines wrap early.
 #[test]
 fn segoe_ui_light_and_semilight_measure_at_word_advances() {
     let (mut store, base) = store_with_font();
-    for (family, ratio) in [("Segoe UI Light", 0.949), ("Segoe UI Semilight", 0.976)] {
-        let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
-        let view = store.register_substitute(base, requested).expect(family);
+    for family in ["Segoe UI Light", "Segoe UI Semilight"] {
+        let view = store.register_named_substitute(base, family).expect(family);
+        let metrics =
+            ooxml_text::family_metrics::family_metrics(&family.to_lowercase(), false, false)
+                .expect(family);
         let text = "the quick brown fox jumps";
-        let width = |id| -> f32 {
-            shape(&store, id, text, 64.0, &[])
-                .unwrap()
-                .iter()
-                .map(|glyph| glyph.x_advance)
-                .sum()
-        };
-        let measured = width(view) / width(base);
-        assert!((measured - ratio).abs() < 1e-4, "{family}: {measured}");
+        let expected = text
+            .chars()
+            .map(|ch| ooxml_text::family_metrics::family_advance(metrics, ch).unwrap())
+            .sum::<f32>()
+            * 64.0;
+        let measured: f32 = shape(&store, view, text, 64.0, &[])
+            .unwrap()
+            .iter()
+            .map(|glyph| glyph.x_advance)
+            .sum();
+        assert!((measured - expected).abs() < 1e-3, "{family}: {measured}");
     }
 }
 
@@ -1306,6 +1308,7 @@ fn a_substituted_corpus_face_measures_at_the_span_word_embeds() {
         ("Lucida Sans", 2332.0 / 2048.0),
         ("Lucida Calligraphy", 2566.0 / 2048.0),
         ("Arial Narrow", 2319.0 / 2048.0),
+        ("Cambria", 2401.0 / 2048.0),
         ("Cambria Math", 2403.0 / 2048.0),
     ] {
         let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);

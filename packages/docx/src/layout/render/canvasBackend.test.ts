@@ -494,6 +494,60 @@ describe('Canvas text-run slot clipping', () => {
   });
 });
 
+describe('Canvas substitute widths', () => {
+  it('scales around the text origin and preserves tracking and word spacing', async () => {
+    for (const horizontalScale of [undefined, 150]) {
+      const { ctx, paints } = recordingContext(
+        new Map([['AB C', { width: 100, ascent: 12, descent: 4 }]])
+      );
+      Object.assign(ctx, { letterSpacing: '0px', wordSpacing: '0px' });
+      const spacing: Record<string, string> = {};
+      const recorded = new Proxy(ctx, {
+        set(target, key, value) {
+          if (key === 'letterSpacing' || key === 'wordSpacing') spacing[key] = value;
+          return Reflect.set(target, key, value);
+        },
+      });
+      const run = textRun('AB C', 40, 80, 'Liberation Sans');
+      run.substituteScale = 0.8;
+      run.horizontalScale = horizontalScale;
+      run.letterSpacing = 8;
+      run.wordSpacing = 4;
+
+      await drawPrimitive(recorded, run);
+
+      expect(spacing).toEqual({ letterSpacing: '10px', wordSpacing: '5px' });
+      expect(paints).toHaveLength(1);
+      expect(paints[0].naturalLeft).toBeCloseTo(40);
+      expect(paints[0].naturalRight).toBeCloseTo(40 + 80 * ((horizontalScale ?? 100) / 100));
+      expect(run.letterSpacing).toBe(8);
+      expect(run.wordSpacing).toBe(4);
+
+      await drawPrimitive(ctx, textRun('AB C', 200, 100, 'Liberation Sans'));
+      expect(paints[1].naturalLeft).toBeCloseTo(200);
+      expect(paints[1].naturalRight).toBeCloseTo(300);
+    }
+  });
+
+  it('keeps measured leader repeat positions while scaling the glyphs', async () => {
+    const { ctx, paints } = recordingContext(
+      new Map([['.', { width: 10, ascent: 12, descent: 4 }]])
+    );
+    const run = textRun('...', 40, 36, 'Liberation Sans');
+    run.substituteScale = 0.8;
+    run.leaderGlyphs = { glyph: '.', count: 3, advance: 12, x: 40, baselineY: 20 };
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(3);
+    for (let index = 0; index < paints.length; index++) {
+      expect(paints[index].naturalLeft).toBeCloseTo(40 + index * 12);
+      expect(paints[index].naturalRight - paints[index].naturalLeft).toBeCloseTo(8);
+    }
+    expect(run.leaderGlyphs.advance).toBe(12);
+  });
+});
+
 describe('Canvas font families', () => {
   it('swaps only the mapped families of a CSS font shorthand', () => {
     const families = new Map([['Calibri', 'Calibri#1f2e']]);
