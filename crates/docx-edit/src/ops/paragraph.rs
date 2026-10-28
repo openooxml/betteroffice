@@ -1176,7 +1176,7 @@ fn rebased_run_attr(
     rebase_style_attr(effective, previous, next, direct)
 }
 
-fn edited_run_formatting(
+fn edited_run_formatting<T: ReadTxn>(
     chunks: &[Chunk],
     boundaries: Option<&Any>,
     source: &crate::seed::SourceMetadata,
@@ -1186,6 +1186,7 @@ fn edited_run_formatting(
     keys: &[&str],
     node_start: u32,
     pilcrow: u32,
+    txn: &T,
 ) -> Result<Vec<DirectRunFormatting>, &'static str> {
     let Some(Any::Array(boundaries)) = boundaries else {
         return Err(MISSING_RUN_PROVENANCE);
@@ -1208,9 +1209,7 @@ fn edited_run_formatting(
     }
     let mut runs = Vec::new();
     for chunk in chunks {
-        if !matches!(chunk.kind, ChunkKind::Text(_))
-            || chunk.start < node_start
-            || chunk.end() > pilcrow
+        if !carries_run_formatting(chunk, txn) || chunk.start < node_start || chunk.end() > pilcrow
         {
             continue;
         }
@@ -1574,6 +1573,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
                     &keys,
                     node_start,
                     pilcrow,
+                    txn,
                 )?
             },
         )
@@ -1583,10 +1583,9 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
     let mut inheritance = HashMap::new();
     let mut formats = Vec::new();
     for chunk in chunks {
-        if !matches!(chunk.kind, crate::ops::ChunkKind::Text(_))
-            || chunk.start < node_start
-            || chunk.end() > pilcrow
-        {
+        let formats_run = matches!(chunk.kind, ChunkKind::Text(_))
+            || (direct_numbering && carries_run_formatting(chunk, txn));
+        if !formats_run || chunk.start < node_start || chunk.end() > pilcrow {
             continue;
         }
         let linked = chunk.attr_active(crate::format::HYPERLINK);

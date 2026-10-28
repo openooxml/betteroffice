@@ -1779,7 +1779,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
-        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="SuperHeading"><w:name w:val="SuperHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="Footnote Reference"/><w:rPr><w:sz w:val="18"/><w:vertAlign w:val="superscript"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="SuperHeading"><w:name w:val="SuperHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>"#
     );
     parts
         .iter_mut()
@@ -2302,6 +2302,66 @@ fn restyle_numbered_runs_with_note_references_stay_patches() {
             .unwrap();
         assert!(part.legacy_paragraphs.is_empty());
         assert_eq!(part.paragraph_patches.len(), 1);
+    }
+}
+
+#[test]
+fn restyle_numbered_note_references_follow_the_style_and_keep_direct_formatting() {
+    for kind in ["footnote", "endnote"] {
+        for edited in [false, true] {
+            for (formatting, size, size_cs, bold, styled) in [
+                ("", 32.0, None, true, false),
+                (
+                    r#"<w:rPr><w:b w:val="0"/><w:sz w:val="24"/><w:szCs w:val="26"/></w:rPr>"#,
+                    24.0,
+                    Some(26.0),
+                    false,
+                    false,
+                ),
+                (
+                    r#"<w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr>"#,
+                    18.0,
+                    None,
+                    true,
+                    true,
+                ),
+            ] {
+                let doc = open_numbered_restyle(&format!(
+                    r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>Chapter 1</w:t></w:r><w:r>{formatting}<w:{kind}Reference w:id="1"/></w:r></w:p>"#
+                ));
+                if edited {
+                    doc.replace_range(&EditCtx::local("", ""), StoryRange::new("body", 0, 1), "c")
+                        .unwrap();
+                }
+                apply(
+                    &doc,
+                    &UndoSession::new(),
+                    vec![set_style("00000001", "Heading1")],
+                );
+                let attrs = embed_marks(&doc, "noteRef");
+                let Some(Any::Map(font_size)) = attrs.get("fontSize") else {
+                    panic!("missing note reference size")
+                };
+                assert_eq!(number(font_size.get("size")), Some(size));
+                assert_eq!(number(font_size.get("sizeCs")), size_cs);
+                assert_eq!(active(&attrs, "bold"), bold);
+                assert_eq!(active(&attrs, "superscript"), styled);
+                if styled {
+                    let Some(Any::Map(style)) = attrs.get("runStyle") else {
+                        panic!("missing note reference style")
+                    };
+                    assert_eq!(style.get("styleId"), Some(&Any::from("FootnoteReference")));
+                }
+                let plan = doc.paragraph_save_plan();
+                let part = plan
+                    .spliced_parts
+                    .iter()
+                    .find(|part| part.part == "word/document.xml")
+                    .unwrap();
+                assert!(part.legacy_paragraphs.is_empty(), "{part:?}");
+                assert_eq!(part.paragraph_patches.len(), 1);
+            }
+        }
     }
 }
 

@@ -1248,6 +1248,51 @@ fn paragraph_patch_numbered_restyle_changes_only_the_style_element() {
 }
 
 #[test]
+fn paragraph_patch_numbered_restyle_with_unchanged_inheritance_changes_only_style() {
+    let source = concat!(
+        "<w:p w:rsidR='12345678'><w:pPr><w:pStyle w:val='A'/>",
+        "<w:numPr w:keep='source'><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+        "<w:spacing w:after='160'/></w:pPr>",
+        "<w:r w:rsidR='87654321'><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>",
+    );
+    for inherited in [json!({}), json!({"bold": true, "fontSize": {"size": 24}})] {
+        let mut marks = inherited.clone();
+        marks["bold"] = json!(true);
+        let units = vec![text("x", marks)];
+        let mut plan = patch(units.clone(), units);
+        plan.seed.properties = attrs(json!({
+            "pStyle": "A", "numPr": {"numId": 43, "ilvl": 0}, "spaceAfter": 160
+        }));
+        seed_inheritance(
+            &mut plan,
+            json!({"spaceAfter": 160}),
+            json!([inherited.clone()]),
+            inherited.clone(),
+        );
+        plan.para_inherit = plan.seed.inherit.paragraph.clone();
+        plan.mark_inherit = plan.seed.inherit.paragraph_mark.clone();
+        plan.para_deltas = vec![delta("pStyle", Some(json!("A")), Some(json!("B")))];
+        let mut properties = plan.seed.properties.clone();
+        properties.insert("pStyle".to_owned(), json!("B"));
+        plan.result_sha256 = result_sha256(&plan.seed.units, &properties);
+        assert_eq!(
+            write(source, &plan).unwrap(),
+            source.replace("<w:pStyle w:val='A'/>", "<w:pStyle w:val='B'/>")
+        );
+        let inherited_numbering = source.replace(
+            "<w:numPr w:keep='source'><w:ilvl w:val='0'/><w:numId w:val='43'/></w:numPr>",
+            "",
+        );
+        plan.seed
+            .inherit
+            .paragraph
+            .insert("numPr".to_owned(), json!({"numId": 43, "ilvl": 0}));
+        plan.para_inherit = plan.seed.inherit.paragraph.clone();
+        assert_restyle_failure(&inherited_numbering, &plan);
+    }
+}
+
+#[test]
 fn paragraph_patch_symbol_font_changes_even_when_run_properties_match() {
     let source = concat!(
         "<w:p><w:r><w:rPr><w:rFonts w:ascii='Arial' w:hAnsi='Arial' w:eastAsia='Arial' w:cs='Arial'/></w:rPr>",
