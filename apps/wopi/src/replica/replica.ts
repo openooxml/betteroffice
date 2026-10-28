@@ -182,7 +182,7 @@ function rejected(error: unknown): { accepted: false; reason: string } {
 
 type ApplyResult =
   | { accepted: true; followUps?: Uint8Array[] }
-  | { accepted: false; reason: string };
+  | { accepted: false; reason: string; followUps?: Uint8Array[] };
 
 type DeleteRanges = Map<number, Array<{ clock: number; len: number }>>;
 
@@ -307,7 +307,8 @@ export class Replica implements ServerReplica {
   }
 
   #applyNow(update: Uint8Array): ApplyResult {
-    if (hasCausalGap(update, this.#engine.encodeStateVector())) {
+    const vectorBefore = this.#engine.encodeStateVector();
+    if (hasCausalGap(update, vectorBefore)) {
       return { accepted: false, reason: "causalGap" };
     }
     const versionBefore = this.#engine.engineVersion();
@@ -316,7 +317,19 @@ export class Replica implements ServerReplica {
       this.#engine.applyUpdate(update.slice());
     } catch (error) {
       this.#endOperation(operation, false);
-      return rejected(error);
+      const rejection = rejected(error);
+      const vectorAfter = this.#engine.encodeStateVector();
+      if (
+        this.#engine.engineVersion() === versionBefore &&
+        vectorAfter.length === vectorBefore.length &&
+        vectorAfter.every((byte, index) => byte === vectorBefore[index])
+      ) {
+        return rejection;
+      }
+      this.#version += 1;
+      const integrated = this.#engine.encodeStateAsUpdate(vectorBefore);
+      this.#publish(integrated);
+      return { ...rejection, followUps: [integrated] };
     }
     if (this.#engine.engineVersion() !== versionBefore) {
       this.#version += 1;
