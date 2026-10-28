@@ -84,5 +84,6 @@ test('pptx: layout dropdown stays inside the viewport on an rtl host page', asyn
   const viewport = page.viewportSize()!;
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  await expect.poll(() => menu.evaluate((element) => getComputedStyle(element).direction)).toBe('ltr');
   await expectRootLtr(page, '[data-testid="pptx-worker-editor"]');
 });
