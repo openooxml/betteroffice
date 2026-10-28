@@ -336,6 +336,10 @@ fn staging_dir(parent: &Path, name: &str) -> Result<PathBuf> {
     Err(io::Error::other("cannot create a unique staging directory").into())
 }
 
+fn verify_limit(parts: &[&[u8]]) -> usize {
+    parts.iter().map(|part| part.len()).max().unwrap_or(0)
+}
+
 fn write_pack(
     options: &Options,
     sources: &[Source],
@@ -348,10 +352,13 @@ fn write_pack(
         let dict = dictionary_payload(source, dictionary)?;
         let encoded = compress(source.payload(), dict, options.level)?;
         let expected = source.reference.as_deref().unwrap_or(&source.bytes);
-        let limit = expected
-            .len()
-            .max(source.bytes.len())
-            .max(source.payload().len());
+        let limit = verify_limit(&[
+            expected,
+            source.bytes.as_slice(),
+            source.payload(),
+            dict.unwrap_or_default(),
+            encoded.as_slice(),
+        ]);
         let decoded = fontpack::decode_face(&encoded, dict, source.codec, limit)?;
         if decoded.font != expected {
             return Err(
@@ -401,7 +408,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, dictionary_payload};
+    use super::{Source, dictionary_payload, verify_limit};
     use fontpack::Codec;
 
     fn source(codec: Codec) -> Source {
@@ -426,5 +433,14 @@ mod tests {
             dictionary_payload(&transformed, Some(&transformed)).unwrap(),
             Some(&[2][..])
         );
+    }
+
+    #[test]
+    fn verify_limit_covers_a_dictionary_larger_than_the_face() {
+        let face = [0u8; 10];
+        let dict = [0u8; 40];
+        let frame = [0u8; 12];
+        assert_eq!(verify_limit(&[&face, &face, &face, &dict, &frame]), 40);
+        assert_eq!(verify_limit(&[&face, &face, &face, &[], &[0u8; 50]]), 50);
     }
 }
