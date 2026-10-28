@@ -188,7 +188,12 @@ fn get_balanced_section_height(
 
 /// Whether `columns` columns of `height`, each filled to the furthest legal
 /// break that fits, reach the end of the content.
-fn content_packs(legal_breaks: &[ColumnBreak], fit_height: f64, columns: usize, height: f64) -> bool {
+fn content_packs(
+    legal_breaks: &[ColumnBreak],
+    fit_height: f64,
+    columns: usize,
+    height: f64,
+) -> bool {
     let mut start = 0.0_f64;
     for _ in 0..columns {
         let limit = start + height + BOUNDARY_SLACK_PX;
@@ -241,12 +246,7 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
         .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
         .find(|height| {
             packs_exactly
-                && content_packs(
-                    legal_breaks,
-                    fit_height,
-                    columns.count as usize,
-                    *height,
-                )
+                && content_packs(legal_breaks, fit_height, columns.count as usize, *height)
         });
     let balanced_height = half_way.unwrap_or_else(|| {
         legal_breaks

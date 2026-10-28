@@ -230,9 +230,7 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
             .iter()
             .filter_map(|item| match item {
                 Fragment::Paragraph(fragment) => {
-                    let measured = arena
-                        .find(item)
-                        .and_then(|index| input.measured.get(index));
+                    let measured = arena.find(item).and_then(|index| input.measured.get(index));
                     let height = match measured {
                         Some(MeasuredBlock {
                             block: LayoutBlock::Paragraph(block),

@@ -81,7 +81,10 @@ fn single_spaced_font_box_fits_without_trailing_leading() {
     };
     assert_eq!(fragment.height, 60.0);
     assert_eq!(fragment.y + fragment.height, 70.0);
-    assert_eq!(result.pages[0].size.h - result.pages[0].margins.bottom, 68.0);
+    assert_eq!(
+        result.pages[0].size.h - result.pages[0].margins.bottom,
+        68.0
+    );
 }
 
 #[test]
@@ -193,7 +196,14 @@ fn split_keep_next_retains_full_pitch_before_its_follower() {
 fn paragraph_after_spacing_is_deferred_and_full_pitch_separates_paragraphs() {
     let result = layout(
         vec![
-            paragraph("first", 1, 20.0, 14.0, 4.0, json!({"spacing": {"after": 8}})),
+            paragraph(
+                "first",
+                1,
+                20.0,
+                14.0,
+                4.0,
+                json!({"spacing": {"after": 8}}),
+            ),
             text(1, 20.0, json!({"spacing": {"after": 50}})),
         ],
         46.0,
@@ -329,9 +339,8 @@ fn column_bottom_uses_the_same_font_box_boundary() {
 #[test]
 fn trailing_leading_does_not_overhang_a_float_band() {
     let mut value = input(vec![text(3, 20.0, json!({"widowControl": false}))], 100.0);
-    value.options.section_page_float_bands = Some(
-        serde_json::from_value(json!([{"default": [{"top": 68, "bottom": 80}]}])).unwrap(),
-    );
+    value.options.section_page_float_bands =
+        Some(serde_json::from_value(json!([{"default": [{"top": 68, "bottom": 80}]}])).unwrap());
     let result = docx_layout::compute_layout_input(&mut value).unwrap();
     let fragments = &result.pages[0].fragments;
     let Fragment::Paragraph(before) = &fragments[0] else {

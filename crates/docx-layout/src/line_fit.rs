@@ -29,7 +29,10 @@ pub(crate) fn trailing_leading(block: &ParagraphBlock, line: &TypesetRow) -> f64
     }) {
         return 0.0;
     }
-    let spacing = block.attrs.as_ref().and_then(|attrs| attrs.spacing.as_ref());
+    let spacing = block
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref());
     let rule = spacing.and_then(|spacing| spacing.line_rule.as_deref());
     if rule == Some("exact")
         || (rule != Some("atLeast")
@@ -54,7 +57,9 @@ pub(crate) fn slice_fit_height(block: &ParagraphBlock, lines: &[TypesetRow]) -> 
         .iter()
         .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
         .sum::<f64>()
-        - lines.last().map_or(0.0, |line| trailing_leading(block, line))
+        - lines
+            .last()
+            .map_or(0.0, |line| trailing_leading(block, line))
 }
 
 pub(crate) fn fragment_fit_height(

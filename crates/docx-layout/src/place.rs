@@ -1132,7 +1132,8 @@ fn place<F: PartialEq>(
                             } else {
                                 group_trailing
                             },
-                        paginator.get_column_capacity_with_trailing(group_trailing) - group_trailing,
+                        paginator.get_column_capacity_with_trailing(group_trailing)
+                            - group_trailing,
                         page_has_content,
                     )?;
                 if must_advance {
@@ -1846,7 +1847,8 @@ fn layout_paragraph(
             } else {
                 0.0
             };
-            if paragraph_fragment_height(fit_before, total_with_line - trailing) <= available_for_lines
+            if paragraph_fragment_height(fit_before, total_with_line - trailing)
+                <= available_for_lines
                 || fitting_lines == 0
             {
                 lines_height = total_with_line;
@@ -1899,7 +1901,8 @@ fn layout_paragraph(
             && let Some((after, trailing)) = keep_with_next_after.filter(|(after, _)| *after > 0.0)
             && paragraph_fragment_height(
                 reserved_before,
-                lines_height + after
+                lines_height
+                    + after
                     + if paginator.allows_trailing_leading() {
                         0.0
                     } else {
