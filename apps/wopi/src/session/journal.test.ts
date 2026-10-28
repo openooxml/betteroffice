@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -7,6 +7,7 @@ import { initEngines } from "../replica/engines";
 import { openFreshClient, openTestClient, sourceBytes } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../../test/session/harness";
 import { FileJournal } from "./journal";
+import { FileSession } from "./fileSession";
 import { SessionRegistry } from "./registry";
 import type { Format } from "../replica/replica";
 
@@ -230,7 +231,7 @@ describe("FileJournal", () => {
     }
   });
 
-  test("host version changed discards the journal and logs it", async () => {
+  test("an unmatched host version recovers the journal into a conflict copy before deleting it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const h = makeHarness({ journalDir: dir });
     addToken(h, "tok-a", "user-a");
@@ -240,6 +241,9 @@ describe("FileJournal", () => {
     try {
       client.edit("stale-edit ", 0);
       const replica = session.replica!;
+      session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector()));
+      await session.requestSave(a.user.id);
+      client.edit("after-checkpoint-edit ", 1);
       session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector()));
       session.abandon();
 
@@ -254,7 +258,18 @@ describe("FileJournal", () => {
       const session2 = [...h2.registry.list()][0]!;
       try {
         expect(session2.dirty).toBe(false);
-        expect(h2.logs.join("\n")).toContain("journal discarded");
+        expect(h2.logs.join("\n")).toContain("journal recovered as a conflict copy");
+        expect(h2.putCount()).toBe(0);
+        expect(h2.callsFor("PUT_RELATIVE")).toHaveLength(1);
+        expect(existsSync(FileJournal.pathFor(dir, SessionRegistry.fileKey("testhost", SRC)))).toBe(false);
+        const copy = [...h2.host.files.values()].find((file) => file.id !== "file1")!;
+        const recovered = await openFreshClient("xlsx", copy.bytes, 92003);
+        try {
+          expect(recovered.contains("stale-edit")).toBe(true);
+          expect(recovered.contains("after-checkpoint-edit")).toBe(true);
+        } finally {
+          recovered.destroy();
+        }
         const fresh = await openFreshClient("xlsx", h2.host.files.get("file1")!.bytes, 92002);
         try {
           expect(fresh.contains("stale-edit")).toBe(false);
@@ -264,6 +279,125 @@ describe("FileJournal", () => {
       } finally {
         await session2.leave(b.user.id).catch(() => {});
       }
+    } finally {
+      client.destroy();
+    }
+  });
+});
+
+describe("journal durability regressions", () => {
+  test("opening a journal truncates a torn tail before appending recoverable records", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const journal = new FileJournal(dir, "torn-tail");
+    const source = new Uint8Array([1, 2]);
+    journal.begin(source, "1");
+    journal.appendUpdate(new Uint8Array([3]));
+    journal.close();
+    const completeLength = readFileSync(journal.path).length;
+    appendFileSync(journal.path, new Uint8Array([0, 0, 0, 8, 85, 4]));
+    const reopened = new FileJournal(dir, "torn-tail");
+    reopened.begin(source, "1");
+    expect(readFileSync(journal.path).length).toBe(completeLength);
+    reopened.appendUpdate(new Uint8Array([5, 6]));
+    reopened.recordWrittenVersion("2");
+    reopened.close();
+    const recovered = new FileJournal(dir, "torn-tail").read();
+    expect(recovered?.updates).toEqual([new Uint8Array([3]), new Uint8Array([5, 6])]);
+    expect(recovered?.writtenVersions).toEqual(["2"]);
+  });
+
+  test("short writes are completed for source, update and version records", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const journal = new FileJournal(dir, "short-writes", {
+      write: (fd, buffer, offset, length) => writeSync(fd, buffer, offset, Math.min(2, length)),
+    });
+    const source = new Uint8Array([1, 2, 3, 4]);
+    journal.begin(source, "1", 42, new Uint8Array([9, 8]));
+    journal.appendUpdate(new Uint8Array([5, 6, 7]));
+    journal.recordWrittenVersion("2");
+    journal.close();
+    const recovered = journal.read();
+    expect(recovered?.source).toEqual(source);
+    expect(recovered?.initialState).toEqual(new Uint8Array([9, 8]));
+    expect(recovered?.updates).toEqual([new Uint8Array([5, 6, 7])]);
+    expect(recovered?.writtenVersions).toEqual(["2"]);
+  });
+
+  test("a partial append failure marks the session journal broken and blocks further updates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    let failing = false;
+    let wrotePartial = false;
+    const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC), {
+      write: (fd, buffer, offset, length) => {
+        if (!failing) return writeSync(fd, buffer, offset, length);
+        if (wrotePartial) return 0;
+        wrotePartial = true;
+        return writeSync(fd, buffer, offset, Math.min(2, length));
+      },
+    });
+    const session = new FileSession({
+      hostClient: h.hostClient, hostId: "testhost", wopiSrc: SRC,
+      fileKey: SessionRegistry.fileKey("testhost", SRC), instanceId: "journal-test",
+      journal, logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await session.join({ wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 96001);
+    const failures: unknown[] = [];
+    session.on("journalBroken", (event) => failures.push(event));
+    try {
+      failing = true;
+      client.edit("append-failed ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+      expect(session.journalBroken).toBe(true);
+      expect(session.viewOnlyReason).toBe("journalBroken");
+      expect(failures).toEqual([{ kind: "writeFailed" }]);
+      expect(h.logs.join("\n")).toContain("error journal broken");
+      client.edit("must-not-accept ", 1);
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+    const repaired = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC));
+    repaired.begin(sourceBytes("xlsx"), "1");
+    expect(repaired.read()?.updates).toEqual([]);
+    repaired.close();
+  });
+
+  test("an unmatched journal survives a failed conflict copy and recovers on retry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    let failCopy = true;
+    const h = makeHarness({ journalDir: dir, relativeStatus: () => failCopy ? 500 : null });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 96011);
+    const path = FileJournal.pathFor(dir, SessionRegistry.fileKey("testhost", SRC));
+    try {
+      client.edit("unmatched-preserved ");
+      a.session.applyUpdate(a.user.id, client.encodeStateAsUpdate(a.session.replica!.encodeStateVector()));
+      a.session.abandon();
+      const original = readFileSync(path);
+      const file = h.host.files.get("file1")!;
+      file.version = 9;
+      file.itemVersion = "9";
+      const registry = restartRegistry(h, dir);
+      await expect(registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" })).rejects.toThrow();
+      expect(readFileSync(path)).toEqual(original);
+      expect(h.putCount()).toBe(0);
+      failCopy = false;
+      const b = await registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(existsSync(path)).toBe(false);
+      const copy = [...h.host.files.values()].find((entry) => entry.id !== "file1")!;
+      const fresh = await openFreshClient("xlsx", copy.bytes, 96012);
+      try {
+        expect(fresh.contains("unmatched-preserved")).toBe(true);
+      } finally {
+        fresh.destroy();
+      }
+      await b.session.close();
     } finally {
       client.destroy();
     }

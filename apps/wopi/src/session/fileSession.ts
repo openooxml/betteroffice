@@ -1,14 +1,15 @@
 import { randomInt, randomUUID } from "node:crypto";
-import type { HostClient } from "../host/client";
+import type { CheckFileInfo, HostClient } from "../host/client";
 import { WopiHostError } from "../host/errors";
 import { redactText } from "../host/redact";
 import { openServerReplica, type Format, type JoinPayload, type ServerReplica } from "../replica/replica";
 import { electLeader } from "./leader";
 import { UserSession } from "./userSession";
-import { FileJournal } from "./journal";
+import { FileJournal, type JournalData } from "./journal";
 import { noopLogger, systemScheduler, type SessionLogger, type SessionScheduler } from "./scheduler";
 
 export const LOCK_REFRESH_MS = 10 * 60 * 1000;
+export const LOCK_LEASE_MS = 30 * 60 * 1000;
 export const AUTOSAVE_DEBOUNCE_MS = 30 * 1000;
 export const AUTOSAVE_MAX_MS = 5 * 60 * 1000;
 export const HEARTBEAT_TIMEOUT_MS = 60 * 1000;
@@ -18,7 +19,7 @@ export const OUR_LOCK_PREFIX = "bo1:";
 export const MAX_TIMER_MS = 2147483647;
 
 export type FileSessionState = "opening" | "open" | "closing" | "closed";
-export type ViewOnlyReason = "lockedElsewhere";
+export type ViewOnlyReason = "lockedElsewhere" | "externalChange" | "lockLost" | "journalBroken";
 
 /** Failure raised by the session layer. */
 export class SessionError extends Error {
@@ -35,8 +36,11 @@ export interface FileSessionEvents {
   leaderChanged: { leaderId: string | null; previousLeaderId: string | null };
   saved: { itemVersion: string | null; by: string | null };
   saveFailed: { kind: string };
-  conflict: { name: string; copyName: string };
+  conflict: { name: string; url?: string; copyName: string; copyUrl?: string };
   viewOnly: { reason: ViewOnlyReason };
+  rejoinRequired: { reason: "sourceChanged" };
+  writable: Record<string, never>;
+  journalBroken: { kind: "writeFailed" };
   replicaUpdate: { update: Uint8Array };
   closed: Record<string, never>;
   lostFlush: Record<string, never>;
@@ -143,6 +147,9 @@ export class FileSession {
   #itemVersion: string | null = null;
   #lockHeld = false;
   #lastLockRefreshAt = 0;
+  #lockDeadline: number | null = null;
+  #refreshFailures = 0;
+  #leaseTimer: ReturnType<typeof setTimeout> | null = null;
   #viewOnlyReason: ViewOnlyReason | null = null;
   #savedVersion = 0;
   #firstDirtyAt: number | null = null;
@@ -157,13 +164,14 @@ export class FileSession {
   #format: Format | null = null;
   #sourceBytes: Uint8Array | null = null;
   #journalActive = false;
-  #journalVersion: string | null = null;
+  #journalBroken = false;
   #pendingJoins = 0;
   #offLocalUpdate: (() => void) | null = null;
   #openedClientId: number | null = null;
   #openedInitialState: Uint8Array | null = null;
   #replayStats: { accepted: number; rejected: number } | null = null;
   #collectingFollowUps: Uint8Array[] | null = null;
+  #checkingSource = false;
 
   constructor(deps: FileSessionDeps) {
     this.#deps = deps;
@@ -209,7 +217,12 @@ export class FileSession {
   }
 
   get lockHeld(): boolean {
+    this.#checkLockLease();
     return this.#lockHeld;
+  }
+
+  get journalBroken(): boolean {
+    return this.#journalBroken;
   }
 
   get viewOnly(): boolean {
@@ -343,7 +356,6 @@ export class FileSession {
         } catch {
           this.#openedInitialState = null;
         }
-        this.#journalVersion = info.Version ?? null;
         this.#state = "open";
       } catch (err) {
         this.#failOpening();
@@ -353,8 +365,9 @@ export class FileSession {
       this.#fileName = info.BaseFileName || this.#fileName;
       this.#fileSize = info.Size;
     }
+    this.#checkLockLease();
     const lockHeldBefore = this.#lockHeld;
-    if (!this.#lockHeld && this.#viewOnlyReason === null && wantsWrite) {
+    if (!this.#lockHeld && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost") && wantsWrite) {
       try {
         await this.#attemptLock(input.accessToken);
       } catch (err) {
@@ -363,15 +376,29 @@ export class FileSession {
       }
     }
     const lockJustAcquired = !lockHeldBefore && this.#lockHeld;
+    if (lockJustAcquired) {
+      try {
+        await this.#refreshSourceUnderLock(input.accessToken);
+        if (this.#viewOnlyReason === "lockLost") {
+          this.#viewOnlyReason = null;
+          this.#emit("writable", {});
+        }
+      } catch (err) {
+        this.#loseLock();
+        this.#scheduleRefresh();
+        if (first) this.#failOpening();
+        throw err;
+      }
+    }
     if (this.#lockHeld && !this.#journalActive) {
       try {
-        await this.#activateJournal(info.Version ?? this.#journalVersion ?? this.#itemVersion);
+        await this.#activateJournal(this.#itemVersion, input.accessToken);
       } catch (err) {
         if (first) this.#failOpening();
         throw err;
       }
     }
-    const canWrite = wantsWrite && this.#viewOnlyReason === null;
+    let canWrite = wantsWrite && this.#viewOnlyReason === null;
     const now = this.#now();
     const user = new UserSession({
       hostId: this.hostId,
@@ -380,16 +407,17 @@ export class FileSession {
       accessTokenTtl: input.accessTokenTtl,
       userId: info.UserId,
       friendlyName: info.UserFriendlyName ?? info.UserId,
-      canWrite,
+      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost"),
       joinedAt: now,
       postMessageOrigin: info.PostMessageOrigin ?? "",
       closeUrl: info.CloseUrl ?? "",
     });
     this.#users.set(user.id, user);
     this.#history.push(user);
-    if (canWrite) this.#everHadEditor = true;
+    if (user.canWrite) this.#everHadEditor = true;
     this.#scheduleUserTimers(user);
     await this.#refreshLeader(lockJustAcquired);
+    canWrite = user.canWrite && this.#viewOnlyReason === null;
     if (canWrite && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
     if (this.#holdPending && canWrite) {
       this.#holdPending = false;
@@ -420,7 +448,7 @@ export class FileSession {
       try {
         if (this.#journalActive) this.#deps.journal?.appendUpdate(update);
       } catch {
-        this.#log("warn", "journal append failed");
+        this.#markJournalBroken();
       }
       this.#emit("replicaUpdate", { update });
     });
@@ -446,6 +474,7 @@ export class FileSession {
     this.#clearTimer("refresh");
     this.#clearTimer("autosave");
     this.#clearTimer("hold");
+    this.#clearLeaseTimer();
     this.#destroyReplica();
     this.#lockHeld = false;
     this.#viewOnlyReason = null;
@@ -455,64 +484,154 @@ export class FileSession {
     this.#deps.journal?.close();
   }
 
-  async #activateJournal(currentVersion: string | null): Promise<void> {
-    const journal = this.#deps.journal;
-    if (!journal || !this.#replica || !this.#format) return;
-    this.#journalVersion = currentVersion;
-    const existing = journal.read();
-    const hasJournal = existing !== null && existing.source !== null && existing.itemVersion !== null;
-    if (hasJournal) {
-      const known = currentVersion !== null && (existing.itemVersion === currentVersion || existing.writtenVersions.includes(currentVersion));
-      if (known) {
-        if (this.#replica.version === 0 && !this.dirty) {
-          const source = existing.source!;
-          this.#destroyReplica();
-          const open = this.#deps.openReplica ?? openServerReplica;
-          this.#attachReplica(await open(this.#format, source, { clientId: existing.clientId ?? randomInt(1, 2000000000) }));
-          this.#savedVersion = 0;
-          const versionBefore = this.#replica.version;
-          let accepted = 0;
-          let rejected = 0;
-          if (existing.initialState) {
-            const initial = this.#replica.applyUpdate(existing.initialState);
-            if (initial.accepted) accepted += 1;
-            else rejected += 1;
-          }
-          for (const update of existing.updates) {
-            const result = this.#replica.applyUpdate(update);
-            if (result.accepted) accepted += 1;
-            else {
-              rejected += 1;
-              this.#log("warn", "journal replay update rejected");
-            }
-          }
-          this.#replayStats = { accepted, rejected };
-          if (this.#replica.version !== versionBefore || existing.updates.length > 0) {
-            this.#firstDirtyAt = this.#now();
-            this.#lastUpdateAt = this.#now();
-          }
-          if (existing.updates.length > 0) this.#log("info", "journal replayed", { updates: existing.updates.length });
-        }
-        this.#journalActive = true;
-        journal.begin(existing.source!, existing.itemVersion, existing.clientId, existing.initialState);
+  #setViewOnly(reason: ViewOnlyReason): void {
+    if (this.#viewOnlyReason === reason) return;
+    this.#viewOnlyReason = reason;
+    this.#emit("viewOnly", { reason });
+  }
+
+  #markJournalBroken(): void {
+    if (this.#journalBroken) return;
+    this.#journalBroken = true;
+    this.#log("error", "journal broken: write failed");
+    this.#emit("journalBroken", { kind: "writeFailed" });
+    this.#setViewOnly("journalBroken");
+  }
+
+  async #openSource(bytes: Uint8Array, info: CheckFileInfo): Promise<void> {
+    const open = this.#deps.openReplica ?? openServerReplica;
+    const replica = await open(this.#format!, bytes, { clientId: randomInt(1, 2000000000) });
+    this.#destroyReplica();
+    this.#attachReplica(replica);
+    this.#sourceBytes = bytes;
+    this.#openedClientId = replica.clientId;
+    this.#openedInitialState = replica.encodeStateAsUpdate();
+    this.#savedVersion = 0;
+    this.#firstDirtyAt = null;
+    this.#itemVersion = info.Version ?? null;
+    this.#lastModifiedTime = info.LastModifiedTime ?? null;
+    this.#fileName = info.BaseFileName;
+    this.#fileSize = info.Size;
+  }
+
+  async #refreshSourceUnderLock(accessToken: string): Promise<void> {
+    this.#checkingSource = true;
+    try {
+      const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken });
+      this.#requireLock();
+      if ((info.Version ?? null) === this.#itemVersion && (info.LastModifiedTime ?? null) === this.#lastModifiedTime) return;
+      if (this.dirty || this.#journalActive) {
+        this.#setViewOnly("externalChange");
         return;
       }
-      this.#log("warn", "journal discarded: host version changed");
-      journal.delete();
+      const bytes = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken });
+      this.#requireLock();
+      await this.#openSource(bytes, info);
+      this.#requireLock();
+      if (this.#users.size > 0) this.#emit("rejoinRequired", { reason: "sourceChanged" });
+    } finally {
+      this.#checkingSource = false;
     }
-    this.#journalActive = true;
-    if (this.#sourceBytes) journal.begin(this.#sourceBytes, currentVersion, this.#openedClientId, this.#openedInitialState);
+  }
+
+  async #rebuildJournal(existing: JournalData): Promise<ServerReplica> {
+    const open = this.#deps.openReplica ?? openServerReplica;
+    const replica = await open(this.#format!, existing.source!, { clientId: existing.clientId ?? randomInt(1, 2000000000) });
+    let accepted = 0;
+    let rejected = 0;
+    try {
+      for (const update of [...(existing.initialState ? [existing.initialState] : []), ...existing.updates]) {
+        const result = replica.applyUpdate(update);
+        if (result.accepted) accepted += 1;
+        else rejected += 1;
+      }
+      this.#replayStats = { accepted, rejected };
+      if (rejected > 0) throw new SessionError("journalRecovery", "journal replay update rejected");
+      return replica;
+    } catch (err) {
+      replica.destroy();
+      throw err;
+    }
+  }
+
+  #copyDetails(name: string, url: string): FileSessionEvents["conflict"] {
+    const details: FileSessionEvents["conflict"] = { name, copyName: name };
+    try {
+      const parsed = new URL(url);
+      if (url.includes("?") || parsed.hash || parsed.username || parsed.password || !["https:", "http:"].includes(parsed.protocol)) return details;
+      const decoded = decodeURIComponent(url);
+      if (this.#history.some((user) => user.accessToken && decoded.includes(user.accessToken))) return details;
+      details.url = url;
+      details.copyUrl = url;
+    } catch {}
+    return details;
+  }
+
+  async #activateJournal(currentVersion: string | null, accessToken: string): Promise<void> {
+    const journal = this.#deps.journal;
+    if (!journal || !this.#replica || !this.#format) return;
+    const existing = journal.read();
+    if (existing !== null && (existing.source === null || existing.fileKey !== this.fileKey)) {
+      this.#markJournalBroken();
+      throw new SessionError("journalRecovery", "journal source is unavailable");
+    }
+    if (existing !== null) {
+      const known = currentVersion !== null && (existing.itemVersion === currentVersion || existing.writtenVersions.includes(currentVersion));
+      if (!known) {
+        this.#log("warn", "journal host version changed, recovering a conflict copy");
+        const recovered = await this.#rebuildJournal(existing);
+        try {
+          const bytes = (await recovered.save()).bytes;
+          const result = await this.#host.putRelativeFile({
+            wopiSrc: this.wopiSrc, accessToken, body: bytes,
+            suggestedTarget: conflictTargetName(this.#fileName, this.#now()),
+            lock: this.lockId,
+          });
+          journal.delete();
+          this.#setViewOnly("externalChange");
+          this.#emit("conflict", this.#copyDetails(result.name, result.url));
+          this.#log("warn", "journal recovered as a conflict copy", { name: result.name });
+        } finally {
+          recovered.destroy();
+        }
+        return;
+      }
+      const recovered = await this.#rebuildJournal(existing);
+      this.#destroyReplica();
+      this.#attachReplica(recovered);
+      this.#sourceBytes = existing.source;
+      this.#savedVersion = 0;
+      if (existing.updates.length > 0) {
+        this.#firstDirtyAt = this.#now();
+        this.#lastUpdateAt = this.#now();
+        this.#log("info", "journal replayed", { updates: existing.updates.length });
+      }
+      journal.begin(existing.source!, existing.itemVersion, existing.clientId, existing.initialState);
+      this.#journalActive = true;
+      if (this.#users.size > 0) this.#emit("rejoinRequired", { reason: "sourceChanged" });
+      return;
+    }
+    try {
+      if (this.#sourceBytes) journal.begin(this.#sourceBytes, currentVersion, this.#openedClientId, this.#openedInitialState);
+      this.#journalActive = true;
+    } catch (err) {
+      this.#markJournalBroken();
+      throw err;
+    }
   }
 
   async #attemptLock(accessToken: string): Promise<void> {
     try {
       await this.#host.lock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId });
-      this.#lockHeld = true;
-      this.#lastLockRefreshAt = this.#now();
+      this.#renewLock();
       this.#scheduleRefresh();
       return;
     } catch (err) {
       if (!(err instanceof WopiHostError) || (err.kind !== "lockMismatch" && err.kind !== "conflict")) throw err;
+      if (this.#viewOnlyReason === "lockLost") {
+        this.#scheduleRefresh();
+        return;
+      }
       let current = err.currentLock ?? null;
       if (current === null) {
         try {
@@ -522,17 +641,15 @@ export class FileSession {
       if (current && current.startsWith(OUR_LOCK_PREFIX)) {
         try {
           await this.#host.unlockAndRelock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId, oldLock: current });
-          this.#lockHeld = true;
-          this.#lastLockRefreshAt = this.#now();
+          this.#renewLock();
           this.#scheduleRefresh();
           return;
         } catch (relockErr) {
           if (!(relockErr instanceof WopiHostError) || (relockErr.kind !== "lockMismatch" && relockErr.kind !== "conflict")) throw relockErr;
         }
       }
-      this.#viewOnlyReason = "lockedElsewhere";
       this.#log("warn", "file is locked elsewhere, opening view only");
-      this.#emit("viewOnly", { reason: "lockedElsewhere" });
+      this.#setViewOnly("lockedElsewhere");
     }
   }
 
@@ -561,6 +678,7 @@ export class FileSession {
     this.#clearTimer("refresh");
     this.#clearTimer("autosave");
     this.#clearTimer("hold");
+    this.#clearLeaseTimer();
     if (this.#sweepTimer !== null) {
       this.#scheduler.clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
@@ -622,7 +740,7 @@ export class FileSession {
     const next = this.#syncLeader();
     if (previous?.id !== next?.id) {
       if (this.dirty) this.#scheduleAutosave();
-      if (next && this.#lockHeld && !suppressRefresh) {
+      if (next && (this.#lockHeld || this.#viewOnlyReason === "lockLost") && !suppressRefresh) {
         await this.#refreshLockNow();
         this.#scheduleRefresh();
       }
@@ -630,36 +748,102 @@ export class FileSession {
     return next;
   }
 
+  #clearLeaseTimer(): void {
+    if (this.#leaseTimer !== null) this.#scheduler.clearTimeout(this.#leaseTimer);
+    this.#leaseTimer = null;
+    this.#lockDeadline = null;
+  }
+
+  #renewLock(): void {
+    this.#clearLeaseTimer();
+    this.#lockHeld = true;
+    this.#lastLockRefreshAt = this.#now();
+    this.#lockDeadline = this.#lastLockRefreshAt + LOCK_LEASE_MS;
+    this.#refreshFailures = 0;
+    this.#leaseTimer = this.#scheduler.setTimeout(() => {
+      this.#leaseTimer = null;
+      this.#checkLockLease();
+      this.#scheduleRefresh();
+    }, LOCK_LEASE_MS);
+  }
+
+  #checkLockLease(): void {
+    if (this.#lockHeld && this.#lockDeadline !== null && this.#now() >= this.#lockDeadline) this.#loseLock();
+  }
+
+  #requireLock(): void {
+    this.#checkLockLease();
+    if (!this.#lockHeld) throw new SessionError("lockLost", "file session lock is lost");
+  }
+
+  #loseLock(): void {
+    this.#lockHeld = false;
+    this.#clearLeaseTimer();
+    if (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost") {
+      this.#setViewOnly("lockLost");
+    }
+  }
+
   #scheduleRefresh(): void {
     this.#clearTimer("refresh");
-    if (!this.#lockHeld || this.#state !== "open") return;
+    if ((!this.#lockHeld && this.#viewOnlyReason !== "lockLost") || this.#state !== "open") return;
+    const backoff = Math.min(1000 * 2 ** Math.min(Math.max(this.#refreshFailures - 1, 0), 6), 60000);
+    let delay = this.#refreshFailures > 0 || !this.#lockHeld ? backoff : LOCK_REFRESH_MS;
+    if (this.#lockDeadline !== null) delay = Math.min(delay, Math.max(0, this.#lockDeadline - this.#now()));
     this.#refreshTimer = this.#scheduler.setTimeout(() => {
+      this.#refreshTimer = null;
       this.#enqueueTask(async () => {
-        if (this.#state !== "open" || !this.#lockHeld) return;
+        if (this.#state !== "open") return;
         await this.#refreshLockNow();
         this.#scheduleRefresh();
       });
-    }, LOCK_REFRESH_MS);
+    }, delay);
   }
 
   async #refreshLockNow(): Promise<void> {
-    if (!this.#lockHeld) return;
+    this.#checkLockLease();
+    if (!this.#lockHeld && this.#viewOnlyReason !== "lockLost") return;
     const tried = new Set<string>();
     let tokenUser: UserSession | null = this.#leader && this.#leader.isTokenValidAt(this.#now()) ? this.#leader : this.#pickToken([]);
     while (tokenUser) {
+      const refreshing = this.#lockHeld && this.#viewOnlyReason !== "lockLost";
+      const deadline = this.#lockDeadline;
       try {
-        await this.#host.refreshLock({ wopiSrc: this.wopiSrc, accessToken: tokenUser.accessToken, lock: this.lockId });
-        this.#lastLockRefreshAt = this.#now();
+        if (refreshing) {
+          await this.#host.refreshLock({ wopiSrc: this.wopiSrc, accessToken: tokenUser.accessToken, lock: this.lockId });
+          if (!this.#lockHeld || (deadline !== null && this.#now() >= deadline)) {
+            this.#loseLock();
+            this.#refreshFailures += 1;
+            return;
+          }
+        } else {
+          await this.#host.lock({ wopiSrc: this.wopiSrc, accessToken: tokenUser.accessToken, lock: this.lockId });
+        }
+        this.#renewLock();
+        if (!refreshing) {
+          await this.#refreshSourceUnderLock(tokenUser.accessToken);
+          if (this.#viewOnlyReason === "lockLost") {
+            this.#viewOnlyReason = null;
+            this.#emit("writable", {});
+            if (this.dirty) this.#scheduleAutosave();
+          }
+        }
         return;
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
         this.#log("warn", `refresh lock failed (${kind})`);
-        if (kind !== "unauthorized") return;
+        if (kind === "lockMismatch" || kind === "conflict") this.#loseLock();
+        if (kind !== "unauthorized") {
+          this.#refreshFailures += 1;
+          this.#checkLockLease();
+          return;
+        }
         tried.add(tokenUser.id);
         this.#markTokenDead(tokenUser);
         tokenUser = this.#pickToken([], tried);
       }
     }
+    this.#refreshFailures += 1;
   }
 
   #pickToken(preferred: UserSession[], excluded?: Set<string>): UserSession | null {
@@ -679,7 +863,7 @@ export class FileSession {
   }
 
   #isConnectedEditor(user: UserSession): boolean {
-    return user.connected && user.canWrite && this.#viewOnlyReason === null && user.isTokenValidAt(this.#now());
+    return user.connected && user.canWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "journalBroken") && user.isTokenValidAt(this.#now());
   }
 
   #connectedEditors(): UserSession[] {
@@ -705,7 +889,8 @@ export class FileSession {
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (this.#state !== "open" || !this.#replica) return { accepted: false, reason: "session is not open" };
     if (!user.connected) return { accepted: false, reason: "user is not connected" };
-    if (!user.canWrite || this.#viewOnlyReason !== null) return { accepted: false, reason: "user is read only" };
+    this.#checkLockLease();
+    if (this.#checkingSource || !this.#lockHeld || !user.canWrite || this.#viewOnlyReason !== null) return { accepted: false, reason: "user is read only" };
     if (!user.isTokenValidAt(this.#now())) return { accepted: false, reason: "token expired" };
     const before = this.#replica.version;
     const followUps: Uint8Array[] = [];
@@ -727,7 +912,7 @@ export class FileSession {
           for (const followUp of followUps) this.#deps.journal?.appendUpdate(followUp);
         }
       } catch {
-        this.#log("warn", "journal append failed");
+        this.#markJournalBroken();
       }
       this.#scheduleAutosave();
     }
@@ -857,14 +1042,14 @@ export class FileSession {
     return this.#saveInternal({ tokenUser, isAutosave: false, isExitSave: false, by: tokenUser?.id ?? null });
   }
 
-  #recordWritten(): void {
+  #recordWritten(itemVersion: string | null): void {
     const journal = this.#deps.journal;
     if (!journal || !this.#journalActive) return;
     try {
-      journal.recordWrittenVersion(this.#itemVersion);
+      journal.recordWrittenVersion(itemVersion);
       journal.flush();
     } catch {
-      this.#log("warn", "journal write failed");
+      this.#markJournalBroken();
     }
   }
 
@@ -873,6 +1058,8 @@ export class FileSession {
       return { saved: false, itemVersion: this.#itemVersion, by: options.by ?? null };
     }
     if (!this.dirty) return { saved: false, itemVersion: this.#itemVersion, by: options.by ?? null };
+    this.#checkLockLease();
+    if (!this.#lockHeld && this.#viewOnlyReason !== "externalChange") return { saved: false, itemVersion: this.#itemVersion, by: options.by ?? null };
     const versionAtStart = this.#replica.version;
     let bytes: Uint8Array;
     try {
@@ -896,6 +1083,11 @@ export class FileSession {
     }
     while (tokenUser) {
       const current = tokenUser;
+      if (this.#viewOnlyReason === "externalChange") {
+        return this.#saveConflictCopy(bytes, versionAtStart, current, tried);
+      }
+      this.#checkLockLease();
+      if (!this.#lockHeld) return { saved: false, itemVersion: this.#itemVersion, by: current.id };
       try {
         const result = await this.#host.putFile({
           wopiSrc: this.wopiSrc,
@@ -904,15 +1096,18 @@ export class FileSession {
           lock: this.#lockHeld ? this.lockId : undefined,
           extraHeaders: headers,
         });
+        this.#recordWritten(result.itemVersion);
+        let info: CheckFileInfo | null = null;
+        try {
+          info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: current.accessToken });
+        } catch {}
+        if (info?.Version && info.Version !== result.itemVersion) {
+          return this.#saveCurrentConflict(current, tried);
+        }
         this.#itemVersion = result.itemVersion ?? this.#itemVersion;
+        if (info?.LastModifiedTime && info.Version === result.itemVersion) this.#lastModifiedTime = info.LastModifiedTime;
         this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
         if (!this.dirty) this.#firstDirtyAt = null;
-        try {
-          const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: current.accessToken });
-          if (info.LastModifiedTime) this.#lastModifiedTime = info.LastModifiedTime;
-          if (info.Version) this.#itemVersion = info.Version;
-        } catch {}
-        this.#recordWritten();
         const by = options.by && options.by === current.id ? options.by : current.id;
         this.#emit("saved", { itemVersion: this.#itemVersion, by });
         return { saved: true, itemVersion: this.#itemVersion, by };
@@ -928,7 +1123,11 @@ export class FileSession {
           return { saved: false, itemVersion: this.#itemVersion, by: current.id };
         }
         if (kind === "conflict" || kind === "lockMismatch") {
-          return this.#saveConflictCopy(bytes, versionAtStart, current, options, tried);
+          if (kind === "lockMismatch") {
+            this.#loseLock();
+            this.#scheduleRefresh();
+          }
+          return this.#saveCurrentConflict(current, tried);
         }
         this.#emit("saveFailed", { kind });
         this.#log("error", this.#scrub(`save failed (${kind})`));
@@ -940,7 +1139,19 @@ export class FileSession {
     return { saved: false, itemVersion: this.#itemVersion, by: null };
   }
 
-  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number, tokenUser: UserSession, options: SaveOptions, tried: Set<string>): Promise<SaveResult> {
+  async #saveCurrentConflict(tokenUser: UserSession, tried: Set<string>): Promise<SaveResult> {
+    this.#setViewOnly("externalChange");
+    const version = this.#replica!.version;
+    try {
+      const bytes = (await this.#replica!.save()).bytes;
+      return this.#saveConflictCopy(bytes, version, tokenUser, tried);
+    } catch {
+      this.#emit("saveFailed", { kind: "invalidResponse" });
+      return { saved: false, itemVersion: this.#itemVersion, by: tokenUser.id };
+    }
+  }
+
+  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number, tokenUser: UserSession, tried: Set<string>): Promise<SaveResult> {
     const target = conflictTargetName(this.#fileName, this.#now());
     let current: UserSession | null = tokenUser;
     while (current) {
@@ -957,10 +1168,15 @@ export class FileSession {
         if (!this.dirty) this.#firstDirtyAt = null;
         try {
           this.#deps.journal?.flush();
-        } catch {}
-        this.#emit("conflict", { name: result.name, copyName: result.name });
+        } catch {
+          this.#markJournalBroken();
+        }
+        const details = this.#copyDetails(result.name, result.url);
+        this.#emit("conflict", details);
         this.#log("warn", "save conflict, wrote a conflict copy", { name: result.name });
-        return { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name };
+        const saved: SaveResult = { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name };
+        if (details.url) saved.conflictUrl = details.url;
+        return saved;
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
         if (kind === "unauthorized") {
@@ -1035,6 +1251,8 @@ export class FileSession {
       try {
         await this.#host.unlock({ wopiSrc: this.wopiSrc, accessToken: current.accessToken, lock: this.lockId });
         this.#lockHeld = false;
+        this.#clearLeaseTimer();
+        this.#clearTimer("refresh");
         return true;
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
@@ -1072,12 +1290,13 @@ export class FileSession {
     this.#clearTimer("refresh");
     this.#clearTimer("autosave");
     this.#clearTimer("hold");
+    this.#clearLeaseTimer();
     if (this.#sweepTimer !== null) {
       this.#scheduler.clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
     for (const id of [...this.#userTimers.keys()]) this.#clearUserTimers(id);
-    if (deleteJournal && !this.dirty && this.#journalActive) {
+    if (deleteJournal && !this.dirty && this.#journalActive && !this.#journalBroken) {
       try {
         this.#deps.journal?.delete();
       } catch {}

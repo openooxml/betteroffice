@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import {
   byteEqual,
   differingParts,
+  fingerprintedUpdate,
   openFreshClient,
   openTestClient,
   sourceBytes,
@@ -75,15 +76,15 @@ for (const format of FORMATS) {
 
         client.edit("replica-marker ");
         const update = client.encodeStateAsUpdate(server.encodeStateVector());
-        expect(server.applyUpdate(update)).toEqual({ accepted: true });
+        expect(server.applyUpdate(update)).toMatchObject({ accepted: true });
         expect(server.version).toBe(1);
 
-        expect(server.applyUpdate(update)).toEqual({ accepted: true });
+        expect(server.applyUpdate(update)).toMatchObject({ accepted: true });
         expect(server.version).toBe(1);
-        expect(server.applyUpdate(new Uint8Array(0))).toEqual({ accepted: true });
+        expect(server.applyUpdate(new Uint8Array(0))).toMatchObject({ accepted: true });
         expect(
           server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         expect(server.version).toBe(1);
 
         const saved = await server.save();
@@ -113,9 +114,9 @@ for (const format of FORMATS) {
         a.edit("AAA ", 0);
         b.edit("BBB ", 1);
         expect(server.applyUpdate(a.encodeStateAsUpdate(server.encodeStateVector())))
-          .toEqual({ accepted: true });
+          .toMatchObject({ accepted: true });
         expect(server.applyUpdate(b.encodeStateAsUpdate(server.encodeStateVector())))
-          .toEqual({ accepted: true });
+          .toMatchObject({ accepted: true });
         expect(server.version).toBe(2);
         await syncClient(server, a);
         await syncClient(server, b);
@@ -142,7 +143,7 @@ for (const format of FORMATS) {
         client.edit("DELETE-ME ");
         expect(
           server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         expect(server.version).toBe(1);
         const before = await openFreshClient(format, (await server.save()).bytes, clientId());
         try {
@@ -153,7 +154,7 @@ for (const format of FORMATS) {
 
         client.remove("DELETE-ME");
         const deletion = client.encodeStateAsUpdate(server.encodeStateVector());
-        expect(server.applyUpdate(deletion)).toEqual({ accepted: true });
+        expect(server.applyUpdate(deletion)).toMatchObject({ accepted: true });
         expect(server.version).toBe(2);
 
         const after = await openFreshClient(format, (await server.save()).bytes, clientId());
@@ -206,11 +207,11 @@ for (const format of FORMATS) {
         early.edit("early-one ", 0);
         expect(
           server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         early.edit("early-two ", 1);
         expect(
           server.applyUpdate(early.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         expect(server.version).toBe(2);
 
         late = await openTestClient(server.joinPayload(), source, clientId());
@@ -221,7 +222,7 @@ for (const format of FORMATS) {
         late.edit("late-marker ", 0);
         expect(
           server.applyUpdate(late.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         expect(server.version).toBe(3);
         await syncClient(server, early);
         expect(early.contains("late-marker")).toBe(true);
@@ -268,10 +269,10 @@ for (const format of FORMATS) {
 
         expect(
           server.applyUpdate(lateA.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         expect(
           server.applyUpdate(lateB.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         await syncClient(server, lateA);
         await syncClient(server, lateB);
         await syncClient(server, early);
@@ -327,7 +328,7 @@ for (const format of FORMATS) {
         client.edit("before-save ", 0);
         expect(
           server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         client.edit("during-save ", 0);
         const during = client.encodeStateAsUpdate(server.encodeStateVector());
 
@@ -335,7 +336,7 @@ for (const format of FORMATS) {
         const off = server.onLocalUpdate((update) => emitted.push(update));
         const pending = server.save();
         await Promise.resolve();
-        expect(server.applyUpdate(during)).toEqual({ accepted: true });
+        expect(server.applyUpdate(during)).toMatchObject({ accepted: true });
         expect([...server.encodeStateVector()]).toEqual([
           ...client.encodeStateVector(),
         ]);
@@ -388,10 +389,10 @@ for (const format of FORMATS) {
           freshBefore.destroy();
         }
 
-        expect(server.applyUpdate(first)).toEqual({ accepted: true });
+        expect(server.applyUpdate(first)).toMatchObject({ accepted: true });
         expect(
           server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-        ).toEqual({ accepted: true });
+        ).toMatchObject({ accepted: true });
         const freshAfter = await openFreshClient(
           format,
           (await server.save()).bytes,
@@ -425,8 +426,8 @@ for (const format of FORMATS) {
           reason: "causalGap",
         });
         expect(server.version).toBe(0);
-        expect(server.applyUpdate(insert)).toEqual({ accepted: true });
-        expect(server.applyUpdate(deletion)).toEqual({ accepted: true });
+        expect(server.applyUpdate(insert)).toMatchObject({ accepted: true });
+        expect(server.applyUpdate(deletion)).toMatchObject({ accepted: true });
         expect([...server.encodeStateVector()]).toEqual([
           ...client.encodeStateVector(),
         ]);
@@ -471,7 +472,7 @@ describe("docx save update", () => {
       client.splitFirstParagraph();
       expect(
         server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
       expect([...server.encodeStateVector()]).toEqual([...client.encodeStateVector()]);
       const versionBefore = server.version;
 
@@ -505,14 +506,14 @@ describe("docx save update", () => {
       client.splitFirstParagraph();
       expect(
         server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
 
       const pending = server.save();
       await new Promise((resolve) => setTimeout(resolve, 0));
       client.edit("during-save ", 0);
       expect(
         server.applyUpdate(client.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
 
       const first = await pending;
       const fresh = await openFreshClient("docx", first.bytes, clientId());
@@ -552,36 +553,38 @@ describe("docx save update", () => {
       peer.splitFirstParagraph();
       expect(
         server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
       const saved = await server.save();
       if (saved.update) peer.applyUpdate(saved.update);
       const savedId = peer.secondParagraphOoxmlId();
       peer.deleteSplitSecondHalf();
       expect(
         server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
 
       author.insertPilcrowClaiming(savedId);
       const authorUpdate = author.encodeStateAsUpdate(server.encodeStateVector());
       const clockBefore = stateVectorMap(server.encodeStateVector()).get(
         server.clientId,
       ) ?? 0;
-      expect(server.applyUpdate(authorUpdate)).toEqual({ accepted: true });
+      const applied = server.applyUpdate(authorUpdate);
+      expect(applied.accepted).toBe(true);
+      if (applied.accepted) expect(applied.followUps).toEqual([emitted.at(-1)!]);
       const clockAfter = stateVectorMap(server.encodeStateVector()).get(
         server.clientId,
       ) ?? 0;
       expect(clockAfter).toBeGreaterThan(clockBefore);
       expect(emitted.length).toBeGreaterThan(0);
       for (const update of emitted) {
-        expect([...Y.parseUpdateMeta(update).to.keys()]).toEqual([
-          server.clientId,
-        ]);
+        expect([...Y.parseUpdateMeta(update).to.keys()].every(
+          (id) => id === server.clientId,
+        )).toBe(true);
       }
       peer.applyUpdate(authorUpdate);
       for (const update of emitted) peer.applyUpdate(update);
       expect(
         server.applyUpdate(peer.encodeStateAsUpdate(server.encodeStateVector())),
-      ).toEqual({ accepted: true });
+      ).toMatchObject({ accepted: true });
       await syncClient(server, peer);
       await syncClient(server, author);
       expect([...peer.encodeStateVector()]).toEqual([
@@ -608,7 +611,12 @@ describe("fingerprinted client updates", () => {
       try {
         client.edit("tagged-marker ", 0);
         const raw = client.encodeStateAsUpdate(server.encodeStateVector());
-        expect(server.applyUpdate(raw)).toEqual({ accepted: true });
+        const tagged = fingerprintedUpdate(raw);
+        expect(tagged.subarray(raw.byteLength, tagged.byteLength - 32)).toEqual(
+          new TextEncoder().encode("\0betteroffice-document-fingerprint-v1\0"),
+        );
+        expect(tagged.subarray(-32)).toEqual(new Uint8Array(32).fill(0x5a));
+        expect(server.applyUpdate(tagged)).toMatchObject({ accepted: true });
         const fresh = await openFreshClient(
           format,
           (await server.save()).bytes,
@@ -628,6 +636,58 @@ describe("fingerprinted client updates", () => {
 });
 
 describe("hasCausalGap", () => {
+  test("Skip structs do not fill missing clocks between supplied ranges", () => {
+    const author = new Y.Doc();
+    const updates: Uint8Array[] = [];
+    author.on("update", (update: Uint8Array) => updates.push(update));
+    author.getMap("m").set("first", 0);
+    const afterFirst = Y.encodeStateVector(author);
+    author.getMap("m").set("missing", 1);
+    const afterSecond = Y.encodeStateVector(author);
+    author.getMap("m").set("last", 2);
+    const skipped = Y.mergeUpdates([updates[0]!, updates[2]!]);
+    const structs = Y.decodeUpdate(skipped).structs;
+    expect(structs.map((struct) => struct.id.clock)).toEqual([0, 1, 2]);
+    expect(structs[1]).toBeInstanceOf(Y.Skip);
+
+    const server = new Y.Doc();
+    expect(hasCausalGap(skipped, Y.encodeStateVector(server))).toBe(true);
+    expect(hasCausalGap(fingerprintedUpdate(skipped), afterFirst)).toBe(true);
+    expect(hasCausalGap(skipped, afterSecond)).toBe(false);
+    expect(hasCausalGap(Y.mergeUpdates(updates), Y.encodeStateVector(server)))
+      .toBe(false);
+    Y.applyUpdate(server, updates[0]!);
+    Y.applyUpdate(server, updates[1]!);
+    expect(hasCausalGap(skipped, Y.encodeStateVector(server))).toBe(false);
+    Y.applyUpdate(server, skipped);
+    expect(server.getMap("m").toJSON()).toEqual(author.getMap("m").toJSON());
+    author.destroy();
+    server.destroy();
+  });
+
+  test("nested parent IDs must be available in server state or the update", () => {
+    const owner = new Y.Doc();
+    owner.getMap("m").set("nested", new Y.Text());
+    const parent = Y.encodeStateAsUpdate(owner);
+    const writer = new Y.Doc();
+    Y.applyUpdate(writer, parent);
+    const before = Y.encodeStateVector(writer);
+    writer.getMap<Y.Text>("m").get("nested")!.insert(0, "child");
+    const child = Y.encodeStateAsUpdate(writer, before);
+    const item = Y.decodeUpdate(child).structs[0]! as Y.Item;
+    expect(item.origin).toBeNull();
+    expect(item.rightOrigin).toBeNull();
+    expect(item.parent).toEqual(Y.createID(owner.clientID, 0));
+
+    const empty = Y.encodeStateVector(new Y.Doc());
+    expect(hasCausalGap(child, empty)).toBe(true);
+    expect(hasCausalGap(fingerprintedUpdate(child), empty)).toBe(true);
+    expect(hasCausalGap(child, before)).toBe(false);
+    expect(hasCausalGap(Y.mergeUpdates([parent, child]), empty)).toBe(false);
+    owner.destroy();
+    writer.destroy();
+  });
+
   test("detects a start clock past the server vector on raw updates", () => {
     const client = new Y.Doc();
     client.getText("t").insert(0, "first");

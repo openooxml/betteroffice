@@ -35,6 +35,14 @@ export function byteEqual(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((byte, i) => byte === b[i]);
 }
 
+export function fingerprintedUpdate(update: Uint8Array): Uint8Array {
+  return new Uint8Array([
+    ...update,
+    ...new TextEncoder().encode("\0betteroffice-document-fingerprint-v1\0"),
+    ...new Uint8Array(32).fill(0x5a),
+  ]);
+}
+
 /** Unzipped parts of a package, keyed by part name. */
 export function unzipParts(bytes: Uint8Array): Record<string, Uint8Array> {
   return unzipContainer(bytes.slice());
