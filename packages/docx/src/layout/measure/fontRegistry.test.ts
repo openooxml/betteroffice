@@ -65,7 +65,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
           expect(chain).toEqual([101, 102]);
           expect(registered[0]).toEqual(new Uint8Array(await primary()));
           expect(registered[1]).toEqual(lastResort);
-          expect(substitutes).toContainEqual([1, primary.measureAs]);
+          expect(substitutes).toContainEqual([1, primary.measureAs ?? family]);
           expect(substitutes).toContainEqual([2, family]);
         }
       });
