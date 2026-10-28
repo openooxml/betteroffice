@@ -780,6 +780,7 @@ export class FileSession {
   }
 
   #loseLock(): void {
+    if (this.#lockHeld) this.#refreshFailures = 0;
     this.#lockHeld = false;
     this.#lockNeedsRecovery = true;
     this.#clearLeaseTimer();
