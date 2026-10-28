@@ -131,7 +131,7 @@ pub(crate) fn paragraph_sizes(
                     text = true;
                 }
             }
-            if control || !text || !fields.iter().all(Field::entry_result) {
+            if control || !text || !fields.last().is_none_or(Field::entry_result) {
                 return true;
             }
             *found = true;
@@ -397,6 +397,26 @@ mod tests {
                 true,
             ),
             (complex.clone(), true),
+            (
+                complex.replace(
+                    r#"<w:t>3</w:t></w:r>"#,
+                    &format!(
+                        "<w:t>3</w:t></w:r>{}",
+                        complex.replace("PAGEREF", "REF").replace(
+                            r#"<w:t>3</w:t>"#,
+                            r#"<w:t>Nested reference</w:t>"#
+                        )
+                    ),
+                ),
+                false,
+            ),
+            (
+                complex.replace("PAGEREF", "REF").replace(
+                    r#"<w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t>3</w:t></w:r>"#,
+                    &format!("<w:r><w:t>Ref text </w:t></w:r>{complex}"),
+                ),
+                true,
+            ),
             (format!("<w:r>{sized}<w:t>Direct entry</w:t></w:r>"), false),
             (
                 format!(r#"<w:r>{sized}<w:sym w:font="Arial" w:char="0041"/></w:r>"#),
