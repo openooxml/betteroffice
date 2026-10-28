@@ -3968,7 +3968,8 @@ mod tests {
     fn candidate_unit_digest_matches_save_with_comment_boundaries() {
         let doc = EditingDoc::new(77114);
         doc.create_story("body", "A😀B", "Normal", "left").unwrap();
-        doc.split_paragraph(&ctx(), Position::new("body", 3), None).unwrap();
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
         let comments = BTreeMap::from([
             ("alpha".to_owned(), vec![(0, 2), (3, 3)]),
             ("beta".to_owned(), vec![(4, 5)]),
@@ -3979,7 +3980,9 @@ mod tests {
             assert_eq!(
                 run_size_fingerprint(
                     unit.segments.into_iter(),
-                    unit.markers.iter().map(|(at, key, end)| (*at, key.as_str(), *end)),
+                    unit.markers
+                        .iter()
+                        .map(|(at, key, end)| (*at, key.as_str(), *end)),
                 ),
                 Some(unit.digest),
             );

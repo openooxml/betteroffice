@@ -739,9 +739,7 @@ fn toc_with_sized_field_result(instruction: &str, complex: bool) -> Vec<Value> {
             result = result,
         )
     } else {
-        format!(
-            r#"<w:fldSimple w:instr=" {instruction} target ">{result}</w:fldSimple>"#,
-        )
+        format!(r#"<w:fldSimple w:instr=" {instruction} target ">{result}</w:fldSimple>"#,)
     };
     let field = if complex && page {
         format!(r#"<w:hyperlink w:anchor="target">{field}</w:hyperlink>"#)
@@ -915,8 +913,7 @@ fn an_edited_toc_paragraph_keeps_unknown_sizes_and_matches_cold_lowering() {
         let resident = engine
             .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
             .unwrap();
-        let cold = docx_edit::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env)
-            .unwrap();
+        let cold = docx_edit::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
         assert_eq!(resident, serde_json::to_value(cold).unwrap());
         let runs = resident[0]["runs"].as_array().unwrap();
         assert_eq!(

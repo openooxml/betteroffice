@@ -65,10 +65,7 @@ pub(crate) fn paragraph_sizes(
     use docx_parse::xml::XmlNode;
 
     enum Run {
-        Entry {
-            direct: bool,
-            direct_cs: bool,
-        },
+        Entry { direct: bool, direct_cs: bool },
         Tab,
         Empty,
         Begin,
@@ -164,10 +161,14 @@ pub(crate) fn paragraph_sizes(
         if entry && !positioned_tab {
             Some(Run::Entry {
                 direct: formatting.is_some_and(|formatting| {
-                    formatting.child_elements().any(|child| child.name == "w:sz")
+                    formatting
+                        .child_elements()
+                        .any(|child| child.name == "w:sz")
                 }),
                 direct_cs: formatting.is_some_and(|formatting| {
-                    formatting.child_elements().any(|child| child.name == "w:szCs")
+                    formatting
+                        .child_elements()
+                        .any(|child| child.name == "w:szCs")
                 }),
             })
         } else if !entry
@@ -296,7 +297,10 @@ pub(crate) fn paragraph_sizes(
     while nodes.get(cursor).is_some_and(|node| marker(node)) {
         cursor += 1;
     }
-    if matches!(nodes.get(cursor).and_then(|node| run(node)), Some(Run::Begin)) {
+    if matches!(
+        nodes.get(cursor).and_then(|node| run(node)),
+        Some(Run::Begin)
+    ) {
         let (instruction, after) = opening(&nodes, cursor)?;
         if kind(&instruction, "TOC") {
             cursor = after;
@@ -329,8 +333,7 @@ mod tests {
     use super::*;
     use crate::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
     use crate::identity::{
-        RUN_SIZE_FINGERPRINTS, RUN_SIZE_SEEDED_SNAPSHOTS, RUN_SIZE_SOURCE_PARTS,
-        STORY_FINGERPRINTS,
+        RUN_SIZE_FINGERPRINTS, RUN_SIZE_SEEDED_SNAPSHOTS, RUN_SIZE_SOURCE_PARTS, STORY_FINGERPRINTS,
     };
     use crate::seed::fixture::{Package, image, para, run};
     use crate::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
@@ -461,10 +464,10 @@ mod tests {
             let segments = doc.story_segments(story_id).unwrap();
             assert!(segments.iter().any(|segment| {
                 matches!(&segment.content, crate::SegmentContent::OtherEmbed { payload, .. }
-                    if payload.get("fieldData").is_some_and(|data| {
-                        matches!(data, yrs::Any::String(data)
-                            if data.contains("Entry 2") && data.contains("Entry 3"))
-                    }))
+                if payload.get("fieldData").is_some_and(|data| {
+                    matches!(data, yrs::Any::String(data)
+                        if data.contains("Entry 2") && data.contains("Entry 3"))
+                }))
             }));
             let txn = doc.yrs_doc().transact();
             let story = crate::story_ref(&txn, story_id).unwrap();
@@ -488,7 +491,12 @@ mod tests {
                         &chunks[start..=index],
                         comments.markers(raw_start, raw_end),
                     );
-                    assert_eq!(proof.is_some(), direct != Some(entry), "entry {}", entry + 1);
+                    assert_eq!(
+                        proof.is_some(),
+                        direct != Some(entry),
+                        "entry {}",
+                        entry + 1
+                    );
                     entry += 1;
                     start = index + 1;
                     raw_start = raw_end;
@@ -586,6 +594,7 @@ mod tests {
         );
         for (label, content) in [
             ("first", format!("{toc}{link}")),
+            ("empty run", format!("{ENTRY}<w:r/>")),
             (
                 "empty run before the page separator",
                 format!(
@@ -681,8 +690,14 @@ mod tests {
                 "two ends in a simple field",
                 format!("{ENTRY}{simple_open}{END}{END}</w:fldSimple>"),
             ),
-            ("instruction in result", format!("{ENTRY}{page}{instruction}{PAGE}{END}")),
-            ("instruction in TOC result", format!("{toc}{ENTRY}{instruction}{END}")),
+            (
+                "instruction in result",
+                format!("{ENTRY}{page}{instruction}{PAGE}{END}"),
+            ),
+            (
+                "instruction in TOC result",
+                format!("{toc}{ENTRY}{instruction}{END}"),
+            ),
             ("stray instruction", format!("{instruction}{ENTRY}")),
             (
                 "text in instruction section",
@@ -709,7 +724,10 @@ mod tests {
             ("body after TOC end", format!("{toc}{ENTRY}{END}{ENTRY}")),
             ("text before TOC begin", format!("{ENTRY}{toc}{ENTRY}")),
             ("unterminated page", format!("{ENTRY}{page}{PAGE}")),
-            ("nested complex page", format!("{ENTRY}{page}{page}{PAGE}{END}{END}")),
+            (
+                "nested complex page",
+                format!("{ENTRY}{page}{page}{PAGE}{END}{END}"),
+            ),
             (
                 "nested simple page",
                 format!("{ENTRY}{simple_open}{simple_open}{PAGE}</w:fldSimple></w:fldSimple>"),
@@ -726,7 +744,10 @@ mod tests {
                 "link in page result",
                 format!("{ENTRY}{page}<w:hyperlink>{PAGE}</w:hyperlink>{END}"),
             ),
-            ("TOC inside link", format!("<w:hyperlink>{toc}{ENTRY}{END}</w:hyperlink>")),
+            (
+                "TOC inside link",
+                format!("<w:hyperlink>{toc}{ENTRY}{END}</w:hyperlink>"),
+            ),
             (
                 "nested link",
                 format!("<w:hyperlink><w:hyperlink>{ENTRY}</w:hyperlink></w:hyperlink>"),
@@ -735,24 +756,47 @@ mod tests {
             ("empty paragraph", String::new()),
             ("only page result", format!("{page}{PAGE}{END}")),
             ("only tab", "<w:r><w:tab/></w:r>".to_owned()),
-            ("empty run", format!("{ENTRY}<w:r/>")),
             ("empty text", format!("{ENTRY}<w:r><w:t/></w:r>")),
-            ("empty text with tab", format!("{ENTRY}<w:r><w:t/><w:tab/></w:r>")),
-            ("only rendered break", format!("{ENTRY}<w:r><w:lastRenderedPageBreak/></w:r>")),
-            ("positioned tab with text", format!("{ENTRY}<w:r><w:t>Text</w:t><w:ptab/></w:r>")),
-            ("page tab only", format!("{ENTRY}{simple_open}<w:r><w:tab/></w:r></w:fldSimple>")),
+            (
+                "empty text with tab",
+                format!("{ENTRY}<w:r><w:t/><w:tab/></w:r>"),
+            ),
+            (
+                "only rendered break",
+                format!("{ENTRY}<w:r><w:lastRenderedPageBreak/></w:r>"),
+            ),
+            (
+                "positioned tab with text",
+                format!("{ENTRY}<w:r><w:t>Text</w:t><w:ptab/></w:r>"),
+            ),
+            (
+                "page tab only",
+                format!("{ENTRY}{simple_open}<w:r><w:tab/></w:r></w:fldSimple>"),
+            ),
             ("late paragraph properties", format!("{ENTRY}<w:pPr/>")),
-            ("duplicate paragraph properties", format!("<w:pPr/><w:pPr/>{ENTRY}")),
-            ("late run properties", format!("{ENTRY}<w:r><w:t>Text</w:t><w:rPr/></w:r>")),
+            (
+                "duplicate paragraph properties",
+                format!("<w:pPr/><w:pPr/>{ENTRY}"),
+            ),
+            (
+                "late run properties",
+                format!("{ENTRY}<w:r><w:t>Text</w:t><w:rPr/></w:r>"),
+            ),
             (
                 "duplicate run properties",
                 format!("{ENTRY}<w:r><w:rPr/><w:rPr/><w:t>Text</w:t></w:r>"),
             ),
             ("container text", format!("{ENTRY} stray")),
-            ("nonempty marker", format!("{ENTRY}<w:bookmarkEnd><w:r/></w:bookmarkEnd>")),
+            (
+                "nonempty marker",
+                format!("{ENTRY}<w:bookmarkEnd><w:r/></w:bookmarkEnd>"),
+            ),
             ("foreign run", format!("{ENTRY}<x:r><x:t>Text</x:t></x:r>")),
             ("foreign text", format!("{ENTRY}<w:r><x:t>Text</x:t></w:r>")),
-            ("foreign properties", format!("{ENTRY}<w:r><x:rPr/><w:t>Text</w:t></w:r>")),
+            (
+                "foreign properties",
+                format!("{ENTRY}<w:r><x:rPr/><w:t>Text</w:t></w:r>"),
+            ),
         ];
         for control in ["begin", "separate", "end"] {
             cases.push((
@@ -774,7 +818,10 @@ mod tests {
             "delText",
         ] {
             cases.push(("unsupported element", format!("{ENTRY}<w:{name}/>")));
-            cases.push(("unsupported run child", format!("{ENTRY}<w:r><w:{name}/></w:r>")));
+            cases.push((
+                "unsupported run child",
+                format!("{ENTRY}<w:r><w:{name}/></w:r>"),
+            ));
         }
         for name in ["REF", "HYPERLINK", "SEQ", "UNKNOWN"] {
             cases.push((
@@ -802,8 +849,7 @@ mod tests {
         ] {
             assert!(grammar_proof(content).is_none(), "{content}");
         }
-        let complex_script =
-            r#"<w:r><w:rPr><w:szCs w:val="28"/></w:rPr><w:t>Entry</w:t></w:r>"#;
+        let complex_script = r#"<w:r><w:rPr><w:szCs w:val="28"/></w:rPr><w:t>Entry</w:t></w:r>"#;
         let proof = grammar_proof(complex_script).unwrap();
         assert!(proof.inherited(false));
         assert!(!proof.inherited(true));

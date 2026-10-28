@@ -825,7 +825,9 @@ fn walk_story_chunks<T: ReadTxn>(
                 .flatten();
                 if let Some(proof) = proof
                     && proof.inherited(
-                        paragraph_runs.iter().any(|run| run.formatting.rtl == Some(true)),
+                        paragraph_runs
+                            .iter()
+                            .any(|run| run.formatting.rtl == Some(true)),
                     )
                 {
                     for run in &mut paragraph_runs {
@@ -3393,7 +3395,9 @@ impl CommentIntervals {
         self.boundaries
             .range(start..end)
             .flat_map(move |(at, markers)| {
-                markers.iter().map(move |(key, end)| (*at - start, key.as_str(), *end))
+                markers
+                    .iter()
+                    .map(move |(key, end)| (*at - start, key.as_str(), *end))
             })
     }
 }
