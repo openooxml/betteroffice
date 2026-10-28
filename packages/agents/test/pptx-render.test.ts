@@ -78,6 +78,29 @@ test('PPTX theme fonts accept single-quoted typefaces', async () => {
   expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
 });
 
+test('PPTX theme fonts accept whitespace around typeface equals', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin xtypeface='Decoy' typeface = 'Times New Roman'/></a:majorFont><a:minorFont><a:latin typeface =\n"Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`);
+  expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+});
+
+test('PPTX theme fonts ignore XML comment decoys', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/theme1.xml', '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><!--<a:majorFont><a:latin typeface="Decoy"/></a:majorFont>--><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>');
+  expect(pptxThemeFonts(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }))).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+});
+
+test('PPTX theme fonts scan large repetitive comments within two seconds', async () => {
+  const zip = new JSZip();
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><!--${'<a:majorFont '.repeat(200000)}--><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`);
+  const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const start = performance.now();
+  const theme = pptxThemeFonts(bytes);
+  const elapsed = performance.now() - start;
+  expect(theme).toEqual({ major: ['Times New Roman'], minor: ['Arial'] });
+  expect(elapsed).toBeLessThan(2000);
+});
+
 test('PPTX previews measure runs without a face in the theme fonts the export uses', async () => {
   const handle = openPresentation(await presentationFixture());
   const registered: string[] = [];

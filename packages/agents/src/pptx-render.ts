@@ -89,9 +89,18 @@ export function pptxThemeFonts(bytes: Uint8Array): PptxThemeFonts {
     const data = bytes.subarray(start, start + size);
     let xml: string;
     try { xml = text.decode(method === 8 ? inflateRawSync(data, { maxOutputLength: 16 * 1024 * 1024 }) : data); } catch { continue; }
-    for (const kind of ['major', 'minor'] as const) {
-      const family = xml.match(new RegExp(`<(?:[\\w.-]+:)?${kind}Font\\b[^>]*>\\s*<(?:[\\w.-]+:)?latin\\b[^>]*\\btypeface=(["'])([\\s\\S]*?)\\1`))?.[2];
-      if (family && !fonts[kind].includes(family)) fonts[kind].push(family);
+    xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, '');
+    const stack: { kind?: 'major' | 'minor'; latin: boolean }[] = [];
+    for (const [, closing, name, attributes] of xml.matchAll(/<(\/?)([^\s/<>!?]+)(\s(?:[^"'<>]|"[^"<]*"|'[^'<]*')*|\/?)>/g)) {
+      if (closing) { stack.pop(); continue; }
+      const local = name.slice(name.lastIndexOf(':') + 1);
+      const parent = stack.at(-1);
+      if (local === 'latin' && parent?.kind && !parent.latin) {
+        parent.latin = true;
+        const family = attributes.match(/(?:^|\s)typeface\s*=\s*(["'])([\s\S]*?)\1/)?.[2];
+        if (family && !fonts[parent.kind].includes(family)) fonts[parent.kind].push(family);
+      }
+      if (!/\/\s*$/.test(attributes)) stack.push({ kind: local === 'majorFont' ? 'major' : local === 'minorFont' ? 'minor' : undefined, latin: false });
     }
   }
   return fonts;
