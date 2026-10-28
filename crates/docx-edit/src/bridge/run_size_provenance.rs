@@ -151,7 +151,10 @@ pub(crate) fn paragraph_sizes(
                     text = true;
                 }
             }
-            if text && !control && !scan.fields.iter().any(|field| field.kind("TOC")) {
+            if control && text {
+                return false;
+            }
+            if text && !scan.fields.iter().any(|field| field.kind("TOC")) {
                 if scan.closed {
                     return false;
                 }
@@ -524,6 +527,18 @@ mod tests {
             (format!("{entry}{end}{reference}"), false),
             (format!("{reference}{begin}{entry}"), false),
             (format!("{reference}{entry}"), true),
+            (
+                format!(
+                    concat!(
+                        "{begin}{entry}",
+                        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/></w:rPr>"#,
+                        r#"<w:fldChar w:fldCharType="end"/><w:t>Direct</w:t></w:r>"#,
+                    ),
+                    begin = begin,
+                    entry = entry,
+                ),
+                false,
+            ),
         ] {
             let xml = format!(
                 r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{content}</w:p>"#
