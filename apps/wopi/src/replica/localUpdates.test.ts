@@ -54,6 +54,58 @@ function expectDeleteOnly(update: Uint8Array): void {
 }
 
 describe("replica local update publication", () => {
+  for (const change of ["insertion", "deletion"]) {
+    test(`failed apply publishes retained ${change} and bumps version`, async () => {
+      const state = harness();
+      const apply = state.engine.applyUpdate;
+      state.engine.applyUpdate = (update) => {
+        apply(update);
+        throw new Error("private engine details");
+      };
+      if (change === "insertion") state.engine.engineVersion = () => "unchanged";
+      const server = state.open(async () =>
+        new TextEncoder().encode(state.doc.getText("t").toString()));
+      const author = new Y.Doc({ gc: false });
+      const peer = new Y.Doc({ gc: false });
+      const initial = server.encodeStateAsUpdate();
+      Y.applyUpdate(author, initial);
+      Y.applyUpdate(peer, initial);
+      const vector = server.encodeStateVector();
+      const emitted: Uint8Array[] = [];
+      server.onLocalUpdate((update) => emitted.push(update));
+      try {
+        if (change === "insertion") author.getText("t").insert(0, "prefix-");
+        else author.getText("t").delete(0, 1);
+        const result = server.applyUpdate(Y.encodeStateAsUpdate(author, vector));
+        expect(result).toEqual({
+          accepted: false,
+          reason: "engine rejected update (Error)",
+          followUps: emitted,
+        });
+        expect(server.version).toBe(1);
+        expect(emitted).toHaveLength(1);
+        expect(emitted[0]).toEqual(server.encodeStateAsUpdate(vector));
+        if (change === "deletion") {
+          expect(server.encodeStateVector()).toEqual(vector);
+          expectDeleteOnly(emitted[0]!);
+        } else {
+          expect(server.encodeStateVector()).not.toEqual(vector);
+        }
+        Y.applyUpdate(peer, emitted[0]!);
+        expect(Y.encodeStateVector(peer)).toEqual(server.encodeStateVector());
+        expect(peer.getText("t").toString()).toBe(state.doc.getText("t").toString());
+        const saved = await server.save();
+        expect(saved.update).toBeNull();
+        expect(new TextDecoder().decode(saved.bytes)).toBe(peer.getText("t").toString());
+        expect(emitted).toHaveLength(1);
+      } finally {
+        server.destroy();
+        author.destroy();
+        peer.destroy();
+      }
+    });
+  }
+
   for (const events of [true, false]) {
     test(`delete-only apply repair is emitted and returned with events=${events}`, () => {
       const state = harness(events);
