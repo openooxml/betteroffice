@@ -190,10 +190,9 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
                 .map(str::trim_end)
                 .eq(expected.iter().map(String::as_str))
             {
-                return Err(invalid(format!(
-                    "source SHA-256 mismatch for {file}; {regenerate}"
-                ))
-                .into());
+                return Err(
+                    invalid(format!("source SHA-256 mismatch for {file}; {regenerate}")).into(),
+                );
             }
             let reference = wuff::decompress_woff2(&standard)
                 .map_err(|error| invalid(format!("invalid reference WOFF2 for {file}: {error}")))?;
