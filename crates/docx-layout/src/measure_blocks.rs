@@ -6950,12 +6950,37 @@ mod tests {
         ordinary.collect([&block], "Calibri");
         let ordinary = ordinary.finish();
         assert!(ordinary.contains_key("box font|0|0"));
-        assert_eq!(ordinary["nested font|1|1"].scripts, ["cjk-jp"]);
         let mut preview = FontRequirementCollector::default();
         preview.collect_preview([&block], "Calibri");
+        let preview = preview.finish();
+        for key in ["calibri|0|0", "nested font|0|0", "nested font|1|1"] {
+            assert_eq!(ordinary[key].scripts, ["cjk-jp"]);
+            assert_eq!(preview[key].scripts, ["cjk-jp", "cjk-sc"]);
+        }
+        let LayoutBlock::Paragraph(paragraph) = &block else {
+            panic!("paragraph");
+        };
+        let Run::Image(image) = &paragraph.runs[0] else {
+            panic!("inline shape");
+        };
+        let mut shape = image.inline_shape.as_deref().unwrap().clone();
+        let child = &mut shape.children[0];
+        let Run::Image(mut nested) = child.inner_text.as_mut().unwrap()[0].runs.remove(0) else {
+            panic!("nested inline shape");
+        };
+        child.children.push(*nested.inline_shape.take().unwrap());
+        let standalone = LayoutBlock::Shape(shape);
+        let mut standalone_ordinary = FontRequirementCollector::default();
+        standalone_ordinary.collect([&standalone], "Calibri");
+        let mut standalone_preview = FontRequirementCollector::default();
+        standalone_preview.collect_preview([&standalone], "Calibri");
         assert_eq!(
-            serde_json::to_value(preview.finish()).unwrap(),
-            serde_json::to_value(ordinary).unwrap()
+            serde_json::to_value(ordinary).unwrap(),
+            serde_json::to_value(standalone_ordinary.finish()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(preview).unwrap(),
+            serde_json::to_value(standalone_preview.finish()).unwrap()
         );
     }
 

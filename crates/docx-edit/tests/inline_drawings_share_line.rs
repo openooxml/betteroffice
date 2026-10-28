@@ -1010,7 +1010,9 @@ fn shared_text_box_requests_its_unique_font_and_script() {
     seed_from_docx(engine.doc(), &document(&body, 20160, 12240, 1080)).unwrap();
     let requirements: Vec<Value> = serde_json::from_str(
         &engine
-            .layout_font_requirements_json(&json!({"bodyStory": "body"}).to_string())
+            .layout_font_requirements_json(
+                &json!({"bodyStory": "body", "renderEnv": {}}).to_string(),
+            )
             .unwrap(),
     )
     .unwrap();
@@ -1132,8 +1134,14 @@ fn converted_text_box_page_totals_prevent_an_exact_prefix_cut() {
     assert!(result.pages > 3);
     let output = engine.retained_layout_json().unwrap();
     let layout: Value = serde_json::from_str(&output).unwrap();
+    let paragraph = layout["measured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["block"]["id"] == "A0000005")
+        .expect("paragraph holding the NUMPAGES carrier");
     assert!(
-        layout["measured"][0]["block"]["runs"]
+        paragraph["block"]["runs"]
             .as_array()
             .unwrap()
             .iter()
