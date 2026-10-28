@@ -172,6 +172,11 @@ fn parse_style_pools(
                         taken: false,
                     });
                     if !read || transparent {
+                        if let Some(open) = markup.as_mut()
+                            && matches!(open.entry, Entry::Xf)
+                        {
+                            open.extra_xml = true;
+                        }
                         continue;
                     }
                     depth

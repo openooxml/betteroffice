@@ -987,9 +987,11 @@ fn apply_range_formats(
                     let source_col = (col - range.start.col) % captured.columns;
                     let index = (source_row * captured.columns + source_col) as usize;
                     if let Some(source) = captured.source_formats.get(index) {
+                        let captured_style = captured.source_styles.get(index).copied().flatten();
                         if source.source_xf.is_none()
                             && source.derived_from.is_none()
                             && format == styles.cell_format(Some(0))
+                            && (captured_style.is_none() || !styles.xf_has_extra_xml(0))
                         {
                             staged.push(
                                 defaults
@@ -3562,6 +3564,39 @@ mod merge_c1300_tests {
         assert_eq!(
             wb.sheets[0].effective_style(CellRef::new(0, 0)),
             Some(row_style)
+        );
+    }
+
+    #[test]
+    fn captured_clean_copy_of_an_extra_xf_zero_keeps_the_copy() {
+        let mut wb = workbook();
+        wb.styles.cell_xfs[0].num_fmt_id = Some(10);
+        wb.styles.mark_xf_extra_xml(0);
+        let clean = wb.styles.cell_xfs.len() as u32;
+        wb.styles.cell_xfs.push(wb.styles.cell_xfs[0].clone());
+        wb.styles.mark_generated_format(clean);
+        let source = PreservedCellFormat::from_style(&wb.styles, Some(clean));
+        assert_eq!((source.source_xf, source.derived_from), (None, None));
+        assert_eq!(source.format, wb.styles.cell_format(Some(0)));
+        apply(
+            &mut wb,
+            &Op::ApplyRangeFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1").unwrap(),
+                format: CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![source.format.clone()],
+                    kept: Vec::new(),
+                    source_styles: vec![Some(clean)],
+                    source_formats: vec![source],
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].cell(CellRef::new(0, 0)).map(|cell| cell.style),
+            Some(Some(clean))
         );
     }
 

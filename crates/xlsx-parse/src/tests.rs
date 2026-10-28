@@ -1837,6 +1837,25 @@ fn source_style_xml_markers_classify_styles_bytes_like_open() {
     }
 }
 
+#[test]
+fn alternate_content_inside_an_xf_marks_it_extra() {
+    let inner = concat!(
+        r#"<cellXfs><xf/><xf numFmtId="2">"#,
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+        r#"<mc:Choice Requires="x14"><alignment horizontal="center"/></mc:Choice>"#,
+        r#"<mc:Fallback><alignment horizontal="left"/></mc:Fallback>"#,
+        r#"</mc:AlternateContent></xf></cellXfs>"#,
+    );
+    let xml = format!("<styleSheet>{inner}</styleSheet>");
+    assert_eq!(
+        crate::source_style_xml_markers(xml.as_bytes()).unwrap(),
+        vec![1]
+    );
+    let opened = parse_workbook(&package_styled("<sheetData/>", Some(inner), None)).unwrap();
+    assert!(opened.styles.xf_has_extra_xml(1));
+    assert!(!opened.styles.xf_has_extra_xml(0));
+}
+
 /// a full styles fixture exercising every pool, including the gray125
 /// convention fill.
 const STYLED: &str = r#"
