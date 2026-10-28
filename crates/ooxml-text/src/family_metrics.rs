@@ -75,7 +75,7 @@ pub fn family_cluster_advance(widths: &FamilyMetrics, cluster: &str) -> Option<f
             chars.next();
         }
         let advance = family_advance(widths, ch)?;
-        if unicode_bidi::bidi_class(ch) != unicode_bidi::BidiClass::NSM {
+        if !crate::shape::is_nonspacing_mark(ch) {
             total += (advance * 1000.0).round();
             has_base = true;
         }

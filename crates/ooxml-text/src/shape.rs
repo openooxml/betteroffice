@@ -46,6 +46,11 @@ pub enum ShapeDirection {
     Rtl,
 }
 
+/// Whether `character` is a Unicode nonspacing mark.
+pub fn is_nonspacing_mark(character: char) -> bool {
+    unicode_bidi::bidi_class(character) == unicode_bidi::BidiClass::NSM
+}
+
 /// Shape `text` with the given registered font, returning glyphs in visual
 /// order with advances/offsets scaled to `size`.
 ///
