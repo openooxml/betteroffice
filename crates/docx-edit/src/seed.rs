@@ -6243,7 +6243,6 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
 }
 
 /// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
-#[cfg(feature = "wasm")]
 pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
     if digest.len() == 64
         && digest
@@ -6259,7 +6258,6 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
@@ -6758,7 +6756,6 @@ pub(crate) fn seed_blocks(
 
 /// Source metadata, identity index and referenced fonts for a package whose stories arrive
 /// another way, such as shared state, from one lowering.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,

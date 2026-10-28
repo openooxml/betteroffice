@@ -191,7 +191,7 @@ pub fn compile_slide_json(slide_json: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen(js_name = rendererVersion)]
 pub fn renderer_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    pptx_engine::renderer_version().to_owned()
 }
 
 #[wasm_bindgen(js_name = decodeTiffPng)]
