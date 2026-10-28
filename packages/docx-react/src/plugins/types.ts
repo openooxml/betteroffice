@@ -195,7 +195,7 @@ export type DocxGeometryTarget =
       occurrence?: DocxOccurrence;
     }
   | { kind: 'range'; version: string; range: DocxTextRange }
-  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number }
+  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number; index?: number }
   /** This plugin's reservation: its box, or a hidden range's boundary. */
   | { kind: 'reservation'; id: string };
 
@@ -241,7 +241,8 @@ export interface DocxPluginGeometry {
    * the first; one that no laid-out page paints, built or not, is `missing-target` once the
    * layout is complete and `layout-unavailable` before. A `drawing` target answers with the
    * drawn frame box of the drawing atom at its `offset`, on every page that paints it; an
-   * offset that is not on a drawing atom is `missing-target`. Refuses stale or unrendered layouts.
+   * optional `index` addresses a drawing inside a content-control atom. Invalid offsets or
+   * indices are `missing-target`. Refuses stale or unrendered layouts.
    * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
    * whose read failed is `read-failed`; overlays render again once either read settles.
    */

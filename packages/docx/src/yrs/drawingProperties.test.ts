@@ -1,10 +1,19 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { preloadEditWasm } from '../wasm/edit';
+import { createYrsSession } from './index';
+import { storiesDocx } from './__fixtures__/storiesDocx';
 import type { DocxDrawing } from '../types/content/run';
 import type { DisplayList } from '../layout/render/displayList';
 import { findDrawingRectsByDocPos } from '../layout/render/displayListImages';
-import { resolveAnchorTarget, type AnchorReader } from './proposalGeometry';
+import { computeAnchorTargetGeometry, resolveAnchorTarget, type AnchorReader, type ProposalGeometryReader } from './proposalGeometry';
 import type { DocxTextAtom } from './edits';
 import type { DocxExportInline } from './structuredExport';
+
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(
+  resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')
+))));
 
 const DRAWING: DocxDrawing = {
   docPrId: '7',
@@ -246,4 +255,101 @@ describe('findDrawingRectsByDocPos', () => {
       { pageIndex: 0, x: 10, y: 10, width: 80, height: 60 },
     ]);
   });
+});
+
+test('readStories carries control drawings in revision view order', async () => {
+  const session = await createYrsSession({ clientId: 76203 });
+  try {
+    session.openDocx(storiesDocx(), true);
+    const image = (id: string, attrs = {}) => ({
+      kind: 'image',
+      payload: { docPr: { ...DRAWING, docPrId: id }, title: 'Live title', alt: 'Live alt', wrapType: 'square' },
+      attrs,
+    });
+    session.applyRawOps('body', [{ op: 'insertEmbed', index: 0, kind: 'sdt', payload: {
+      content: [
+        image('1'),
+        { kind: 'sdt', payload: { content: [image('2', { hyperlink: { href: '#logo' } })] }, attrs: {} },
+        image('3', { del: { id: 3, author: 'A' } }),
+        image('4', { ins: { id: 4, author: 'A' } }),
+      ],
+    } }]);
+    for (const view of ['accepted', 'original'] as const) {
+      const read = session.readStories({ stories: ['body'], view });
+      if (!read.ok) throw new Error(read.failure.message);
+      const story = read.stories[0]!;
+      if (!story.ok) throw new Error(story.failure.message);
+      const atom = story.paragraphs[0]!.atoms[0]!;
+      expect(atom.kind).toBe('contentControl');
+      expect(atom.drawings?.map(({ docPrId }) => docPrId)).toEqual(view === 'accepted' ? ['1', '2', '4'] : ['1', '2', '3']);
+      expect(atom.drawings?.[0]).toEqual({ ...DRAWING, docPrId: '1', title: 'Live title', descr: 'Live alt', placement: 'anchor' });
+    }
+  } finally {
+    session.destroy();
+  }
+});
+
+test('indexed drawings reuse expanded control positions including hidden and nested content', () => {
+  const nested = { kind: 'sdt', payload: { content: [
+    { kind: 'text', text: 'xy', attrs: {} },
+    { kind: 'image', payload: { docPr: DRAWING }, attrs: { del: { id: 1 } } },
+    { kind: 'sdt', payload: { content: [{ kind: 'image', payload: { docPr: DRAWING }, attrs: {} }] }, attrs: {} },
+    { kind: 'image', payload: { docPr: DRAWING }, attrs: {} },
+  ] }, attributes: {} };
+  const base = reader();
+  const controlReader = { ...base, version: () => 'v1', storySegments: () => [
+    { kind: 'text', text: 'ab', attributes: {} },
+    { ...nested, kind: 'embed', embedKind: 'sdt' },
+    { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} },
+  ] } as unknown as ProposalGeometryReader;
+  const resolved = computeAnchorTargetGeometry(controlReader, [
+    { kind: 'drawing', paragraph: PARAGRAPH, offset: 2, index: 0 },
+    { kind: 'drawing', paragraph: PARAGRAPH, offset: 2, index: 1 },
+  ]);
+  expect(resolved).toMatchObject([
+    { ok: true, drawing: true, ranges: [{ from: 8, to: 9 }] },
+    { ok: true, drawing: true, ranges: [{ from: 10, to: 11 }] },
+  ]);
+});
+
+test('control reads and geometry exclude cached field drawings without shifting later indices', async () => {
+  const session = await createYrsSession({ clientId: 76204 });
+  try {
+    session.openDocx(storiesDocx(), true);
+    const field = { fieldData: JSON.stringify({ type: 'simpleField', content: [{ type: 'run', content: [
+      { type: 'drawing', drawing: { ...DRAWING, docPrId: 'cached' }, image: {
+        type: 'image', rId: 'rIdImage', size: { width: 914400, height: 457200 }, wrap: { type: 'inline' },
+      } },
+    ] }] }) };
+    const image = (id: string) => ({ kind: 'image', payload: { docPr: { ...DRAWING, docPrId: id } }, attrs: {} });
+    session.applyRawOps('body', [
+      { op: 'insertEmbed', index: 0, kind: 'field', payload: field },
+      { op: 'insertEmbed', index: 1, kind: 'sdt', payload: { content: [
+        image('before'), { kind: 'field', payload: field, attrs: {} }, image('after'),
+      ] } },
+    ]);
+    const read = session.readStories({ stories: ['body'], view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    const story = read.stories[0]!;
+    if (!story.ok) throw new Error(story.failure.message);
+    const paragraph = story.paragraphs[0]!;
+    expect(paragraph.atoms[0]!.kind).toBe('field');
+    expect(paragraph.atoms[0]!.drawings).toBeUndefined();
+    expect(paragraph.atoms[1]!.drawings?.map(({ docPrId }) => docPrId)).toEqual(['before', 'after']);
+    const anchor = { kind: 'session' as const, sessionId: session.paragraphIdentities().sessionId, story: 'body', paraId: paragraph.paraId };
+    const geometry = computeAnchorTargetGeometry(session, [
+      { kind: 'drawing', paragraph: anchor, offset: 1, index: 0 },
+      { kind: 'drawing', paragraph: anchor, offset: 1, index: 1 },
+      { kind: 'drawing', paragraph: anchor, offset: 1, index: 2 },
+      { kind: 'drawing', paragraph: anchor, offset: 0, index: 0 },
+    ]);
+    expect(geometry).toMatchObject([
+      { ok: true, drawing: true, ranges: [{ from: 3, to: 4 }] },
+      { ok: true, drawing: true, ranges: [{ from: 5, to: 6 }] },
+      { ok: false, failure: { code: 'missing-target' } },
+      { ok: false, failure: { code: 'missing-target' } },
+    ]);
+  } finally {
+    session.destroy();
+  }
 });

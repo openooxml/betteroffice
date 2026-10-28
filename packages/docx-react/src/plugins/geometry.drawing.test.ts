@@ -9,7 +9,7 @@ import {
   createCanvasHostProjector,
   createRenderedDomContext,
 } from '@betteroffice/docx/plugin-api/RenderedDomContext';
-import type { DocxSessionParagraphAnchor, YrsSession } from '@betteroffice/docx/yrs';
+import type { DocxSessionParagraphAnchor, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import { createPluginGeometry } from './geometry';
 import type { DocxAnchorGeometryResult, DocxGeometryTarget } from './types';
 
@@ -39,6 +39,12 @@ const BODY_ANCHOR: DocxSessionParagraphAnchor = {
   story: 'body',
   paraId: 'p',
 };
+const FOOTER_ANCHOR: DocxSessionParagraphAnchor = {
+  kind: 'session',
+  sessionId: 'session',
+  story: 'hf:rFoot',
+  paraId: 'fp',
+};
 const HEADER_ANCHOR: DocxSessionParagraphAnchor = {
   kind: 'session',
   sessionId: 'session',
@@ -46,7 +52,7 @@ const HEADER_ANCHOR: DocxSessionParagraphAnchor = {
   paraId: 'hp',
 };
 
-function segments(docPr: Record<string, unknown>) {
+function segments(docPr: Record<string, unknown>): YrsStorySegment[] {
   return [
     { kind: 'text', text: 'ab', attributes: {} },
     { kind: 'embed', embedKind: 'image', payload: { docPr }, attributes: {} },
@@ -59,11 +65,13 @@ function harness({
   painted = true,
   complete = true,
   unbuilt = false,
+  control = false,
 }: {
   docPr?: Record<string, unknown>;
   painted?: boolean;
   complete?: boolean;
   unbuilt?: boolean;
+  control?: boolean;
 } = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
@@ -78,7 +86,8 @@ function harness({
   });
   void canvases;
   const frame = { pageIndex: 0, x: 30, y: 40, width: 50, height: 20 };
-  const headerFrame = { x: 5, y: 6, w: 70, h: 10, docStart: 3 };
+  const drawingPosition = control ? 6 : 3;
+  const headerFrame = { x: 5, y: 6, w: 70, h: 10, docStart: drawingPosition };
   const source = {
     pageSize: () => PAGE,
     pageCount: () => 2,
@@ -104,10 +113,17 @@ function harness({
                   y: frame.y,
                   w: frame.width,
                   h: frame.height,
-                  docStart: 3,
+                  docStart: drawingPosition,
                 },
               ]
             : [],
+        footer: {
+          rId: 'rFoot',
+          kind: 'footer',
+          y: 170,
+          height: 30,
+          primitives: painted ? [{ kind: 'image', relId: 'r3', ...headerFrame }] : [],
+        },
         header: {
           rId: 'rHead',
           kind: 'header',
@@ -118,11 +134,22 @@ function harness({
       })),
     },
   } as unknown as DisplayListQueries;
-  const stories: Record<string, ReturnType<typeof segments>> = {
-    body: segments(docPr),
-    'hf:rHead': segments(docPr).map((segment) =>
+  const storySegments = segments(docPr);
+  if (control) storySegments[1] = {
+    kind: 'embed', embedKind: 'sdt', attributes: {},
+    payload: { content: [
+      { kind: 'text', text: 'xy', attrs: {} },
+      { kind: 'image', payload: { docPr }, attrs: {} },
+    ] },
+  };
+  const stories: Record<string, YrsStorySegment[]> = {
+    body: storySegments,
+    'hf:rFoot': storySegments.map((segment) =>
+      segment.kind === 'pilcrow' ? { ...segment, paraId: 'fp' } : segment
+    ),
+    'hf:rHead': storySegments.map((segment) =>
       segment.kind === 'pilcrow' ? { ...segment, paraId: 'hp' } : segment
-    ) as ReturnType<typeof segments>,
+    ),
   };
   const session = {
     version: () => 'v1',
@@ -133,7 +160,7 @@ function harness({
       anchor,
     }),
     paragraphSpans: (story: string) => [
-      { paraId: story === 'body' ? 'p' : 'hp', length: 3 },
+      { paraId: story === 'body' ? 'p' : story === 'hf:rFoot' ? 'fp' : 'hp', length: 3 },
     ],
     storySegments: (story: string) => stories[story] ?? [],
     findText: () => ({ ok: true, version: 'v1', matches: [], truncated: false }),
@@ -239,4 +266,35 @@ describe('drawing geometry targets', () => {
       geometry.getAnchorGeometry({ kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2 })
     ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   });
+});
+
+test('an indexed control drawing answers with its inner frame', () => {
+  const { geometry, frame } = harness({ control: true });
+  const result = anchored(geometry.getAnchorGeometry({
+    kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2, index: 0,
+  }));
+  expect(result.rects).toEqual([{ ...frame, pageIndex: 0 }]);
+});
+
+test('invalid control drawing indices are missing targets', () => {
+  for (const control of [false, true]) {
+    const { geometry } = harness({ control });
+    for (const index of control ? [1, -1, 0.5] : [0, 1]) {
+      expect(geometry.getAnchorGeometry({
+        kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2, index,
+      })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    }
+    if (control) expect(geometry.getAnchorGeometry({
+      kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2,
+    })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  }
+});
+
+test('a footer control drawing answers on every page that paints it', () => {
+  const { geometry } = harness({ control: true });
+  const result = anchored(geometry.getAnchorGeometry({
+    kind: 'drawing', paragraph: FOOTER_ANCHOR, offset: 2, index: 0,
+  }));
+  expect(result.rects.map((rect) => rect.pageIndex)).toEqual([0, 1]);
+  expect(result.rects[0]).toMatchObject({ x: 5, y: 6, width: 70, height: 10 });
 });

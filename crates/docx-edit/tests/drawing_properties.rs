@@ -513,3 +513,376 @@ fn image_edits_show_in_reads_and_export() {
     assert_eq!(exported.0.placement, DrawingPlacement::Anchor);
     assert_eq!(exported.1.as_deref(), Some("D-edited"));
 }
+
+fn control(content: &str, properties: &str) -> String {
+    format!(
+        r#"<w:sdt><w:sdtPr>{properties}</w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+    )
+}
+
+fn control_fixture(preview: bool) -> Vec<u8> {
+    let run = |content: String| format!("<w:r>{content}</w:r>");
+    let picture = |id: &str| {
+        run(inline_picture(
+            id,
+            &format!(r#"name="N-{id}" title="T-{id}" descr="D-{id}""#),
+        ))
+    };
+    let textbox = concat!(
+        r#"<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor relativeHeight="1"><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+        r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/>"#,
+        r#"<wp:docPr id="102" name="N-102" title="T-102" descr="D-102"><a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative val="1"/></a:ext></a:extLst></wp:docPr>"#,
+        r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr>"#,
+        r#"<wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"#,
+        r#"<mc:Fallback><w:pict><v:shape id="fallback" style="width:72pt;height:36pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent>"#,
+    );
+    let textbox = if preview {
+        textbox.replace("</v:shape>", r#"<v:imagedata r:id="rIdImage"/></v:shape>"#)
+    } else {
+        textbox.to_owned()
+    };
+    let content = format!(
+        "{}{}{}{}{}{}",
+        picture("101"),
+        run(textbox),
+        control(
+            &format!(
+                r#"<w:hyperlink w:anchor="logo">{}</w:hyperlink>"#,
+                picture("104")
+            ),
+            "<w:richText/>"
+        ),
+        format_args!(r#"<w:del w:id="7" w:author="A">{}</w:del>"#, picture("105")),
+        format_args!(r#"<w:ins w:id="8" w:author="A">{}</w:ins>"#, picture("106")),
+        picture("107"),
+    );
+    let inline = format!(
+        r#"<w:p w14:paraId="30000001">{}{}</w:p>"#,
+        control(&content, "<w:richText/>"),
+        control(&picture("108"), "<w:text/>"),
+    );
+    let footer = format!(
+        r#"<w:ftr {NS}><w:p w14:paraId="40000001">{}</w:p></w:ftr>"#,
+        control(
+            &picture("103"),
+            "<w:docPartObj><w:docPartGallery w:val=\"Watermarks\"/></w:docPartObj>"
+        ),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    for (path, bytes) in &mut parts {
+        let xml = String::from_utf8_lossy(bytes);
+        let updated = match path.as_str() {
+            "word/document.xml" => Some(
+                xml.replace("<w:sectPr>", &format!("{inline}<w:sectPr><w:footerReference w:type=\"default\" r:id=\"rIdFooter\"/>"))
+                    .replace("<w:document ", r#"<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml" "#),
+            ),
+            "word/_rels/document.xml.rels" => Some(xml.replace("</Relationships>", &format!(r#"<Relationship Id="rIdFooter" Type="{REL}/footer" Target="footer1.xml"/></Relationships>"#))),
+            "[Content_Types].xml" => Some(xml.replace("</Types>", r#"<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>"#)),
+            _ => None,
+        };
+        if let Some(updated) = updated {
+            *bytes = updated.into_bytes();
+        }
+    }
+    parts.push(("word/footer1.xml".to_owned(), footer.into_bytes()));
+    parts.push(("word/_rels/footer1.xml.rels".to_owned(), format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="{REL}/image" Target="media/image.png"/></Relationships>"#).into_bytes()));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn collect_inline_drawings<'a>(inlines: &'a [Inline], out: &mut Vec<&'a DrawingProperties>) {
+    for inline in inlines {
+        match &inline.content {
+            InlineKind::ContentControl { inlines, .. } => collect_inline_drawings(inlines, out),
+            InlineKind::Image {
+                drawing: Some(drawing),
+                ..
+            }
+            | InlineKind::Unsupported {
+                drawing: Some(drawing),
+                ..
+            } => out.push(drawing),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn inline_control_drawings_follow_read_and_export_views() {
+    for preview in [false, true] {
+        let doc = open(&control_fixture(preview));
+        for (view, revision_view, ids) in [
+            (
+                EditTextView::Accepted,
+                RevisionView::Accepted,
+                vec!["101", "102", "104", "106", "107"],
+            ),
+            (
+                EditTextView::Original,
+                RevisionView::Original,
+                vec!["101", "102", "104", "105", "107"],
+            ),
+        ] {
+            let stories = doc
+                .read_stories(&ReadStoriesRequest {
+                    view,
+                    stories: None,
+                    by_root: false,
+                    expect_version: None,
+                })
+                .unwrap()
+                .stories;
+            let mut read = Vec::new();
+            for story in &stories {
+                let StoryText::Read { story, paragraphs } = story else {
+                    panic!("refused story")
+                };
+                for paragraph in paragraphs {
+                    if paragraph.para_id == "30000001" {
+                        assert_eq!(paragraph.text, "\u{FFFC}\u{FFFC}");
+                        assert_eq!(paragraph.atoms.len(), 2);
+                        assert!(paragraph.atoms[0].drawing.is_none());
+                        let drawings = &paragraph.atoms[0].drawings;
+                        assert_eq!(
+                            drawings
+                                .iter()
+                                .map(|drawing| drawing.doc_pr_id.as_deref().unwrap())
+                                .collect::<Vec<_>>(),
+                            ids
+                        );
+                        assert_eq!(
+                            paragraph.atoms[1].drawings[0].doc_pr_id.as_deref(),
+                            Some("108")
+                        );
+                    }
+                    if story == "hf:rIdFooter" {
+                        assert_eq!(
+                            paragraph.atoms[0].drawings[0].doc_pr_id.as_deref(),
+                            Some("103")
+                        );
+                    }
+                    read.extend(
+                        paragraph
+                            .atoms
+                            .iter()
+                            .flat_map(|atom| atom.drawings.iter().cloned()),
+                    );
+                }
+            }
+            assert_eq!(read.len(), 7);
+            for drawing in &read {
+                let id = drawing.doc_pr_id.as_deref().unwrap();
+                assert_eq!(drawing.name, Some(format!("N-{id}")));
+                assert_eq!(drawing.title, Some(format!("T-{id}")));
+                assert_eq!(drawing.descr, Some(format!("D-{id}")));
+                assert!(!drawing.hidden);
+                assert_eq!(drawing.decorative, id == "102");
+                assert_eq!(
+                    drawing.placement,
+                    if id == "102" {
+                        DrawingPlacement::Anchor
+                    } else {
+                        DrawingPlacement::Inline
+                    }
+                );
+                assert_eq!(
+                    drawing.drawing_type,
+                    if id == "102" {
+                        DrawingType::TextBox
+                    } else {
+                        DrawingType::Picture
+                    }
+                );
+            }
+            let content = doc
+                .export_structured(&ExportOptions {
+                    stories: Some(vec![
+                        StorySelection::Body,
+                        StorySelection::Headers,
+                        StorySelection::Footers,
+                    ]),
+                    ..ExportOptions::new(revision_view)
+                })
+                .unwrap()
+                .content;
+            let mut inlines = Vec::new();
+            for story in &content.stories {
+                collect_inlines(&story.blocks, &mut inlines);
+            }
+            let mut exported = Vec::new();
+            for inline in &inlines {
+                if let InlineKind::ContentControl { inlines, .. } = &inline.content {
+                    collect_inline_drawings(inlines, &mut exported);
+                }
+            }
+            assert_eq!(read, exported.into_iter().cloned().collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
+fn inline_control_drawings_save_source_parts_byte_identically() {
+    let bytes = control_fixture(false);
+    let doc = open(&bytes);
+    let plan = doc.paragraph_save_plan();
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let request = serde_json::from_value(serde_json::json!({
+        "determinism": { "seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z" },
+        "document": { "content": package.document.content, "comments": package.document.comments },
+        "relationshipEntries": package.relationship_entries,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "options": { "updateModifiedDate": false },
+        "paragraphIds": {
+            "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
+                serde_json::json!({"part": part, "ordinal": ordinal, "paraId": para_id})
+            }).collect::<Vec<_>>(),
+            "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
+                serde_json::json!({"part": part, "paraIds": para_ids})
+            }).collect::<Vec<_>>()
+        }
+    }))
+    .unwrap();
+    let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
+    let parts = |bytes: &[u8]| {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(parts(&saved), parts(&bytes));
+}
+
+fn prepend_paragraphs(content: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "word/document.xml" {
+            *bytes = String::from_utf8_lossy(bytes)
+                .replace("<w:body>", &format!("<w:body>{content}"))
+                .replace("<w:document ", r#"<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" "#)
+                .into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn inline_control_alternate_content_keeps_selected_picture_identity() {
+    let selected = inline_picture(
+        "401",
+        r#"name="Selected picture" descr="Selected description""#,
+    );
+    let unused = concat!(
+        r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="402" name="Unused text box" descr="Unused description"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+        r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr/><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+    );
+    let run = format!(
+        r#"<w:r><mc:AlternateContent><mc:Choice Requires="pic">{selected}</mc:Choice><mc:Choice Requires="wps">{unused}</mc:Choice><mc:Fallback/></mc:AlternateContent></w:r>"#
+    );
+    let doc = open(&prepend_paragraphs(&format!(
+        r#"<w:p w14:paraId="60000001">{}</w:p>"#,
+        control(&run, "<w:richText/>")
+    )));
+    let read = doc
+        .read_paragraphs(&ReadParagraphsRequest {
+            story: Some("body".to_owned()),
+            para_ids: Some(vec!["60000001".to_owned()]),
+            view: EditTextView::Accepted,
+        })
+        .unwrap();
+    let drawings = &read.paragraphs[0].atoms[0].drawings;
+    assert_eq!(drawings.len(), 1);
+    assert_eq!(drawings[0].doc_pr_id.as_deref(), Some("401"));
+    assert_eq!(drawings[0].name.as_deref(), Some("Selected picture"));
+    assert_eq!(drawings[0].descr.as_deref(), Some("Selected description"));
+    let content = doc
+        .export_structured(&ExportOptions::new(RevisionView::Accepted))
+        .unwrap()
+        .content;
+    let mut inlines = Vec::new();
+    for story in &content.stories {
+        collect_inlines(&story.blocks, &mut inlines);
+    }
+    let mut exported = Vec::new();
+    for inline in &inlines {
+        if let InlineKind::ContentControl { inlines, .. } = &inline.content {
+            collect_inline_drawings(inlines, &mut exported);
+        }
+    }
+    assert_eq!(drawings, &exported.into_iter().cloned().collect::<Vec<_>>());
+}
+
+#[test]
+fn inline_control_multi_drawing_choice_matches_base_branch_parsing() {
+    let picture = inline_picture("401", r#"name="Picture" descr="Picture description""#);
+    let textbox = concat!(
+        r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="402" name="Text box" descr="Text box description"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+        r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr/><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+    );
+    for drawings in [format!("{picture}{textbox}"), format!("{textbox}{textbox}")] {
+        let alternate = format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="wps">{drawings}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#
+        );
+        let xml = format!(
+            r#"<w:r {NS} xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">{alternate}</w:r>"#
+        );
+        let limits = docx_parse::xml::ParseLimits::default();
+        let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+        let xml =
+            docx_parse::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        let alternate_element = xml
+            .root()
+            .unwrap()
+            .child_by_full_name("mc:AlternateContent")
+            .unwrap();
+        let expected: Vec<_> = docx_parse::paragraph::parse_alternate_content_branch(
+            alternate_element,
+            None,
+            &mut budget,
+            None,
+            false,
+        )
+        .unwrap()
+        .map(|(_, contents)| {
+            contents
+                .into_iter()
+                .filter_map(|content| content.drawing_properties().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+        let doc = open(&prepend_paragraphs(&format!(
+            r#"<w:p w14:paraId="60000002">{}</w:p>"#,
+            control(&format!("<w:r>{alternate}</w:r>"), "<w:richText/>")
+        )));
+        let read = doc
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: Some("body".to_owned()),
+                para_ids: Some(vec!["60000002".to_owned()]),
+                view: EditTextView::Accepted,
+            })
+            .unwrap();
+        assert_eq!(read.paragraphs[0].atoms[0].drawings, expected);
+        let content = doc
+            .export_structured(&ExportOptions::new(RevisionView::Accepted))
+            .unwrap()
+            .content;
+        let mut inlines = Vec::new();
+        for story in &content.stories {
+            collect_inlines(&story.blocks, &mut inlines);
+        }
+        let mut exported = Vec::new();
+        for inline in &inlines {
+            if let InlineKind::ContentControl { inlines, .. } = &inline.content {
+                collect_inline_drawings(inlines, &mut exported);
+            }
+        }
+        assert_eq!(exported.into_iter().cloned().collect::<Vec<_>>(), expected);
+    }
+}

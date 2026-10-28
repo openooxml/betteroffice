@@ -392,11 +392,13 @@ mod tests {
             offset: 1,
             kind: AtomKind::LineBreak,
             drawing: None,
+            drawings: Vec::new(),
         }];
         let image = [TextAtom {
             offset: 1,
             kind: AtomKind::Image,
             drawing: None,
+            drawings: Vec::new(),
         }];
         let same = diff_paragraphs(
             ("a\u{FFFC}b", &line),

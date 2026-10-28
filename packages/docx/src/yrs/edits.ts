@@ -233,6 +233,9 @@ export interface DocxTextAtom {
   kind: DocxAtomKind;
   /** The drawing's `wp:docPr` properties, on atoms whose embed carries them. */
   drawing?: DocxDrawing;
+  /** Drawings inside content-control atoms in the requested view;
+   * drawings inside field results are not listed. */
+  drawings?: DocxDrawing[];
 }
 
 /** Numbering in the requested view, counted from the start of the root story. */
