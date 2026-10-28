@@ -148,6 +148,7 @@ interface ViewParagraph {
   inlineStart: number;
   rawLength: number;
   viewLength: number;
+  joins: boolean;
   spans: ViewSpan[];
   atoms: Array<{
     view: number;
@@ -169,7 +170,8 @@ function viewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView
   let inlineStart = 0;
   for (const segment of segments) {
     if (segment.kind === 'pilcrow') {
-      paragraphs.push({ index: paragraphs.length, paraId: segment.paraId, inlineStart, rawLength, viewLength, spans, atoms });
+      const joins = segment.properties[view === 'accepted' ? 'pPrDel' : 'pPrIns'] != null;
+      paragraphs.push({ index: paragraphs.length, paraId: segment.paraId, inlineStart, rawLength, viewLength, joins, spans, atoms });
       inlineStart = 0;
       rawLength = 0;
       viewLength = 0;
@@ -202,14 +204,16 @@ const DRAWING_EMBEDS = new Set(['image', 'shape', 'chart', 'opaqueDrawing']);
 
 interface ViewParagraphIndex {
   byId: Map<string, ViewParagraph | null>;
+  list: ViewParagraph[];
 }
 
 function indexViewParagraphs(segments: readonly YrsStorySegment[], view: DocxTextView): ViewParagraphIndex {
   const byId = new Map<string, ViewParagraph | null>();
-  for (const paragraph of viewParagraphs(segments, view)) {
+  const list = viewParagraphs(segments, view);
+  for (const paragraph of list) {
     byId.set(paragraph.paraId, byId.has(paragraph.paraId) ? null : paragraph);
   }
-  return { byId };
+  return { byId, list };
 }
 
 function viewsAt(session: AnchorReader, version: string, story: string, view: DocxTextView) {
@@ -428,18 +432,32 @@ export function resolveAnchorTarget(
       return anchorFailure('missing-target', 'The offset is not on a drawing');
     }
     const { story, paraId } = paragraph.loc;
-    const view = viewsAt(session, version, story, 'accepted').byId.get(paraId);
+    const views = viewsAt(session, version, story, 'accepted');
+    const view = views.byId.get(paraId);
     if (view === null) {
       return anchorFailure('ambiguous-target', 'The paragraph cannot be resolved uniquely');
     }
-    const atom = view?.atoms.find((candidate) => candidate.view === target.offset);
+    let first = view?.index ?? 0;
+    while (view && first > 0 && views.list[first - 1]!.joins) first -= 1;
+    let base = 0;
+    let found: { paraId: string; atom: ViewParagraph['atoms'][number] } | undefined;
+    for (const part of view ? views.list.slice(first, view.index + 1) : []) {
+      const atom = part.atoms.find((candidate) => base + candidate.view === target.offset);
+      if (atom) {
+        found = { paraId: part.paraId, atom };
+        break;
+      }
+      base += part.viewLength;
+    }
+    const atom = found?.atom;
     if (
+      !found ||
       !atom ||
       (!DRAWING_EMBEDS.has(atom.embedKind) && atom.payload.docPr === undefined)
     ) {
       return anchorFailure('missing-target', 'The offset is not on a drawing');
     }
-    const at = { story, paraId, offset: atom.raw };
+    const at = { story, paraId: found.paraId, offset: atom.raw };
     return {
       ok: true,
       ranges: [{ start: at, end: { ...at, offset: atom.raw + 1 } }],
