@@ -270,12 +270,12 @@ function inlineLength(child: ParagraphContent): number {
   }
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; tableParagraph?: ParagraphFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
   const pkg = yrsToDocument(view, source).package;
-  const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting): ReturnType<typeof openingRun> => {
+  const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting, tableParagraph?: ParagraphFormatting): ReturnType<typeof openingRun> => {
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {
         let offset = 0;
@@ -283,20 +283,21 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
           const length = inlineLength(child);
           if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)
             && (atOffset === undefined || (offset <= atOffset && atOffset < offset + length))) {
-            return { run: child, offset, tableRun, paragraphFormatting: block.formatting };
+            return { run: child, offset, tableRun, tableParagraph, paragraphFormatting: block.formatting };
           }
           offset += length;
         }
-        return { offset: 0, tableRun, paragraphFormatting: block.formatting };
+        return { offset: 0, tableRun, tableParagraph, paragraphFormatting: block.formatting };
       }
       if (block.type === 'table') {
         const baseline = inheritance.tableAttributes(block);
         for (const [rowIndex, row] of block.rows.entries()) for (const [cellIndex, cell] of row.cells.entries()) {
-          const run = find(cell.content, baseline.rows[rowIndex]?.[cellIndex]?.runFormatting ?? undefined);
+          const cellFormatting = baseline.rows[rowIndex]?.[cellIndex];
+          const run = find(cell.content, cellFormatting?.runFormatting ?? undefined, cellFormatting?.paragraphFormatting ?? undefined);
           if (run) return run;
         }
       }
-      const run = block.type === 'blockSdt' ? find(block.content, tableRun) : undefined;
+      const run = block.type === 'blockSdt' ? find(block.content, tableRun, tableParagraph) : undefined;
       if (run) return run;
     }
   };
@@ -313,11 +314,11 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
   const inheritance = draft.runInheritance(source?.package.styles);
   let attrs: Record<string, unknown> | undefined;
   let formatting: TextFormatting | undefined;
-  let paragraphFormatting: ParagraphFormatting | undefined;
+  let tableParagraph: ParagraphFormatting | undefined;
   let tableRun: TextFormatting | undefined;
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
-    paragraphFormatting = selected?.paragraphFormatting;
+    tableParagraph = selected?.tableParagraph;
     tableRun = selected?.tableRun;
     let offset = 0;
     const run = selected?.run && content.find(segment => {
@@ -335,7 +336,7 @@ function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
     }
   } finally { inheritance.dispose(); }
   const defaultStyleId = source?.package.styles?.styles.find(style => style.type === 'paragraph' && style.default)?.styleId;
-  return { attrs, formatting, paragraphFormatting, tableRun, styles: source?.package.styles, markProperties: mark.properties, defaultStyleId };
+  return { attrs, formatting, tableParagraph, tableRun, styles: source?.package.styles, markProperties: mark.properties, defaultStyleId };
 }
 
 function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
@@ -361,6 +362,21 @@ function setInheritedRunFormat(draft: YrsSession, created: readonly DocxParagrap
 
 const LIST_DERIVED = ['listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor', 'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'listStartOverride'];
 const DIRECT_FLATTENED = new Set([...PARAGRAPH_PROPERTIES, 'cnfStyle', 'adjustRightInd'].filter(key => !['pStyle', '_originalFormatting', 'defaultTextFormatting', 'numPrFromStyle'].includes(key)));
+
+function directProperties(anchor: Record<string, unknown>, inherited: ParagraphFormatting | undefined): Record<string, unknown> {
+  const original = anchor._originalFormatting;
+  const direct: Record<string, unknown> = { ...(original && typeof original === 'object' ? original : {}) };
+  for (const key of ['alignment', 'numPr', 'widowControl', 'autoSpaceDE', 'autoSpaceDN', 'adjustRightInd', 'bidi', 'cnfStyle'] as const) {
+    const value = anchor[key] ?? undefined;
+    if (JSON.stringify(value ?? null) !== JSON.stringify(direct[key] ?? inherited?.[key] ?? null)) direct[key] = value;
+  }
+  const sameNumPr = (left: unknown, right: unknown) => left != null && right != null && JSON.stringify(left) === JSON.stringify(right);
+  if (sameNumPr(direct.numPr, direct.numPrFromStyle) || sameNumPr(anchor.numPr, anchor.numPrFromStyle)) {
+    delete direct.numPr;
+    delete direct.numPrFromStyle;
+  }
+  return Object.fromEntries(Object.entries(direct).filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
+}
 
 function applyDirectProperties(draft: YrsSession, target: DocxParagraphTarget, current: Record<string, unknown> | undefined, direct: Record<string, unknown>, effective: string | null, anchor: Record<string, unknown>) {
   const set = (key: string, value: unknown) => {
@@ -408,19 +424,13 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
   const anchor = anchorRunFormat(draft, target);
   const { markProperties } = anchor;
   const anchorStyle = typeof markProperties.pStyle === 'string' ? markProperties.pStyle : null;
-  const directSource = anchor.paragraphFormatting ?? markProperties._originalFormatting;
-  let direct = Object.fromEntries(Object.entries((directSource && typeof directSource === 'object' ? directSource : {}) as Record<string, unknown>)
-    .filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
-  const sameNumPr = (left: unknown, right: unknown) => left != null && right != null && JSON.stringify(left) === JSON.stringify(right);
-  if (sameNumPr(direct.numPr, direct.numPrFromStyle) || sameNumPr(markProperties.numPr, markProperties.numPrFromStyle)) {
-    direct = Object.fromEntries(Object.entries(direct).filter(([key]) => key !== 'numPr' && key !== 'numPrFromStyle'));
-  }
   const inheritance = draft.runInheritance(anchor.styles);
   let created: DocxParagraphTarget[] = [];
   let inherited: Record<string, unknown>[] = [];
   try {
+    const direct = directProperties(markProperties, inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph));
     const effective = paragraphs.map(({ styleId }) => styleId ?? anchorStyle);
-    const numbered = effective.map(style => style ? inheritance.paragraphFormatting(style, undefined)?.numPr != null : false);
+    const numbered = effective.map(style => inheritance.paragraphFormatting(style, undefined)?.numPr != null);
     inherited = effective.map(style => inheritance.attributes(style, null, anchor.tableRun));
     const styleList = anchor.styles?.styles.filter(style => style.type === 'paragraph') ?? [];
     const safeStyle = (anchor.defaultStyleId && !inheritance.paragraphFormatting(anchor.defaultStyleId, undefined)?.numPr ? anchor.defaultStyleId : undefined)
@@ -431,7 +441,7 @@ export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphT
     const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
     created.forEach((entry, index) => {
       if (!paragraphs[index].styleId && numbered[index] && seededStyles[index] !== effective[index]) {
-        applyCopiedProperties(draft, target.story, [entry], copiedProperties(markProperties, directSource), COPIED_PROPERTIES);
+        applyCopiedProperties(draft, target.story, [entry], copiedProperties(markProperties, direct), COPIED_PROPERTIES);
       } else {
         applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
       }

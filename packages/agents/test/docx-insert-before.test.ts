@@ -305,3 +305,40 @@ test('insert after keeps its existing plain behaviour', async () => {
   expect(receipt.results[0].refs?.map(ref => doc.read(ref!).text)).toEqual(['Added after']);
   expect(pPrOf(blockOf(await xmlOf(doc), 'Added after'))).not.toContain('BodyText');
 });
+
+test('insert before an unstyled anchor uses safe seeding for a numbered default style', async () => {
+  const zip = await JSZip.loadAsync(await numberedStyleFixture());
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  zip.file('word/styles.xml', `<w:styles xmlns:w="${w}"><w:style w:type="paragraph" w:default="1" w:styleId="DefaultList"><w:name w:val="Default List"/><w:pPr><w:numPr><w:numId w:val="3"/></w:numPr></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style></w:styles>`);
+  zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/<w:body>[\s\S]*?(?=<w:sectPr>)/, `<w:body>${para('', 'Default anchor')}${para('', 'Tail')}`));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  expect(item(doc, 'Default anchor').list).toEqual({ level: 0 });
+  await doc.edit({ version: doc.list().version, edits: [{
+    op: 'insert_paragraphs', before: item(doc, 'Default anchor').ref, paragraphs: [{ text: 'Before default list' }],
+  }] });
+  expect(item(doc, 'Before default list').list).toEqual({ level: 0 });
+  const saved = await xmlOf(doc);
+  expect(blocks(saved).map(textOf)).toEqual(['Before default list', 'Default anchor', 'Tail']);
+  expect(pPrOf(blockOf(saved, 'Before default list'))).not.toContain('<w:numPr>');
+  expect(pPrOf(blockOf(saved, 'Before default list'))).not.toContain('Plain');
+});
+
+test('insert before a list style anchor keeps inherited alignment out of direct properties', async () => {
+  for (const inControl of [false, true]) {
+    const zip = await JSZip.loadAsync(await numberedStyleFixture());
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('<w:spacing w:after="60"/>', '<w:spacing w:after="60"/><w:jc w:val="center"/>'));
+    if (inControl) {
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const anchor = blockOf(xml, 'Style one');
+      zip.file('word/document.xml', xml.replace(anchor, `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${anchor}</w:sdtContent></w:sdt>`));
+    }
+    const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+    await doc.edit({ version: doc.list().version, edits: [{
+      op: 'insert_paragraphs', before: item(doc, 'Style one').ref, paragraphs: [{ text: 'Plain before list', style: 'Normal' }],
+    }] });
+    const pPr = pPrOf(blockOf(await xmlOf(doc), 'Plain before list'));
+    expect(pPr).not.toContain('<w:jc');
+    expect(canonical(pPr)).toBe('<w:pPr><w:pStyle w:val="Normal"/></w:pPr>');
+    expect(item(doc, 'Plain before list').list).toBeUndefined();
+  }
+});
