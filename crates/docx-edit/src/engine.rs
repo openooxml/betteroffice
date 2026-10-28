@@ -1809,15 +1809,68 @@ fn extend_input_for_header_footer(
         .map_or(extended.last(), |section| extended.get(section))
         .cloned();
     let mut section_index = 0;
+    let mut first_break = true;
+    let mut section_size = fallback_size;
+    let mut section_margins = fallback_margins;
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
         };
+        let ends_first_section = first_break;
+        first_break = false;
+        if let Some(size) = &section_break.page_size {
+            section_size.clone_from(size);
+        }
+        if let Some(margins) = &section_break.margins {
+            section_margins.clone_from(margins);
+        }
         if section_break.is_self_describing() {
+            let section = regions
+                .sections
+                .get(section_index)
+                .or_else(|| regions.sections.last());
+            let mut margins = section_margins.clone();
+            margins.header = section_break
+                .margins
+                .as_ref()
+                .and_then(|margins| margins.header)
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.header))
+                .or_else(|| section.and_then(|section| section.header_distance))
+                .or(margins.header)
+                .or(Some(margins.top.abs()));
+            margins.footer = section_break
+                .margins
+                .as_ref()
+                .and_then(|margins| margins.footer)
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.footer))
+                .or_else(|| section.and_then(|section| section.footer_distance))
+                .or(margins.footer)
+                .or(Some(margins.bottom.abs()));
+            let variant_height = |kind| {
+                variants
+                    .iter()
+                    .rfind(|variant| {
+                        variant.section_index == section_index
+                            && variant.kind == kind
+                            && variant.hf_type == HeaderFooterType::Default
+                    })
+                    .map_or(0.0, |variant| variant.flow_height)
+            };
+            section_margins = extend_body_margins(
+                &section_size,
+                &margins,
+                variant_height(HeaderFooterKind::Header),
+                variant_height(HeaderFooterKind::Footer),
+            );
+            section_break.margins = Some(section_margins.clone());
+            if ends_first_section {
+                input.options.margins = Some(section_margins.clone());
+            }
             continue;
         }
         if let Some(margins) = extended.get(section_index) {
             section_break.margins = Some(margins.clone());
+            section_margins.clone_from(margins);
         }
         section_index += 1;
     }
