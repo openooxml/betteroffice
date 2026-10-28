@@ -1,6 +1,34 @@
-use crate::types::{ParagraphBlock, ParagraphExtent, ParagraphFragment, TypesetRow};
+use crate::types::{ParagraphBlock, ParagraphExtent, ParagraphFragment, Run, TypesetRow};
 
 pub(crate) fn trailing_leading(block: &ParagraphBlock, line: &TypesetRow) -> f64 {
+    let Some(runs) = block.runs.get(line.head_run..=line.tail_run) else {
+        return 0.0;
+    };
+    if runs.iter().any(|run| {
+        !matches!(
+            run,
+            Run::Text(_) | Run::Tab(_) | Run::Field(_) | Run::LineBreak(_)
+        )
+    }) || block.attrs.as_ref().is_some_and(|attrs| {
+        attrs.shading.is_some()
+            || attrs.borders.as_ref().is_some_and(|borders| {
+                [
+                    borders.bottom.as_ref(),
+                    borders.between.as_ref(),
+                    borders.left.as_ref(),
+                    borders.right.as_ref(),
+                    borders.bar.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|border| {
+                    !matches!(border.style.as_deref(), Some("none" | "nil"))
+                        && border.width.unwrap_or(1.0) > 0.0
+                })
+            })
+    }) {
+        return 0.0;
+    }
     let spacing = block.attrs.as_ref().and_then(|attrs| attrs.spacing.as_ref());
     let rule = spacing.and_then(|spacing| spacing.line_rule.as_deref());
     if rule == Some("exact")

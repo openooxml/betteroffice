@@ -215,6 +215,109 @@ fn footnote_reservation_uses_the_same_font_box_boundary() {
 }
 
 #[test]
+fn inline_atoms_require_full_pitch_at_body_and_footnote_boundaries() {
+    let image = json!({"kind": "image", "src": "synthetic-image", "width": 30, "height": 30});
+    let mut shape = image.clone();
+    shape["inlineShape"] = json!({
+        "id": "shape", "shapeType": "rect", "geometryPath": [],
+        "width": 30, "height": 30, "children": [],
+    });
+    let mut chart = image.clone();
+    chart["inlineChart"] = json!({
+        "id": "chart", "chart": {}, "width": 30, "height": 30,
+    });
+    let reserved = json!({
+        "kind": "reserved", "reservation": {"owner": "test", "id": "atom"},
+        "width": 30, "height": 30,
+    });
+    for run in [image, shape, chart, reserved] {
+        for reserved_height in [0.0, 20.0] {
+            let mut target = text(
+                1,
+                40.0,
+                json!({"spacing": {"line": 2, "lineUnit": "multiplier", "lineRule": "auto"}}),
+            );
+            target["block"]["runs"] = json!([run.clone()]);
+            let mut value = input(vec![prefix(82.0 - reserved_height), target], 100.0);
+            value.options.footnote_reserved_heights =
+                Some([("1".to_owned(), reserved_height)].into_iter().collect());
+            let result = docx_layout::compute_layout_input(&mut value).unwrap();
+            assert_eq!(
+                slices(&result, "text"),
+                vec![(1, 0, 1)],
+                "run: {run}, reserved height: {reserved_height}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inline_atoms_do_not_disable_trailing_leading_on_other_lines() {
+    let mut target = text(2, 40.0, json!({"widowControl": false}));
+    target["block"]["runs"] = json!([
+        {"kind": "image", "src": "synthetic-image", "width": 30, "height": 30},
+        {"kind": "text", "text": "x"},
+    ]);
+    let line = &mut target["measure"]["lines"][1];
+    line["headRun"] = json!(1);
+    line["headChar"] = json!(0);
+    line["tailRun"] = json!(1);
+    line["tailChar"] = json!(1);
+    let result = layout(vec![target], 58.0);
+    assert_eq!(slices(&result, "text"), vec![(0, 0, 2)]);
+}
+
+#[test]
+fn paragraph_borders_and_shading_require_full_pitch_at_body_and_footnote_boundaries() {
+    let mut decorations = vec![json!({"shading": "#eeeeee"})];
+    for side in ["bottom", "between", "left", "right", "bar"] {
+        let mut attrs = json!({"borders": {}});
+        attrs["borders"][side] = json!({"style": "single", "width": 1});
+        decorations.push(attrs);
+    }
+    decorations.push(json!({"borders": {"bottom": {}}}));
+    for mut attrs in decorations {
+        attrs["spacing"] = json!({"line": 3, "lineUnit": "multiplier", "lineRule": "auto"});
+        for reserved_height in [0.0, 20.0] {
+            let mut value = input(
+                vec![prefix(82.0 - reserved_height), text(1, 60.0, attrs.clone())],
+                100.0,
+            );
+            value.options.footnote_reserved_heights =
+                Some([("1".to_owned(), reserved_height)].into_iter().collect());
+            let result = docx_layout::compute_layout_input(&mut value).unwrap();
+            assert_eq!(
+                slices(&result, "text"),
+                vec![(1, 0, 1)],
+                "attrs: {attrs}, reserved height: {reserved_height}"
+            );
+        }
+    }
+}
+
+#[test]
+fn invisible_paragraph_borders_preserve_font_box_fit() {
+    for border in [
+        json!({"style": "none", "width": 1}),
+        json!({"style": "nil", "width": 1}),
+        json!({"style": "single", "width": 0}),
+    ] {
+        let result = layout(
+            vec![
+                prefix(82.0),
+                text(
+                    1,
+                    60.0,
+                    json!({"borders": {"bottom": border, "between": border}}),
+                ),
+            ],
+            100.0,
+        );
+        assert_eq!(slices(&result, "text"), vec![(0, 0, 1)]);
+    }
+}
+
+#[test]
 fn column_bottom_uses_the_same_font_box_boundary() {
     let mut value = input(vec![text(6, 20.0, json!({"widowControl": false}))], 58.0);
     value.options.columns = Some(serde_json::from_value(json!({"count": 2, "gap": 10})).unwrap());
