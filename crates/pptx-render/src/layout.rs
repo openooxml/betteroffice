@@ -386,6 +386,7 @@ impl SlideRenderer {
             deck.width_emu,
             deck.height_emu,
             slide_index,
+            None,
         )
     }
 
@@ -402,6 +403,7 @@ impl SlideRenderer {
             scope.width_emu,
             scope.height_emu,
             scope.index,
+            None,
         )
     }
 
@@ -412,6 +414,7 @@ impl SlideRenderer {
         width_emu: i64,
         height_emu: i64,
         slide_index: usize,
+        shape_filter: Option<&HashSet<String>>,
     ) -> Result<RenderedSlide, RenderError> {
         let SlideParents {
             slide: parsed_slide,
@@ -502,6 +505,7 @@ impl SlideRenderer {
             master_other_style_levels: None,
             layout,
             parsed_slide,
+            shape_filter,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
             autofit: HashMap::new(),
@@ -521,7 +525,8 @@ impl SlideRenderer {
             background_picture: background_picture.cloned(),
         };
         let root_space = Space::root();
-        if let Some(picture) = background_picture
+        if shape_filter.is_none()
+            && let Some(picture) = background_picture
             && let Some(asset_id) = picture.media_part_path.clone()
         {
             let background_dpi = builder
@@ -558,7 +563,8 @@ impl SlideRenderer {
         }
         // `p:sld/@showMasterSp` hides the layout's own decoration as well as the
         // master's, because the master reaches the slide through the layout.
-        let show_layout = parsed_slide.is_none_or(|slide| slide.show_master_shapes);
+        let show_layout =
+            shape_filter.is_none() && parsed_slide.is_none_or(|slide| slide.show_master_shapes);
         let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
         if show_master && let Some(master) = master {
             for (index, shape) in master.shapes.iter().enumerate() {
@@ -615,15 +621,23 @@ impl SlideRenderer {
                     slide.source_part_path.as_deref(),
                     slide.layout_part_path.as_deref(),
                 );
-                if !has_autofit_edits(
+                let shape_ids = autofit_edited_shapes(
                     &slide.shapes,
                     base.map_or(&[], |base| &base.shapes),
                     &parents,
-                ) {
+                );
+                if shape_ids.is_empty() {
                     continue;
                 }
                 let rendered = self
-                    .layout_slide(session.package(), snapshot, index)
+                    .layout_resolved(
+                        session.package(),
+                        slide,
+                        snapshot.width_emu,
+                        snapshot.height_emu,
+                        index,
+                        Some(&shape_ids),
+                    )
                     .map_err(|error| pptx_edit::EditError::Write(error.to_string()))?;
                 autofit.extend(rendered.autofit);
             }
@@ -739,26 +753,41 @@ impl SlideRenderer {
     }
 }
 
-fn has_autofit_edits(
+fn autofit_edited_shapes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     parents: &SlideParents<'_>,
+) -> HashSet<String> {
+    let mut edited = HashSet::new();
+    collect_autofit_edited_shapes(current, baseline, parents, &mut edited);
+    edited
+}
+
+fn collect_autofit_edited_shapes(
+    current: &[ShapeSnapshot],
+    baseline: &[ShapeSnapshot],
+    parents: &SlideParents<'_>,
+    edited: &mut HashSet<String>,
 ) -> bool {
+    let mut has_edits = false;
     let mut baseline_by_id = HashMap::with_capacity(baseline.len());
     for shape in baseline {
         baseline_by_id.entry(shape.id.as_str()).or_insert(shape);
     }
-    current.iter().any(|shape| {
+    for shape in current {
         let base = baseline_by_id.get(shape.id.as_str()).copied();
-        if has_autofit_edits(
+        let child_edited = collect_autofit_edited_shapes(
             &shape.children,
             base.map_or(&[], |base| &base.children),
             parents,
-        ) {
-            return true;
+            edited,
+        );
+        if child_edited && shape.kind == ShapeKind::Group {
+            edited.insert(shape.id.clone());
         }
+        has_edits |= child_edited;
         if base.is_some_and(|base| base.text_stories == shape.text_stories) {
-            return false;
+            continue;
         }
         let original = parents
             .slide
@@ -773,14 +802,18 @@ fn has_autofit_edits(
                 .master
                 .and_then(|master| find_placeholder(&master.shapes, placeholder))
         });
-        matches!(
+        if matches!(
             [original, layout, master]
                 .into_iter()
                 .flatten()
                 .find_map(|node| node_text(node)?.autofit.as_ref()),
             Some(TextAutofit::Normal { .. })
-        )
-    })
+        ) {
+            edited.insert(shape.id.clone());
+            has_edits = true;
+        }
+    }
+    has_edits
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -899,6 +932,7 @@ struct LayoutBuilder<'a> {
     master_other_style_levels: Option<[bool; 9]>,
     layout: Option<&'a SlideLayout>,
     parsed_slide: Option<&'a Slide>,
+    shape_filter: Option<&'a HashSet<String>>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
     autofit: HashMap<String, TextAutofit>,
@@ -989,6 +1023,12 @@ impl<'a> LayoutBuilder<'a> {
         shape: &ShapeSnapshot,
         space: Space,
     ) -> Result<(), RenderError> {
+        if self
+            .shape_filter
+            .is_some_and(|shape_ids| !shape_ids.contains(&shape.id))
+        {
+            return Ok(());
+        }
         self.charge_shape()?;
         if shape.hidden {
             return Ok(());
@@ -4442,6 +4482,7 @@ fn shape_paragraph(
     let mut global_byte = 0_usize;
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let mut segment_start = 0_usize;
+        let mut source_start = run.start;
         for (byte_index, character) in run.text.char_indices() {
             if character != '\n' && character != '\t' {
                 continue;
@@ -4453,13 +4494,14 @@ fn shape_paragraph(
                     run_index,
                     text: &run.text[segment_start..byte_index],
                     run_byte_start: segment_start,
+                    source_start,
                     global_run_byte: global_byte,
                     scale,
                     breaks: &breaks,
                 },
                 &mut clusters,
             )?;
-            let start = run.start + utf16_len(&run.text[..byte_index]);
+            let start = source_start + utf16_len(&run.text[segment_start..byte_index]);
             let hard = character == '\n';
             clusters.push(ShapedCluster {
                 text: character.to_string(),
@@ -4475,6 +4517,7 @@ fn shape_paragraph(
                 tab: !hard,
             });
             segment_start = byte_index + character.len_utf8();
+            source_start = start + 1;
         }
         add_shaped_segment(
             SegmentShape {
@@ -4483,6 +4526,7 @@ fn shape_paragraph(
                 run_index,
                 text: &run.text[segment_start..],
                 run_byte_start: segment_start,
+                source_start,
                 global_run_byte: global_byte,
                 scale,
                 breaks: &breaks,
@@ -4500,6 +4544,7 @@ struct SegmentShape<'a> {
     run_index: usize,
     text: &'a str,
     run_byte_start: usize,
+    source_start: u32,
     global_run_byte: usize,
     scale: f32,
     breaks: &'a HashMap<usize, bool>,
@@ -4541,6 +4586,7 @@ fn add_shaped_segment(
         run_index,
         text,
         run_byte_start,
+        mut source_start,
         global_run_byte,
         scale,
         breaks,
@@ -4562,29 +4608,30 @@ fn add_shaped_segment(
         ),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
-    let mut starts = shaped
-        .iter()
-        .map(|glyph| glyph.cluster as usize)
-        .filter(|start| *start < text.len() && text.is_char_boundary(*start))
+    let mut glyphs_by_cluster: HashMap<usize, Vec<ShapedGlyph>> = HashMap::new();
+    for glyph in shaped {
+        let start = glyph.cluster as usize;
+        if start < text.len() && text.is_char_boundary(start) {
+            glyphs_by_cluster.entry(start).or_default().push(glyph);
+        }
+    }
+    let mut starts = text
+        .char_indices()
+        .filter(|(start, _)| *start == 0 || glyphs_by_cluster.contains_key(start))
+        .map(|(start, _)| start)
         .collect::<Vec<_>>();
-    starts.push(0);
     starts.push(text.len());
-    starts.sort_unstable();
-    starts.dedup();
     for pair in starts.windows(2) {
         let start_byte = pair[0];
         let end_byte = pair[1];
         if start_byte == end_byte {
             continue;
         }
-        let source_start = run.start + utf16_len(&run.text[..run_byte_start + start_byte]);
-        let source_end = run.start + utf16_len(&run.text[..run_byte_start + end_byte]);
+        let text_slice = &text[start_byte..end_byte];
+        let source_end = source_start + utf16_len(text_slice);
         let mut glyph_x = 0.0;
         let mut glyphs = Vec::new();
-        for glyph in shaped
-            .iter()
-            .filter(|glyph| glyph.cluster as usize == start_byte)
-        {
+        for glyph in glyphs_by_cluster.remove(&start_byte).unwrap_or_default() {
             glyphs.push(ClusterGlyph {
                 glyph_id: glyph.glyph_id,
                 cluster: source_start,
@@ -4595,7 +4642,6 @@ fn add_shaped_segment(
             });
             glyph_x += glyph.x_advance;
         }
-        let text_slice = &text[start_byte..end_byte];
         // The glyphs keep the advances of the face that draws them, so a
         // backend laying the run out itself still sees where each one ends and
         // places the next cluster at the x this width put it.
@@ -4615,6 +4661,7 @@ fn add_shaped_segment(
             mandatory: breaks.get(&global_end).copied().unwrap_or(false),
             tab: false,
         });
+        source_start = source_end;
     }
     Ok(())
 }
@@ -9423,6 +9470,40 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_with_a_large_single_run_lays_out_in_linear_time() {
+        let text = "x".repeat(200_000);
+        let body = TextBody {
+            paragraphs: vec![pptx_parse::TextParagraph {
+                runs: vec![pptx_parse::TextRun {
+                    text: text.clone(),
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let start = std::time::Instant::now();
+        let rendered = text_columns_slide(body);
+        let elapsed = start.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+        let lines = text_columns_lines(&rendered);
+        let laid_out: String = lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(laid_out, text);
+        assert_eq!(lines.last().unwrap().end, 200_000);
+    }
+
+    #[test]
     fn text_columns_fill_then_continue_at_the_next_column() {
         let rendered = text_columns_slide(text_columns_body());
         let lines = text_columns_lines(&rendered);
@@ -10346,10 +10427,123 @@ mod tests {
             }],
         });
         let start = std::time::Instant::now();
-        let edited = has_autofit_edits(&current, &baseline, &SlideParents::default());
+        let edited = autofit_edited_shapes(&current, &baseline, &SlideParents::default());
         let elapsed = start.elapsed();
-        assert!(!edited);
+        assert!(edited.is_empty());
         assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+    }
+
+    fn edited_autofit_session(
+        untouched_text: &str,
+        inherited: bool,
+        grouped: bool,
+    ) -> (DeckSession, StorySnapshot) {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let normal = r#"<a:normAutofit fontScale="100000"/>"#;
+        let transform = r#"<a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1905000" cy="952500"/></a:xfrm>"#;
+        let title = format!(
+            r#"<p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+<p:spPr>{}</p:spPr>
+<p:txBody><a:bodyPr lIns="0" rIns="0" tIns="0" bIns="0">{}</a:bodyPr><a:lstStyle/>
+<a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>Start</a:t></a:r></a:p>
+</p:txBody></p:sp>"#,
+            if inherited { "" } else { transform },
+            if inherited { "" } else { normal },
+        );
+        let title = if grouped {
+            format!(
+                r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="4" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm><a:off x="952500" y="952500"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="0" y="0"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></p:grpSpPr>
+{title}</p:grpSp>"#
+            )
+        } else {
+            title
+        };
+        let slide = format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld><p:spTree>{title}<p:sp>
+<p:nvSpPr><p:cNvPr id="3" name="Untouched"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="476250" y="1905000"/><a:ext cx="1905000" cy="952500"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>{untouched_text}</a:t></a:r></a:p></p:txBody>
+</p:sp></p:spTree></p:cSld></p:sld>"#
+        );
+        let slide_path = package.slides[0].part_path.clone();
+        assert!(package.replace_part(&slide_path, slide.into_bytes()));
+        if inherited {
+            let layout = format!(
+                r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" type="title">
+<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Inherited title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+<p:spPr>{transform}</p:spPr><p:txBody><a:bodyPr>{normal}</a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>"#
+            );
+            let layout_path = package.slides[0].layout_part_path.clone().unwrap();
+            assert!(package.replace_part(&layout_path, layout.into_bytes()));
+        }
+        let bytes = pptx_parse::write_pptx(&package).unwrap();
+        let session = DeckSession::open(&bytes, 8_031).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let root = &snapshot.slides[0].shapes[0];
+        let title = if grouped { &root.children[0] } else { root };
+        let story = title.text_stories[0].clone();
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story.id,
+                story.length - 1,
+                &" words that must shrink to stay inside the title".repeat(6),
+                &TextStyle::default(),
+            )
+            .unwrap();
+        (session, story)
+    }
+
+    #[test]
+    fn fitted_save_skips_untouched_text_over_the_render_limit() {
+        let untouched = "x".repeat(MAX_TEXT_BYTES + 1);
+        let (session, _) = edited_autofit_session(&untouched, false, false);
+        let renderer = renderer();
+        assert!(matches!(
+            renderer.layout_slide(session.package(), &session.snapshot().unwrap(), 0),
+            Err(RenderError::ResourceLimit(message)) if message.contains("text exceeds")
+        ));
+        let saved = renderer.save(&session).unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+        assert!(matches!(
+            title.autofit,
+            Some(TextAutofit::Normal { font_scale: Some(scale), .. }) if scale < 1.0
+        ));
+        let untouched_node = find_node(&reopened.slides[0].shapes, 3).unwrap();
+        assert_eq!(
+            node_text(untouched_node).unwrap().paragraphs[0].runs[0].text,
+            untouched
+        );
+        assert_eq!(
+            Some(untouched_node),
+            find_node(&session.package().slides[0].shapes, 3)
+        );
+    }
+
+    #[test]
+    fn fitted_save_matches_full_layout_autofit() {
+        for inherited in [false, true] {
+            for grouped in [false, true] {
+                let (session, story) = edited_autofit_session("Untouched", inherited, grouped);
+                let renderer = renderer();
+                let rendered = renderer
+                    .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                    .unwrap();
+                let expected = rendered.autofit.get(&story.id).unwrap();
+                assert!(matches!(
+                    expected,
+                    TextAutofit::Normal { font_scale: Some(scale), .. } if *scale < 1.0
+                ));
+                let saved = renderer.save(&session).unwrap();
+                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                assert_eq!(title.autofit.as_ref(), Some(expected));
+            }
+        }
     }
 
     #[test]
