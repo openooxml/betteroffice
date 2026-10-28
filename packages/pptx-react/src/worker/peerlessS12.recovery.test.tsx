@@ -69,6 +69,61 @@ test('recovery retains acknowledged typing before the first checkpoint', async (
   } finally { checkpoint.mockRestore(); }
 });
 
+test('recovery after a crash on a deck whose state exceeds the update cap', async () => {
+  const updateCap = 64 * 1024 * 1024;
+  let bytes: Uint8Array;
+  {
+    const zip = await JSZip.loadAsync(await deck());
+    const media = new Uint8Array(48 * 1024 * 1024 + 64 * 1024);
+    let random = 0x12345678;
+    for (let offset = 0; offset < media.length; offset++) {
+      random ^= random << 13;
+      random ^= random >>> 17;
+      random ^= random << 5;
+      media[offset] = random & 0xff;
+    }
+    media.set(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7N8AAAAASUVORK5CYII=', 'base64'));
+    zip.file('ppt/media/large.png', media);
+    zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>',
+      '<Default Extension="png" ContentType="image/png"/></Types>'));
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    zip.file('ppt/slides/_rels/slide2.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${rel}/image" Target="../media/large.png"/></Relationships>`);
+    zip.file('ppt/slides/slide2.xml', (await zip.file('ppt/slides/slide2.xml')!.async('string')).replace('</p:spTree>',
+      '<p:pic><p:nvPicPr><p:cNvPr id="3" name="Large picture"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdImage"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="7000000" y="100000"/><a:ext cx="1000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree>'));
+    bytes = await zip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+  }
+  const error = mock(() => {});
+  const opened = spyOn(wasm, 'openPresentation');
+  let value: Awaited<ReturnType<typeof open>>;
+  try {
+    value = await open({ file: bytes, onError: error });
+    const handle = opened.mock.results[0]!.value as wasm.PresentationHandle;
+    expect(handle.encodeStateAsUpdate().byteLength).toBeGreaterThan(updateCap);
+  } finally { opened.mockRestore(); }
+  const target = await story(value.api);
+  const checkpoint = spyOn(value.client, 'checkpoint');
+  try {
+    await act(async () => {
+      await value.api.selectText({ slide: 1, shapeId: target.shapeId, storyId: target.storyId, start: 0, end: 0 });
+      type(value.view.getByLabelText('Slide text'), 'Accepted');
+      await value.api.flushPendingInput();
+      faultControl.crash();
+    });
+    const acceptedSeq = value.client.state.throughSeq;
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(checkpoint).not.toHaveBeenCalled();
+    const recovered = await value.api.recoverySave();
+    const saved = wasm.openPresentation(recovered.bytes);
+    try {
+      const content = saved.readContent();
+      expect(content.ok).toBe(true);
+      if (!content.ok) throw new Error(content.failure.message);
+      expect(content.stories[0]!.text).toBe(`Accepted${target.text}`);
+      expect(recovered.throughSeq).toBe(acceptedSeq);
+    } finally { saved.dispose(); }
+  } finally { checkpoint.mockRestore(); }
+}, 60_000);
+
 test('unknown_outcome', async () => {
   const error = mock(() => {});
   const changed = mock((_snapshot: DeckSnapshot) => {});

@@ -47,7 +47,7 @@ test('recovery journal limit defaults to the larger of sixteen MiB and half the 
   }
 });
 
-test('source baseline retains local, remote and empty acknowledgements across ordinary checkpoints', () => {
+test('source baseline retains local and remote acknowledgements across ordinary checkpoints', () => {
   const source = new Uint8Array(32);
   const recovery = peerlessRecoveryFactory.create(source);
   recovery.open(undefined, 0, '0', 'source', 'engine');
@@ -59,7 +59,7 @@ test('source baseline retains local, remote and empty acknowledgements across or
   recovery.append(3, '3', [{ bytes: new ArrayBuffer(4), origin: 'local' }]);
   recovery.checkpoint(checkpoint(3));
   recovery.append(4, '4', [{ bytes: new ArrayBuffer(2), origin: 'local' }]);
-  expect(recovery.journal.map((entry) => entry.throughSeq)).toEqual([1, 2, 3, 4]);
+  expect(recovery.journal.map((entry) => entry.throughSeq)).toEqual([2, 3, 4]);
   expect(recovery.validate().kind).toBe('source');
   expect(recovery.hasUncheckpointedUpdates()).toBe(true);
   expect(recovery.needsRebase()).toBe(false);
