@@ -1,6 +1,6 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { Suspense } from 'react';
@@ -70,6 +70,10 @@ export async function deck(small = false): Promise<Uint8Array> {
     `<Relationship Id="rId2" Type="${rel}/slide" Target="slides/slide2.xml"/></Relationships>`));
   return zip.generateAsync({ type: 'uint8array' });
 }
+
+beforeAll(async () => {
+  await wasm.initWasm(await readFile(new URL('../../../pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+});
 
 beforeEach(() => {
   const originalRect = HTMLElement.prototype.getBoundingClientRect;

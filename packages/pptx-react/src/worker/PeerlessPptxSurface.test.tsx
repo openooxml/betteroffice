@@ -2942,10 +2942,13 @@ describe('peerless stage fit', () => {
       expect(imageTiles.map((tile) => calls(tile).length)).toEqual(counts);
       const changed = coveringFrame(value.client, 'abc', 0);
       changed.media = [{ assetId: 'image-0', bytes: new Uint8Array([2]).buffer }];
+      const marks = new Map([...canvasCalls].map(([canvas, entries]) => [canvas, entries.length]));
       await flushStage(() => { value.client.ack(0, changed); });
       expect(images.decode).toHaveBeenCalledTimes(27);
       await flushStage(() => { images.release(26); });
-      const updated = rasterTiles(drawnRaster(value.canvas));
+      const target = drawnRaster(value.canvas);
+      const updated = calls(target).slice(marks.get(target) ?? 0).filter((entry) => entry.kind === 'drawImage')
+        .map((entry) => entry.args[0]).filter((source): source is HTMLCanvasElement => source instanceof HTMLCanvasElement);
       expect(imageTiles.filter((tile) => updated.includes(tile))).toHaveLength(25);
       await flushStage(() => { value.view.unmount(); });
       expect(images.requests.map(({ close }) => close.mock.calls.length)).toEqual(Array<number>(27).fill(1));

@@ -1,5 +1,5 @@
 import { deck, faultControl, open, story, type } from './peerlessTestHarness';
-import { expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 import type { DeckSnapshot } from '@betteroffice/pptx';
@@ -7,9 +7,25 @@ import type { PresentationCommandSaveResult } from '@betteroffice/pptx/worker';
 import * as wasm from '../../../pptx/src/wasm/loader';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
+import { peerlessCheckpointTimer } from './usePeerlessPresentation';
 const { act, waitFor } = await import('@testing-library/react');
 
 const last = <T,>(items: readonly T[]): T | undefined => items[items.length - 1];
+let dueCheckpoints: (() => void)[] = [];
+let checkpointTimer: ReturnType<typeof spyOn> | undefined;
+beforeEach(() => {
+  dueCheckpoints = [];
+  checkpointTimer = spyOn(peerlessCheckpointTimer, 'start').mockImplementation((callback) => {
+    dueCheckpoints.push(callback);
+    return () => { dueCheckpoints = dueCheckpoints.filter((due) => due !== callback); };
+  });
+});
+afterEach(() => { checkpointTimer?.mockRestore(); });
+
+async function fireCheckpointTimer(): Promise<void> {
+  await waitFor(() => expect(dueCheckpoints).toHaveLength(1), { timeout: 3000 });
+  await act(async () => { dueCheckpoints.shift()!(); });
+}
 
 test('recovery retains typing after an edited automatic checkpoint', async () => {
   const error = mock(() => {});
@@ -20,6 +36,7 @@ test('recovery retains typing after an edited automatic checkpoint', async () =>
   try {
     const input = value.view.getByLabelText('Slide text');
     await act(async () => { type(input, 'FIRST'); await value.api.flushPendingInput(); });
+    await fireCheckpointTimer();
     await waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(1), { timeout: 3000 });
     await act(async () => { await checkpoint.mock.results[0]!.value; });
     await act(async () => {
@@ -166,6 +183,7 @@ test('source open and three ordinary checkpoints encode no recovery update', asy
     try {
       for (let index = 0; index < 3; index++) {
         await act(async () => { type(value.view.getByLabelText('Slide text'), String(index)); await value.api.flushPendingInput(); });
+        await fireCheckpointTimer();
         await waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(index + 1), { timeout: 3000 });
         await act(async () => {
           const result = (await checkpoint.mock.results[index]!.value) as PresentationCommandSaveResult | undefined;
@@ -194,6 +212,7 @@ for (const rebase of [false, true]) test(`recovery replays four edits across che
         await act(async () => { type(value.view.getByLabelText('Slide text'), String(index)); await value.api.flushPendingInput(); });
         if (index === 1 || index === 3) {
           const call = checkpoints++;
+          await fireCheckpointTimer();
           await waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(checkpoints), { timeout: 3000 });
           await act(async () => {
             const result = (await checkpoint.mock.results[call]!.value) as PresentationCommandSaveResult | undefined;

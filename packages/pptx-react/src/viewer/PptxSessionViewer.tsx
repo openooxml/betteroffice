@@ -157,7 +157,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
   };
   return (
     <PptxCommandContext.Provider value={commands.store}>
-      <div ref={rootRef} className={props.className} style={styles.root}>
+      <div dir="ltr" ref={rootRef} className={props.className} style={styles.root}>
         {props.showToolbar !== false && props.toolbar != null ? (
           <div style={styles.toolbarShell}>
             <EditorChromeContext.Provider value>
