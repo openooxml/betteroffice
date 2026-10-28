@@ -11,7 +11,7 @@ use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
     SlideLayout,
 };
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use yrs::types::AsPrelim;
@@ -46,7 +46,7 @@ const MAX_ADJUSTMENT_INDEX: usize = 32;
 /// Stays well under the 16 MiB collaboration frame cap once base64-encoded.
 const MAX_PENDING_PICTURE_BYTES: usize = 8 * 1024 * 1024;
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SlideMetadata {
@@ -56,14 +56,14 @@ pub(crate) struct SlideMetadata {
     layout_part_path: Option<String>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct DeckSize {
     width: i64,
     height: i64,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct DeckMetadata {
     slides: Vec<SlideMetadata>,
@@ -280,7 +280,7 @@ impl DeckSession {
         snapshot_doc(&self.doc, &self.package)
     }
 
-    #[cfg(any(feature = "wasm", test))]
+    #[cfg(any(feature = "engine", test))]
     pub(crate) fn session_metadata(&self) -> EditResult<DeckMetadata> {
         let txn = self.doc.transact();
         let meta = required_map(&txn, META)?;
@@ -2396,7 +2396,7 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
     })
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 pub(crate) fn snapshot_selected_slides(
     doc: &Doc,
     package: &PptxPackage,

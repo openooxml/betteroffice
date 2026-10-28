@@ -62,6 +62,9 @@ pub use target::{
 };
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
+#[cfg(feature = "engine")]
+#[doc(hidden)]
+pub mod engine;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -339,7 +342,7 @@ impl DeckSession {
     }
 
     /// Invalidates every version handed out so far; `entropy` is mixed into the new nonce.
-    #[cfg(feature = "wasm")]
+    #[cfg(feature = "engine")]
     pub(crate) fn rotate_version(&self, entropy: u64) {
         self.version_nonce.store(
             batch::mint_nonce(self.client_id, entropy),

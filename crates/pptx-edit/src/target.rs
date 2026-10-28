@@ -105,7 +105,7 @@ pub struct ReadResponse {
     pub stories: Vec<StoryText>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CommandReadResponse {
@@ -114,7 +114,7 @@ pub(crate) struct CommandReadResponse {
     sources: Vec<CommandStorySource>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandStorySource {
@@ -122,7 +122,7 @@ struct CommandStorySource {
     paragraphs: Vec<CommandParagraphSource>,
 }
 
-#[cfg(any(feature = "wasm", test))]
+#[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandParagraphSource {
@@ -919,7 +919,7 @@ impl DeckSession {
         self.read_snapshot(request, snapshot, version)
     }
 
-    #[cfg(any(feature = "wasm", test))]
+    #[cfg(any(feature = "engine", test))]
     pub(crate) fn read_command_content(
         &self,
         request: &ReadRequest,
