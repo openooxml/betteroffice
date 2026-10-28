@@ -197,11 +197,15 @@ function assertThemeFontPaint(session: YrsSession, document: Document, texts: st
   const display = JSON.parse(session.buildDisplayListJson(JSON.stringify({
     ...layout, fontChains: request.measurement.fontChains,
   }))) as DisplayList;
-  const glyphs = display.pages.flatMap(page => page.primitives).filter(
-    (primitive): primitive is GlyphRunPrimitive => primitive.kind === 'glyphRun' && texts.includes(primitive.text)
+  const painted = display.pages.flatMap(page => page.primitives).filter(
+    primitive => (primitive.kind === 'glyphRun' || primitive.kind === 'text') && primitive.text.length > 0
   );
-  for (const text of texts) expect(glyphs.some(run => run.text === text)).toBe(true);
-  expect(glyphs.every(run => run.fontId === themeFont)).toBe(true);
+  expect(painted.map(primitive => primitive.kind)).toEqual(painted.map(() => 'glyphRun'));
+  const glyphs = painted.filter((primitive): primitive is GlyphRunPrimitive => primitive.kind === 'glyphRun');
+  const paintedText = glyphs.map(run => run.text).join('');
+  for (const text of texts) expect(paintedText).toContain(text);
+  expect(paintedText.length).toBe(texts.join('').length);
+  expect(glyphs.map(run => run.fontId)).toEqual(glyphs.map(() => themeFont));
 }
 
 for (const path of ['native', 'typescript'] as const) {
@@ -315,7 +319,7 @@ for (const path of ['native', 'typescript'] as const) {
           kind: 'text', text: 'Title', fontFamily: effective,
           fontSlots: { ascii: effective, hAnsi: effective },
         });
-        if (name === 'paired') assertThemeFontPaint(session, document, ['Title']);
+        if (name === 'paired' || name === 'theme-only') assertThemeFontPaint(session, document, ['Title']);
         expect(session.encodeState()).toEqual(original);
       } finally {
         session.destroy();
@@ -346,7 +350,7 @@ for (const path of ['native', 'typescript'] as const) {
           expect(labels[0]).toMatchObject({
             fontFamily: 'Calibri', fontSlots: { ascii: 'Calibri', hAnsi: 'Calibri' },
           });
-          if (authored === 'paired') assertThemeFontPaint(session, document, ['Box', 'Title']);
+          assertThemeFontPaint(session, document, ['Box', 'Title']);
           expect(session.encodeState()).toEqual(original);
         } finally {
           session.destroy();
