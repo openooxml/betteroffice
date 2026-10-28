@@ -375,7 +375,11 @@ export function usePeerlessPresentation(
       const owner = session;
       void owner.ready.then((client) => {
         if (!current()) return;
-        recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version);
+        recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version,
+          client.state.recoveryBaseline, client.state.recoveryEngine);
+        disposers.push(client.subscribe((ack) => {
+          if (current()) recovery.append(ack.throughSeq, ack.version, ack.updates ?? []);
+        }));
         const cacheMedia = (assets: PresentationCommandFrame['media']) => {
           if (!current()) return;
           for (const asset of assets) pendingMedia.set(asset.assetId, asset.bytes);
@@ -482,7 +486,6 @@ export function usePeerlessPresentation(
         }
         disposers.push(client.subscribe((ack) => {
           if (!current()) return;
-          if (ack.updates?.length) recovery.append(ack.throughSeq, ack.version, ack.updates);
           if (ack.slides) {
             const restored = new Set(ack.slides.map((slide) => slide.id));
             for (const id of vanished) if (restored.has(id)) vanished.delete(id);
@@ -532,12 +535,18 @@ export function usePeerlessPresentation(
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             if (!fatal) await saveCheckpoint(client);
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
+            const baseline = recovery.baseline && recovery.validate();
+            if (baseline?.kind === 'source' && !recoveryBase.byteLength) throw new Error('Recovery baseline is unavailable');
             if (!recovery.hasUncheckpointedUpdates()) return { ...recovery.saved, bytes: recovery.saved.bytes.slice(), recovery: true };
-            if (!recovery.baseline) throw new Error('Recovery baseline is unavailable');
-            const { baseline, journal } = recovery;
-            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts, initialUpdate: baseline.update });
+            if (!baseline) throw new Error('Recovery baseline is unavailable');
+            const journal = recovery.journal.slice();
+            const recovering = peerlessSessionOpener.open(recoveryBase, { fonts,
+              ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             try {
               const replay = await recovering.ready;
+              if (baseline.kind === 'source' && replay.state.recoveryEngine !== baseline.engine) {
+                throw new Error('Recovery baseline is unavailable');
+              }
               for (const entry of journal.filter((entry) => entry.throughSeq > baseline.throughSeq)) for (const update of entry.updates) {
                 if (!currentFile()) throw new PptxWorkerEditorDisposedError();
                 const ack = await replay.dispatch({ kind: 'applyRemoteUpdate', payload: { bytes: update.slice().buffer,
