@@ -44,6 +44,7 @@ defineSuite('xlsx', ['passing', 'failing'].map((name) => ({
           ...(fault === 'filter' ? ['--test-name-pattern', 'passing'] : []),
         ],
         {
+          cwd: dir,
           env: {
             ...process.env,
             BETTEROFFICE_E2E: '1',

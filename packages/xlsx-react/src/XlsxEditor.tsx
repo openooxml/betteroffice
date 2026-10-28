@@ -2592,6 +2592,7 @@ function XlsxEditorContent({
 
   const editor = (
     <div
+      dir="ltr"
       ref={rootRef}
       className={className}
       role="application"

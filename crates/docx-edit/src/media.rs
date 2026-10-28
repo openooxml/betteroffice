@@ -516,6 +516,12 @@ mod tests {
                 .iter()
                 .find_map(|block| match block {
                     LayoutBlock::Shape(shape) => Some(shape),
+                    LayoutBlock::Paragraph(paragraph) => {
+                        paragraph.runs.iter().find_map(|run| match run {
+                            Run::Image(image) => image.inline_shape.as_deref(),
+                            _ => None,
+                        })
+                    }
                     _ => None,
                 })
                 .unwrap();
@@ -531,7 +537,7 @@ mod tests {
                 })
                 .flat_map(|paragraph| &paragraph.runs)
                 .find_map(|run| match run {
-                    Run::Image(image) => Some(image),
+                    Run::Image(image) if image.inline_shape.is_none() => Some(image),
                     _ => None,
                 })
                 .unwrap();
