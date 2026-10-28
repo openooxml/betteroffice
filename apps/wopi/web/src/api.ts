@@ -54,13 +54,14 @@ export class SessionApi {
     return decodeJoinResponse(await response.json());
   }
 
-  async save(stateVector: Uint8Array): Promise<{ itemVersion: string | null }> {
+  async save(stateVector: Uint8Array, signal?: AbortSignal): Promise<{ itemVersion: string | null }> {
     let binary = "";
     for (const byte of stateVector) binary += String.fromCharCode(byte);
     const response = await this.#fetch("/api/session/save", {
       method: "POST",
       headers: { ...this.#headers(), "Content-Type": "application/json" },
       body: JSON.stringify({ stateVector: btoa(binary) }),
+      signal,
     });
     if (!response.ok) {
       const failure = await response.json().catch(() => null) as { error?: { kind?: unknown } } | null;

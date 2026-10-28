@@ -4,7 +4,7 @@ import { XlsxEditor, type XlsxAsyncEditorApi } from "@betteroffice/xlsx-react";
 import { PptxEditor, type PptxAsyncEditorApi } from "@betteroffice/pptx-react";
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
 import { setGoogleFontsEnabled } from "@betteroffice/docx/utils";
-import { CollaborationProvider as DocxProvider } from "@betteroffice/docx/collaboration";
+import { CollaborationProvider as DocxProvider, type AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
 import { CollaborationProvider as XlsxProvider } from "@betteroffice/xlsx/collaboration";
 import { CollaborationProvider as PptxProvider, type AsyncCollaborationReplica } from "@betteroffice/pptx/collaboration";
 import type { PptxFontFace } from "@betteroffice/pptx";
@@ -202,7 +202,7 @@ export default function Editor({
     crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff || 1
   ).current;
   const clientId = collaborationClientId ?? generatedClientId;
-  const [replica, setReplica] = useState<CollaborationReplica | null>(null);
+  const [replica, setReplica] = useState<CollaborationReplica | AsyncReplicaAdapter | null>(null);
   const [presentationReplica, setPresentationReplica] = useState<AsyncCollaborationReplica | null>(null);
   const [provider, setProvider] = useState<
     DocxProvider | XlsxProvider | PptxProvider | null
@@ -360,9 +360,14 @@ export default function Editor({
       },
       async encodeStateVector() {
         if (!active) throw disposed;
+        if (file.format === "docx") {
+          const current = replicas.current.replica;
+          if (!current) throw new Error("The collaboration replica is not ready.");
+          return await ("async" in current ? current.async : current).encodeStateVector();
+        }
         const current = file.format === "xlsx"
           ? (await whenReady(xlsx)).collaboration
-          : file.format === "pptx" ? replicas.current.presentationReplica : replicas.current.replica;
+          : replicas.current.presentationReplica;
         if (!current) throw new Error("The collaboration replica is not ready.");
         return await current.encodeStateVector();
       },

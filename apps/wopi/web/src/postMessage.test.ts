@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
+import { saveDocument } from "./documentActions";
 import { PostMessageBridge, type PostMessageWindow, type WopiView } from "./postMessage";
 
 const ORIGIN = "https://cloud.example.com";
@@ -211,4 +212,36 @@ test("Action_Save failure notifies only when requested and forwards edit options
   bridge.handleMessage({ origin: ORIGIN, data: hostMessage("Action_Save") });
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(win.parsed()).toHaveLength(1);
+});
+
+test.each(["flushPendingInput", "encodeStateVector"] as const)("Action_Save Notify reports a stalled docx %s", async (method) => {
+  const win = new FakeWindow();
+  let saving: Promise<void> | undefined;
+  let posted = false;
+  const editor = {
+    flushPendingInput: async () => {},
+    encodeStateVector: async () => Uint8Array.of(0),
+  };
+  editor[method] = () => new Promise<never>(() => {});
+  const bridge = new PostMessageBridge(win, ORIGIN, {
+    onSave: (options) => {
+      saving = saveDocument(editor, { save: async () => { posted = true; } }, {
+        ...options, isModified: () => true, inputTimeoutMs: 5,
+      });
+      return saving;
+    },
+    onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
+  });
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    bridge.handleMessage({ origin: ORIGIN, data: hostMessage("Action_Save", { Notify: true }) });
+    await saving?.catch(() => {});
+    await Promise.resolve();
+    expect(posted).toBe(false);
+    expect(win.parsed()).toMatchObject([{
+      MessageId: "Action_Save_Resp", Values: { success: false, result: `${method}Timeout` },
+    }]);
+  } finally {
+    warning.mockRestore();
+  }
 });

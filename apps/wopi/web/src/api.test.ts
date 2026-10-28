@@ -85,6 +85,17 @@ test("save exposes a short typed synchronization failure", async () => {
   await expect(api.save(Uint8Array.of(0))).rejects.toThrow("notSynced");
 });
 
+test("save forwards the request cancellation signal", async () => {
+  const controller = new AbortController();
+  let signal: AbortSignal | null | undefined;
+  const api = new SessionApi("handle-1", (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    signal = init?.signal;
+    return Response.json({ itemVersion: "2" });
+  }) as unknown as typeof fetch);
+  await api.save(Uint8Array.of(0), controller.signal);
+  expect(signal).toBe(controller.signal);
+});
+
 test("close rejects unsuccessful responses", async () => {
   const api = new SessionApi("handle-1", (async () => new Response(null, { status: 502 })) as unknown as typeof fetch);
   await expect(api.close()).rejects.toThrow("Close failed");

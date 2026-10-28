@@ -12,7 +12,7 @@ import "./styles.css";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
 
-/** Records boot progress for diagnostics. */
+/** Records page progress for diagnostics. */
 export function wopiDebug(patch: Record<string, unknown>): void {
   const holder = window as unknown as { __wopiDebug?: Record<string, unknown> };
   holder.__wopiDebug = { ...(holder.__wopiDebug ?? {}), ...patch };
@@ -65,11 +65,13 @@ function WopiApp({ loaded }: { loaded: Loaded }) {
   const requestSave = useCallback(async (options: SaveOptions = {}): Promise<void> => {
     setSaveState("saving");
     try {
-      const editor = editorApi.current;
-      if (!editor) throw new Error("editorNotReady");
-      if (!options.DontTerminateEdit) await editor.flushPendingInput();
-      const version = changeVersion.current;
-      await saveDocument(editor, api, { ...options, DontTerminateEdit: true, isModified: () => modified.current });
+      let version = changeVersion.current;
+      await saveDocument(editorApi.current, api, {
+        ...options,
+        isModified: () => modified.current,
+        onFlushed: () => { version = changeVersion.current; },
+        onProgress: wopiDebug,
+      });
       setSaveState("saved");
       if (modified.current && changeVersion.current === version) {
         modified.current = false;

@@ -5,6 +5,8 @@ import { forwardRef, useEffect, useImperativeHandle } from "react";
 import type { XlsxAsyncEditorApi, XlsxAsyncEditorProps, XlsxCommandResult } from "@betteroffice/xlsx-react";
 import type { PptxAsyncEditorApi, PptxAsyncEditorProps } from "@betteroffice/pptx-react";
 import type { DocxErrorInfo } from "@betteroffice/docx-react";
+import type { AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
+import type { CollaborationReplica } from "./collaboration/types";
 import type { EditorApi } from "./Editor";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -20,8 +22,10 @@ interface DocxProps {
   legacySyncApi?: boolean;
   onChange?: () => void;
   onDocumentChange?: () => void;
+  collaboration?: { onReplica?(replica: CollaborationReplica | null): void };
 }
 let docxProps: DocxProps;
+let docxReplica: CollaborationReplica | null = null;
 let deferDocxPaint = false;
 const parseDocx = mock(async () => ({}));
 const flushDocxInput = mock(async () => {});
@@ -118,6 +122,10 @@ mock.module("@betteroffice/docx-react", () => ({
     docxProps = props;
     useImperativeHandle(ref, () => ({ save: () => save(props), flushPendingInput: flushDocxInput }));
     useEffect(() => {
+      props.collaboration?.onReplica?.(docxReplica);
+      return () => props.collaboration?.onReplica?.(null);
+    }, [props.collaboration?.onReplica]);
+    useEffect(() => {
       if (deferDocxPaint) return;
       if (props.legacySyncApi) { props.onFirstPagePainted(); return; }
       const client = new ResidentEngineWorkerClient();
@@ -163,6 +171,7 @@ const { default: Editor, prepareFile } = await import("./Editor");
 
 afterEach(() => {
   cleanup();
+  docxReplica = null;
   deferDocxPaint = false;
   hydrateWorkbook = async () => {};
   hydratePresentation = async () => {};
@@ -278,6 +287,46 @@ test("xlsx state vector uses the asynchronous collaboration API", async () => {
 test("pptx state vector comes from the live replica", async () => {
   const { api } = await mount("pptx", true);
   expect(await api.encodeStateVector()).toEqual(Uint8Array.of(1));
+});
+
+test("docx ordered saves read the worker replica through its async API", async () => {
+  const vector = Uint8Array.of(1, 42, 3);
+  const readVector = mock(async () => vector);
+  const syncVector = mock((): Uint8Array => {
+    throw new Error("encodeStateVector is not available on a worker-hosted replica");
+  });
+  const replica: AsyncReplicaAdapter = {
+    clientId: 42,
+    encodeStateVector: syncVector,
+    encodeStateAsUpdate() { throw new Error("worker-hosted replica"); },
+    applyUpdate() {},
+    onUpdate: () => () => {},
+    async: {
+      clientId: 42,
+      encodeStateVector: readVector,
+      encodeStateAsUpdate: async () => Uint8Array.of(0),
+      applyUpdate: async () => {},
+      onUpdate: () => () => {},
+    },
+  };
+  docxReplica = replica;
+  const { api } = await mount("docx", true);
+  await api.flushPendingInput();
+  expect(await api.encodeStateVector()).toEqual(vector);
+  expect(readVector).toHaveBeenCalledTimes(1);
+  expect(syncVector).not.toHaveBeenCalled();
+});
+
+test("docx ordered saves support a legacy synchronous replica", async () => {
+  docxReplica = {
+    clientId: 42,
+    encodeStateVector: () => Uint8Array.of(1, 42, 3),
+    encodeStateAsUpdate: () => Uint8Array.of(0),
+    applyUpdate() {},
+    onUpdate: () => () => {},
+  };
+  const { api } = await mount("docx", true);
+  expect(await api.encodeStateVector()).toEqual(Uint8Array.of(1, 42, 3));
 });
 
 test.each(["", "&peerless=1", "&peerless=0"])("docx %s reports dirty state through document events", async (query) => {

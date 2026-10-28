@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { closeDocument, finishClose, saveDocument } from "./documentActions";
 
 function setup() {
@@ -19,6 +19,75 @@ test("save flushes pending input before capturing the ordered save vector", asyn
   const h = setup();
   await saveDocument(h.editor, h.api, { isModified: h.isModified });
   expect(h.calls).toEqual(["flush", "vector", "save"]);
+});
+
+test.each(["flushPendingInput", "encodeStateVector"] as const)("a stalled docx %s fails without posting a save", async (method) => {
+  const h = setup();
+  h.editor[method] = () => new Promise<never>(() => {});
+  const progress: Record<string, unknown>[] = [];
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, h.api, {
+      isModified: h.isModified,
+      inputTimeoutMs: 5,
+      onProgress: (patch) => { progress.push(patch); },
+    })).rejects.toThrow(`${method}Timeout`);
+    expect(h.calls).not.toContain("save");
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(progress.at(-1)).toMatchObject({ saveStep: "result", saveResult: "failed", saveError: `${method}Timeout` });
+  } finally {
+    warning.mockRestore();
+  }
+});
+
+test("a throwing docx state vector API reports its failure", async () => {
+  const h = setup();
+  h.editor.encodeStateVector = () => { throw new Error("worker-hosted replica"); };
+  const progress: Record<string, unknown>[] = [];
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, h.api, {
+      isModified: h.isModified,
+      onProgress: (patch) => { progress.push(patch); },
+    })).rejects.toThrow("worker-hosted replica");
+    expect(h.calls).toEqual(["flush"]);
+    expect(progress.at(-1)).toMatchObject({ saveStep: "result", saveResult: "failed", saveFailedStep: "stateVector" });
+  } finally {
+    warning.mockRestore();
+  }
+});
+
+test("save diagnostics record every stage and capture changes committed by the flush", async () => {
+  const h = setup();
+  const progress: Record<string, unknown>[] = [];
+  let modifiedAfterFlush = false;
+  await saveDocument(h.editor, h.api, {
+    isModified: h.isModified,
+    onFlushed: () => { modifiedAfterFlush = h.isModified(); },
+    onProgress: (patch) => { progress.push(patch); },
+  });
+  expect(modifiedAfterFlush).toBe(true);
+  expect(progress.map((patch) => patch.saveStep)).toEqual(["started", "flushed", "stateVector", "posted", "result"]);
+  expect(progress[2]).toMatchObject({ saveStateVectorBytes: 1 });
+  expect(progress.at(-1)).toMatchObject({ saveResult: "saved" });
+});
+
+test("a stalled save response times out and aborts the request", async () => {
+  const h = setup();
+  let signal: AbortSignal | undefined;
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, {
+      save(_vector: Uint8Array, requestSignal?: AbortSignal) {
+        signal = requestSignal;
+        return new Promise<never>(() => {});
+      },
+    }, { isModified: h.isModified, saveTimeoutMs: 5 })).rejects.toThrow("saveTimeout");
+    expect(signal?.aborted).toBe(true);
+    expect(h.isModified()).toBe(true);
+  } finally {
+    warning.mockRestore();
+  }
 });
 
 test("close saves an edit committed by the final flush before closing", async () => {
