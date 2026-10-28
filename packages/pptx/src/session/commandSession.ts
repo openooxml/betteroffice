@@ -90,22 +90,33 @@ export function createPptxWorkerSession(
     transport.close();
   }
 
+  const inflight = new Set<{ promise?: Promise<unknown> }>();
+
   function current(): void {
     if (disposed) throw new PptxWorkerEditorDisposedError();
     if (failure) throw failure;
   }
 
-  async function perform<T>(operation: () => Promise<T>): Promise<T> {
-    current();
-    try {
-      const value = await operation();
-      current();
-      return value;
-    } catch (error) {
-      if (error instanceof SessionFailure || error instanceof Error &&
-        (error.name === 'CommandOutcomeUnknown' || error.name === 'RuntimeError')) fail(error);
-      throw failure ?? error;
-    }
+  function perform<T>(operation: () => Promise<T>): Promise<T> {
+    const entry: { promise?: Promise<unknown> } = {};
+    inflight.add(entry);
+    const pending = (async () => {
+      try {
+        current();
+        const value = await operation();
+        current();
+        return value;
+      } catch (error) {
+        if (error instanceof SessionFailure || error instanceof Error &&
+          (error.name === 'CommandOutcomeUnknown' || error.name === 'RuntimeError')) fail(error);
+        throw failure ?? error;
+      } finally {
+        inflight.delete(entry);
+      }
+    })();
+    entry.promise = pending;
+    if (disposed) void pending.catch(() => {});
+    return pending;
   }
 
   const offError = transport.onError(fail);
@@ -142,7 +153,8 @@ export function createPptxWorkerSession(
       read: (request) => perform(() => opened.read(request)),
       save: () => perform(() => opened.save()),
       access: (method, ...args) => perform(() => opened.access!(method, ...args)),
-      checkpoint: () => perform(() => opened.checkpoint!()),
+      takeRecoveryUpdate: () => opened.takeRecoveryUpdate?.(),
+      checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
       subscribe: (listener) => opened.subscribe(listener),
@@ -183,6 +195,7 @@ export function createPptxWorkerSession(
       offError();
       offClientFailure?.();
       listeners.clear();
+      for (const entry of inflight) void entry.promise?.catch(() => {});
       for (const listener of [...connectionErrors]) listener(new SessionFailure('disposed', 'Session was disposed'));
       transport.close();
       disposal = client ? client.dispose() : opening.then(

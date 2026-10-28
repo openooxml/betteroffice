@@ -1,6 +1,6 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
@@ -716,7 +716,7 @@ export class DocxAgentDocument {
         return { result: { ref: p.ref, start, end } };
       };
     }
-    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
+    const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
     const target = { story: p.story, paraId: p.paraId };
     switch (edit.op) {
       case 'set_paragraph_style': {
@@ -729,6 +729,9 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.before !== undefined && edit.list) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue needs after.');
+        }
         if (edit.list && edit.runFormat !== undefined) {
           throw new DocumentToolError('INVALID_ARGUMENT', 'runFormat cannot be combined with list: continue. Omit runFormat.');
         }
@@ -737,7 +740,8 @@ export class DocxAgentDocument {
         }
         const paragraphs = edit.paragraphs.map(({ text, style }) => {
           lineText(text);
-          return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
+          const resolved = style ? resolveStyle(this.styles(), style) : undefined;
+          return edit.before !== undefined ? (resolved ? { text, styleId: resolved } : { text }) : { text, styleId: resolved ?? fallback };
         });
         if (edit.list) {
           const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
@@ -747,6 +751,7 @@ export class DocxAgentDocument {
         }
         return draft => {
           requireParagraph(draft, target);
+          if (edit.before !== undefined) return { result: {}, created: insertParagraphsBefore(draft, target, paragraphs, edit.runFormat) };
           if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
           if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };

@@ -1,5 +1,7 @@
+import type { Format } from "../../../shared/editor-host/Editor";
 import { t } from "./i18n";
-export type Format = "docx" | "xlsx" | "pptx";
+
+export type { Format };
 export interface OpenFile {
   id: string;
   name: string;

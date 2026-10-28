@@ -1,5 +1,3 @@
-import { t } from "./i18n";
-
 export class SessionRevision {
   private revision = 0;
   private saved = 0;
@@ -16,13 +14,4 @@ export class SessionRevision {
   didSave(checkpoint: number): void {
     this.saved = checkpoint;
   }
-}
-
-/** Saved bytes, or the failure the editor reported, or that it is opening. */
-export function savedBytes(
-  bytes: ArrayBuffer | Uint8Array | null | undefined,
-  failure: Error | null
-): Uint8Array {
-  if (bytes) return new Uint8Array(bytes);
-  throw failure ?? new Error(t("editor.stillOpening"));
 }

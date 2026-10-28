@@ -2845,10 +2845,13 @@ impl BlockSpacing {
         paragraph: &docx_layout::types::ParagraphBlock,
         line_px: Option<f64>,
     ) -> Option<(Option<u64>, Option<u64>)> {
-        if !contextual_spacing_enabled(paragraph) {
+        let spacing = paragraph.attrs.as_ref()?.spacing.as_ref()?;
+        if !contextual_spacing_enabled(paragraph)
+            && spacing.before_auto != Some(true)
+            && spacing.after_auto != Some(true)
+        {
             return None;
         }
-        let spacing = paragraph.attrs.as_ref()?.spacing.as_ref()?;
         let resolve = |value: Option<f64>, lines: Option<f64>| {
             line_px
                 .zip(lines.filter(|lines| lines.is_finite() && *lines > 0.0))
@@ -3363,6 +3366,18 @@ fn suppress_contextual_spacing(
     index: usize,
     owned: &mut LayoutBlock,
 ) {
+    if index == 0 {
+        docx_layout::paragraph_spacing::suppress_document_auto_before(owned);
+    }
+    docx_layout::paragraph_spacing::suppress_break_auto_before(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+    );
+    docx_layout::paragraph_spacing::suppress_list_auto_spacing(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+        blocks.get(index + 1),
+    );
     if let Some(LayoutBlock::Paragraph(previous)) = index.checked_sub(1).and_then(|i| blocks.get(i))
     {
         let suppress_before = match &*owned {
@@ -5690,11 +5705,24 @@ impl EngineSession {
     /// id. A later resident edit replaces only `block` and reuses the rest of
     /// this envelope, so the host no longer orchestrates dirty measurement.
     pub fn measure_paragraph_json(&self, input_json: &str) -> Result<String, String> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(input_json).map_err(|error| format!("invalid: parse: {error}"))?;
         let key = value_block_key(&value)
             .ok_or_else(|| "invalid: measurement block requires a stable id".to_owned())?;
-        let output = docx_layout::measure_paragraph_json_resident(input_json)?;
+        if value.get("compat").is_none() {
+            value["compat"] = serde_json::json!({});
+        }
+        if let Some(compat) = value
+            .get_mut("compat")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            compat
+                .entry("compatibilityMode")
+                .or_insert(serde_json::json!(12));
+        }
+        let input_json = serde_json::to_string(&value)
+            .map_err(|error| format!("invalid: serialize: {error}"))?;
+        let output = docx_layout::measure_paragraph_json_resident(&input_json)?;
         let resident_safe = measure_template_is_resident_safe(&value);
         let mut measurement = self.measurement.borrow_mut();
         measurement.templates.insert(
@@ -6044,7 +6072,24 @@ impl EngineSession {
                     .iter()
                     .enumerate()
                     .map(|(index, block)| {
-                        if fingerprints[index] == retained.fingerprints[index] {
+                        let auto_spacing = match block.as_ref() {
+                            LayoutBlock::Paragraph(paragraph) => paragraph
+                                .attrs
+                                .as_ref()
+                                .and_then(|attrs| attrs.spacing.as_ref())
+                                .is_some_and(|spacing| {
+                                    spacing.before_auto == Some(true)
+                                        || spacing.after_auto == Some(true)
+                                }),
+                            _ => false,
+                        };
+                        let previous_clean = index.checked_sub(1).is_none_or(|previous| {
+                            fingerprints[previous] == retained.fingerprints[previous]
+                        });
+                        let next_clean =
+                            fingerprints.get(index + 1) == retained.fingerprints.get(index + 1);
+                        let neighbors_clean = !auto_spacing || (previous_clean && next_clean);
+                        if fingerprints[index] == retained.fingerprints[index] && neighbors_clean {
                             Ok(None)
                         } else {
                             let mut block = block.as_ref().clone();
