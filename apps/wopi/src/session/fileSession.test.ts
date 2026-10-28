@@ -931,3 +931,227 @@ describe("replica api adaptation", () => {
     }
   });
 });
+
+describe("session safety regressions", () => {
+  test("conflict results and events omit a token-bearing copy URL", async () => {
+    const secret = "copy-only-distinctive-secret-xyz";
+    const h = makeHarness({ quirks: { timestampConflict: true, relativeUrlToken: secret } });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const events: unknown[] = [];
+    session.on("conflict", (event) => events.push(event));
+    try {
+      edit(session, a.user.id, client, "private-copy ");
+      h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
+      const result = await session.requestSave(a.user.id);
+      expect(result.saved).toBe(true);
+      expect(result.conflictName).toBeTruthy();
+      expect(result.conflictUrl).toBeUndefined();
+      expect(events).toEqual([{ name: result.conflictName, copyName: result.conflictName }]);
+      expect(JSON.stringify({ events, result, logs: h.logs })).not.toContain(secret);
+      expect(JSON.stringify({ events, result, logs: h.logs })).not.toContain("access_token");
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+
+  for (const changed of ["version", "timestamp"] as const) {
+    test(`first writer reloads a viewer's source when the ${changed} changes under the lock`, async () => {
+      let onCheck = async () => {};
+      const h = makeHarness({ beforeCheckFileInfo: () => onCheck() });
+      addToken(h, "tok-v", "viewer", { canWrite: false });
+      addToken(h, "tok-a", "writer");
+      const viewer = await joinEditor(h, "tok-v", "view");
+      const session = viewer.session;
+      const events: unknown[] = [];
+      session.on("rejoinRequired", (event) => events.push(event));
+      const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
+      let client: TestClient | null = null;
+      try {
+        external.edit("external-before-lock ");
+        const bytes = await external.save();
+        let changedUnderLock = false;
+        onCheck = async () => {
+          const file = h.host.files.get("file1")!;
+          if (file.lock !== session.lockId || changedUnderLock) return;
+          changedUnderLock = true;
+          file.bytes = bytes;
+          if (changed === "version") file.itemVersion = "2";
+          else file.lastModifiedTime = "2026-10-28T12:00:00.000Z";
+        };
+        const writer = await joinEditor(h, "tok-a");
+        expect(changedUnderLock).toBe(true);
+        expect(events).toEqual([{ reason: "sourceChanged" }]);
+        client = await clientFor(session, writer.joinPayload, bytes);
+        expect(client.contains("external-before-lock")).toBe(true);
+        edit(session, writer.user.id, client, "writer-after-lock ", 1);
+        await session.requestSave(writer.user.id);
+        expect(await savedContains(h, "external-before-lock")).toBe(true);
+        expect(await savedContains(h, "writer-after-lock")).toBe(true);
+        expect(h.calls.filter((call) => call.pathname.endsWith("/contents") && call.override === null)).toHaveLength(2);
+      } finally {
+        external.destroy();
+        client?.destroy();
+        await session.close();
+      }
+    });
+  }
+
+  test("a host change after PutFile saves all session edits as a copy without adopting the external baseline", async () => {
+    let onCheck = async () => {};
+    const h = makeHarness({ beforeCheckFileInfo: () => onCheck() });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
+    const notices: unknown[] = [];
+    const saved: unknown[] = [];
+    session.on("viewOnly", (event) => notices.push(event));
+    session.on("saved", (event) => saved.push(event));
+    try {
+      external.edit("external-after-put ");
+      const externalBytes = await external.save();
+      edit(session, a.user.id, client, "session-before-put ");
+      let changed = false;
+      onCheck = async () => {
+        if (!h.putCount() || changed) return;
+        changed = true;
+        edit(session, a.user.id, client, "session-during-check ", 1);
+        const file = h.host.files.get("file1")!;
+        file.bytes = externalBytes;
+        file.version = 3;
+        file.itemVersion = "3";
+        file.lastModifiedTime = "2026-10-28T12:00:00.000Z";
+      };
+      const result = await session.requestSave(a.user.id);
+      expect(result.conflictName).toBeTruthy();
+      expect(session.itemVersion).toBe("1");
+      expect(session.viewOnlyReason).toBe("externalChange");
+      expect(notices).toEqual([{ reason: "externalChange" }]);
+      expect(saved).toEqual([]);
+      expect(h.host.files.get("file1")!.bytes).toEqual(externalBytes);
+      const copy = [...h.host.files.values()].find((file) => file.id !== "file1")!;
+      const fresh = await openFreshClient("xlsx", copy.bytes, nextId());
+      try {
+        expect(fresh.contains("session-before-put")).toBe(true);
+        expect(fresh.contains("session-during-check")).toBe(true);
+      } finally {
+        fresh.destroy();
+      }
+      client.edit("blocked-after-conflict ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+      await session.requestSave(a.user.id);
+      expect(h.putCount()).toBe(1);
+    } finally {
+      client.destroy();
+      external.destroy();
+      await session.close();
+    }
+  });
+
+  test("failed lock refreshes back off and recover before the lease expires", async () => {
+    let failing = true;
+    const h = makeHarness({ refreshStatus: () => failing ? 500 : null });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    try {
+      for (let i = 0; i < 20; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+      }
+      expect(h.callsFor("REFRESH_LOCK")).toHaveLength(1);
+      await h.clock.advance(1000);
+      expect(h.callsFor("REFRESH_LOCK")).toHaveLength(2);
+      await h.clock.advance(1999);
+      expect(h.callsFor("REFRESH_LOCK")).toHaveLength(2);
+      failing = false;
+      await h.clock.advance(1);
+      expect(h.callsFor("REFRESH_LOCK")).toHaveLength(3);
+      expect(session.lockHeld).toBe(true);
+      expect(session.viewOnly).toBe(false);
+      expect(h.host.files.get("file1")!.lockExpiresAt).toBe(h.clock.t + 30 * 60000);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("the lease deadline stops updates even while a refresh request is pending, then a re-lock resumes", async () => {
+    const h = makeHarness({ refreshStatus: () => 500 });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const notices: unknown[] = [];
+    session.on("viewOnly", (event) => notices.push(event));
+    let releaseRefresh: () => void = () => {};
+    try {
+      for (let i = 0; i < 20; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+      }
+      h.hostClient.refreshLock = () => new Promise<void>((resolve) => { releaseRefresh = resolve; });
+      for (let i = 0; i < 40; i += 1) {
+        await h.clock.advance(30000);
+        session.heartbeat(a.user.id);
+      }
+      expect(session.lockHeld).toBe(false);
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(notices).toEqual([{ reason: "lockLost" }]);
+      client.edit("blocked-without-lock ");
+      const update = client.encodeStateAsUpdate(session.replica!.encodeStateVector());
+      expect(session.applyUpdate(a.user.id, update).accepted).toBe(false);
+      releaseRefresh();
+      await h.clock.flush();
+      await h.clock.advance(30000);
+      session.heartbeat(a.user.id);
+      await h.clock.advance(30000);
+      session.heartbeat(a.user.id);
+      expect(session.lockHeld).toBe(true);
+      expect(session.viewOnly).toBe(false);
+      expect(h.callsFor("LOCK").length).toBeGreaterThanOrEqual(2);
+      expect(session.applyUpdate(a.user.id, update).accepted).toBe(true);
+    } finally {
+      releaseRefresh();
+      client.destroy();
+      await session.close();
+    }
+  });
+
+  test("a refresh lock mismatch stops updates immediately and recovers after the other lock clears", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const notices: unknown[] = [];
+    session.on("viewOnly", (event) => notices.push(event));
+    try {
+      const file = h.host.files.get("file1")!;
+      file.lock = "other-app-lock";
+      file.lockExpiresAt = h.clock.t + 30 * 60000;
+      await joinEditor(h, "tok-b");
+      await session.leave(a.user.id);
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(notices).toEqual([{ reason: "lockLost" }]);
+      const writer = session.users[0]!;
+      client.edit("after-lock-loss ");
+      const update = client.encodeStateAsUpdate(session.replica!.encodeStateVector());
+      expect(session.applyUpdate(writer.id, update).accepted).toBe(false);
+      file.lock = null;
+      file.lockExpiresAt = null;
+      await h.clock.advance(1000);
+      expect(session.lockHeld).toBe(true);
+      expect(session.viewOnly).toBe(false);
+      expect(session.applyUpdate(writer.id, update).accepted).toBe(true);
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+});

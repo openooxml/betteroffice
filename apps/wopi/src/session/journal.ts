@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 /** Journal contents read back from disk. The journal holds the full source at rest. */
@@ -15,6 +15,7 @@ export interface JournalData {
 }
 
 const MAGIC = Buffer.from("BOJ2\n", "utf8");
+type JournalWrite = (fd: number, buffer: Uint8Array, offset: number, length: number) => number;
 
 function record(prefix: string, payload: Buffer): Buffer {
   const body = Buffer.concat([Buffer.from(prefix, "utf8"), payload]);
@@ -34,12 +35,15 @@ export class FileJournal {
   readonly fileKey: string;
   #fd: number | null = null;
   #begun = false;
+  #broken = false;
+  #write: JournalWrite;
 
-  constructor(dir: string, fileKey: string) {
+  constructor(dir: string, fileKey: string, options: { write?: JournalWrite } = {}) {
     const name = `${createHash("sha256").update(fileKey).digest("hex")}.journal`;
     this.path = join(dir, name);
     this.dir = dir;
     this.fileKey = fileKey;
+    this.#write = options.write ?? ((fd, buffer, offset, length) => writeSync(fd, buffer, offset, length));
   }
 
   /** Path for a file key inside a journal directory. */
@@ -48,37 +52,75 @@ export class FileJournal {
   }
 
   #ensureFd(): number {
+    if (this.#broken) throw new Error("journal is broken");
     if (this.#fd === null) {
       mkdirSync(this.dir, { recursive: true });
       this.#fd = openSync(this.path, "a");
+      try {
+        const data = readFileSync(this.path);
+        if (data.length > 0) {
+          if (!data.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error("invalid journal header");
+          let end = MAGIC.length;
+          while (end + 4 <= data.length) {
+            const length = data.readUInt32BE(end);
+            if (length === 0 || end + 4 + length > data.length) break;
+            end += 4 + length;
+          }
+          if (end < data.length) ftruncateSync(this.#fd, end);
+        }
+      } catch (err) {
+        this.#broken = true;
+        this.close();
+        throw err;
+      }
     }
     return this.#fd;
+  }
+
+  #writeFully(data: Uint8Array): void {
+    const fd = this.#ensureFd();
+    const start = fstatSync(fd).size;
+    try {
+      let offset = 0;
+      while (offset < data.length) {
+        const written = this.#write(fd, data, offset, data.length - offset);
+        if (!Number.isInteger(written) || written <= 0 || written > data.length - offset) throw new Error("incomplete journal write");
+        offset += written;
+      }
+    } catch (err) {
+      this.#broken = true;
+      try {
+        ftruncateSync(fd, start);
+      } catch {}
+      throw err;
+    }
   }
 
   /** Creates the journal with its source header when missing. */
   begin(source: Uint8Array, itemVersion: string | null, clientId?: number | null, initialState?: Uint8Array | null): void {
     if (this.#begun) return;
-    this.#begun = true;
-    if (existsSync(this.path) && readFileSync(this.path).length > 0) return;
-    const fd = this.#ensureFd();
+    this.#ensureFd();
+    if (readFileSync(this.path).length > 0) {
+      if (this.read()?.source === null) throw new Error("incomplete journal source");
+      this.#begun = true;
+      return;
+    }
     const header = JSON.stringify({ fileKey: this.fileKey, itemVersion, sha256: sha256Hex(source), clientId: clientId ?? null });
-    writeSync(fd, MAGIC);
-    writeSync(fd, record("H", Buffer.from(header, "utf8")));
-    writeSync(fd, record("S", Buffer.from(source)));
-    if (initialState) writeSync(fd, record("I", Buffer.from(initialState)));
+    const records = [MAGIC, record("H", Buffer.from(header, "utf8")), record("S", Buffer.from(source))];
+    if (initialState) records.push(record("I", Buffer.from(initialState)));
+    this.#writeFully(Buffer.concat(records));
+    this.#begun = true;
   }
 
   /** Appends one accepted or replica local update. */
   appendUpdate(update: Uint8Array): void {
-    const fd = this.#ensureFd();
-    writeSync(fd, record("U", Buffer.from(update)));
+    this.#writeFully(record("U", Buffer.from(update)));
   }
 
   /** Records an itemVersion this session wrote with PutFile. */
   recordWrittenVersion(itemVersion: string | null): void {
     if (itemVersion === null) return;
-    const fd = this.#ensureFd();
-    writeSync(fd, record("V", Buffer.from(itemVersion, "utf8")));
+    this.#writeFully(record("V", Buffer.from(itemVersion, "utf8")));
   }
 
   /** Flushes buffered journal bytes to disk. */
@@ -134,6 +176,7 @@ export class FileJournal {
       unlinkSync(this.path);
     } catch {}
     this.#begun = false;
+    this.#broken = false;
   }
 
   /** Closes the underlying file handle. */

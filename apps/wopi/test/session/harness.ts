@@ -97,13 +97,16 @@ export function makeHarness(options: {
   journalDir?: string;
   maxEditorsPerFile?: number;
   instanceId?: string;
-  quirks?: { timestampConflict?: boolean };
+  quirks?: { timestampConflict?: boolean; relativeUrlToken?: string };
   format?: Format;
   fileName?: string;
   lockFails?: boolean;
   failFirstRead?: boolean;
   beforePut?: () => Promise<void>;
   beforeUnlock?: () => Promise<void>;
+  beforeCheckFileInfo?: () => Promise<void>;
+  refreshStatus?: () => number | null;
+  relativeStatus?: () => number | null;
 } = {}): Harness {
   const clock = new FakeClock();
   const pair = generateKeyPair();
@@ -127,6 +130,9 @@ export function makeHarness(options: {
     }
     if (override === "PUT" && options.beforePut) await options.beforePut();
     if (override === "UNLOCK" && options.beforeUnlock) await options.beforeUnlock();
+    if (request.method === "GET" && !url.pathname.endsWith("/contents") && options.beforeCheckFileInfo) await options.beforeCheckFileInfo();
+    const status = override === "REFRESH_LOCK" ? options.refreshStatus?.() : override === "PUT_RELATIVE" ? options.relativeStatus?.() : null;
+    if (status) return new Response(null, { status });
     return host.fetch(request);
   };
   const client = createHostClient({ signer, maxFileBytes: 64 * 1024 * 1024, fetch: fetchFn, now: clock.now });
