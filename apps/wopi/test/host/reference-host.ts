@@ -1,4 +1,4 @@
-import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { createPublicKey, randomUUID, verify, type KeyObject } from "node:crypto";
 import {
   buildProofBytes,
   proofKeyAttributes,
@@ -7,6 +7,7 @@ import {
   type ProofKeyPair,
   type ProofSigner,
 } from "../../src/proof";
+import { cancelStream } from "../../src/host/streams";
 import { decodeUtf7, encodeUtf7 } from "../../src/host/utf7";
 
 export interface ReferenceToken {
@@ -15,6 +16,7 @@ export interface ReferenceToken {
   canWrite?: boolean;
   userCanWrite?: boolean;
   expiresAt?: number;
+  fileIds?: Set<string>;
 }
 
 export interface ReferenceFile {
@@ -163,6 +165,19 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     return null;
   }
 
+  function relativeUrl(request: Request, fileId: string, user: ReferenceToken): string {
+    const url = new URL(request.url);
+    const sourceToken = url.searchParams.get("access_token");
+    if (sourceToken !== null && !tokens.has(sourceToken)) tokens.set(sourceToken, user);
+    user.fileIds?.add(fileId);
+    const token = randomUUID();
+    tokens.set(token, user);
+    url.pathname = url.pathname.replace(/[^/]+$/, encodeURIComponent(fileId));
+    url.search = "";
+    url.searchParams.set("access_token", token);
+    return url.toString();
+  }
+
   function verifyRequestProof(request: Request, token: string): boolean {
     if (options.verifyProof === undefined) return true;
     const timestampHeader = request.headers.get("X-WOPI-TimeStamp");
@@ -220,7 +235,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
   function validateRelativeTarget(request: Request, file: ReferenceFile, overwrite: boolean): Response | null {
     const targetLock = liveLock(file);
     if (targetLock !== null) return lockConflict(targetLock);
-    if (!overwrite) return json({ error: "target exists" }, 412);
+    if (!overwrite) return lockConflict(null, "Target exists");
     return timestampConflict(request, file);
   }
 
@@ -272,9 +287,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
       const chunk = await reader.read();
       if (chunk.done) break;
       if (offset + chunk.value.byteLength > out.length) {
-        try {
-          await reader.cancel();
-        } catch {}
+        cancelStream(reader);
         return null;
       }
       out.set(chunk.value, offset);
@@ -309,6 +322,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
 
     const isContents = url.pathname.endsWith("/contents");
     const fileId = fileIdFromPath(url.pathname);
+    if (user.fileIds && !user.fileIds.has(fileId)) return json({ error: "unauthorized" }, 401);
     const file = files.get(fileId);
     if (!file) return json({ error: "not found" }, 404);
     const canWrite = user.canWrite ?? user.userCanWrite ?? true;
@@ -413,8 +427,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           return json({ error: "exactly one target header is required" }, 400);
         }
         const overwrite = relative !== null && (request.headers.get("X-WOPI-OverwriteRelativeTarget") ?? "").toLowerCase() === "true";
-        const targetName = decodeUtf7(relative ?? suggested ?? "copy");
+        let targetName = decodeUtf7(relative ?? suggested ?? "copy");
         if (targetName === "") return json({ error: "target header is required" }, 400);
+        if (suggested !== null && targetName.startsWith(".")) {
+          const ext = extensionOf(file.name);
+          targetName = `${ext ? file.name.slice(0, -ext.length) : file.name}${targetName}`;
+        }
         let finalName = targetName;
         const existing = [...files.values()].find((entry) => entry.name === targetName);
         if (existing && relative !== null) {
@@ -431,10 +449,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           current.version += 1;
           current.itemVersion = String(current.version);
           current.lastModifiedTime = new Date(now()).toISOString();
-          const existingUrl = new URL(request.url);
-          existingUrl.pathname = existingUrl.pathname.replace(/[^/]+$/, encodeURIComponent(current.id));
-          existingUrl.search = "";
-          return json({ Name: finalName, Url: existingUrl.toString() }, 200, { "X-WOPI-ItemVersion": current.itemVersion });
+          return json({ Name: finalName, Url: relativeUrl(request, current.id, user) }, 200, { "X-WOPI-ItemVersion": current.itemVersion });
         }
         if (current && suggested !== null) {
           const ext = extensionOf(targetName);
@@ -457,12 +472,9 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
           lastModifiedTime: new Date(now()).toISOString(),
         };
         files.set(newId, created);
-        const newUrl = new URL(request.url);
-        newUrl.pathname = newUrl.pathname.replace(/[^/]+$/, encodeURIComponent(newId));
-        newUrl.search = "";
         const headers: Record<string, string> = { "X-WOPI-ItemVersion": "1" };
         if (finalName !== targetName) headers["X-WOPI-ValidRelativeTarget"] = encodeUtf7(finalName);
-        return json({ Name: finalName, Url: newUrl.toString() }, 200, headers);
+        return json({ Name: finalName, Url: relativeUrl(request, newId, user) }, 200, headers);
       }
       if (override === "RENAME_FILE") {
         if (!canWrite) return json({ error: "unauthorized" }, 401);
@@ -473,9 +485,12 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
         const requested = decodeUtf7(requestedHeader);
         if (requested === "") return json({ error: "X-WOPI-RequestedName is required" }, 400);
         const ext = extensionOf(file.name);
-        const newName = requested.includes(".") ? requested : `${requested}${ext}`;
+        const newName = `${requested}${ext}`;
+        if ([...files.values()].some((entry) => entry.id !== file.id && entry.name === newName)) {
+          return empty(400, { "X-WOPI-InvalidFileNameError": "A file with that name already exists" });
+        }
         file.name = newName;
-        return json({ Name: ext && !requested.includes(".") ? requested : newName });
+        return json({ Name: requested });
       }
       return json({ error: "unknown override" }, 400);
     }

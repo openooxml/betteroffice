@@ -137,6 +137,152 @@ describe("reference host and host client", () => {
     expect(host.files.get("file1")?.name).toContain("Umbenannt");
   });
 
+  test("rename rejects another file's name with an invalid filename error and preserves both files", async () => {
+    for (const locked of [false, true]) {
+      const { host, client, signer, nowMs } = setup();
+      host.setFile("target", "target bytes", { name: "Kopie München.docx" });
+      if (locked) await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "holder" });
+      const before = [...host.files.values()].map((file) => ({ ...file }));
+      const response = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), {
+        method: "POST",
+        headers: {
+          "X-WOPI-Override": "RENAME_FILE",
+          "X-WOPI-RequestedName": encodeUtf7("Kopie München"),
+          ...(locked ? { "X-WOPI-Lock": "holder" } : {}),
+        },
+      }));
+      expect(response.status).toBe(400);
+      expect(response.headers.get("X-WOPI-InvalidFileNameError")).toBeTruthy();
+      const error = await kindOf(client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "Kopie München", lock: locked ? "holder" : undefined }));
+      expect(error.kind).toBe("invalidResponse");
+      expect(error.status).toBe(400);
+      expect([...host.files.values()]).toEqual(before);
+      expect((await client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "hello", lock: locked ? "holder" : undefined })).name).toBe("hello");
+      expect([...host.files.values()]).toEqual(before);
+    }
+  });
+
+  test("rename always appends the original extension to the entire requested name", async () => {
+    for (const [original, requested, expected] of [
+      ["hello.docx", "report.v2", "report.v2.docx"],
+      ["hello.docx", "report.pdf", "report.pdf.docx"],
+      ["hello.final.docx", "München.v2", "München.v2.docx"],
+      ["hello", "report.v2", "report.v2"],
+    ] as const) {
+      const { host, client } = setup();
+      const source = host.setFile("file1", "hello", { name: original });
+      const before = { ...source };
+      const renamed = await client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: requested });
+      expect(renamed.name).toBe(requested);
+      expect(source).toEqual({ ...before, name: expected });
+      expect((await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })).BaseFileName).toBe(expected);
+      host.setFile("target", "target bytes", { name: original.includes(".") ? "taken.v2.docx" : "taken.v2" });
+      const snapshot = [...host.files.values()].map((file) => ({ ...file }));
+      const collision = await kindOf(client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "taken.v2" }));
+      expect(collision.status).toBe(400);
+      expect([...host.files.values()]).toEqual(snapshot);
+    }
+  });
+
+  test("extension-only suggestions use the source stem before choosing a unique name", async () => {
+    for (const [sourceName, stem] of [
+      ["hello.docx", "hello"],
+      ["hello.final.docx", "hello.final"],
+      ["hello", "hello"],
+      ["München.docx", "München"],
+    ] as const) {
+      const { host, client } = setup();
+      host.setFile("file1", "hello", { name: sourceName });
+      const first = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: ".pdf" });
+      expect(first.name).toBe(`${stem}.pdf`);
+      const target = [...host.files.values()].find((file) => file.name === first.name)!;
+      await client.lock({ wopiSrc: first.url, accessToken: new URL(first.url).searchParams.get("access_token")!, lock: "holder" });
+      const before = { ...target };
+      const second = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([2]), suggestedTarget: ".pdf", overwrite: true });
+      expect(second.name).toBe(`${stem} (1).pdf`);
+      expect(second.validRelativeTarget).toBe(second.name);
+      expect(target).toEqual(before);
+      expect([...host.files.values()].some((file) => file.name === ".pdf")).toBe(false);
+      const relative = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([3]), relativeTarget: ".pdf" });
+      expect(relative.name).toBe(".pdf");
+    }
+  });
+
+  test("every relative file URL includes a fresh token with the same user's grants and expiry", async () => {
+    const { host, client, signer, nowMs, advance } = setup();
+    const user = {
+      userId: "copy-user",
+      userName: "Copy User",
+      canWrite: true,
+      expiresAt: nowMs() + 10 * 60 * 1000,
+      fileIds: new Set(["file1", "target"]),
+    };
+    host.tokens.set(TOKEN, user);
+    host.setFile("target", "old", { name: "target.docx" });
+    const issued = new Set<string>();
+    let lastUrl = "";
+    let lastToken = "";
+    for (const mode of ["suggested", "relative", "overwrite"] as const) {
+      const body = new TextEncoder().encode(mode);
+      const copy = await client.putRelativeFile({
+        wopiSrc: `${SRC}?context=copy`,
+        accessToken: TOKEN,
+        body,
+        ...(mode === "suggested" ? { suggestedTarget: "suggested.docx" }
+          : { relativeTarget: mode === "relative" ? "relative.docx" : "target.docx", overwrite: mode === "overwrite" }),
+      });
+      const url = new URL(copy.url);
+      const token = url.searchParams.get("access_token");
+      expect(token).toBeTruthy();
+      expect(token).not.toBe(TOKEN);
+      expect(issued.has(token!)).toBe(false);
+      issued.add(token!);
+      const fileId = decodeURIComponent(url.pathname.split("/").pop()!);
+      expect(user.fileIds.has(fileId)).toBe(true);
+      const infoResponse = await host.fetch(rawRequest(signer, copy.url, token!, nowMs()));
+      expect(infoResponse.status).toBe(200);
+      const info = await infoResponse.json() as { UserId: string; UserFriendlyName: string; UserCanWrite: boolean; BaseFileName: string };
+      expect(info.UserId).toBe(user.userId);
+      expect(info.UserFriendlyName).toBe(user.userName);
+      expect(info.UserCanWrite).toBe(true);
+      expect(info.BaseFileName).toBe(copy.name);
+      url.pathname += "/contents";
+      const contents = await host.fetch(rawRequest(signer, url.toString(), token!, nowMs()));
+      expect(contents.status).toBe(200);
+      expect(new Uint8Array(await contents.arrayBuffer())).toEqual(body);
+      const missing = new URL(copy.url);
+      missing.searchParams.delete("access_token");
+      expect((await host.fetch(new Request(missing))).status).toBe(401);
+      expect((await host.fetch(rawRequest(signer, copy.url, "unknown-token", nowMs()))).status).toBe(401);
+      lastUrl = copy.url;
+      lastToken = token!;
+    }
+    host.setFile("ungranted", "private", { name: "private.docx" });
+    expect((await host.fetch(rawRequest(signer, "https://cloud.example.com/wopi/files/ungranted", lastToken, nowMs()))).status).toBe(401);
+    advance(11 * 60 * 1000);
+    expect((await host.fetch(rawRequest(signer, lastUrl, lastToken, nowMs()))).status).toBe(401);
+  });
+
+  test("minting a copy token preserves a string user's identity and the default source token", async () => {
+    for (const registered of [false, true]) {
+      const host = createReferenceHost();
+      host.setFile("file1", "hello", { name: "hello.docx" });
+      if (registered) host.tokens.set(TOKEN, "string-user");
+      const response = await host.fetch(new Request(`${SRC}?access_token=${TOKEN}`, {
+        method: "POST",
+        headers: { "X-WOPI-Override": "PUT_RELATIVE", "X-WOPI-SuggestedTarget": "copy.docx" },
+        body: new Uint8Array([1]),
+      }));
+      expect(response.status).toBe(200);
+      const copy = await response.json() as { Url: string };
+      const infoResponse = await host.fetch(new Request(copy.Url));
+      expect(infoResponse.status).toBe(200);
+      const info = await infoResponse.json() as { UserId: string };
+      expect(info.UserId).toBe(registered ? "string-user" : "user1");
+      expect((await host.fetch(new Request(`${SRC}?access_token=${TOKEN}`))).status).toBe(200);
+    }
+  });
+
   test("a bad proof is rejected with unauthorized", async () => {
     const { host } = setup();
     const otherSigner = createProofSigner(generateKeyPair());
@@ -441,6 +587,45 @@ describe("reference host strictness", () => {
     expect(ok.itemVersion).toBe(target.itemVersion);
   });
 
+  test("an unlocked relative target without overwrite returns 409 with an empty lock", async () => {
+    for (const overwrite of [undefined, false]) {
+      const { host, client, signer, nowMs } = setup();
+      host.setFile("target", "original", { name: "target.docx" });
+      const before = [...host.files.values()].map((file) => ({ ...file }));
+      const response = await host.fetch(rawRequest(signer, SRC, TOKEN, nowMs(), {
+        method: "POST",
+        headers: {
+          "X-WOPI-Override": "PUT_RELATIVE",
+          "X-WOPI-RelativeTarget": "target.docx",
+          ...(overwrite === undefined ? {} : { "X-WOPI-OverwriteRelativeTarget": "false" }),
+        },
+        body: new Uint8Array([9]),
+      }));
+      expect(response.status).toBe(409);
+      expect(response.headers.get("X-WOPI-Lock")).toBe("");
+      const error = await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([9]), relativeTarget: "target.docx", overwrite }));
+      expect(error.status).toBe(409);
+      expect(error.kind).toBe("lockMismatch");
+      expect(error.currentLock).toBeNull();
+      expect([...host.files.values()]).toEqual(before);
+    }
+  });
+
+  test("a relative target created during upload conflicts with an empty lock when overwrite is disabled", async () => {
+    const { host, client } = setup();
+    const upload = pausedBody();
+    const pending = kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: upload.body, relativeTarget: "race.docx", overwrite: false }));
+    await upload.started;
+    host.setFile("target", "original", { name: "race.docx" });
+    const before = [...host.files.values()].map((file) => ({ ...file }));
+    upload.finish();
+    const error = await pending;
+    expect(error.status).toBe(409);
+    expect(error.kind).toBe("lockMismatch");
+    expect(error.currentLock).toBeNull();
+    expect([...host.files.values()]).toEqual(before);
+  });
+
   test("suggested targets never overwrite a collision even when overwrite is true", async () => {
     for (const locked of [false, true]) {
       const { host, client } = setup();
@@ -484,6 +669,45 @@ describe("reference host strictness", () => {
 });
 
 describe("reference host file identity and body length", () => {
+  test("excess upload bytes return 413 without waiting for source cancellation", async () => {
+    const { host, client, signer, nowMs } = setup();
+    host.setFile("target", "original", { name: "target.docx" });
+    await client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "holder" });
+    const before = [...host.files.values()].map((file) => ({ ...file }));
+    for (const mode of ["put", "create", "overwrite"] as const) {
+      for (const rejects of [false, true]) {
+        let cancelled = false;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2]));
+          },
+          cancel() {
+            cancelled = true;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        });
+        const headers: Record<string, string> = { "Content-Length": "1" };
+        if (mode === "put") {
+          headers["X-WOPI-Override"] = "PUT";
+          headers["X-WOPI-Lock"] = "holder";
+        } else {
+          headers["X-WOPI-Override"] = "PUT_RELATIVE";
+          headers["X-WOPI-RelativeTarget"] = mode === "create" ? "new.docx" : "target.docx";
+          headers["X-WOPI-OverwriteRelativeTarget"] = "true";
+        }
+        const response = await host.fetch(rawRequest(signer, mode === "put" ? `${SRC}/contents` : SRC, TOKEN, nowMs(), {
+          method: "POST",
+          headers,
+          body,
+          duplex: "half",
+        } as RequestInit));
+        expect(response.status).toBe(413);
+        expect(cancelled).toBe(true);
+        expect([...host.files.values()]).toEqual(before);
+      }
+    }
+  }, 1000);
+
   test("create, rename, create again keeps both files under distinct ids", async () => {
     const { host, client } = setup();
     const first = await client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new TextEncoder().encode("first"), suggestedTarget: "copy.docx" });

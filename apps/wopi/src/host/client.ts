@@ -1,6 +1,7 @@
 import { dotnetTicks, type ProofSigner } from "../proof";
 import { WopiHostError } from "./errors";
 import { redactText } from "./redact";
+import { cancelStream } from "./streams";
 import { decodeUtf7, encodeUtf7 } from "./utf7";
 
 type ChunkResult = Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>;
@@ -141,12 +142,6 @@ function parseContentLength(header: string | null): number | null {
   return Number.isSafeInteger(value) ? value : null;
 }
 
-function cancelStream(stream: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array> | null | undefined): void {
-  try {
-    stream?.cancel().catch(() => {});
-  } catch {}
-}
-
 interface HostResponse {
   response: Response;
   controller: AbortController;
@@ -241,8 +236,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
           if (chunk.done) break;
           total += chunk.value.byteLength;
           if (total > maxBytes) {
-            controller.abort();
-            cancelStream(reader);
+            cancelStream(reader, () => controller.abort());
             if (throwOnOverCap) {
               throw new WopiHostError("invalidResponse", `${op} response exceeds ${maxBytes} bytes`);
             }
@@ -267,12 +261,11 @@ export function createHostClient(options: HostClientOptions): HostClient {
         reader.releaseLock();
       }
     }, () => {
-      cancelStream(reader);
-      controller.abort();
+      cancelStream(reader, () => controller.abort());
     });
   }
 
-  async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string): Promise<ChunkResult> {
+  async function idleRead(reader: ReadableStreamDefaultReader<Uint8Array>, op: string, accessToken: string, abort?: () => void): Promise<ChunkResult> {
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -285,10 +278,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       return await Promise.race([reader.read(), timeout]);
     } catch (err) {
       if (timedOut) {
-        try {
-          const pending = reader.cancel();
-          pending.catch(() => {});
-        } catch {}
+        cancelStream(reader, abort);
         throw new WopiHostError("timeout", `${op} timed out after ${bodyIdleTimeoutMs} ms without data`);
       }
       throw bodyError(err, op, accessToken);
@@ -335,7 +325,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
       async pull(controller) {
         let chunk: ChunkResult;
         try {
-          chunk = await idleRead(reader, op, accessToken);
+          chunk = await idleRead(reader, op, accessToken, abort);
         } catch (err) {
           controller.error(bodyError(err, op, accessToken));
           return;
@@ -347,14 +337,13 @@ export function createHostClient(options: HostClientOptions): HostClient {
         count += chunk.value.byteLength;
         if (count > maxFileBytes) {
           controller.error(tooLarge(op));
-          abort();
-          cancelStream(reader);
+          cancelStream(reader, abort);
           return;
         }
         controller.enqueue(chunk.value);
       },
-      async cancel(reason) {
-        await reader.cancel(reason);
+      cancel(reason) {
+        cancelStream(reader, abort, reason);
       },
     });
   }
@@ -398,7 +387,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         state.clearIdleTimer?.();
         let chunk: ChunkResult;
         try {
-          chunk = await idleRead(reader, op, accessToken);
+          chunk = await idleRead(reader, op, accessToken, state.abort);
         } catch (err) {
           state.error = bodyError(err, op, accessToken);
           controller.error(state.error);
@@ -413,8 +402,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         if (count > maxFileBytes) {
           state.exceeded = true;
           controller.error(tooLarge(op));
-          state.abort?.();
-          cancelStream(reader);
+          cancelStream(reader, state.abort);
           return;
         }
         controller.enqueue(chunk.value);
@@ -424,9 +412,9 @@ export function createHostClient(options: HostClientOptions): HostClient {
           state.abort?.();
         }, bodyIdleTimeoutMs);
       },
-      async cancel(reason) {
+      cancel(reason) {
         state.clearIdleTimer?.();
-        await reader.cancel(reason);
+        cancelStream(reader, state.abort, reason);
       },
     }, { highWaterMark: 0 });
   }
@@ -503,15 +491,12 @@ export function createHostClient(options: HostClientOptions): HostClient {
       if (connectTimer) clearTimeout(connectTimer);
       uploadState.clearIdleTimer?.();
       if (exceeded()) {
-        controller.abort();
-        cancelStream(response.body);
+        cancelStream(response.body, () => controller.abort());
         throw tooLarge(spec.op);
       }
       if (uploadState.error) throw uploadState.error;
       if (spec.idempotent && RETRYABLE_STATUSES.has(response.status) && attempt < 2) {
-        try {
-          await response.body?.cancel();
-        } catch {}
+        cancelStream(response.body, () => controller.abort());
         continue;
       }
       if (response.status < 200 || response.status >= 300) {
@@ -552,8 +537,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     const { response, controller } = await execute(input, { op: "GetFile", contents: true, method: "GET", idempotent: true });
     const announced = parseContentLength(response.headers.get("Content-Length"));
     if (announced !== null && announced > maxFileBytes) {
-      controller.abort();
-      cancelStream(response.body);
+      cancelStream(response.body, () => controller.abort());
       throw tooLarge("GetFile");
     }
     const source = response.body ?? new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
@@ -571,9 +555,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
         const chunk = await reader.read();
         if (chunk.done) break;
         if (offset + chunk.value.byteLength > buffer.length) {
-          try {
-            await reader.cancel();
-          } catch {}
+          cancelStream(reader);
           throw new WopiHostError("invalidResponse", "GetFile returned more bytes than announced");
         }
         buffer.set(chunk.value, offset);
@@ -624,33 +606,29 @@ export function createHostClient(options: HostClientOptions): HostClient {
   }
 
   async function putFile(args: PutFileArgs): Promise<PutFileResult> {
-    const { response } = await sendPut(args, args, true, "PUT", args.extraHeaders, "PutFile");
-    try {
-      await response.body?.cancel();
-    } catch {}
-    return { itemVersion: response.headers.get("X-WOPI-ItemVersion") };
+    const result = await sendPut(args, args, true, "PUT", args.extraHeaders, "PutFile");
+    discard(result);
+    return { itemVersion: result.response.headers.get("X-WOPI-ItemVersion") };
   }
 
-  async function discard({ response }: HostResponse): Promise<void> {
-    try {
-      await response.body?.cancel();
-    } catch {}
+  function discard({ response, controller }: HostResponse): void {
+    cancelStream(response.body, () => controller.abort());
   }
 
   async function lock(args: LockArgs): Promise<void> {
-    await discard(await execute(args, { op: "Lock", contents: false, method: "POST", override: "LOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: false }));
+    discard(await execute(args, { op: "Lock", contents: false, method: "POST", override: "LOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: false }));
   }
 
   async function refreshLock(args: LockArgs): Promise<void> {
-    await discard(await execute(args, { op: "RefreshLock", contents: false, method: "POST", override: "REFRESH_LOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: true }));
+    discard(await execute(args, { op: "RefreshLock", contents: false, method: "POST", override: "REFRESH_LOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: true }));
   }
 
   async function unlock(args: LockArgs): Promise<void> {
-    await discard(await execute(args, { op: "Unlock", contents: false, method: "POST", override: "UNLOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: false }));
+    discard(await execute(args, { op: "Unlock", contents: false, method: "POST", override: "UNLOCK", headers: { "X-WOPI-Lock": args.lock }, idempotent: false }));
   }
 
   async function unlockAndRelock(args: UnlockAndRelockArgs): Promise<void> {
-    await discard(await execute(args, {
+    discard(await execute(args, {
       op: "UnlockAndRelock",
       contents: false,
       method: "POST",
@@ -665,7 +643,7 @@ export function createHostClient(options: HostClientOptions): HostClient {
     const { response } = result;
     const raw = response.headers.get("X-WOPI-Lock");
     const currentLock = raw === null || raw === "" ? null : raw;
-    await discard(result);
+    discard(result);
     return { lock: currentLock };
   }
 

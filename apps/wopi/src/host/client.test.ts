@@ -112,6 +112,29 @@ describe("host client requests", () => {
 });
 
 describe("retries", () => {
+  test("retries without waiting for response cancellation and aborts discarded requests", async () => {
+    for (const rejects of [false, true]) {
+      let calls = 0;
+      let cancellations = 0;
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const client = makeClient(async (_input, init) => {
+        calls += 1;
+        if (calls === 3) return jsonResponse(validInfo());
+        signals.push(init?.signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancellations += 1;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        }), { status: 503 });
+      });
+      expect((await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })).BaseFileName).toBe("a.docx");
+      expect(calls).toBe(3);
+      expect(cancellations).toBe(2);
+      expect(signals.every((signal) => signal?.aborted)).toBe(true);
+    }
+  }, 2000);
+
   test("retries an idempotent op on 503 and then succeeds", async () => {
     let calls = 0;
     const client = makeClient(async () => {
@@ -159,6 +182,62 @@ describe("retries", () => {
     expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("server");
     expect(calls).toBe(1);
   });
+});
+
+describe("body cancellation", () => {
+  test("successful saves and lock operations do not wait for response cancellation", async () => {
+    for (const rejects of [false, true]) {
+      let cancellations = 0;
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const client = makeClient(async (_input, init) => {
+        signals.push(init?.signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancellations += 1;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        }), { headers: { "X-WOPI-ItemVersion": "7", "X-WOPI-Lock": "holder" } });
+      });
+      const input = { wopiSrc: SRC, accessToken: TOKEN, lock: "holder" };
+      expect((await client.putFile({ ...input, body: new Uint8Array([1]) })).itemVersion).toBe("7");
+      await client.lock(input);
+      await client.refreshLock(input);
+      await client.unlock(input);
+      await client.unlockAndRelock({ ...input, oldLock: "old" });
+      expect((await client.getLock(input)).lock).toBe("holder");
+      expect(cancellations).toBe(6);
+      expect(signals.every((signal) => signal?.aborted)).toBe(true);
+    }
+  }, 1000);
+
+  test("cancelling either stream wrapper does not wait for its source", async () => {
+    for (const direction of ["download", "upload"]) {
+      for (const rejects of [false, true]) {
+        let cancelledWith: unknown;
+        let signal: AbortSignal | null | undefined;
+        const source = new ReadableStream<Uint8Array>({
+          cancel(reason) {
+            cancelledWith = reason;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        });
+        const client = makeClient(async (_input, init) => {
+          signal = init?.signal;
+          if (direction === "download") return new Response(source);
+          await (init?.body as ReadableStream<Uint8Array>).cancel("stop");
+          return new Response(null);
+        });
+        if (direction === "download") {
+          const result = await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+          await result.stream.cancel("stop");
+        } else {
+          await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source });
+        }
+        expect(cancelledWith).toBe("stop");
+        expect(signal?.aborted).toBe(true);
+      }
+    }
+  }, 1000);
 });
 
 describe("streaming", () => {
@@ -653,6 +732,29 @@ describe("body caps", () => {
 });
 
 describe("content length and truncation", () => {
+  test("excess download bytes fail without waiting for cancellation and abort the request", async () => {
+    for (const rejects of [false, true]) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        },
+        cancel() {
+          cancelled = true;
+          return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(source, { headers: { "Content-Length": "1" } });
+      });
+      expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
   test("readFile fails on premature EOF instead of returning a truncated file", async () => {
     const client = makeClient(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Length": "10" } }));
     expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
