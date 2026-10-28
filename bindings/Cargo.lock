@@ -179,6 +179,7 @@ name = "betteroffice-drawingml"
 version = "0.5.1"
 dependencies = [
  "indexmap",
+ "libm",
  "serde",
 ]
 
@@ -447,12 +448,14 @@ name = "betteroffice-xlsx-calc"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
+ "libm",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
 version = "0.5.1"
 dependencies = [
+ "libm",
  "serde",
 ]
 
@@ -500,6 +503,7 @@ name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-render",
+ "libm",
  "png",
  "rustybuzz",
  "tiny-skia",
@@ -513,6 +517,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "hashbrown 0.17.1",
+ "libm",
  "serde",
  "unicode-segmentation",
 ]
@@ -1044,9 +1049,9 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "lock_api"

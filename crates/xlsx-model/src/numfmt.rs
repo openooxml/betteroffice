@@ -8,6 +8,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::date::DateSystem;
+use crate::fmath;
 use crate::value::CellValue;
 
 /// the display string plus the `#rrggbb` color a bracket prefix (`[Red]`) requested.
@@ -1016,7 +1017,7 @@ fn digit_kinds(toks: &[Tok]) -> Vec<char> {
 /// split a non-negative magnitude into (integer digits, fraction digits) after
 /// rounding half-away-from-zero (excel's display rule) to `frac_len` places.
 fn split_digits(mag: f64, frac_len: usize) -> (String, String) {
-    let factor = 10f64.powi(frac_len as i32);
+    let factor = fmath::powi(10.0, frac_len as i32);
     let scaled = (mag * factor).round();
     let mut s = format!("{scaled:.0}");
     while s.len() < frac_len + 1 {
@@ -1169,14 +1170,14 @@ fn render_scientific(sec: &Section, mag: f64) -> FormattedValue {
     let (mantissa, exp_val) = if v == 0.0 {
         (0.0, 0i32)
     } else {
-        let e = v.log10().floor() as i32;
+        let e = fmath::log10(v).floor() as i32;
         let mut exp = e.div_euclid(p) * p;
-        let mut m = v / 10f64.powi(exp);
+        let mut m = v / fmath::powi(10.0, exp);
         // rounding can overflow the mantissa (9.99 -> 10): bump exponent, recompute
         let (id, _) = split_digits(m, qf);
         if id.len() as i32 > p {
             exp += p;
-            m = v / 10f64.powi(exp);
+            m = v / fmath::powi(10.0, exp);
         }
         (m, exp)
     };
@@ -1215,7 +1216,7 @@ fn format_general(n: f64) -> String {
     }
     let neg = n < 0.0;
     let a = n.abs();
-    let e = a.log10().floor() as i32;
+    let e = fmath::log10(a).floor() as i32;
     let body = if !(-4..11).contains(&e) {
         scientific_precision(a, 5)
     } else {
@@ -1276,7 +1277,7 @@ pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32)
     if !value.is_finite() || value == 0.0 {
         return None;
     }
-    let exponent = value.abs().log10().floor() as i32;
+    let exponent = fmath::log10(value.abs()).floor() as i32;
     if (-4..11).contains(&exponent) {
         for decimals in (0..=(10 - exponent).clamp(0, 15) as usize).rev() {
             let mut candidate = round_fixed(value, decimals);
@@ -1301,7 +1302,7 @@ pub fn fit_general(value: f64, width: f32, mut measure: impl FnMut(&str) -> f32)
 }
 
 fn round_fixed(a: f64, decimals: usize) -> String {
-    let factor = 10f64.powi(decimals as i32);
+    let factor = fmath::powi(10.0, decimals as i32);
     let r = (a * factor).round() / factor;
     format!("{r:.decimals$}")
 }

@@ -11,6 +11,7 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+libm = "=0.2.15"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
 xlsx-model = { package = "betteroffice-xlsx-model", path = "crates/xlsx-model", version = "0.5.1" }
