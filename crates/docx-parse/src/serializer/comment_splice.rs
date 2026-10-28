@@ -720,13 +720,19 @@ fn blank_text(value: &mut Value) {
     match value {
         Value::Object(object) => {
             if object.get("type").and_then(Value::as_str) == Some("paragraph") {
-                for key in ["extraAttributes", "listRendering", "renderedPageBreakBefore"] {
+                for key in [
+                    "extraAttributes",
+                    "listRendering",
+                    "renderedPageBreakBefore",
+                ] {
                     object.remove(key);
                 }
-                if object
-                    .get("formatting")
-                    .is_some_and(|formatting| formatting.is_null() || formatting.as_object().is_some_and(|values| values.is_empty()))
-                {
+                if object.get("formatting").is_some_and(|formatting| {
+                    formatting.is_null()
+                        || formatting
+                            .as_object()
+                            .is_some_and(|values| values.is_empty())
+                }) {
                     object.remove("formatting");
                 }
             }
@@ -1101,8 +1107,8 @@ fn error_xml(message: impl Into<String>) -> ParseError {
 mod tests {
     use crate::formatting::{ParagraphFormatting, TextFormatting};
     use crate::inline::{
-        InlineNode, PropertyChangeInfo, Run, RunContent, RunPropertyChange,
-        RunPropertyChangeType, RunType,
+        InlineNode, PropertyChangeInfo, Run, RunContent, RunPropertyChange, RunPropertyChangeType,
+        RunType,
     };
     use crate::paragraph::{Paragraph, ParagraphContent};
 
@@ -1278,9 +1284,16 @@ mod tests {
             alignment: Some("center".to_owned()),
             ..ParagraphFormatting::default()
         });
-        assert_eq!(comment_text_patch(&source, &written, FRAGMENT).unwrap(), None);
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
         written.content[0].formatting = source.content[0].formatting.clone();
-        assert!(comment_text_patch(&source, &written, FRAGMENT).unwrap().is_some());
+        assert!(
+            comment_text_patch(&source, &written, FRAGMENT)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1305,9 +1318,16 @@ mod tests {
             "<w:pStyle w:val=\"CommentText\"/>",
             "<w:pStyle w:val=\"KeepWithNext\"/><w:keepNext w:val=\"0\"/>",
         );
-        assert!(comment_text_patch(&source, &written, &fragment).unwrap().is_some());
+        assert!(
+            comment_text_patch(&source, &written, &fragment)
+                .unwrap()
+                .is_some()
+        );
         written.content[0].formatting.as_mut().unwrap().keep_next = None;
-        assert_eq!(comment_text_patch(&source, &written, &fragment).unwrap(), None);
+        assert_eq!(
+            comment_text_patch(&source, &written, &fragment).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1336,9 +1356,15 @@ mod tests {
                 current_formatting: run.formatting.clone(),
             }]);
         }
-        assert_eq!(comment_text_patch(&source, &revised, FRAGMENT).unwrap(), None);
+        assert_eq!(
+            comment_text_patch(&source, &revised, FRAGMENT).unwrap(),
+            None
+        );
         written.content[0].content.swap(1, 2);
-        assert_eq!(comment_text_patch(&source, &written, FRAGMENT).unwrap(), None);
+        assert_eq!(
+            comment_text_patch(&source, &written, FRAGMENT).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1374,8 +1400,7 @@ mod tests {
             now: "2026-01-05T09:00:00.000Z".to_owned(),
         })
         .unwrap();
-        let (serialized, mut infos) =
-            serialize_comments_with_info(&comments, &mut context.clone());
+        let (serialized, mut infos) = serialize_comments_with_info(&comments, &mut context.clone());
         let spliced = splice_comments(
             source.as_bytes(),
             &parts,
@@ -1395,10 +1420,17 @@ mod tests {
             }
         }
         let (_, extended) = find_part(&parts, "word/commentsExtended.xml").unwrap();
-        assert!(std::str::from_utf8(extended).unwrap().contains(source_entry));
+        assert!(
+            std::str::from_utf8(extended)
+                .unwrap()
+                .contains(source_entry)
+        );
         let reopened = source_comments(&parts, &seed).unwrap();
         assert_eq!(reopened.len(), 2);
-        assert_eq!(model_paragraph_text_parts(&reopened[0].content[0]).unwrap(), ["new"]);
+        assert_eq!(
+            model_paragraph_text_parts(&reopened[0].content[0]).unwrap(),
+            ["new"]
+        );
         assert_eq!(reopened[0].done, Some(true));
         assert_eq!(reopened[1].done, Some(true));
     }
