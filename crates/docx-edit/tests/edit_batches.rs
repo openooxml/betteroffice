@@ -1779,7 +1779,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 fn open_numbered_restyle(body: &str) -> EditingDoc {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
-        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style></w:styles>"#
+        r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="SuperHeading"><w:name w:val="SuperHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>"#
     );
     parts
         .iter_mut()
@@ -2507,6 +2507,31 @@ fn restyle_numbered_runs_keep_explicit_off_properties() {
     );
     assert!(!active(&marks(&doc, "body", "Explicit"), "bold"));
     assert!(active(&marks(&doc, "body", "Inherited"), "bold"));
+}
+
+#[test]
+fn restyle_numbered_runs_keep_explicit_vertical_alignment() {
+    let doc = open_numbered_restyle(concat!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>"#,
+        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr></w:pPr>"#,
+        r#"<w:r><w:rPr><w:vertAlign w:val="baseline"/></w:rPr><w:t>Baseline</w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>Lowered</w:t></w:r>"#,
+        "<w:r><w:t>Inherited</w:t></w:r></w:p>",
+    ));
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "SuperHeading")],
+    );
+    let baseline = marks(&doc, "body", "Baseline");
+    assert!(!active(&baseline, "superscript"));
+    assert!(!active(&baseline, "subscript"));
+    let lowered = marks(&doc, "body", "Lowered");
+    assert!(active(&lowered, "subscript"));
+    assert!(!active(&lowered, "superscript"));
+    let inherited = marks(&doc, "body", "Inherited");
+    assert!(active(&inherited, "superscript"));
+    assert!(!active(&inherited, "subscript"));
 }
 
 #[test]
