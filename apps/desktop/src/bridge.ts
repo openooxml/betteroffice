@@ -1,4 +1,5 @@
 import type { Format } from "../../../shared/editor-host/Editor";
+import { t } from "./i18n";
 
 export type { Format };
 export interface OpenFile {
@@ -50,9 +51,7 @@ export async function invoke<T>(message: {
 export function formatOf(name: string): Format {
   const format = name.split(".").at(-1)?.toLowerCase();
   if (format !== "docx" && format !== "xlsx" && format !== "pptx") {
-    throw new Error(
-      "Choose a Word document, Excel spreadsheet, or PowerPoint presentation."
-    );
+    throw new Error(t("errors.unsupportedFile"));
   }
   return format;
 }

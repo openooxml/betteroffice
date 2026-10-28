@@ -4,6 +4,7 @@
 pub mod chart;
 mod color;
 mod emit;
+mod fmath;
 mod geometry;
 #[cfg(feature = "tiff")]
 pub mod media;
@@ -19,6 +20,8 @@ mod theme;
 
 pub use color::*;
 pub use emit::*;
+#[doc(hidden)]
+pub use fmath::correctly_rounded_hypot;
 pub use geometry::*;
 pub use picture::*;
 pub use shape::*;

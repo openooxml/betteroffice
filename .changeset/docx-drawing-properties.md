@@ -3,4 +3,4 @@
 '@betteroffice/docx-react': minor
 ---
 
-Adds `drawing` (`wp:docPr` properties, placement and type) to read atoms and structured image and unsupported inlines, plus a `drawing` geometry target for frame rects. Sessions seeded earlier read the fields as absent until reseeded.
+Reads now include `drawing` (`wp:docPr` properties, placement and type) on drawing atoms by default, as do structured image and unsupported inlines. Plugins request a drawing's frame rects with the new `drawing` geometry target. Sessions seeded earlier read `drawing` as absent until reseeded.

@@ -13,18 +13,14 @@
     "save": "Save",
     "exportPng": "Export PNG",
     "present": "Present",
-    "historyLabel": "History",
     "undo": "Undo",
     "redo": "Redo",
-    "textFormattingLabel": "Text formatting",
     "bold": "Bold",
     "italic": "Italic",
     "fontSize": "Font size",
     "textColor": "Text color",
-    "slidesLabel": "Slides",
     "addSlide": "Add slide",
     "deleteSlide": "Delete slide",
-    "objectsLabel": "Objects",
     "addTextBox": "Add text box",
     "insertImage": "Insert image",
     "groups": {
@@ -47,21 +43,15 @@
     "newSlide": "New slide",
     "newSlideWithLayout": "New slide with layout",
     "layoutOption": "Layout {number}",
-    "undoShortcut": "Undo (⌘Z)",
-    "redoShortcut": "Redo (⇧⌘Z)",
     "fit": "Fit",
     "zoomValue": "Zoom: {value}",
-    "selectToolShortcut": "Select (Esc)",
     "textBoxTool": "Text box",
     "shapeTool": "Shape",
     "fontFamily": "Font family",
     "mixed": "Mixed",
     "decreaseFontSize": "Decrease font size",
     "increaseFontSize": "Increase font size",
-    "boldShortcut": "Bold (⌘B)",
-    "italicShortcut": "Italic (⌘I)",
     "underline": "Underline",
-    "underlineShortcut": "Underline (⌘U)",
     "more": "More",
     "fillColor": "Fill color",
     "noFill": "No fill",
@@ -165,6 +155,7 @@
     "stale": "These objects changed after the proposal was created. Preview the current changes before applying.",
     "stalePreview": "This preview uses the updated slide. Applying will override the changed targets.",
     "geometry": "Position and size (x, y, width, height)",
+    "geometryValues": "{before} → {after} pt",
     "appearance": "Appearance or text formatting changed",
     "changedAgain": "The target changed again. Review the refreshed preview before applying.",
     "canvasTitle": "Changes on this slide",
@@ -231,6 +222,8 @@
     "expandPanel": "Expand {title}"
   },
   "presence": {
-    "label": "Collaborators"
+    "label": "Collaborators",
+    "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}",
+    "moreSelections": "+{count, plural, one {# selection} other {# selections}}"
   }
 }

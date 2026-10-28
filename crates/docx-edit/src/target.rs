@@ -410,10 +410,6 @@ impl Mark {
         self.has("sectPr") || self.has("sectionBreakType")
     }
 
-    pub fn numbering(&self) -> bool {
-        self.has("numPr")
-    }
-
     /// The source runs retained for save carry tracked formatting changes.
     fn run_revisions(&self) -> bool {
         let Some(Any::Array(runs)) = self.properties.get("_originalRunBoundaries") else {

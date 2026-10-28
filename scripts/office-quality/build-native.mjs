@@ -11,6 +11,7 @@ const harness = resolve(dirname(fileURLToPath(import.meta.url)), 'native/main.rs
 export function nativeFeatures(layoutSource) {
   const signature = layoutSource.match(/pub fn register_substitute_measure_font\s*\(([^)]*)\)/s)?.[1];
   if (!signature) return [];
+  if (layoutSource.includes('.register_named_substitute(')) return ['substitute-widths'];
   return [/\bbold\s*:/.test(signature) ? 'substitute-styles' : 'substitute-metrics'];
 }
 
@@ -41,6 +42,7 @@ publish = false
 [features]
 substitute-metrics = []
 substitute-styles = ["substitute-metrics"]
+substitute-widths = ["substitute-metrics"]
 
 [dependencies]
 ${dependencies.join('\n')}

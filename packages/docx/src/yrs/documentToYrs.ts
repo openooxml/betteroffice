@@ -1112,8 +1112,11 @@ function runBoundary(
   const marks = noteRefMarkTypes(run);
   const breaks = flowBreakOffsets(run);
   const key = keys[0];
+  const text = unitsText(units);
+  const storyText = units.map((unit) => unit.kind === 'text' ? unit.text : '\uFFFC').join('');
   return {
-    text: unitsText(units),
+    text,
+    ...(storyText !== text ? { storyText } : {}),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),

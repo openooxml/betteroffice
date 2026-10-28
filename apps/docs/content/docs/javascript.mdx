@@ -779,6 +779,9 @@ const saved = deck.save();
 
 A story reads as its paragraphs joined by `\n`, with story-local UTF-16 offsets;
 the read reports each paragraph's span, soft line breaks and field results.
+Each shape at every depth also reports its alternative text: `title` and
+`description` from its non-visual properties when non-empty, and
+`decorative: true` when it carries the decorative extension.
 Steps insert, replace and delete text within one paragraph, format and align
 text, replace speaker notes, and set a top-level shape's rectangle, fill or
 outline. Fields and soft line breaks are never replaced or deleted. Ids and

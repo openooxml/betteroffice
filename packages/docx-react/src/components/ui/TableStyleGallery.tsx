@@ -21,6 +21,7 @@ import type { TranslationKey } from '@betteroffice/docx-i18n';
 export interface TableStylePreset {
   id: string;
   name: string;
+  nameKey?: TranslationKey;
   /** Table-level borders */
   tableBorders?: {
     top?: { style: string; size?: number; color?: { rgb: string } };
@@ -65,11 +66,13 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'TableNormal',
     name: 'Normal Table',
+    nameKey: 'table.styles.normalTable',
     look: { firstRow: false, lastRow: false, noHBand: true, noVBand: true },
   },
   {
     id: 'TableGrid',
     name: 'Table Grid',
+    nameKey: 'table.styles.tableGrid',
     tableBorders: {
       top: border1('000000'),
       bottom: border1('000000'),
@@ -83,6 +86,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'TableGridLight',
     name: 'Grid Table Light',
+    nameKey: 'table.styles.gridTableLight',
     tableBorders: {
       top: border1('BFBFBF'),
       bottom: border1('BFBFBF'),
@@ -99,6 +103,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'PlainTable1',
     name: 'Plain Table 1',
+    nameKey: 'table.styles.plainTable1',
     tableBorders: {
       top: border1('BFBFBF'),
       bottom: border1('BFBFBF'),
@@ -112,6 +117,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'PlainTable2',
     name: 'Plain Table 2',
+    nameKey: 'table.styles.plainTable2',
     look: { firstRow: true, lastRow: false, noHBand: false, noVBand: true },
     conditionals: {
       firstRow: { bold: true, borders: { bottom: border1('7F7F7F') } },
@@ -121,6 +127,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'PlainTable3',
     name: 'Plain Table 3',
+    nameKey: 'table.styles.plainTable3',
     look: { firstRow: true, lastRow: false, noHBand: false, noVBand: true },
     conditionals: {
       firstRow: { bold: true, color: '#FFFFFF', backgroundColor: '#A5A5A5' },
@@ -130,6 +137,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'PlainTable4',
     name: 'Plain Table 4',
+    nameKey: 'table.styles.plainTable4',
     look: { firstRow: true, lastRow: false, noHBand: false, noVBand: true },
     conditionals: {
       firstRow: { bold: true, color: '#FFFFFF', backgroundColor: '#000000' },
@@ -139,6 +147,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'GridTable1Light-Accent1',
     name: 'Grid Table 1 Light',
+    nameKey: 'table.styles.gridTable1Light',
     tableBorders: {
       top: border1('B4C6E7'),
       bottom: border1('B4C6E7'),
@@ -155,6 +164,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'GridTable4-Accent1',
     name: 'Grid Table 4 Accent 1',
+    nameKey: 'table.styles.gridTable4Accent1',
     tableBorders: {
       top: border1('4472C4'),
       bottom: border1('4472C4'),
@@ -172,6 +182,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'GridTable5Dark-Accent1',
     name: 'Grid Table 5 Dark',
+    nameKey: 'table.styles.gridTable5Dark',
     tableBorders: {
       top: border1('FFFFFF'),
       bottom: border1('FFFFFF'),
@@ -190,6 +201,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'ListTable3-Accent2',
     name: 'List Table 3 Accent 2',
+    nameKey: 'table.styles.listTable3Accent2',
     tableBorders: {
       top: border1('ED7D31'),
       bottom: border1('ED7D31'),
@@ -203,6 +215,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'ListTable4-Accent3',
     name: 'List Table 4 Accent 3',
+    nameKey: 'table.styles.listTable4Accent3',
     tableBorders: {
       top: border1('A5A5A5'),
       bottom: border1('A5A5A5'),
@@ -217,6 +230,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'GridTable4-Accent5',
     name: 'Grid Table 4 Accent 5',
+    nameKey: 'table.styles.gridTable4Accent5',
     tableBorders: {
       top: border1('5B9BD5'),
       bottom: border1('5B9BD5'),
@@ -234,6 +248,7 @@ const BUILTIN_STYLES: TableStylePreset[] = [
   {
     id: 'GridTable4-Accent6',
     name: 'Grid Table 4 Accent 6',
+    nameKey: 'table.styles.gridTable4Accent6',
     tableBorders: {
       top: border1('70AD47'),
       bottom: border1('70AD47'),
@@ -488,7 +503,7 @@ export function TableStyleGallery({
           }}
         >
           {allPresets.map((preset) => {
-            const nameKey = STYLE_NAME_KEYS[preset.id];
+            const nameKey = preset.nameKey ?? STYLE_NAME_KEYS[preset.id];
             const translatedPreset = nameKey ? { ...preset, name: t(nameKey) } : preset;
             return (
               <StylePreview

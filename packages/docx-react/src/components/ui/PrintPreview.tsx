@@ -11,6 +11,8 @@
 import React from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from '../../i18n';
+import { createT, en } from '@betteroffice/docx-i18n';
+import type { TFunction } from '@betteroffice/docx-i18n';
 
 // Print data helpers are framework-agnostic and live in core as the single
 // source of truth; re-export them so the React API surface is unchanged.
@@ -21,9 +23,18 @@ export {
   triggerPrint,
   openPrintWindow,
   parsePageRange,
-  formatPageRange,
   isPrintSupported,
 } from '@betteroffice/docx';
+
+export function formatPageRange(
+  range: { start: number; end: number } | null,
+  totalPages: number,
+  t: TFunction = createT(en)
+): string {
+  if (!range) return t('print.allPages', { totalPages });
+  if (range.start === range.end) return t('print.singlePage', { start: range.start });
+  return t('print.pageRange', { start: range.start, end: range.end });
+}
 
 // ============================================================================
 // TYPES

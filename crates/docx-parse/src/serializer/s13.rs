@@ -1306,6 +1306,16 @@ impl StoryParts<'_> {
                 patches,
                 &mut reasons,
             )
+            .or_else(|| {
+                super::splice::splice_source_direct(
+                    source,
+                    &serialized,
+                    &written,
+                    part,
+                    assignments,
+                    patches,
+                )
+            })
         };
         if let Some(spliced) = spliced {
             for reason in reasons {
