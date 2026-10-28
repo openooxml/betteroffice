@@ -65,6 +65,10 @@ export interface PresentationCommandRegistration {
   dispose(): void;
 }
 
+function engineVersion(): string | undefined {
+  try { return PptxDocument.version(); } catch { return undefined; }
+}
+
 export function registerPresentationCommandHandlers(
   options: PresentationCommandHostOptions = {}
 ): PresentationCommandRegistration {
@@ -1353,7 +1357,7 @@ export function registerPresentationCommandHandlers(
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
           activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
-          recoveryEngine: PptxDocument.version(), ...(recoveryUpdate ? { recoveryUpdate } : {}) },
+          recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}) },
           [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : [])]);
       } catch (error) {
         dispose();

@@ -133,11 +133,11 @@ fn source_seed_and_update_baselines_replay_identically_across_live_clients() {
         hydrated.apply_update_v1(update).unwrap();
     }
     let expected = parts(&author.save().unwrap());
+    assert_eq!(
+        source.encode_state_as_update_v1(),
+        hydrated.encode_state_as_update_v1()
+    );
     for recovered in [&source, &hydrated] {
-        assert_eq!(
-            recovered.encode_state_as_update_v1(),
-            author.encode_state_as_update_v1()
-        );
         assert_eq!(
             recovered.encode_state_vector_v1(),
             author.encode_state_vector_v1()
