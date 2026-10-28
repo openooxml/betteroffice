@@ -62,191 +62,251 @@ pub(crate) fn paragraph_sizes(
     paragraph: &XmlElement,
     fingerprint: [u8; 32],
 ) -> Option<ParagraphSizes> {
-    #[derive(Default)]
-    struct Field {
-        instruction: String,
-        result: bool,
-    }
+    use docx_parse::xml::XmlNode;
 
-    impl Field {
-        fn kind(&self, name: &str) -> bool {
-            self.instruction
-                .split_whitespace()
-                .next()
-                .is_some_and(|instruction| instruction.eq_ignore_ascii_case(name))
-        }
-
-        fn entry_result(&self) -> bool {
-            self.result && !self.kind("PAGEREF")
-        }
+    enum Run {
+        Entry {
+            direct: bool,
+            direct_cs: bool,
+        },
+        Tab,
+        Begin,
+        Separate,
+        End,
+        Instruction(String),
     }
 
     #[derive(Default)]
-    struct Scan {
-        fields: Vec<Field>,
+    struct Entries {
         found: bool,
         direct_cs: bool,
-        outside_text: bool,
-        closed: bool,
-        floor: usize,
     }
 
-    impl Scan {
-        fn accepts(&self, field: &Field, simple: bool) -> bool {
-            let below = &self.fields[..self.fields.len().saturating_sub(usize::from(!simple))];
-            if field.kind("TOC") {
-                return !simple && below.is_empty() && !self.outside_text;
-            }
-            field.kind("PAGEREF")
-                && below.len() <= 1
-                && below.iter().all(|field| field.kind("TOC"))
-        }
-
-        fn close(&mut self) {
-            match self.fields.pop() {
-                None => self.closed = true,
-                Some(field) if field.kind("TOC") => self.closed = true,
-                Some(_) => {}
+    fn elements(node: &XmlElement) -> Option<Vec<&XmlElement>> {
+        let mut elements = Vec::new();
+        for child in &node.children {
+            match child {
+                XmlNode::Element(element) => elements.push(element),
+                XmlNode::Text(text) | XmlNode::CData(text) if text.trim().is_empty() => {}
+                _ => return None,
             }
         }
+        Some(elements)
     }
 
-    const PROPERTIES: [&str; 4] = ["pPr", "sdtPr", "sdtEndPr", "smartTagPr"];
-    const CONTAINERS: [&str; 6] = ["p", "hyperlink", "sdt", "sdtContent", "smartTag", "customXml"];
-    const MARKS: [&str; 7] = [
-        "bookmarkStart",
-        "bookmarkEnd",
-        "proofErr",
-        "permStart",
-        "permEnd",
-        "commentRangeStart",
-        "commentRangeEnd",
-    ];
-    const RUN_CHILDREN: [&str; 12] = [
-        "rPr",
-        "t",
-        "tab",
-        "ptab",
-        "fldChar",
-        "instrText",
-        "sym",
-        "softHyphen",
-        "noBreakHyphen",
-        "lastRenderedPageBreak",
-        "br",
-        "cr",
-    ];
+    fn properties(node: &XmlElement) -> bool {
+        node.namespace_prefix() == Some("w")
+            && node.children.iter().all(|child| match child {
+                XmlNode::Element(element) => properties(element),
+                XmlNode::Text(text) | XmlNode::CData(text) => text.trim().is_empty(),
+            })
+    }
 
-    fn visit(node: &XmlElement, scan: &mut Scan) -> bool {
-        if PROPERTIES.iter().any(|name| node.matches_name("w", name))
-            || node.matches_name("w", "customXmlPr")
-            || MARKS.iter().any(|name| node.matches_name("w", name))
-        {
-            return true;
+    fn text(node: &XmlElement) -> Option<String> {
+        let mut text = String::new();
+        for child in &node.children {
+            match child {
+                XmlNode::Text(part) | XmlNode::CData(part) => text.push_str(part),
+                XmlNode::Element(_) => return None,
+            }
         }
-        if node.matches_name("w", "r")
-            && !node
-                .child_elements()
-                .all(|child| RUN_CHILDREN.iter().any(|name| child.matches_name("w", name)))
-        {
-            return false;
+        Some(text)
+    }
+
+    fn run(node: &XmlElement) -> Option<Run> {
+        if node.name != "w:r" {
+            return None;
         }
-        if !node.matches_name("w", "r")
-            && !node.matches_name("w", "fldSimple")
-            && !CONTAINERS.iter().any(|name| node.matches_name("w", name))
-        {
-            return false;
+        let children = elements(node)?;
+        let (formatting, content) = match children.split_first() {
+            Some((first, rest)) if first.name == "w:rPr" && properties(first) => {
+                (Some(*first), rest)
+            }
+            _ => (None, children.as_slice()),
+        };
+        if content.is_empty() {
+            return None;
         }
-        if node.matches_name("w", "fldSimple") {
-            let field = Field {
-                instruction: node.attribute(Some("w"), "instr").unwrap_or_default().to_owned(),
-                result: true,
+        if content.len() == 1 && content[0].name == "w:fldChar" {
+            if !content[0].children.is_empty() {
+                return None;
+            }
+            return match content[0].attributes.get("w:fldCharType")?.as_str() {
+                "begin" => Some(Run::Begin),
+                "separate" => Some(Run::Separate),
+                "end" => Some(Run::End),
+                _ => None,
             };
-            if !scan.accepts(&field, true) {
-                return false;
-            }
-            let depth = scan.fields.len();
-            scan.fields.push(field);
-            let floor = std::mem::replace(&mut scan.floor, depth + 1);
-            if !node.child_elements().all(|child| visit(child, scan))
-                || scan.fields.len() != depth + 1
-            {
-                return false;
-            }
-            scan.floor = floor;
-            scan.close();
-            return true;
         }
-        if node.matches_name("w", "r") {
-            let mut control = false;
-            let mut text = false;
-            for child in node.child_elements() {
-                if child.matches_name("w", "fldChar") {
-                    control = true;
-                    match child.attribute(Some("w"), "fldCharType") {
-                        Some("begin") => scan.fields.push(Field::default()),
-                        Some("separate" | "end")
-                            if scan.floor > 0 && scan.fields.len() <= scan.floor =>
-                        {
-                            return false;
-                        }
-                        Some("separate") => {
-                            if scan.fields.is_empty() {
-                                scan.fields.push(Field::default());
-                            }
-                            scan.fields.last_mut().unwrap().result = true;
-                            if !scan.accepts(scan.fields.last().unwrap(), false) {
-                                return false;
-                            }
-                        }
-                        Some("end") => scan.close(),
-                        _ => return false,
-                    }
-                } else if child.matches_name("w", "instrText") {
-                    control = true;
-                    match scan.fields.last_mut() {
-                        Some(field) if !field.result => {
-                            field.instruction.push_str(&child.text_content());
-                        }
-                        _ => return false,
-                    }
-                } else if child.matches_name("w", "t") {
-                    text |= !child.text_content().is_empty();
-                } else if ["sym", "softHyphen", "noBreakHyphen"]
-                    .iter()
-                    .any(|name| child.matches_name("w", name))
-                {
-                    text = true;
-                }
+        if content.iter().all(|child| child.name == "w:instrText") {
+            let mut instruction = String::new();
+            for child in content {
+                instruction.push_str(&text(child)?);
             }
-            if text && (control || scan.fields.last().is_some_and(|field| !field.result)) {
-                return false;
-            }
-            if text && !scan.fields.iter().any(|field| field.kind("TOC")) {
-                if scan.closed {
-                    return false;
-                }
-                scan.outside_text = true;
-            }
-            if control || !text || !scan.fields.last().is_none_or(Field::entry_result) {
-                return true;
-            }
-            scan.found = true;
-            let properties = node.child("w", "rPr");
-            if properties.is_some_and(|properties| properties.child("w", "sz").is_some()) {
-                return false;
-            }
-            scan.direct_cs |=
-                properties.is_some_and(|properties| properties.child("w", "szCs").is_some());
-            return true;
+            return Some(Run::Instruction(instruction));
         }
-        node.child_elements().all(|child| visit(child, scan))
+        let mut entry = false;
+        let mut tab = false;
+        let mut positioned_tab = false;
+        for child in content {
+            match child.name.as_str() {
+                "w:t" => entry |= !text(child)?.is_empty(),
+                "w:sym" | "w:softHyphen" | "w:noBreakHyphen" if child.children.is_empty() => {
+                    entry = true;
+                }
+                "w:tab" if child.children.is_empty() => tab = true,
+                "w:ptab" if child.children.is_empty() => positioned_tab = true,
+                "w:lastRenderedPageBreak" if child.children.is_empty() => {}
+                _ => return None,
+            }
+        }
+        if entry && !positioned_tab {
+            Some(Run::Entry {
+                direct: formatting.is_some_and(|formatting| {
+                    formatting.child_elements().any(|child| child.name == "w:sz")
+                }),
+                direct_cs: formatting.is_some_and(|formatting| {
+                    formatting.child_elements().any(|child| child.name == "w:szCs")
+                }),
+            })
+        } else if !entry
+            && (tab || positioned_tab)
+            && !content.iter().any(|child| child.name == "w:t")
+        {
+            Some(Run::Tab)
+        } else {
+            None
+        }
     }
 
-    let mut scan = Scan::default();
-    (visit(paragraph, &mut scan) && scan.found).then_some(ParagraphSizes {
+    fn marker(node: &XmlElement) -> bool {
+        matches!(
+            node.name.as_str(),
+            "w:bookmarkStart"
+                | "w:bookmarkEnd"
+                | "w:proofErr"
+                | "w:permStart"
+                | "w:permEnd"
+                | "w:commentRangeStart"
+                | "w:commentRangeEnd"
+        ) && node.children.is_empty()
+    }
+
+    fn kind(instruction: &str, expected: &str) -> bool {
+        instruction
+            .split_whitespace()
+            .next()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case(expected))
+    }
+
+    fn opening(nodes: &[&XmlElement], start: usize) -> Option<(String, usize)> {
+        if !matches!(run(nodes.get(start)?), Some(Run::Begin)) {
+            return None;
+        }
+        let mut cursor = start + 1;
+        let mut instruction = String::new();
+        while let Some(Run::Instruction(part)) = nodes.get(cursor).and_then(|node| run(node)) {
+            instruction.push_str(&part);
+            cursor += 1;
+        }
+        if cursor == start + 1 || !matches!(run(nodes.get(cursor)?), Some(Run::Separate)) {
+            return None;
+        }
+        Some((instruction, cursor + 1))
+    }
+
+    fn complex_page(nodes: &[&XmlElement], start: usize) -> Option<usize> {
+        let (instruction, mut cursor) = opening(nodes, start)?;
+        if !kind(&instruction, "PAGEREF") {
+            return None;
+        }
+        while matches!(nodes.get(cursor).and_then(|node| run(node)), Some(Run::Entry { .. })) {
+            cursor += 1;
+        }
+        matches!(run(nodes.get(cursor)?), Some(Run::End)).then_some(cursor + 1)
+    }
+
+    fn item(
+        nodes: &[&XmlElement],
+        cursor: usize,
+        links: bool,
+        entries: &mut Entries,
+    ) -> Option<usize> {
+        let node = nodes.get(cursor)?;
+        if marker(node) {
+            return Some(cursor + 1);
+        }
+        if links && node.name == "w:hyperlink" {
+            let children = elements(node)?;
+            let mut child = 0;
+            while child < children.len() {
+                child = item(&children, child, false, entries)?;
+            }
+            return Some(cursor + 1);
+        }
+        if node.name == "w:fldSimple" {
+            if !kind(node.attributes.get("w:instr")?, "PAGEREF") {
+                return None;
+            }
+            return elements(node)?
+                .iter()
+                .all(|child| matches!(run(child), Some(Run::Entry { .. })))
+                .then_some(cursor + 1);
+        }
+        match run(node)? {
+            Run::Entry {
+                direct: false,
+                direct_cs,
+            } => {
+                entries.found = true;
+                entries.direct_cs |= direct_cs;
+                Some(cursor + 1)
+            }
+            Run::Tab => Some(cursor + 1),
+            Run::Begin => complex_page(nodes, cursor),
+            _ => None,
+        }
+    }
+
+    if paragraph.name != "w:p" {
+        return None;
+    }
+    let nodes = elements(paragraph)?;
+    let mut cursor = 0;
+    if let Some(first) = nodes.first()
+        && first.name == "w:pPr"
+    {
+        if !properties(first) {
+            return None;
+        }
+        cursor += 1;
+    }
+    while nodes.get(cursor).is_some_and(|node| marker(node)) {
+        cursor += 1;
+    }
+    if matches!(nodes.get(cursor).and_then(|node| run(node)), Some(Run::Begin)) {
+        let (instruction, after) = opening(&nodes, cursor)?;
+        if kind(&instruction, "TOC") {
+            cursor = after;
+        }
+    }
+    let mut entries = Entries::default();
+    while cursor < nodes.len() {
+        if matches!(run(nodes[cursor]), Some(Run::End)) {
+            cursor += 1;
+            while nodes.get(cursor).is_some_and(|node| marker(node)) {
+                cursor += 1;
+            }
+            if cursor != nodes.len() {
+                return None;
+            }
+            break;
+        }
+        cursor = item(&nodes, cursor, true, &mut entries)?;
+    }
+    entries.found.then_some(ParagraphSizes {
         fingerprint,
-        direct_cs: scan.direct_cs,
+        direct_cs: entries.direct_cs,
     })
 }
 
@@ -462,234 +522,262 @@ mod tests {
         }
     }
 
-    #[test]
-    fn source_entry_sizes_exclude_tabs_and_pageref_results() {
+    const ENTRY: &str = concat!(
+        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>"#,
+        "<w:t>Entry</w:t></w:r>",
+    );
+    const BEGIN: &str = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
+    const SEPARATE: &str = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+    const END: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    const PAGE: &str = concat!(
+        r#"<w:r><w:rPr><w:webHidden/><w:sz w:val="28"/><w:szCs w:val="28"/>"#,
+        "</w:rPr><w:t>3</w:t></w:r>",
+    );
+
+    fn grammar_open(instruction: &str) -> String {
+        format!("{BEGIN}<w:r><w:instrText> {instruction} target </w:instrText></w:r>{SEPARATE}")
+    }
+
+    fn grammar_proof(content: &str) -> Option<ParagraphSizes> {
         use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 
-        let sized = r#"<w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>"#;
-        let complex = format!(
+        let xml = format!(
             concat!(
-                r#"<w:r>{sized}<w:fldChar w:fldCharType="begin"/></w:r>"#,
-                r#"<w:r>{sized}<w:instrText> PAGEREF target </w:instrText></w:r>"#,
-                r#"<w:r>{sized}<w:fldChar w:fldCharType="separate"/></w:r>"#,
-                r#"<w:r>{sized}<w:t>3</w:t></w:r>"#,
-                r#"<w:r>{sized}<w:fldChar w:fldCharType="end"/></w:r>"#,
+                "<w:p ",
+                r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+                r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" "#,
+                r#"xmlns:x="urn:foreign">{content}</w:p>"#,
             ),
-            sized = sized,
+            content = content,
         );
-        let mut cases = vec![
-            (format!("<w:r>{sized}<w:tab/><w:ptab/></w:r>"), true),
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        paragraph_sizes(document.root().unwrap(), [23; 32])
+    }
+
+    #[test]
+    fn strict_toc_grammar_accepts_word_entry_paragraphs() {
+        let toc = grammar_open("tOc");
+        let page = format!("{}{PAGE}{END}", grammar_open("pAgErEf"));
+        let simple = format!(r#"<w:fldSimple w:instr=" PAGEREF target ">{PAGE}</w:fldSimple>"#);
+        let tab = concat!(
+            r#"<w:r><w:rPr><w:webHidden/><w:sz w:val="28"/><w:szCs w:val="28"/>"#,
+            "</w:rPr><w:tab/><w:lastRenderedPageBreak/></w:r>",
+        );
+        let link = format!(r#"<w:hyperlink w:anchor="target">{ENTRY}{tab}{page}</w:hyperlink>"#);
+        let markers = concat!(
+            r#"<w:bookmarkStart w:id="0" w:name="entry"/><w:bookmarkEnd w:id="0"/>"#,
+            r#"<w:proofErr w:type="spellStart"/><w:permStart w:id="1"/>"#,
+            r#"<w:permEnd w:id="1"/><w:commentRangeStart w:id="2"/>"#,
+            r#"<w:commentRangeEnd w:id="2"/>"#,
+        );
+        for (label, content) in [
+            ("first", format!("{toc}{link}")),
+            ("middle", link.clone()),
+            ("last", format!("{link}{END}")),
+            ("single", format!("{toc}{link}{END}")),
+            ("simple page", format!("{ENTRY}{tab}{simple}")),
+            ("complex page", format!("{ENTRY}{tab}{page}")),
             (
+                "simple page in link",
+                format!("<w:hyperlink>{ENTRY}{simple}</w:hyperlink>"),
+            ),
+            (
+                "markers",
+                format!("<w:pPr/>{markers}{toc}{markers}{link}{END}{markers}"),
+            ),
+            (
+                "empty page results",
+                format!(
+                    r#"{ENTRY}<w:fldSimple w:instr=" PAGEREF target "/>{}{END}"#,
+                    grammar_open("PAGEREF"),
+                ),
+            ),
+            (
+                "multiple instruction runs",
                 format!(
                     concat!(
-                        r#"<w:fldSimple w:instr=" PAGEREF target "><w:r>{sized}"#,
-                        "<w:t>3</w:t></w:r></w:fldSimple>",
+                        "{BEGIN}<w:r><w:instrText>T</w:instrText></w:r>",
+                        "<w:r><w:instrText>O</w:instrText><w:instrText>C</w:instrText></w:r>",
+                        "{SEPARATE}{ENTRY}{END}",
                     ),
-                    sized = sized,
+                    BEGIN = BEGIN,
+                    SEPARATE = SEPARATE,
+                    ENTRY = ENTRY,
+                    END = END,
                 ),
-                true,
-            ),
-            (complex.clone(), true),
-            (
-                complex.replace(
-                    r#"<w:t>3</w:t></w:r>"#,
-                    &format!(
-                        "<w:t>3</w:t></w:r>{}",
-                        complex.replace("PAGEREF", "REF").replace(
-                            r#"<w:t>3</w:t>"#,
-                            r#"<w:t>Nested reference</w:t>"#
-                        )
-                    ),
-                ),
-                false,
             ),
             (
-                complex.replace("PAGEREF", "REF").replace(
-                    r#"<w:r><w:rPr><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t>3</w:t></w:r>"#,
-                    &format!("<w:r><w:t>Ref text </w:t></w:r>{complex}"),
-                ),
-                false,
-            ),
-            (format!("<w:r>{sized}<w:t>Direct entry</w:t></w:r>"), false),
-            (
-                format!(r#"<w:r>{sized}<w:sym w:font="Arial" w:char="0041"/></w:r>"#),
-                false,
-            ),
-        ];
-        for instruction in ["TOC", "REF", "HYPERLINK", "SEQ", "UNKNOWN"] {
-            cases.push((
+                "entry content",
                 format!(
                     concat!(
-                        r#"<w:fldSimple w:instr=" {instruction} target "><w:r>{sized}"#,
-                        "<w:t>3</w:t></w:r></w:fldSimple>",
+                        "<w:r><w:t>Entry</w:t><w:tab/><w:lastRenderedPageBreak/>",
+                        r#"<w:sym w:font="Arial" w:char="0041"/>"#,
+                        "<w:softHyphen/><w:noBreakHyphen/></w:r>{tab}",
+                        "<w:r><w:rPr/><w:ptab/><w:lastRenderedPageBreak/></w:r>",
                     ),
-                    instruction = instruction,
-                    sized = sized,
+                    tab = tab,
                 ),
-                false,
-            ));
-            cases.push((complex.replace("PAGEREF", instruction), false));
-        }
-        for linked in [false, true] {
-            for (content, eligible) in &cases {
-                let entry = concat!(
-                    r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-                    r#"<w:t>Entry</w:t></w:r>"#,
-                );
-                let content = if linked {
-                    format!("<w:hyperlink>{entry}{content}</w:hyperlink>")
-                } else {
-                    format!("{entry}{content}")
-                };
-                let xml = format!(
-                    concat!(
-                        "<w:p xmlns:w=\"",
-                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
-                        "{content}</w:p>",
-                    ),
-                    content = content,
-                );
-                let limits = ParseLimits::default();
-                let mut budget = ParseBudget::new(&limits);
-                let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-                let proof = paragraph_sizes(document.root().unwrap(), [0; 32]);
-                assert_eq!(proof.is_some(), *eligible, "{content}");
-                if let Some(proof) = proof {
-                    assert!(proof.inherited(true), "{content}");
-                }
-            }
+            ),
+            (
+                "formatted field controls",
+                format!(
+                    "{}{}{ENTRY}{}",
+                    toc.replace("<w:r>", r#"<w:r><w:rPr><w:sz w:val="28"/></w:rPr>"#),
+                    "<w:hyperlink/>",
+                    END.replace("<w:r>", r#"<w:r><w:rPr><w:szCs w:val="28"/></w:rPr>"#),
+                ),
+            ),
+        ] {
+            let proof = grammar_proof(&content).unwrap_or_else(|| panic!("{label}: {content}"));
+            assert_eq!(proof.fingerprint, [23; 32], "{label}");
+            assert!(proof.inherited(true), "{label}");
         }
     }
 
     #[test]
-    fn text_outside_the_toc_field_rejects_its_paragraph_proof() {
-        use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
+    fn strict_toc_grammar_rejects_malformed_or_unsupported_content() {
+        let toc = grammar_open("TOC");
+        let page = grammar_open("PAGEREF");
+        let reference = format!("{}{ENTRY}{END}", grammar_open("REF"));
+        let simple_open = r#"<w:fldSimple w:instr=" PAGEREF target ">"#;
+        let instruction = "<w:r><w:instrText> stray </w:instrText></w:r>";
+        let mut cases = vec![
+            (
+                "field crosses a simple field boundary",
+                format!("{ENTRY}{page}{simple_open}{END}</w:fldSimple>{PAGE}{END}"),
+            ),
+            (
+                "two ends in a simple field",
+                format!("{ENTRY}{simple_open}{END}{END}</w:fldSimple>"),
+            ),
+            ("instruction in result", format!("{ENTRY}{page}{instruction}{PAGE}{END}")),
+            ("instruction in TOC result", format!("{toc}{ENTRY}{instruction}{END}")),
+            ("stray instruction", format!("{instruction}{ENTRY}")),
+            (
+                "text in instruction section",
+                format!(
+                    "{BEGIN}<w:r><w:instrText> TOC </w:instrText></w:r>{ENTRY}{SEPARATE}{ENTRY}"
+                ),
+            ),
+            ("deleted controls", format!("<w:del>{toc}</w:del>{ENTRY}")),
+            (
+                "alternate controls",
+                format!(
+                    concat!(
+                        "<mc:AlternateContent><mc:Choice Requires=\"w14\">{toc}</mc:Choice>",
+                        "<mc:Fallback/></mc:AlternateContent>{ENTRY}",
+                    ),
+                    toc = toc,
+                    ENTRY = ENTRY,
+                ),
+            ),
+            ("REF before TOC", format!("{reference}{toc}{ENTRY}")),
+            ("REF after TOC", format!("{toc}{ENTRY}{END}{reference}")),
+            ("REF before entry", format!("{reference}{ENTRY}")),
+            ("REF after continuation", format!("{ENTRY}{END}{reference}")),
+            ("body after TOC end", format!("{toc}{ENTRY}{END}{ENTRY}")),
+            ("text before TOC begin", format!("{ENTRY}{toc}{ENTRY}")),
+            ("unterminated page", format!("{ENTRY}{page}{PAGE}")),
+            ("nested complex page", format!("{ENTRY}{page}{page}{PAGE}{END}{END}")),
+            (
+                "nested simple page",
+                format!("{ENTRY}{simple_open}{simple_open}{PAGE}</w:fldSimple></w:fldSimple>"),
+            ),
+            (
+                "field crosses into link",
+                format!("{ENTRY}{page}<w:hyperlink>{PAGE}{END}</w:hyperlink>"),
+            ),
+            (
+                "field crosses out of link",
+                format!("<w:hyperlink>{ENTRY}{page}{PAGE}</w:hyperlink>{END}"),
+            ),
+            (
+                "link in page result",
+                format!("{ENTRY}{page}<w:hyperlink>{PAGE}</w:hyperlink>{END}"),
+            ),
+            ("TOC inside link", format!("<w:hyperlink>{toc}{ENTRY}{END}</w:hyperlink>")),
+            (
+                "nested link",
+                format!("<w:hyperlink><w:hyperlink>{ENTRY}</w:hyperlink></w:hyperlink>"),
+            ),
+            ("multiple ends", format!("{ENTRY}{END}{END}")),
+            ("empty paragraph", String::new()),
+            ("only page result", format!("{page}{PAGE}{END}")),
+            ("only tab", "<w:r><w:tab/></w:r>".to_owned()),
+            ("empty run", format!("{ENTRY}<w:r/>")),
+            ("empty text", format!("{ENTRY}<w:r><w:t/></w:r>")),
+            ("empty text with tab", format!("{ENTRY}<w:r><w:t/><w:tab/></w:r>")),
+            ("only rendered break", format!("{ENTRY}<w:r><w:lastRenderedPageBreak/></w:r>")),
+            ("positioned tab with text", format!("{ENTRY}<w:r><w:t>Text</w:t><w:ptab/></w:r>")),
+            ("page tab only", format!("{ENTRY}{simple_open}<w:r><w:tab/></w:r></w:fldSimple>")),
+            ("late paragraph properties", format!("{ENTRY}<w:pPr/>")),
+            ("duplicate paragraph properties", format!("<w:pPr/><w:pPr/>{ENTRY}")),
+            ("late run properties", format!("{ENTRY}<w:r><w:t>Text</w:t><w:rPr/></w:r>")),
+            (
+                "duplicate run properties",
+                format!("{ENTRY}<w:r><w:rPr/><w:rPr/><w:t>Text</w:t></w:r>"),
+            ),
+            ("container text", format!("{ENTRY} stray")),
+            ("nonempty marker", format!("{ENTRY}<w:bookmarkEnd><w:r/></w:bookmarkEnd>")),
+            ("foreign run", format!("{ENTRY}<x:r><x:t>Text</x:t></x:r>")),
+            ("foreign text", format!("{ENTRY}<w:r><x:t>Text</x:t></w:r>")),
+            ("foreign properties", format!("{ENTRY}<w:r><x:rPr/><w:t>Text</w:t></w:r>")),
+        ];
+        for control in ["begin", "separate", "end"] {
+            cases.push((
+                "mixed control and text",
+                format!(
+                    r#"{ENTRY}<w:r><w:fldChar w:fldCharType="{control}"/><w:t>Text</w:t></w:r>"#
+                ),
+            ));
+        }
+        for name in [
+            "br",
+            "cr",
+            "sdt",
+            "smartTag",
+            "customXml",
+            "ins",
+            "del",
+            "footnoteReference",
+            "delText",
+        ] {
+            cases.push(("unsupported element", format!("{ENTRY}<w:{name}/>")));
+            cases.push(("unsupported run child", format!("{ENTRY}<w:r><w:{name}/></w:r>")));
+        }
+        for name in ["REF", "HYPERLINK", "SEQ", "UNKNOWN"] {
+            cases.push((
+                "other complex field",
+                format!("{ENTRY}{}{PAGE}{END}", grammar_open(name)),
+            ));
+            cases.push((
+                "other simple field",
+                format!(r#"{ENTRY}<w:fldSimple w:instr=" {name} target ">{PAGE}</w:fldSimple>"#),
+            ));
+        }
+        for (label, content) in cases {
+            assert!(grammar_proof(&content).is_none(), "{label}: {content}");
+        }
+    }
 
-        let begin = concat!(
-            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-            r#"<w:r><w:instrText> TOC \h </w:instrText></w:r>"#,
-            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-        );
-        let entry = r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry</w:t></w:r>"#;
-        let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
-        let body = r#"<w:hyperlink w:anchor="body"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Body link</w:t></w:r></w:hyperlink>"#;
-        let title = r#"<w:r><w:t>Contents</w:t></w:r>"#;
-        let reference = format!(
+    #[test]
+    fn strict_toc_grammar_preserves_direct_entry_sizes() {
+        for content in [
+            r#"<w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>Entry</w:t></w:r>"#,
             concat!(
-                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-                r#"<w:r><w:instrText> REF body </w:instrText></w:r>"#,
-                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                "{body}",
-                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
-            ),
-            body = body,
-        );
-        for (content, eligible) in [
-            (format!("{begin}{entry}{end}"), true),
-            (format!("{begin}{entry}"), true),
-            (format!("{entry}{end}"), true),
-            (format!("{begin}{entry}{end}{body}"), false),
-            (
-                format!(r#"{begin}{entry}<w:r><w:instrText>X</w:instrText></w:r>{end}{body}"#),
-                false,
-            ),
-            (format!(r#"<w:r><w:instrText> TOC </w:instrText></w:r>{entry}"#), false),
-            (format!("{entry}{end}{body}"), false),
-            (format!("{title}{begin}{entry}"), false),
-            (format!("{begin}{entry}{end}{reference}"), false),
-            (format!("{entry}{end}{reference}"), false),
-            (format!("{reference}{begin}{entry}"), false),
-            (format!("{reference}{entry}"), false),
-            (
-                format!(
-                    concat!(
-                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-                        r#"<w:r><w:instrText> REF x </w:instrText></w:r>{entry}"#,
-                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>{entry}"#,
-                    ),
-                    entry = entry,
-                ),
-                false,
-            ),
-            (format!(r#"<w:del w:id="1">{begin}</w:del>{entry}"#), false),
-            (
-                format!(
-                    concat!(
-                        r#"{entry}<w:fldSimple w:instr=" PAGEREF x "><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
-                        r#"<w:r><w:instrText> REF y </w:instrText></w:r></w:fldSimple>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{entry}"#,
-                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
-                    ),
-                    entry = entry,
-                ),
-                false,
-            ),
-            (
-                format!(
-                    concat!(
-                        r#"<w:fldSimple w:instr=" PAGEREF x "><w:r><w:fldChar w:fldCharType="end"/></w:r></w:fldSimple>{entry}"#,
-                    ),
-                    entry = entry,
-                ),
-                false,
-            ),
-            (
-                format!(
-                    concat!(
-                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF a </w:instrText></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr=" REF b ">"#,
-                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGEREF c </w:instrText></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF d </w:instrText></w:r>"#,
-                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:fldSimple>{entry}"#,
-                    ),
-                    entry = entry,
-                ),
-                false,
-            ),
-            (format!(r#"<w:ins w:id="1">{entry}</w:ins>"#), false),
-            (
-                format!(
-                    r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w14">{begin}</mc:Choice><mc:Fallback/></mc:AlternateContent>{entry}"#
-                ),
-                false,
-            ),
-            (
-                format!(
-                    r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:footnoteReference w:id="1"/></w:r>{entry}"#
-                ),
-                false,
-            ),
-            (
-                format!(
-                    r#"<w:proofErr w:type="spellStart"/>{begin}<w:bookmarkStart w:id="0" w:name="x"/>{entry}<w:bookmarkEnd w:id="0"/>"#
-                ),
-                true,
-            ),
-            (
-                format!(
-                    concat!(
-                        "{begin}{entry}",
-                        r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/></w:rPr>"#,
-                        r#"<w:fldChar w:fldCharType="end"/><w:t>Direct</w:t></w:r>"#,
-                    ),
-                    begin = begin,
-                    entry = entry,
-                ),
-                false,
+                r#"<w:hyperlink><w:r><w:rPr><w:sz w:val="28"/></w:rPr>"#,
+                r#"<w:sym w:font="Arial" w:char="0041"/></w:r></w:hyperlink>"#,
             ),
         ] {
-            let xml = format!(
-                r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{content}</w:p>"#
-            );
-            let limits = ParseLimits::default();
-            let mut budget = ParseBudget::new(&limits);
-            let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-            let proof = paragraph_sizes(document.root().unwrap(), [0; 32]);
-            assert_eq!(proof.is_some(), eligible, "{content}");
+            assert!(grammar_proof(content).is_none(), "{content}");
         }
+        let complex_script =
+            r#"<w:r><w:rPr><w:szCs w:val="28"/></w:rPr><w:t>Entry</w:t></w:r>"#;
+        let proof = grammar_proof(complex_script).unwrap();
+        assert!(proof.inherited(false));
+        assert!(!proof.inherited(true));
     }
 
     #[test]

@@ -720,13 +720,19 @@ fn toc_with_sized_field_result(instruction: &str, complex: bool) -> Vec<Value> {
         r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:sz w:val="28"/>"#,
         r#"</w:rPr><w:t>3</w:t></w:r>"#,
     );
+    let page = instruction.eq_ignore_ascii_case("PAGEREF");
+    let result = if complex && !page {
+        format!(r#"<w:hyperlink w:anchor="target">{result}</w:hyperlink>"#)
+    } else {
+        result.to_owned()
+    };
     let field = if complex {
         format!(
             concat!(
                 r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
                 r#"<w:r><w:instrText> {instruction} target </w:instrText></w:r>"#,
                 r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                r#"<w:hyperlink w:anchor="target">{result}</w:hyperlink>"#,
+                "{result}",
                 r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
             ),
             instruction = instruction,
@@ -736,6 +742,11 @@ fn toc_with_sized_field_result(instruction: &str, complex: bool) -> Vec<Value> {
         format!(
             r#"<w:fldSimple w:instr=" {instruction} target ">{result}</w:fldSimple>"#,
         )
+    };
+    let field = if complex && page {
+        format!(r#"<w:hyperlink w:anchor="target">{field}</w:hyperlink>"#)
+    } else {
+        field
     };
     let body = format!(
         concat!(
