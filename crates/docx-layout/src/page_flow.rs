@@ -326,6 +326,7 @@ pub struct Paginator {
     footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     start_page_number: u32,
     section_index: usize,
+    region_section_indices: Vec<usize>,
     section_page_margins: Vec<SectionPageMargins>,
     section_page_float_bands: SharedPageFloatBands,
     column_capacities: Vec<Option<f64>>,
@@ -389,6 +390,7 @@ impl Paginator {
             footnote_reserved_heights: footnote_reserved_heights.map(Arc::new),
             start_page_number: 1,
             section_index: 0,
+            region_section_indices: Vec::new(),
             section_page_margins: Vec::new(),
             section_page_float_bands: SharedPageFloatBands::default(),
             column_capacities: Vec::new(),
@@ -405,6 +407,17 @@ impl Paginator {
     /// per section; see [`SectionPageMargins`].
     pub fn set_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
         self.section_page_margins = margins;
+    }
+
+    pub(crate) fn set_region_section_indices(&mut self, indices: Vec<usize>) {
+        self.region_section_indices = indices;
+    }
+
+    fn region_section_index(&self) -> usize {
+        self.region_section_indices
+            .get(self.section_index)
+            .copied()
+            .unwrap_or(self.section_index)
     }
 
     pub fn set_section_page_float_bands(&mut self, mut bands: Vec<SectionPageFloatBands>) {
@@ -519,14 +532,15 @@ impl Paginator {
     /// Sets ownership for future pages and the untouched current page, which
     /// then opens the section.
     pub fn set_section_index(&mut self, section_index: usize) {
-        let entering = section_index != self.section_index;
+        let previous_region = self.region_section_index();
         self.section_index = section_index;
+        let entering = previous_region != self.region_section_index();
         if entering {
             self.section_started = false;
         }
         if let Some(idx) = self.pristine_page() {
             let page_index = self.states[idx].page_index;
-            self.pages[page_index].region_section_index = section_index;
+            self.pages[page_index].region_section_index = self.region_section_index();
             if entering {
                 self.opens_section[idx] = true;
                 self.section_started = true;
@@ -617,7 +631,7 @@ impl Paginator {
     /// restart when it opens the section, else the previous page's plus one.
     fn page_parity_offset(&self, opens_section: bool, page_number: u32) -> bool {
         self.section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|margins| margins.restart)
             .filter(|_| opens_section)
             .map_or(self.continued_parity_offset, |start| {
@@ -630,7 +644,7 @@ impl Paginator {
     fn page_margins(&self, opens_section: bool, page_number: u32) -> PageMargins {
         let variant = self
             .section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|variants| {
                 if opens_section && variants.first.is_some() {
                     variants.first.as_ref()
@@ -656,7 +670,7 @@ impl Paginator {
         let margins = self
             .section_page_float_bands
             .sections
-            .get(self.section_index)
+            .get(self.region_section_index())
             .filter(|bands| {
                 !bands.default.is_empty()
                     || [&bands.first, &bands.even]
@@ -705,7 +719,7 @@ impl Paginator {
         let bands = self
             .section_page_float_bands
             .sections
-            .get(self.section_index)
+            .get(self.region_section_index())
             .map(|variants| {
                 if let Some(first) = variants.first.as_ref().filter(|_| opens_section) {
                     first
@@ -822,7 +836,7 @@ impl Paginator {
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
         self.opening_margins[page_index] = self.margins.clone();
         self.opening_columns[page_index] = self.columns.clone();
-        self.pages[page_index].region_section_index = self.section_index;
+        self.pages[page_index].region_section_index = self.region_section_index();
         let state = &mut self.states[idx];
         state.pen_y = content_top;
         state.content_top = content_top;
@@ -907,7 +921,7 @@ impl Paginator {
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
-            region_section_index: self.section_index,
+            region_section_index: self.region_section_index(),
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: if footnote_height > 0.0 {

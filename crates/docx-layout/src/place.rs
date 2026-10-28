@@ -482,6 +482,9 @@ fn origin_paginator(
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(indices) = &plan.region_section_indices {
+        paginator.set_region_section_indices(indices.clone());
+    }
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
     paginator
         .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
@@ -748,6 +751,9 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                     start.section_index,
                     options.footnote_reserved_heights.clone(),
                 )?;
+                if let Some(indices) = &plan.region_section_indices {
+                    paginator.set_region_section_indices(indices.clone());
+                }
                 paginator.set_section_page_margins(
                     options.section_page_margins.clone().unwrap_or_default(),
                 );
@@ -1237,11 +1243,7 @@ fn place<F: PartialEq>(
             LayoutBlock::SectionBreak(block) => {
                 // the NEXT section's columns and its own start type
                 let next_type = break_type_after_section(plan, section_idx);
-                let restart = plan
-                    .section_page_restarts
-                    .get(section_idx + 1)
-                    .copied()
-                    .flatten();
+                let restart = plan.section_page_restart(section_idx + 1);
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)

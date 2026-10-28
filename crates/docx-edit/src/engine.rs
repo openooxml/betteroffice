@@ -26,8 +26,9 @@ use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::prescan::SectionLayoutConfig;
 use docx_layout::regions::{
-    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_document_regions_tracked,
-    apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
+    DocumentRegions, RegionLayoutInput, advances_region_section, apply_document_regions,
+    apply_document_regions_tracked, apply_section_geometry, apply_section_geometry_to_blocks,
+    effective_header_footer_refs, section_region_indices,
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Fragment, HeaderFooterRefs, Input as LayoutInput, Layout,
@@ -598,6 +599,7 @@ fn region_table_measurement_frames<'a>(
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
+    let region_indices = section_region_indices(blocks.iter().copied());
     let section_breaks: Vec<_> = blocks
         .iter()
         .copied()
@@ -662,10 +664,19 @@ fn region_table_measurement_frames<'a>(
             {
                 column_index = 0;
             }
-            let section = regions
-                .sections
+            let region_index = region_indices
+                .as_ref()
+                .map_or(section_index, |indices| indices[section_index]);
+            let section = section_breaks
                 .get(section_index)
-                .or_else(|| regions.sections.last());
+                .is_none_or(|section| !section.is_self_describing())
+                .then(|| {
+                    regions
+                        .sections
+                        .get(region_index)
+                        .or_else(|| regions.sections.last())
+                })
+                .flatten();
             let fallback = &fallback_sections[section_index];
             let size = section
                 .and_then(|section| section.page_size.as_ref())
@@ -720,7 +731,7 @@ fn region_table_measurement_frames<'a>(
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
-                || regions.sections.get(section_index).is_some())
+                || regions.sections.get(region_index).is_some())
                 && columns.is_none_or(|columns| columns.count == 1.0)
                 && placement_columns.is_none_or(|columns| columns.count == 1.0)
                 && width == placement_page_width - placement_margins.left - placement_margins.right;
@@ -1307,6 +1318,8 @@ fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
 }
 
 fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<bool> {
+    let region_indices =
+        section_region_indices(input.measured.iter().map(|measured| &measured.block));
     let breaks: Vec<_> = input
         .measured
         .iter()
@@ -1320,9 +1333,14 @@ fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<
         .measured
         .iter()
         .map(|measured| {
-            let columns = regions
-                .sections
+            let region_index = region_indices
+                .as_ref()
+                .map_or(section_index, |indices| indices[section_index]);
+            let columns = breaks
                 .get(section_index)
+                .is_none_or(|section| !section.is_self_describing())
+                .then(|| regions.sections.get(region_index))
+                .flatten()
                 .and_then(|section| section.columns.as_ref())
                 .or_else(|| {
                     breaks
@@ -1777,7 +1795,16 @@ fn extend_input_for_header_footer(
                 || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
         })
         .then_some(float_bands);
-    input.options.margins = extended.first().cloned();
+    input.options.margins = input
+        .measured
+        .iter()
+        .find_map(|measured| match &measured.block {
+            LayoutBlock::SectionBreak(section) => Some(section),
+            _ => None,
+        })
+        .filter(|section| section.is_self_describing())
+        .and_then(|section| section.margins.clone())
+        .or_else(|| extended.first().cloned());
     input.options.final_margins = cut
         .map_or(extended.last(), |section| extended.get(section))
         .cloned();
@@ -1786,6 +1813,9 @@ fn extend_input_for_header_footer(
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
         };
+        if section_break.is_self_describing() {
+            continue;
+        }
         if let Some(margins) = extended.get(section_index) {
             section_break.margins = Some(margins.clone());
         }
@@ -2833,7 +2863,7 @@ impl BlockSpacing {
                     block,
                     regions.map(|regions| regions.paragraph_spacing_line_px(section)),
                 );
-                if matches!(block, LayoutBlock::SectionBreak(_)) {
+                if advances_region_section(block) {
                     section += 1;
                 }
                 spacing
@@ -3434,6 +3464,7 @@ fn normalize_measurement_block(
     resolve_line_unit_spacing(&mut owned, regions.paragraph_spacing_line_px(section_index));
     resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
     if let LayoutBlock::SectionBreak(section_break) = &mut owned
+        && !section_break.is_self_describing()
         && let Some(section) = regions.sections.get(section_index)
     {
         if section.page_size.is_some() {
@@ -3650,7 +3681,7 @@ fn certify_retained_blocks(
                         None
                     }
                 };
-            if matches!(source, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(source) {
                 section += 1;
             }
             Ok(certificate)
@@ -7062,7 +7093,7 @@ impl EngineSession {
                             block,
                             regions.doc_grid_snap_pitch_px(section_index),
                         );
-                        if matches!(block, LayoutBlock::SectionBreak(_)) {
+                        if advances_region_section(block) {
                             section_index += 1;
                         }
                     }
@@ -7079,11 +7110,18 @@ impl EngineSession {
                                 && (!exact || exact_prefix_body(&regions, &blocks)) =>
                         {
                             let anchored = anchors_objects(&blocks);
+                            let region_indices = section_region_indices(blocks.iter());
+                            let wrapped_sections = region_indices
+                                .as_ref()
+                                .map(|_| BodySections::new(&blocks, &input.options));
                             let sections =
                                 exact.then(|| BodySections::new(&blocks, &input.options));
                             let through = |last: usize| match &sections {
                                 Some(sections) => sections.through(last),
-                                None => options_through_section(&request_options, &regions, last),
+                                None => wrapped_sections.as_ref().map_or_else(
+                                    || options_through_section(&request_options, &regions, last),
+                                    |sections| sections.through(last),
+                                ),
                             };
                             let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
@@ -7115,7 +7153,12 @@ impl EngineSession {
                                             section: (last < sections.ended.len()).then_some(last),
                                         });
                                     }
-                                    None => regions.sections.truncate(last + 1),
+                                    None => {
+                                        let last = region_indices
+                                            .as_ref()
+                                            .map_or(last, |indices| indices[last]);
+                                        regions.sections.truncate(last + 1);
+                                    }
                                 }
                             }
                             input.measured = blocks
@@ -8444,6 +8487,11 @@ impl EngineSession {
         render_env: &RenderEnv,
         cut: Option<usize>,
     ) -> Result<Option<HeaderFooterPayload>, String> {
+        let cut = cut.map(|cut| {
+            section_region_indices(input.measured.iter().map(|measured| &measured.block))
+                .and_then(|indices| indices.get(cut).copied())
+                .unwrap_or(cut)
+        });
         let mut variants = Vec::new();
         let sections = regions.sections.len();
         let measured = cut.map_or(sections, |cut| (cut + 1).min(sections));
@@ -9635,7 +9683,7 @@ impl EngineSession {
                     BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(index));
                 }
             }
-            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(next_block) {
                 section_index += 1;
             }
         }
@@ -9964,6 +10012,7 @@ impl EngineSession {
                 );
                 resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
                 if let LayoutBlock::SectionBreak(section_break) = &mut owned
+                    && !section_break.is_self_describing()
                     && let Some(section) = regions.sections.get(section_index)
                 {
                     if section.page_size.is_some() {
@@ -10064,7 +10113,7 @@ impl EngineSession {
                         }
                     };
             }
-            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(next_block) {
                 section_index += 1;
             }
         }
@@ -10099,6 +10148,7 @@ impl EngineSession {
                         );
                         resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section));
                         if let LayoutBlock::SectionBreak(section_break) = block
+                            && !section_break.is_self_describing()
                             && let Some(section) = regions.sections.get(section)
                         {
                             if section.page_size.is_some() {

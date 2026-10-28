@@ -1151,6 +1151,15 @@ pub struct SectionBreakBlock {
     pub columns: Option<ColumnLayout>,
 }
 
+impl SectionBreakBlock {
+    /// Whether block-SDT geometry replaces a missing caller section entry.
+    pub fn is_self_describing(&self) -> bool {
+        self.sdt_groups
+            .as_ref()
+            .is_some_and(|groups| !groups.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageBreakBlock {

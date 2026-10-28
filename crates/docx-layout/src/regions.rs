@@ -501,6 +501,36 @@ pub fn apply_section_geometry(input: &mut Input, regions: &DocumentRegions) {
     apply_section_geometry_to_blocks(&mut input.measured, &mut input.options, regions);
 }
 
+/// Maps physical sections to caller entries only when block SDTs add sections.
+pub fn section_region_indices<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+) -> Option<Vec<usize>> {
+    let mut indices: Option<Vec<usize>> = None;
+    let mut region_index = 0;
+    for block in blocks {
+        let LayoutBlock::SectionBreak(section_break) = block else {
+            continue;
+        };
+        if let Some(indices) = &mut indices {
+            indices.push(region_index);
+        }
+        if section_break.is_self_describing() {
+            indices.get_or_insert_with(|| (0..=region_index).collect());
+        } else {
+            region_index += 1;
+        }
+    }
+    if let Some(indices) = &mut indices {
+        indices.push(region_index);
+    }
+    indices
+}
+
+/// Whether a block closes an entry supplied by the caller.
+pub fn advances_region_section(block: &LayoutBlock) -> bool {
+    matches!(block, LayoutBlock::SectionBreak(section) if !section.is_self_describing())
+}
+
 pub fn apply_section_geometry_to_blocks<T>(
     blocks: &mut [T],
     options: &mut crate::types::LayoutOptions,
@@ -544,10 +574,24 @@ pub fn apply_section_geometry_to_blocks<T>(
         options.body_break_type = last.section_start;
     }
     let mut section_index = 0;
+    let mut first_break = true;
     for item in blocks {
         let LayoutBlock::SectionBreak(section_break) = item.block_mut() else {
             continue;
         };
+        let ends_first_section = first_break;
+        first_break = false;
+        if section_break.is_self_describing() {
+            if ends_first_section {
+                if section_break.page_size.is_some() {
+                    options.page_size.clone_from(&section_break.page_size);
+                }
+                if section_break.margins.is_some() {
+                    options.margins.clone_from(&section_break.margins);
+                }
+            }
+            continue;
+        }
         let Some(section) = regions.sections.get(section_index) else {
             break;
         };
@@ -1121,6 +1165,193 @@ mod tests {
         };
         assert_eq!(section_break.columns.as_ref().unwrap().count, 2.0);
         assert_eq!(section_break.margins.as_ref().unwrap().top, 10.0);
+    }
+
+    fn sdt_section_input(wrapped: Option<usize>) -> (Input, DocumentRegions) {
+        let mut measured = Vec::new();
+        let mut sections = Vec::new();
+        for index in 0..4 {
+            let (width, height) = if index % 2 == 0 {
+                (300 + index * 20, 500 + index * 20)
+            } else {
+                (500 + index * 20, 300 + index * 20)
+            };
+            let geometry = json!({
+                "pageSize": {"w": width, "h": height},
+                "margins": {"top": 20 + index * 5, "right": 21 + index * 5,
+                    "bottom": 22 + index * 5, "left": 23 + index * 5},
+                "columns": {"count": if index == 1 { 2 } else { 1 }, "gap": 10}
+            });
+            measured.push(json!({
+                "block": {"kind": "paragraph", "id": format!("section-{index}"),
+                    "runs": [{"kind": "text", "text": "Content"}], "attrs": {}},
+                "measure": {"kind": "paragraph", "totalHeight": 24,
+                    "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0,
+                        "tailChar": 7, "width": 60, "ascent": 18,
+                        "descent": 6, "lineHeight": 24}]}
+            }));
+            if index < 3 {
+                let mut block = geometry.clone();
+                block["kind"] = json!("sectionBreak");
+                block["id"] = json!(format!("break-{index}"));
+                block["type"] = json!("nextPage");
+                if wrapped == Some(index) {
+                    block["sdtGroups"] = json!([{"id": "sdt@0", "sdtType": "richText"}]);
+                }
+                measured.push(json!({"block": block, "measure": {"kind": "sectionBreak"}}));
+            }
+            if wrapped != Some(index) {
+                let mut section = geometry;
+                section["sectionStart"] = json!("nextPage");
+                sections.push(section);
+            }
+        }
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "measured": measured, "regions": {"sections": sections}
+        }))
+        .unwrap();
+        let (input, regions, _, _, _, _) = request.split();
+        (input, regions)
+    }
+
+    fn assert_sdt_section_geometry(wrapped: usize) {
+        let (mut input, regions) = sdt_section_input(Some(wrapped));
+        let expected: Vec<_> = input
+            .measured
+            .iter()
+            .filter_map(|measured| match &measured.block {
+                LayoutBlock::SectionBreak(section) => Some((
+                    section.page_size.clone().unwrap(),
+                    section.margins.clone().unwrap(),
+                    section.columns.clone().unwrap(),
+                )),
+                _ => None,
+            })
+            .chain(regions.sections.last().map(|section| {
+                (
+                    section.page_size.clone().unwrap(),
+                    section.margins.clone().unwrap(),
+                    section.columns.clone().unwrap(),
+                )
+            }))
+            .collect();
+        apply_section_geometry(&mut input, &regions);
+        assert_eq!(input.options.page_size.as_ref(), Some(&expected[0].0));
+        assert_eq!(input.options.margins.as_ref(), Some(&expected[0].1));
+        assert_eq!(input.options.final_page_size.as_ref(), Some(&expected[3].0));
+        assert_eq!(input.options.final_margins.as_ref(), Some(&expected[3].1));
+        let mut layout = crate::compute_layout_input(&mut input).unwrap();
+        apply_document_regions(&mut layout, &regions);
+        assert_eq!(layout.pages.len(), 4);
+        for (index, (page, (size, margins, columns))) in
+            layout.pages.iter().zip(expected).enumerate()
+        {
+            assert_eq!(page.size, size, "section {index}");
+            assert_eq!(page.margins, margins, "section {index}");
+            assert_eq!(
+                page.columns.as_ref().map_or(1.0, |columns| columns.count),
+                columns.count,
+                "section {index}"
+            );
+            assert_eq!(page.fragments.len(), 1, "section {index}");
+            assert_eq!(
+                page.region_section_index,
+                index - usize::from(index > wrapped),
+                "section {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_section_geometry_matches_direct_layout() {
+        for empty_groups in [false, true] {
+            let (mut input, regions) = sdt_section_input(None);
+            let mut direct = input.clone();
+            let first = &regions.sections[0];
+            let last = &regions.sections[3];
+            direct.options.page_size.clone_from(&first.page_size);
+            direct.options.margins.clone_from(&first.margins);
+            direct.options.final_page_size.clone_from(&last.page_size);
+            direct.options.final_margins.clone_from(&last.margins);
+            direct.options.columns.clone_from(&last.columns);
+            direct.options.body_break_type = last.section_start;
+            for measured in &mut input.measured {
+                if let LayoutBlock::SectionBreak(section) = &mut measured.block {
+                    section.page_size = Some(Size { w: 200.0, h: 250.0 });
+                    section.margins = None;
+                    section.columns = None;
+                    if empty_groups {
+                        section.sdt_groups = Some(Vec::new());
+                    }
+                }
+            }
+            apply_section_geometry(&mut input, &regions);
+            let mut layout = crate::compute_layout_input(&mut input).unwrap();
+            let mut expected = crate::compute_layout_input(&mut direct).unwrap();
+            apply_document_regions(&mut layout, &regions);
+            apply_document_regions(&mut expected, &regions);
+            assert_eq!(
+                serde_json::to_vec(&layout).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_cover_section_keeps_its_own_page_geometry() {
+        assert_sdt_section_geometry(0);
+    }
+
+    #[test]
+    fn wrapped_middle_section_preserves_later_portrait_and_landscape_geometry() {
+        assert_sdt_section_geometry(1);
+    }
+
+    #[test]
+    fn wrapped_last_break_preserves_body_section_geometry() {
+        assert_sdt_section_geometry(2);
+    }
+
+    #[test]
+    fn wrapped_section_does_not_advance_caller_note_grid_or_numbering_lookups() {
+        let (mut input, mut regions) = sdt_section_input(Some(0));
+        for (index, section) in regions.sections.iter_mut().enumerate() {
+            section.note_settings.footnote_columns = Some(index as u64 + 2);
+            section.properties = Some(AuthoredSectionProperties {
+                doc_grid: Some(json!({"type": "lines", "linePitch": 300 + index * 150})),
+                ..AuthoredSectionProperties::default()
+            });
+            section.page_numbering = Some(PageNumbering {
+                start: Some(7 + index as u64 * 10),
+                format: Some("decimal".into()),
+            });
+            section.header_footer_refs = Some(HeaderFooterRefs {
+                header_default: Some(format!("header-{index}")),
+                ..HeaderFooterRefs::default()
+            });
+        }
+        apply_section_geometry(&mut input, &regions);
+        let mut layout = crate::compute_layout_input(&mut input).unwrap();
+        apply_document_regions(&mut layout, &regions);
+        let columns = crate::footnotes::footnote_columns_by_page(&layout.pages, &regions);
+        for (index, page) in layout.pages.iter().enumerate() {
+            let caller = index.saturating_sub(1);
+            assert_eq!(page.region_section_index, caller);
+            assert_eq!(columns.get(&page.number), Some(&(caller as u64 + 2)));
+            assert_eq!(
+                regions.paragraph_spacing_line_px(page.region_section_index),
+                20.0 + caller as f64 * 10.0
+            );
+            assert_eq!(
+                regions.doc_grid_snap_pitch_px(page.region_section_index),
+                Some(20.0 + caller as f64 * 10.0)
+            );
+            assert_eq!(page.section_page_number, Some([7, 8, 17, 27][index]));
+            assert_eq!(
+                page.header_footer_refs.as_ref().unwrap().header_default,
+                Some(format!("header-{caller}"))
+            );
+        }
     }
 
     fn restart_parity_input(
