@@ -8,6 +8,7 @@ import type {
 } from './peerlessViewStore';
 
 interface RasterTile {
+  id: number;
   canvas: HTMLCanvasElement;
   references: number;
   cancelled: boolean;
@@ -22,10 +23,15 @@ interface RasterLayer {
   line?: PeerlessActiveLine['line'];
 }
 
+interface PooledLayer {
+  id: number;
+  bounds: PeerlessRect;
+}
+
 interface PooledRaster {
   canvas: HTMLCanvasElement;
   background: string;
-  layers: readonly RasterLayer[];
+  layers: readonly PooledLayer[];
 }
 
 interface RasterPool {
@@ -180,6 +186,7 @@ export interface CommandFramePainterOptions {
 const rasters = new WeakMap<PeerlessConfirmedFrame, Map<number, RasterEntry>>();
 const tiles = new WeakMap<CommandFrameImages, Map<string, RasterTile>>();
 const rasterPools = new WeakMap<CommandFrameImages, RasterPool>();
+let tileSequence = 0;
 export { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
 
 export function commandFrameRaster(frame: PeerlessConfirmedFrame, scale = 1,
@@ -426,7 +433,7 @@ function buildRaster(
     remove();
     listeners.clear();
     if (ready && !pool.disposed && pool.canvases.length < 2) pool.canvases.push({ canvas: authoritative, background,
-      layers: ordered.map(({ tile, bounds }) => ({ tile, bounds })) });
+      layers: ordered.map(({ tile, bounds }) => ({ id: tile.id, bounds })) });
     else zero(authoritative);
     for (const [tile, key] of held) if (--tile.references === 0) {
       tile.cancelled = true;
@@ -453,7 +460,7 @@ function buildRaster(
       if (!context) { zero(canvas); throw new Error('Slide canvas is unavailable'); }
       const imageMedia = primitive.kind === 'image' && primitive.assetId ? media.retainAsset(primitive.assetId) : undefined;
       let painting = false;
-      const item: RasterTile = { canvas, references: 0, cancelled: false, ready: Promise.resolve(),
+      const item: RasterTile = { id: ++tileSequence, canvas, references: 0, cancelled: false, ready: Promise.resolve(),
         releaseMedia() { if (!painting) imageMedia?.release(); } };
       const proxy = guardedContext(context, () => !item.cancelled, () => {
         context.setTransform(factor, 0, 0, factor, -bounds.x * factor, -bounds.y * factor);
@@ -548,9 +555,9 @@ function buildRaster(
     release() { this.cancelled = true; release(); } };
 }
 
-function rasterDamage(previous: readonly RasterLayer[], next: readonly RasterLayer[], factor: number): PeerlessRect | undefined {
+function rasterDamage(previous: readonly PooledLayer[], next: readonly RasterLayer[], factor: number): PeerlessRect | undefined {
   let x = Infinity; let y = Infinity; let right = -Infinity; let bottom = -Infinity;
-  const include = (layer: RasterLayer | undefined) => {
+  const include = (layer: { bounds: PeerlessRect } | undefined) => {
     if (!layer) return;
     const bounds = layer.bounds;
     x = Math.min(x, bounds.x); y = Math.min(y, bounds.y);
@@ -558,7 +565,7 @@ function rasterDamage(previous: readonly RasterLayer[], next: readonly RasterLay
   };
   for (let index = 0; index < Math.max(previous.length, next.length); index += 1) {
     const a = previous[index]; const b = next[index];
-    if (a?.tile === b?.tile && a?.bounds.x === b?.bounds.x && a?.bounds.y === b?.bounds.y &&
+    if (a?.id === b?.tile.id && a?.bounds.x === b?.bounds.x && a?.bounds.y === b?.bounds.y &&
       a?.bounds.width === b?.bounds.width && a?.bounds.height === b?.bounds.height) continue;
     include(a); include(b);
   }

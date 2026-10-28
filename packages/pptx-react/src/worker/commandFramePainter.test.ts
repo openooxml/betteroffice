@@ -332,4 +332,18 @@ describe('command frame incremental raster', () => {
       expect(surface(canvas).pixels).toEqual(pixels);
     } finally { echo.dispose(); }
   });
+
+  test('pooled canvases do not keep earlier typing frames alive', async () => {
+    const target = painter(); const lists: WeakRef<SlideDisplayList>[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      const displayList = list(`a${index}`);
+      lists.push(new WeakRef(displayList));
+      await paint(target, displayList);
+    }
+    for (let round = 0; round < 3; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      Bun.gc(true);
+    }
+    expect(lists.filter((value) => value.deref()).length).toBeLessThanOrEqual(4);
+  });
 });
