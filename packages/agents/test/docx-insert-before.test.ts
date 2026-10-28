@@ -73,7 +73,7 @@ test('insert before copies paragraph and first run formatting with runFormat anc
     expect(canonical(firstRPrOf(added))).toBe(canonical(firstRPrOf(body)));
   }
   expect(receipt.results[0].refs?.map(ref => doc.read(ref!).text)).toEqual(['Inserted one', 'Inserted two']);
-  expect(doc.list({ limit: 100 }).items.slice(1, 3).map(entry => entry.ref)).toEqual(receipt.results[0].refs);
+  expect(doc.list({ limit: 100 }).items.slice(1, 3).map(entry => entry.ref)).toEqual(receipt.results[0].refs as string[]);
   await doc.edit({ version: doc.list().version, edits: [{ op: 'set_paragraph_style', paragraph: receipt.results[0].refs![0]!, style: 'Quote' }] });
   expect(doc.read(receipt.results[0].refs![0]!).style).toBe('Quote');
 });
