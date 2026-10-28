@@ -11,21 +11,21 @@
     "retry": "Erneut versuchen",
     "send": "Senden",
     "edit": "Bearbeiten",
-    "comment": "Kommentar",
+    "comment": "Kommentieren",
     "reply": "Antworten",
     "accept": "Annehmen",
     "reject": "Ablehnen",
     "dismiss": "Verwerfen",
     "change": "Ändern",
+    "clear": "Löschen",
     "px": "px",
     "closeDialog": "Dialogfeld schließen",
-    "clear": "Löschen",
     "units": {
-      "inch": null,
-      "cm": null,
-      "pt": null,
-      "px": null,
-      "inchMark": null
+      "inch": "Zoll",
+      "cm": "cm",
+      "pt": "pt",
+      "px": "px",
+      "inchMark": "\""
     }
   },
   "toolbar": {
@@ -33,26 +33,26 @@
     "file": "Datei",
     "format": "Format",
     "insert": "Einfügen",
-    "print": "Drucken",
-    "printShortcut": "Strg+P",
-    "pageSetup": "Seite einrichten",
-    "leftToRight": "Text von links nach rechts",
-    "rightToLeft": "Text von rechts nach links",
-    "image": "Grafik",
-    "table": "Tabelle",
-    "pageBreak": "Seitenumbruch",
-    "tableOfContents": "Inhaltsverzeichnis",
-    "symbol": "Symbol",
-    "help": "Hilfe",
-    "reportIssue": "Problem melden",
     "open": "Öffnen",
     "openShortcut": "Strg+O",
     "save": "Speichern",
-    "saveShortcut": "Strg+S",
+    "print": "Drucken",
+    "pageSetup": "Seite einrichten",
+    "leftToRight": "Text von links nach rechts",
+    "rightToLeft": "Text von rechts nach links",
+    "image": "Bild",
+    "table": "Tabelle",
+    "break": "Umbruch",
+    "pageBreak": "Seitenumbruch",
+    "sectionBreakNextPage": "Abschnittsumbruch (nächste Seite)",
+    "sectionBreakContinuous": "Abschnittsumbruch (fortlaufend)",
+    "tableOfContents": "Inhaltsverzeichnis",
     "watermark": "Wasserzeichen",
-    "break": null,
-    "sectionBreakContinuous": null,
-    "sectionBreakNextPage": null
+    "help": "Hilfe",
+    "reportIssue": "Problem melden",
+    "imageWrap": {
+      "current": "Aktuell"
+    }
   },
   "formattingBar": {
     "groups": {
@@ -64,36 +64,25 @@
       "script": "Hoch-/Tiefgestellt",
       "alignment": "Ausrichtung",
       "listFormatting": "Listenformatierung",
-      "image": "Grafik",
+      "image": "Bild",
       "table": "Tabelle"
     },
     "undo": "Rückgängig",
-    "undoShortcut": "Rückgängig (Strg+Z)",
     "redo": "Wiederholen",
-    "redoShortcut": "Wiederholen (Strg+Y)",
     "bold": "Fett",
-    "boldShortcut": "Fett (Strg+B)",
     "italic": "Kursiv",
-    "italicShortcut": "Kursiv (Strg+I)",
     "underline": "Unterstrichen",
-    "underlineShortcut": "Unterstrichen (Strg+U)",
     "strikethrough": "Durchgestrichen",
     "fontColor": "Schriftfarbe",
     "highlightColor": "Texthervorhebungsfarbe",
     "insertLink": "Link einfügen",
-    "insertLinkShortcut": "Link einfügen (Strg+K)",
     "superscript": "Hochgestellt",
-    "superscriptShortcut": "Hochgestellt (Strg+Umschalt+=)",
     "subscript": "Tiefgestellt",
-    "subscriptShortcut": "Tiefgestellt (Strg+=)",
     "imageProperties": "Bildeigenschaften",
-    "imagePropertiesShortcut": "Bildeigenschaften (Alternativtext, Rahmen)...",
-    "clearFormatting": "Formatierung löschen",
-    "commentsAndChanges": "Kommentare & Änderungen",
-    "moreItems": "{count, plural, one {# weiteres Element} other {# weitere Elemente}}"
+    "clearFormatting": "Formatierung löschen"
   },
   "alignment": {
-    "left": null,
+    "left": "Links",
     "alignLeft": "Linksbündig",
     "alignLeftShortcut": "Strg+L",
     "center": "Zentriert",
@@ -105,19 +94,17 @@
   },
   "lists": {
     "ariaLabel": "Listenformatierung",
-    "typeAriaLabel": "Listentyp",
-    "indentationAriaLabel": "Listeneinzug",
     "bulletList": "Aufzählungszeichen",
     "numberedList": "Nummerierung",
     "decreaseIndent": "Einzug verkleinern",
     "increaseIndent": "Einzug vergrößern"
   },
   "lineSpacing": {
+    "label": "Zeilenabstand",
     "single": "Einfach",
     "double": "Doppelt",
     "lineSpacingTitle": "Zeilenabstand: {label}",
-    "paragraphSpacing": "Absatzabstand",
-    "label": "Zeilenabstand"
+    "paragraphSpacing": "Absatzabstand"
   },
   "styles": {
     "selectAriaLabel": "Absatzformatvorlage auswählen",
@@ -130,79 +117,45 @@
   },
   "font": {
     "selectAriaLabel": "Schriftart auswählen",
-    "sansSerif": "Sans Serif",
-    "serif": "Serif",
-    "monospace": "Monospace",
+    "sansSerif": "Serifenlos",
+    "serif": "Serifen",
+    "monospace": "Festbreitenschrift",
     "other": "Andere",
-    "documentFonts": null
+    "documentFonts": "Dokumentschriftarten"
   },
   "fontSize": {
     "decrease": "Schriftgrad verkleinern",
     "increase": "Schriftgrad vergrößern",
     "label": "Schriftgrad",
     "listLabel": "Schriftgrade",
-    "selectAriaLabel": null
+    "selectAriaLabel": "Schriftgrad auswählen"
   },
   "zoom": {
     "ariaLabel": "Zoom: {label}",
+    "zoomOut": "Verkleinern",
     "zoomIn": "Vergrößern",
-    "zoomLevel": "Zoomstufe",
-    "zoomOut": "Verkleinern"
+    "zoomLevel": "Zoomstufe"
   },
   "colorPicker": {
     "ariaLabel": "Farbauswahl — {type}",
-    "pickerLabel": null,
-    "customHexColor": null,
-    "highlightColors": "Hervorhebungsfarben",
+    "pickerLabel": "{title}-Auswahl",
+    "customHexColor": "Benutzerdefinierte Hex-Farbe",
     "customColor": "Benutzerdefinierte Farbe",
     "noColor": "Keine Farbe",
     "automatic": "Automatisch",
     "themeColors": "Designfarben",
     "standardColors": "Standardfarben",
     "colors": {
-      "black": "Schwarz",
       "darkRed": "Dunkelrot",
       "red": "Rot",
       "orange": "Orange",
       "yellow": "Gelb",
-      "darkYellow": "Dunkelgelb",
       "green": "Grün",
-      "darkGreen": "Dunkelgrün",
-      "teal": "Blaugrün",
-      "darkTeal": "Dunkelblaugrün",
       "blue": "Blau",
       "darkBlue": "Dunkelblau",
       "purple": "Lila",
-      "darkPurple": "Dunkellila",
-      "brown": "Braun",
-      "grey50": "Grau 50%",
-      "grey25": "Grau 25%",
-      "grey10": "Grau 10%",
-      "white": "Weiß",
-      "lightRed": "Hellrot",
-      "lightOrange": "Hellorange",
-      "lightYellow": "Hellgelb",
       "lightGreen": "Hellgrün",
-      "lightBlue": "Hellblau",
-      "lightPurple": "Helllila",
-      "pink": "Rosa",
-      "rose": "Rosé",
-      "gold": "Gold",
-      "aqua": "Aquamarin",
-      "lavender": "Lavendel",
-      "silver": "Silber",
-      "darkOrange": "Dunkelorange",
-      "darkGray": "Dunkelgrau",
-      "gray": "Grau",
-      "cyan": "Cyan",
-      "magenta": "Magenta",
-      "paleGreen": "Blassgrün",
-      "lightCyan": "Hellcyan",
-      "skyBlue": "Himmelblau",
-      "lightBlue2": "Hellblau 2",
-      "lightMagenta": "Hell-Magenta",
-      "brightGreen": "Hellgrün",
-      "violet": "Violett"
+      "lightBlue": "Hellblau"
     }
   },
   "dialogs": {
@@ -227,8 +180,7 @@
       "replaceAllTitle": "Alle Treffer ersetzen",
       "matchCase": "Groß-/Kleinschreibung beachten",
       "wholeWords": "Nur ganzes Wort suchen",
-      "toggleReplace": "+ Ersetzen",
-      "matchesFound": "{total} Treffer"
+      "toggleReplace": "+ Ersetzen"
     },
     "hyperlink": {
       "titleEdit": "Hyperlink bearbeiten",
@@ -251,20 +203,33 @@
     },
     "insertTable": {
       "title": "Tabelle einfügen",
-      "hoverToSelect": "Zeigen, um Größe auszuwählen",
       "tableSize": "Tabelle {cols} x {rows}",
-      "orSpecifySize": "oder Größe angeben",
       "rowsLabel": "Zeilen:",
       "columnsLabel": "Spalten:",
-      "insertButton": "Tabelle einfügen",
       "sizeSelector": "Tabellengröße auswählen",
-      "autofit": "An Inhalt anpassen",
-      "columnWidthLabel": "Spaltenbreite",
-      "fixedWidth": "Fest",
-      "tableStyleLabel": "Tabellenformat",
-      "validationHint": "Zeilen: {minRows}-{maxRows}, Spalten: {minCols}-{maxCols}",
-      "selectSize": null,
-      "cellSize": null
+      "selectSize": "Größe auswählen",
+      "cellSize": "{cols} Spalten, {rows} Zeilen"
+    },
+    "watermark": {
+      "title": "Wasserzeichen",
+      "noWatermark": "Kein Wasserzeichen",
+      "picture": "Bildwasserzeichen",
+      "text": "Textwasserzeichen",
+      "selectPicture": "Bild auswählen …",
+      "scale": "Skalierung",
+      "washout": "Ausbleichen",
+      "textLabel": "Text",
+      "fontLabel": "Schriftart",
+      "sizeLabel": "Größe",
+      "sizeAuto": "Automatisch",
+      "colorLabel": "Farbe",
+      "layoutLabel": "Layout",
+      "diagonal": "Diagonal",
+      "horizontal": "Horizontal",
+      "semitransparent": "Halbtransparent",
+      "presetLabel": "Vorlage",
+      "applyButton": "Übernehmen",
+      "cancelButton": "Abbrechen"
     },
     "splitCell": {
       "title": "Zelle teilen",
@@ -275,43 +240,10 @@
       "minValue": "Verwenden Sie mindestens {rows} Zeile(n) und {cols} Spalte(n).",
       "notOneByOne": "Wählen Sie mindestens zwei resultierende Zellen."
     },
-    "insertImage": {
-      "title": "Grafik einfügen",
-      "uploadAriaLabel": "Klicken oder ziehen, um ein Bild hochzuladen",
-      "uploadText": "Klicken Sie, um ein Bild auszuwählen, oder ziehen Sie es hierher",
-      "uploadSubtext": "PNG, JPG, GIF bis zu 10 MB",
-      "dimensions": "Abmessungen",
-      "widthLabel": "Breite:",
-      "heightLabel": "Höhe:",
-      "aspectRatioLocked": "Seitenverhältnis gesperrt",
-      "aspectRatioUnlocked": "Seitenverhältnis entsperrt",
-      "altTextLabel": "Alternativtext (optional)",
-      "altTextPlaceholder": "Beschreiben Sie das Bild für Barrierefreiheit",
-      "insertButton": "Grafik einfügen",
-      "invalidFile": "Bitte eine gültige Bilddatei auswählen",
-      "fileTooLarge": "Bilddatei ist zu groß (max. 10 MB)",
-      "readFailed": "Bilddatei konnte nicht gelesen werden",
-      "loadFailed": "Bild konnte nicht geladen werden",
-      "preview": "Vorschau"
-    },
     "insertSymbol": {
-      "title": "Symbol einfügen",
-      "searchPlaceholder": "Symbole suchen (Zeichen oder Unicode)...",
-      "noResults": "Keine Symbole für \"{query}\" gefunden",
-      "decimal": "Dezimal: {value}",
       "categories": {
-        "common": "Häufig verwendet",
-        "arrows": "Pfeile",
-        "math": "Mathematisch",
-        "greek": "Griechisch",
-        "shapes": "Formen",
-        "punctuation": "Satzzeichen",
-        "currency": "Währungen",
-        "music": "Musik",
-        "emoji": "Emoji"
-      },
-      "noResultsEmpty": "Keine Symbole gefunden",
-      "recent": "Zuletzt verwendet:"
+        "common": "Häufig verwendet"
+      }
     },
     "imageProperties": {
       "title": "Bildeigenschaften",
@@ -322,6 +254,10 @@
       "style": "Stil",
       "color": "Farbe",
       "preview": "Vorschau",
+      "dimensions": "Abmessungen",
+      "widthLabel": "Breite:",
+      "heightLabel": "Höhe:",
+      "lockAspectRatio": "Seitenverhältnis sperren",
       "borderStyles": {
         "solid": "Durchgezogen",
         "dashed": "Gestrichelt",
@@ -331,19 +267,6 @@
         "ridge": "Steg",
         "inset": "Eingelassen",
         "outset": "Erhaben"
-      },
-      "dimensions": "Abmessungen",
-      "heightLabel": "Höhe:",
-      "lockAspectRatio": "Seitenverhältnis sperren",
-      "textWrapping": "Textumbruch",
-      "widthLabel": "Breite:",
-      "wrapOptions": {
-        "behind": "Hinter den Text",
-        "inFront": "Vor den Text",
-        "inline": "Mit Text in Zeile",
-        "topAndBottom": "Oben und unten",
-        "wrapLeft": "Textumbruch, rechts ausgerichtet",
-        "wrapRight": "Textumbruch, links ausgerichtet"
       }
     },
     "imagePosition": {
@@ -354,7 +277,7 @@
       "alignment": "Ausrichtung",
       "offset": "Versatz",
       "offsetPx": "Versatz (px)",
-      "distanceFromText": null,
+      "distanceFromText": "Abstand vom Text ({unit})",
       "align": "Ausrichten",
       "relativeTo": "Relativ zu",
       "alignOptions": {
@@ -416,19 +339,6 @@
         "right": "Rechts"
       }
     },
-    "pasteSpecial": {
-      "title": "Inhalte einfügen",
-      "keepFormatting": "Ursprüngliche Formatierung beibehalten",
-      "keepFormattingDescription": "Mit Originalformatierung einfügen",
-      "keepFormattingShortcut": "Strg+V",
-      "plainText": "Als unformatierten Text einfügen",
-      "plainTextDescription": "Ohne Formatierung einfügen",
-      "plainTextShortcut": "Strg+Umschalt+V",
-      "readingClipboard": "Zwischenablage wird gelesen...",
-      "preview": "Vorschau:",
-      "noContent": "Kein Inhalt zum Einfügen verfügbar",
-      "clipboardError": "Zwischenablage konnte nicht gelesen werden. Verwenden Sie Strg+V zum Einfügen."
-    },
     "footnoteProperties": {
       "title": "Fuß- und Endnoteneinstellungen",
       "footnotes": "Fußnoten",
@@ -475,8 +385,8 @@
       "shortcuts": {
         "save": "Speichern",
         "saveDescription": "Dokument speichern",
-        "open": null,
-        "openDescription": null,
+        "open": "Öffnen",
+        "openDescription": "Dokument öffnen",
         "print": "Drucken",
         "printDescription": "Dokument drucken",
         "undo": "Rückgängig",
@@ -529,7 +439,7 @@
         "selectParagraphDescription": "Aktuellen Absatz markieren",
         "extendSelectionByWord": "Markierung wortweise erweitern",
         "extendSelectionByWordDescription": "Markierung zum nächsten/vorherigen Wort erweitern",
-        "extendSelectionToLineEdge": "Markierung bis Zeilenende erweitern",
+        "extendSelectionToLineEdge": "Markierung bis Zeilenanfang/-ende erweitern",
         "extendSelectionToLineEdgeDescription": "Markierung bis Zeilenanfang/-ende erweitern",
         "moveByWord": "Wortweise bewegen",
         "moveByWordDescription": "Cursor zum nächsten/vorherigen Wort bewegen",
@@ -546,47 +456,28 @@
         "pageDown": "Seite nach unten",
         "pageDownDescription": "Eine Seite nach unten scrollen",
         "zoomIn": "Vergrößern",
-        "zoomInDescription": "Zoomstufe erhöhen",
         "zoomOut": "Verkleinern",
-        "zoomOutDescription": "Zoomstufe verringern",
-        "resetZoom": "Zoom zurücksetzen",
-        "resetZoomDescription": "Zoom auf 100 % zurücksetzen",
         "keyboardShortcuts": "Tastenkombinationen",
         "keyboardShortcutsDescription": "Dieses Hilfedialogfeld anzeigen",
         "insertLink": "Link einfügen",
         "insertLinkDescription": "Hyperlink einfügen oder bearbeiten"
       },
-      "noResults": "Keine Tastenkombinationen für \"{query}\" gefunden",
+      "noResults": "Keine Tastenkombinationen für „{query}“ gefunden",
       "pressEscToClose": "{key} drücken, um zu schließen",
       "or": "oder",
       "keys": {
-        "escape": null,
-        "pageUp": null,
-        "pageDown": null,
-        "ctrl": null,
-        "del": null
+        "escape": "Esc",
+        "pageUp": "Bild auf",
+        "pageDown": "Bild ab",
+        "ctrl": "Strg",
+        "del": "Entf"
       }
     },
-    "watermark": {
-      "applyButton": "Übernehmen",
-      "cancelButton": "Abbrechen",
-      "colorLabel": "Farbe",
-      "diagonal": "Diagonal",
-      "fontLabel": "Schriftart",
-      "horizontal": "Horizontal",
-      "layoutLabel": "Layout",
-      "noWatermark": "Kein Wasserzeichen",
-      "picture": "Bildwasserzeichen",
-      "presetLabel": "Vorlage",
-      "scale": "Skalierung",
-      "selectPicture": "Bild auswählen …",
-      "semitransparent": "Halbtransparent",
-      "sizeAuto": "Automatisch",
-      "sizeLabel": "Größe",
-      "text": "Textwasserzeichen",
-      "textLabel": "Text",
-      "title": "Wasserzeichen",
-      "washout": "Auswaschen"
+    "objectGeometry": {
+      "left": "Links (px)",
+      "top": "Oben (px)",
+      "width": "Breite (px)",
+      "height": "Höhe (px)"
     }
   },
   "comments": {
@@ -601,10 +492,7 @@
   },
   "trackedChanges": {
     "unknown": "Unbekannt",
-    "replaced": "Ersetzt",
-    "with": "durch",
     "added": "Hinzugefügt",
-    "deleted": "Gelöscht",
     "agent": "Agent",
     "previousChange": "Vorherige Änderung",
     "nextChange": "Nächste Änderung",
@@ -613,10 +501,24 @@
     "acceptAll": "Alle annehmen",
     "acceptAllChanges": "Alle Änderungen annehmen"
   },
+  "revisions": {
+    "paragraphMarkInserted": "Absatzmarke eingefügt",
+    "paragraphMarkDeleted": "Absatzmarke gelöscht",
+    "paragraphPropertiesChanged": "Absatzeigenschaften geändert",
+    "rowInserted": "Zeile eingefügt",
+    "rowDeleted": "Zeile gelöscht",
+    "rowPropertiesChanged": "Zeileneigenschaften geändert",
+    "cellInserted": "Zelle eingefügt",
+    "cellDeleted": "Zelle gelöscht",
+    "cellMerged": "Zellen zusammengeführt",
+    "cellPropertiesChanged": "Zelleneigenschaften geändert",
+    "tablePropertiesChanged": "Tabelleneigenschaften geändert",
+    "tableInserted": "Tabelle eingefügt",
+    "tableDeleted": "Tabelle gelöscht"
+  },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",
     "textMenuAriaLabel": "Textbearbeitungsmenü",
-    "customPromptPlaceholder": "Eigene Eingabeaufforderung eingeben...",
     "cut": "Ausschneiden",
     "cutShortcut": "Strg+X",
     "copy": "Kopieren",
@@ -630,18 +532,10 @@
     "selectAll": "Alles markieren",
     "selectAllShortcut": "Strg+A",
     "selected": "Markiert:",
-    "aiActions": {
-      "askAi": "KI fragen",
-      "rewrite": "Umschreiben",
-      "expand": "Erweitern",
-      "summarize": "Zusammenfassen",
-      "translate": "Übersetzen",
-      "explain": "Erklären",
-      "fixGrammar": "Grammatik korrigieren",
-      "makeFormal": "Formeller formulieren",
-      "makeCasual": "Lockerer formulieren",
-      "custom": "Benutzerdefiniert"
-    }
+    "addComment": "Kommentieren",
+    "resizeImage": "Bildgröße ändern",
+    "moveImage": "Bild verschieben",
+    "columnWidth": "Spaltenbreite"
   },
   "documentOutline": {
     "ariaLabel": "Dokumentgliederung",
@@ -653,6 +547,9 @@
   "sidebar": {
     "ariaLabel": "Anmerkungsleiste"
   },
+  "viewer": {
+    "pageIndicator": "{current} von {total}"
+  },
   "titleBar": {
     "untitled": "Unbenannt",
     "documentNameAriaLabel": "Dokumentname",
@@ -660,9 +557,13 @@
   },
   "errors": {
     "loadingDocument": "Dokument wird geladen...",
-    "stillOpening": null,
+    "stillOpening": "Dieses Dokument wird noch geöffnet. Sobald es bereit ist, können Sie tippen.",
     "noDocumentLoaded": "Kein Dokument geladen",
     "failedToLoad": "Dokument konnte nicht geladen werden",
+    "failedToLoadDescription": "Die Datei ist möglicherweise beschädigt oder verwendet etwas, das dieser Editor noch nicht lesen kann.",
+    "editorUnavailable": "Der Editor konnte nicht geladen werden",
+    "editorUnavailableDescription": "Überprüfen Sie Ihre Verbindung und laden Sie die Seite neu.",
+    "reloadPage": "Seite neu laden",
     "unableToParse": "Dokument konnte nicht verarbeitet werden",
     "somethingWentWrong": "Ein Fehler ist aufgetreten",
     "errorDescription": "Beim Rendern dieser Komponente ist ein Fehler aufgetreten. Versuchen Sie es erneut oder wenden Sie sich an den Support, wenn das Problem weiterhin besteht.",
@@ -671,29 +572,29 @@
     "tryAgain": "Erneut versuchen",
     "showDetails": "Details anzeigen",
     "hideDetails": "Details ausblenden",
-    "unsavedChanges": "Sie haben nicht gespeicherte Änderungen. Möchten Sie die Seite wirklich verlassen?",
-    "canvasRendererFailed": null,
+    "canvasRendererFailed": "Canvas-Renderer ist fehlgeschlagen.",
     "userFriendly": {
-      "network": null,
-      "parse": null,
-      "permission": null,
-      "notFound": null,
-      "timeout": null,
-      "unexpected": null
+      "network": "Netzwerkfehler. Überprüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.",
+      "parse": "Das Dokument konnte nicht analysiert werden. Es ist möglicherweise beschädigt oder hat ein nicht unterstütztes Format.",
+      "permission": "Zugriff verweigert. Sie haben möglicherweise keine Berechtigung, auf diese Datei zuzugreifen.",
+      "notFound": "Die angeforderte Datei wurde nicht gefunden.",
+      "timeout": "Zeitüberschreitung bei der Operation. Bitte versuchen Sie es erneut.",
+      "unexpected": "Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es erneut."
     }
   },
   "contentControls": {
-    "noOptions": null
+    "noOptions": "Keine Optionen"
   },
   "table": {
     "insertRowAbove": "Zeile oberhalb einfügen",
     "insertRowBelow": "Zeile unterhalb einfügen",
     "insertColumnLeft": "Spalte links einfügen",
     "insertColumnRight": "Spalte rechts einfügen",
-    "insertColumnToTheRight": null,
+    "insertColumnToTheRight": "Spalte rechts einfügen",
     "deleteRow": "Zeile löschen",
     "deleteColumn": "Spalte löschen",
     "deleteTable": "Tabelle löschen",
+    "selectTable": "Ganze Tabelle auswählen",
     "mergeCells": "Zellen zusammenführen",
     "splitCell": "Zelle teilen",
     "editingTools": "Tabellenbearbeitungswerkzeuge",
@@ -734,29 +635,14 @@
       "listTable4Accent3": "Listentabelle 4 Akzent 3",
       "gridTable4Accent5": "Rastertabelle 4 Akzent 5",
       "gridTable4Accent6": "Rastertabelle 4 Akzent 6"
-    },
-    "selectTable": null
+    }
   },
   "tableAdvanced": {
     "verticalAlignment": "Vertikale Ausrichtung",
     "top": "Oben",
     "middle": "Mitte",
     "bottom": "Unten",
-    "cellMargins": "Zellenränder",
-    "textDirection": "Textrichtung",
-    "textDirections": {
-      "horizontal": "Horizontal (LR)",
-      "verticalRL": "Vertikal (oben nach unten, RL)",
-      "verticalLR": "Vertikal (unten nach oben, LR)"
-    },
     "toggleNoWrap": "Textumbruch umschalten",
-    "rowHeight": "Zeilenhöhe",
-    "heightRules": {
-      "auto": "Automatisch",
-      "atLeast": "Mindestens",
-      "exact": "Genau"
-    },
-    "rule": "Regel",
     "height": "Höhe",
     "toggleHeaderRow": "Überschriftenzeile umschalten",
     "distributeColumns": "Spalten gleichmäßig verteilen",
@@ -765,9 +651,7 @@
     "tableAlignment": "Tabellenausrichtung",
     "alignTableLeft": "Tabelle links ausrichten",
     "alignTableCenter": "Tabelle zentrieren",
-    "alignTableRight": "Tabelle rechts ausrichten",
-    "tableOptionsMenu": "Tabellenoptionsmenü",
-    "tableOptions": "Tabellenoptionen"
+    "alignTableRight": "Tabelle rechts ausrichten"
   },
   "imageTransform": {
     "tooltip": "Transformieren",
@@ -778,38 +662,28 @@
   },
   "imageWrap": {
     "inline": "Mit Text in Zeile",
-    "floatLeft": "Links umfließen (Text rechts)",
-    "floatRight": "Rechts umfließen (Text links)",
+    "floatLeft": "Quadrat links",
+    "floatRight": "Quadrat rechts",
     "topAndBottom": "Oben und unten",
     "behindText": "Hinter den Text",
     "inFrontOfText": "Vor den Text",
     "tooltipPrefix": "Textumbruch: {label}",
     "menu": {
-      "ariaLabel": "Bildlayoutoptionen",
-      "behindText": "Hinter den Text",
-      "inFrontOfText": "Vor den Text",
       "inLineWithText": "Mit Text in Zeile",
       "squareLeft": "Quadrat links",
       "squareRight": "Quadrat rechts",
+      "behindText": "Hinter den Text",
+      "inFrontOfText": "Vor den Text",
+      "ariaLabel": "Bildlayoutoptionen",
       "imageProperties": "Bildeigenschaften…"
     },
     "menuDesc": {
-      "behindText": "Bild liegt hinter dem Text",
-      "inFrontOfText": "Bild liegt über dem Text",
       "inLineWithText": "Bild fließt als Glyphe in der Zeile",
       "squareLeft": "Bild links, Text fließt rechts",
-      "squareRight": "Bild rechts, Text fließt links"
+      "squareRight": "Bild rechts, Text fließt links",
+      "behindText": "Bild liegt hinter dem Text",
+      "inFrontOfText": "Bild liegt über dem Text"
     }
-  },
-  "responsePreview": {
-    "loading": "{action}...",
-    "result": "Ergebnis — {action}",
-    "closeEsc": "Schließen (Esc)",
-    "editPrompt": "Ergebnis vor dem Übernehmen bearbeiten:",
-    "changes": "Änderungen:",
-    "original": "Original:",
-    "new": "Neu:",
-    "cancelEdit": "Bearbeitung abbrechen"
   },
   "commentMarkers": {
     "resolvedComment": "Aufgelöster Kommentar",
@@ -827,7 +701,21 @@
     "failedToParse": "Dokument konnte nicht verarbeitet werden",
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
-    "failedToSave": "Dokument konnte nicht gespeichert werden"
+    "failedToSave": "Dokument konnte nicht gespeichert werden",
+    "documentInput": "Dokumenteingabe",
+    "documentPreview": "Dokumentvorschau",
+    "closeNote": "Notiz schließen",
+    "recoverableText": "Wiederherstellbarer Dokumenttext",
+    "dismissDraft": "Entwurf verwerfen",
+    "readDocumentText": "Dokumenttext lesen",
+    "documentText": "Dokumenttext",
+    "previousText": "Vorheriger Text",
+    "nextText": "Nächster Text",
+    "addComment": "Kommentar hinzufügen",
+    "noteProperties": "Notizeigenschaften",
+    "recoverableTextNotice": "Dieser Text konnte nicht angewendet werden. Kopieren Sie ihn, um Ihren Entwurf zu behalten, und verwerfen Sie ihn dann.",
+    "documentTextUnavailable": "Der Dokumenttext ist nicht verfügbar.",
+    "documentTextChanged": "Der Dokumenttext hat sich geändert. Lesen Sie ihn erneut."
   },
   "hyperlinkPopup": {
     "displayTextPlaceholder": "Anzuzeigender Text",
@@ -846,20 +734,18 @@
     "closeEditing": "{label}-Bearbeitung schließen"
   },
   "image": {
-    "placeholder": "Bildplatzhalter",
-    "placeholderText": "[Grafik]",
-    "editableAriaLabel": "Bearbeitbares Bild"
+    "placeholder": "Bildplatzhalter"
   },
   "ruler": {
-    "tabStop": null,
+    "tabStop": "{alignment}-Tabulator bei {position}",
     "tabAlignments": {
-      "left": null,
-      "center": null,
-      "right": null,
-      "decimal": null,
-      "bar": null,
-      "clear": null,
-      "num": null
+      "left": "Links",
+      "center": "Zentriert",
+      "right": "Rechts",
+      "decimal": "Dezimal",
+      "bar": "Vertikalstrich",
+      "clear": "Gelöscht",
+      "num": "Liste"
     },
     "horizontal": "Horizontales Lineal",
     "vertical": "Vertikales Lineal",
@@ -875,126 +761,80 @@
     "singlePage": "Seite {start}",
     "pageRange": "Seiten {start}–{end}"
   },
-  "unsaved": {
-    "unsaved": "Nicht gespeichert",
-    "saved": "Gespeichert",
-    "unsavedTitle": "Dokument hat nicht gespeicherte Änderungen",
-    "savedTitle": "Alle Änderungen gespeichert",
-    "unsavedAriaLabel": "Nicht gespeicherte Änderungen",
-    "savedAriaLabel": "Alle Änderungen gespeichert"
-  },
   "loading": {
     "label": "Wird geladen"
   },
-  "agentPanel": {
-    "close": "Bereich schließen",
-    "composerPlaceholder": "Den Assistenten fragen…",
-    "defaultTitle": "Assistent",
-    "resizeHandle": "Assistentenbereich skalieren",
-    "send": "Senden",
-    "thinking": "Assistent denkt nach",
-    "timeline": {
-      "earlier": "+ {count, plural, one {# vorheriger Schritt} other {# vorherige Schritte}}",
-      "summary": "{count, plural, one {# Schritt} other {# Schritte}}",
-      "working": "Arbeite… {count, plural, one {# Schritt} other {# Schritte}}"
-    },
-    "toggle": "Assistent öffnen"
-  },
-  "viewer": {
-    "pageIndicator": "{current} von {total}"
-  },
-  "imageOverlay": {
-    "deleteImage": "Bild löschen",
-    "imageProperties": "Bildeigenschaften",
-    "rotate": "Drehen",
-    "replaceImage": "Bild ersetzen…"
-  },
-  "revisions": {
-    "cellDeleted": null,
-    "cellInserted": null,
-    "cellMerged": null,
-    "cellPropertiesChanged": null,
-    "paragraphMarkDeleted": null,
-    "paragraphMarkInserted": null,
-    "paragraphPropertiesChanged": null,
-    "rowDeleted": null,
-    "rowInserted": null,
-    "rowPropertiesChanged": null,
-    "tablePropertiesChanged": null,
-    "tableDeleted": null,
-    "tableInserted": null
-  },
   "a11y": {
-    "commentedText": null,
-    "footerLabel": null,
-    "headerLabel": null,
-    "listItem": null,
-    "pageLabel": null,
-    "selected": null,
-    "selectionCleared": null,
-    "trackedDeletion": null,
-    "trackedInsertion": null,
-    "addRepeatingItem": null,
-    "contentControl": null,
-    "removeRepeatingItem": null
+    "pageLabel": "Seite {number}",
+    "headerLabel": "Kopfzeile",
+    "footerLabel": "Fußzeile",
+    "selected": "Ausgewählt",
+    "selectionCleared": "Auswahl aufgehoben",
+    "commentedText": "Kommentierter Text",
+    "trackedInsertion": "Nachverfolgte Einfügung",
+    "trackedDeletion": "Nachverfolgte Löschung",
+    "listItem": "Listenelement, Ebene {level}",
+    "contentControl": "Inhaltssteuerelement",
+    "addRepeatingItem": "Element hinzufügen",
+    "removeRepeatingItem": "Element entfernen"
   },
   "commands": {
-    "paragraphStyle": null,
-    "fontFamily": null,
-    "imageWrap": null,
-    "editingMode": null,
-    "review": null,
+    "paragraphStyle": "Absatzformatvorlage",
+    "fontFamily": "Schriftart",
+    "imageWrap": "Textumbruch",
+    "editingMode": "Bearbeitungsmodus",
+    "review": "Überprüfen",
     "reviewAccept": "Änderung annehmen",
     "reviewReject": "Änderung ablehnen",
-    "reviewPrevious": null,
-    "reviewNext": null,
-    "moreActions": null,
-    "customColor": null,
-    "hexColor": null,
-    "customFontSize": null,
-    "fontSizePoints": null,
+    "reviewPrevious": "Vorherige Änderung",
+    "reviewNext": "Nächste Änderung",
+    "moreActions": "Weitere Aktionen",
+    "customColor": "Benutzerdefinierte Farbe…",
+    "hexColor": "Hex-Farbe, z. B. FF0000",
+    "customFontSize": "Benutzerdefinierte Größe…",
+    "fontSizePoints": "Größe in Punkt",
     "reasons": {
-      "editorUnavailable": null,
-      "documentLoading": null,
-      "noDocument": null,
-      "readOnly": null,
-      "viewingMode": null,
-      "suggestingUnsupported": null,
-      "selectionRequired": null,
-      "unsupportedSelection": null,
-      "unsupportedStory": null,
-      "cannotOutdent": null,
-      "nothingToUndo": null,
-      "nothingToRedo": null,
-      "imageRequired": null,
-      "tableRequired": null,
-      "multipleCellsRequired": null,
-      "cannotSplitCell": null,
-      "lastRow": null,
-      "lastColumn": null,
-      "revisionRequired": null,
-      "revisionNotFound": null,
-      "noRevisions": null,
-      "controlledMode": null,
-      "controlledSidebar": null,
-      "hostDisabled": null,
-      "unsupportedCommand": null,
-      "tableOfContentsUnsupported": null,
-      "invalidArguments": null,
-      "inputFailed": null,
-      "documentReplaced": null,
-      "targetChanged": null,
-      "commandFailed": null,
-      "permissionDenied": null,
-      "unsupportedPolicy": null,
-      "pluginUnavailable": null,
-      "aborted": null
+      "editorUnavailable": "Der Editor ist nicht bereit.",
+      "documentLoading": "Das Dokument wird noch geladen.",
+      "noDocument": "Kein Dokument geöffnet.",
+      "readOnly": "Dieses Dokument ist schreibgeschützt.",
+      "viewingMode": "Wechseln Sie zu „Bearbeiten“ oder „Vorschlagen“, um Änderungen vorzunehmen.",
+      "suggestingUnsupported": "Diese Änderung kann nicht als Vorschlag aufgezeichnet werden.",
+      "selectionRequired": "Platzieren Sie zuerst den Cursor im Dokument.",
+      "unsupportedSelection": "Diese Auswahl kann mit diesem Befehl nicht geändert werden.",
+      "unsupportedStory": "Nicht verfügbar, während Sie eine Kopfzeile, Fußzeile oder Notiz bearbeiten.",
+      "cannotOutdent": "Dieser Absatz hat keinen Einzug, der verkleinert werden könnte.",
+      "nothingToUndo": "Es gibt nichts rückgängig zu machen.",
+      "nothingToRedo": "Es gibt nichts zu wiederholen.",
+      "imageRequired": "Wählen Sie zuerst ein Bild aus.",
+      "tableRequired": "Platzieren Sie zuerst den Cursor in einer Tabelle.",
+      "multipleCellsRequired": "Wählen Sie mehr als eine Zelle aus.",
+      "cannotSplitCell": "Diese Zelle kann nicht geteilt werden.",
+      "lastRow": "Eine Tabelle benötigt mindestens eine Zeile.",
+      "lastColumn": "Eine Tabelle benötigt mindestens eine Spalte.",
+      "revisionRequired": "Platzieren Sie den Cursor in einer nachverfolgten Änderung.",
+      "revisionNotFound": "Diese nachverfolgte Änderung ist nicht mehr vorhanden.",
+      "noRevisions": "Das Dokument enthält keine nachverfolgten Änderungen.",
+      "controlledMode": "Die Host-Anwendung steuert den Bearbeitungsmodus.",
+      "controlledSidebar": "Die Host-Anwendung steuert die Kommentarseitenleiste.",
+      "hostDisabled": "Von der Host-Anwendung deaktiviert.",
+      "unsupportedCommand": "Diese Aktion wird noch nicht unterstützt.",
+      "tableOfContentsUnsupported": "Das Einfügen eines Inhaltsverzeichnisses wird noch nicht unterstützt.",
+      "invalidArguments": "Der Befehl hat ungültige Optionen erhalten.",
+      "inputFailed": "Eine frühere Eingabe konnte nicht angewendet werden, daher wurde der Befehl nicht ausgeführt.",
+      "documentReplaced": "Das Dokument hat sich geändert, bevor der Befehl ausgeführt werden konnte.",
+      "targetChanged": "Der Inhalt, für den diese Aktion geöffnet wurde, hat sich geändert, bevor sie angewendet werden konnte.",
+      "commandFailed": "Der Befehl konnte nicht abgeschlossen werden.",
+      "permissionDenied": "Die Host-Anwendung hat diesem Plugin die Verwendung dieses Befehls nicht gestattet.",
+      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
+      "aborted": "Die Pluginaktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }
   },
   "plugins": {
-    "toolbarGroup": null,
-    "panelTabs": null,
-    "collapsePanel": null,
-    "expandPanel": null
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin-Bereiche",
+    "collapsePanel": "{title} einklappen",
+    "expandPanel": "{title} ausklappen"
   }
 }
