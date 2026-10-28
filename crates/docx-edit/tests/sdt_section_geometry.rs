@@ -667,3 +667,237 @@ fn resident_sdt_cover_section_preserves_each_sections_geometry() {
         assert_eq!(paragraphs[2]["block"]["attrs"]["docGridPitchPx"], 30.0);
     }
 }
+
+fn wrapped_float_edit_document(cover_width: u32, body_width: u32, relative_to: &str) -> Vec<u8> {
+    let paragraph = |id: u32, extra: &str, content: &str| {
+        p(
+            &format!("{id:08X}"),
+            &format!(
+                concat!(
+                    "<w:pPr>{extra}<w:spacing w:before=\"0\" w:after=\"0\" ",
+                    "w:line=\"300\" w:lineRule=\"exact\"/></w:pPr>{content}"
+                ),
+                extra = extra,
+                content = content,
+            ),
+        )
+    };
+    let cover = paragraph(
+        1,
+        &section(cover_width * 15 + 1440, 15840, 1440, 1440, ""),
+        &r("Cover"),
+    );
+    let before = if cover_width > body_width {
+        format!("SMALL_FLOAT{}", r("Before the image"))
+    } else {
+        r("Before the image")
+    };
+    let tails = (0..40)
+        .map(|index| paragraph(0x1000 + index, "", &r("Following body text")))
+        .collect::<String>();
+    let body = format!(
+        concat!(
+            "<w:sdt><w:sdtPr><w:id w:val=\"7\"/></w:sdtPr><w:sdtContent>",
+            "{cover}</w:sdtContent></w:sdt>{before}{anchor}{near}{tails}{section}"
+        ),
+        cover = cover,
+        before = paragraph(2, "", &before),
+        anchor = paragraph(3, "<w:pageBreakBefore/>", "BODY_FLOAT"),
+        near = paragraph(4, "", &r(&"Body words beside the image. ".repeat(12))),
+        tails = tails,
+        section = section(body_width * 15 + 1440, 15840, 1440, 1440, ""),
+    );
+    let mut parts = floating_footer_parts(&body);
+    let footer = parts
+        .iter()
+        .find(|(name, _)| name == "word/footer1.xml")
+        .unwrap();
+    let drawing = std::str::from_utf8(&footer.1)
+        .unwrap()
+        .split_once("<w:drawing>")
+        .unwrap()
+        .1
+        .split_once("</w:drawing>")
+        .unwrap()
+        .0
+        .replace(
+            "<wp:positionV relativeFrom=\"margin\"><wp:align>bottom</wp:align></wp:positionV>",
+            &format!(
+                concat!(
+                    "<wp:positionV relativeFrom=\"{relative_to}\">",
+                    "<wp:posOffset>0</wp:posOffset></wp:positionV>"
+                ),
+                relative_to = relative_to,
+            ),
+        )
+        .replace("<wp:wrapTopAndBottom/>", "<wp:wrapSquare wrapText=\"bothSides\"/>")
+        .replace("cx=\"1143000\"", "cx=\"5852160\"")
+        .replace("cy=\"1143000\"", "cy=\"4876800\"")
+        .replace("distL=\"0\"", "distL=\"114300\"")
+        .replace("distR=\"0\"", "distR=\"114300\"");
+    let image = format!(
+        concat!(
+            "<w:r ",
+            "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" ",
+            "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" ",
+            "xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">",
+            "<w:drawing>{drawing}</w:drawing></w:r>"
+        ),
+        drawing = drawing,
+    );
+    let small_image = image
+        .replace("5852160", "381000")
+        .replace("4876800", "381000")
+        .replace("id=\"1\"", "id=\"2\"");
+    for (name, bytes) in &mut parts {
+        let xml = std::str::from_utf8(bytes).ok();
+        let replacement = match name.as_str() {
+            "word/document.xml" => Some(
+                xml.unwrap()
+                    .replace("BODY_FLOAT", &image)
+                    .replace("SMALL_FLOAT", &small_image),
+            ),
+            "word/_rels/document.xml.rels" => Some(xml.unwrap().replace(
+                "</Relationships>",
+                concat!(
+                    "<Relationship Id=\"rIdImage\" ",
+                    "Type=\"",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" ",
+                    "Target=\"media/footer.png\"/></Relationships>"
+                ),
+            )),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *bytes = replacement.into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn assert_wrapped_float_measurements(input: &Value, wraps: bool) {
+    let measured = input["measured"].as_array().unwrap();
+    let image = measured
+        .iter()
+        .find(|entry| {
+            entry["block"]["runs"].as_array().is_some_and(|runs| {
+                runs.iter().any(|run| {
+                    run["kind"] == "image"
+                        && run["width"].as_f64().is_some_and(|width| width > 600.0)
+                })
+            })
+        })
+        .unwrap();
+    assert_eq!(image["measure"]["totalHeight"], 20.0);
+    assert_eq!(
+        image["measure"]["lines"][0]["floatSkipBefore"]
+            .as_f64()
+            .unwrap_or(0.0),
+        0.0
+    );
+    let text = measured
+        .iter()
+        .find(|entry| {
+            entry["block"]["runs"].as_array().is_some_and(|runs| {
+                runs.iter().any(|run| {
+                    run["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("Body words beside the image."))
+                })
+            })
+        })
+        .unwrap();
+    let line = &text["measure"]["lines"][0];
+    assert_eq!(line["floatSkipBefore"].as_f64().unwrap_or(0.0), 0.0);
+    assert_eq!(line["leftOffset"].as_f64().unwrap_or(0.0) > 600.0, wraps);
+}
+
+fn assert_wrapped_float_edit_matches_fresh(cover_width: u32, body_width: u32, relative_to: &str) {
+    let bytes = wrapped_float_edit_document(cover_width, body_width, relative_to);
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    for host_update in [false, true] {
+        let engine = EngineSession::new(75220);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        let mut request = region_request(&engine, &bytes, font);
+        let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+            .unwrap()
+            .document
+            .package;
+        request["regions"]["sections"] = json!([{
+            "properties": package.document.final_section_properties,
+        }]);
+        request["notes"]["contents"] = json!([]);
+        let request = request.to_string();
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        let initial: Value =
+            serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+        assert_wrapped_float_measurements(&initial, body_width == 690);
+        let before = engine.stats();
+        let edit = |doc: &docx_edit::EditingDoc| {
+            doc.insert_text(
+                &docx_edit::EditCtx::local("", ""),
+                doc.paragraph_mark_position("00000004").unwrap(),
+                "x",
+                docx_edit::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        };
+        if host_update {
+            let peer = docx_edit::EditingDoc::new(75221);
+            peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                .unwrap();
+            edit(&peer);
+            engine
+                .doc()
+                .apply_host_update_v1(&peer.encode_state_as_update_v1())
+                .unwrap();
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+        } else {
+            edit(engine.doc());
+            engine.apply_and_layout("body", 0).unwrap();
+        }
+        let after = engine.stats();
+        if relative_to == "paragraph" {
+            assert!(after.resident_measure_calls - before.resident_measure_calls > 1);
+            assert!(after.resident_reused_blocks > before.resident_reused_blocks);
+        } else {
+            assert_eq!(after.resident_reused_blocks, before.resident_reused_blocks);
+        }
+        assert!(after.incremental_pagination_calls > before.incremental_pagination_calls);
+        let incremental: Value =
+            serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+        assert_wrapped_float_measurements(&incremental, body_width == 690);
+        let fresh = EngineSession::new(75222);
+        fresh
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        fresh
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        let full: Value =
+            serde_json::from_str(&fresh.retained_kernel_inputs_json().unwrap()).unwrap();
+        assert_eq!(incremental["measured"], full["measured"]);
+        assert_eq!(after.retained_pages, fresh.stats().retained_pages);
+        assert_eq!(
+            engine.retained_layout_json().unwrap(),
+            fresh.retained_layout_json().unwrap()
+        );
+    }
+}
+
+#[test]
+fn wrapped_cover_float_skip_stays_clamped_after_incremental_text_edits() {
+    assert_wrapped_float_edit_matches_fresh(690, 624, "paragraph");
+}
+
+#[test]
+fn wrapped_cover_body_float_wrapping_survives_incremental_text_edits() {
+    for relative_to in ["paragraph", "margin", "page"] {
+        assert_wrapped_float_edit_matches_fresh(624, 690, relative_to);
+    }
+}

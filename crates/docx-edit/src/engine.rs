@@ -20,7 +20,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::measure_blocks::{ColumnWidthBand, TableMeasurementFrame};
+use docx_layout::measure_blocks::{ColumnWidthBand, FloatWidthPolicy, TableMeasurementFrame};
 use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
@@ -992,12 +992,12 @@ fn cut_exact_prefix(pagination: &mut PaginationState, pages: usize) -> bool {
 /// moves the first `pages` pages.
 /// Returns the extents of the measured prefix; all blocks when it never does.
 /// With `anchored` objects the prefix is measured whole each time it grows: a
-/// float applies from its anchor on, and zones are extracted at the body's
-/// first width, which a batch opening in a later section would not use.
+/// float applies from its anchor on, using the complete document's width policy.
 #[allow(clippy::too_many_arguments)]
 fn measure_page_prefix_plain(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
@@ -1013,9 +1013,10 @@ fn measure_page_prefix_plain(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let mut prefix = blocks[..end].to_vec();
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &prefix,
                 &widths[..end],
+                float_width_policy,
                 &table_wrap_frames[..end],
                 measurement,
                 Some(geometry),
@@ -1027,9 +1028,10 @@ fn measure_page_prefix_plain(
                 *block = measured;
             }
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &blocks[start..end],
                 &widths[start..end],
+                float_width_policy,
                 &table_wrap_frames[start..end],
                 measurement,
                 Some(geometry),
@@ -1080,6 +1082,7 @@ fn measure_page_prefix_plain(
 fn measure_page_prefix(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
@@ -1092,6 +1095,7 @@ fn measure_page_prefix(
         return measure_page_prefix_plain(
             blocks,
             widths,
+            float_width_policy,
             table_wrap_frames,
             measurement,
             geometry,
@@ -1108,9 +1112,10 @@ fn measure_page_prefix(
         let end = prefix_boundary(blocks, (start + step).min(blocks.len()));
         if anchored {
             let prefix = &mut blocks[..end];
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 prefix,
                 &widths[..end],
+                float_width_policy,
                 &table_wrap_frames[..end],
                 measurement,
                 Some(geometry),
@@ -1119,9 +1124,10 @@ fn measure_page_prefix(
             dependencies = flow.font_dependencies().to_vec();
             measures = flow.into_extents();
         } else {
-            let mut flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+            let mut flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                 &blocks[start..end],
                 &widths[start..end],
+                float_width_policy,
                 &table_wrap_frames[start..end],
                 measurement,
                 Some(geometry),
@@ -3808,15 +3814,20 @@ fn certify_retained_blocks(
 
 fn resident_float_kinds(
     blocks: &SharedBlocks,
-    width: f64,
+    widths: &[f64],
+    float_width_policy: FloatWidthPolicy,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
     geometry: &docx_layout::measure_blocks::FloatPageGeometry,
 ) -> Result<(bool, bool), String> {
     let mut kinds = (false, false);
-    for block in blocks.iter() {
-        let next = docx_layout::measure_blocks::floating_zone_kinds(
+    let default_width = widths.first().copied().unwrap_or(0.0);
+    for (index, block) in blocks.iter().enumerate() {
+        let width = widths.get(index).copied().unwrap_or(default_width);
+        let next = docx_layout::measure_blocks::floating_zone_kinds_with_width_policy(
             std::slice::from_ref(block),
-            width,
+            default_width,
+            &[width],
+            float_width_policy,
             measurement,
             Some(geometry),
         )?;
@@ -7115,6 +7126,7 @@ impl EngineSession {
         let mut retain_matches = Vec::new();
         let mut input_lowering = None;
         let mut has_floats = false;
+        let mut float_width_policy = FloatWidthPolicy::FirstBlock;
         let mut measured_widths = Vec::new();
         let mut measured_font_dependencies = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
@@ -7147,9 +7159,14 @@ impl EngineSession {
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
                         measured_float_geometry = Some(float_geometry_key(&geometry));
-                        let default_width = widths.first().copied().unwrap_or(0.0);
-                        let (floats, margin_floats) =
-                            resident_float_kinds(blocks, default_width, &measurement, &geometry)?;
+                        float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
+                        let (floats, margin_floats) = resident_float_kinds(
+                            blocks,
+                            &widths,
+                            float_width_policy,
+                            &measurement,
+                            &geometry,
+                        )?;
                         has_floats = floats;
                         // margin-relative zones couple the whole flow; re-measure all
                         if margin_floats || (floats && blocks.iter().any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))) {
@@ -7163,6 +7180,7 @@ impl EngineSession {
                                 .get(story)
                                 .map(|lowered| lowered.generation),
                             &widths,
+                            float_width_policy,
                             &table_wrap_frames,
                             &regions,
                             &measurement,
@@ -7243,6 +7261,7 @@ impl EngineSession {
                             let (measures, dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
+                                float_width_policy,
                                 &table_wrap_frames,
                                 &measurement,
                                 &geometry,
@@ -7285,9 +7304,10 @@ impl EngineSession {
                                 .collect();
                         }
                         _ => {
-                            let flow = docx_layout::measure_blocks::FloatFlow::with_table_frames(
+                            let flow = docx_layout::measure_blocks::FloatFlow::with_width_policy(
                                 &blocks,
                                 &widths,
+                                float_width_policy,
                                 &table_wrap_frames,
                                 &measurement,
                                 Some(&geometry),
@@ -9529,6 +9549,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
+        float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
@@ -9541,6 +9562,7 @@ impl EngineSession {
                 blocks,
                 lowered_generation,
                 widths,
+                float_width_policy,
                 table_wrap_frames,
                 regions,
                 measurement,
@@ -9830,10 +9852,11 @@ impl EngineSession {
                         })
                         .collect();
                     let Some((extents, reads)) =
-                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
+                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
                             &mut segment,
                             &widths[start..end],
                             default_width,
+                            float_width_policy,
                             &table_wrap_frames[start..end],
                             measurement,
                             Some(geometry),
@@ -9967,6 +9990,7 @@ impl EngineSession {
         blocks: &(impl BlockSource + ?Sized),
         lowered_generation: Option<u64>,
         widths: &[f64],
+        float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
@@ -9985,6 +10009,7 @@ impl EngineSession {
                 blocks,
                 lowered_generation,
                 widths,
+                float_width_policy,
                 table_wrap_frames,
                 regions,
                 measurement,
@@ -10280,10 +10305,11 @@ impl EngineSession {
                         }
                     }
                     let extents =
-                        docx_layout::measure_blocks::measure_float_segment_with_table_frames(
+                        docx_layout::measure_blocks::measure_float_segment_with_width_policy(
                             &mut segment,
                             &widths[start..end],
                             default_width,
+                            float_width_policy,
                             &table_wrap_frames[start..end],
                             measurement,
                             Some(geometry),
@@ -10543,6 +10569,7 @@ impl EngineSession {
                         )
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
+                    let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
                     if !self.lays_out_as_one_section(
                         &regions,
                         blocks
@@ -10558,7 +10585,8 @@ impl EngineSession {
                         })
                         || resident_float_kinds(
                             blocks,
-                            default_width,
+                            &widths,
+                            float_width_policy,
                             measurement.as_ref(),
                             &geometry,
                         )?
@@ -15222,10 +15250,12 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
         let (options, regions) = (&prepared.input.options, &prepared.regions);
         let through = |last: usize| options_through_section(options, regions, last);
+        let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
         let mut expected_blocks = blocks.clone();
         let (expected, _) = measure_page_prefix_plain(
             &mut expected_blocks,
             &widths,
+            float_width_policy,
             &frames,
             &prepared.measurement,
             &geometry,
@@ -15245,6 +15275,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let (actual, _) = measure_page_prefix(
                 &mut actual_blocks,
                 &widths,
+                float_width_policy,
                 &frames,
                 &prepared.measurement,
                 &geometry,
@@ -17116,6 +17147,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &blocks,
                 None,
                 &[300.0],
+                FloatWidthPolicy::for_document(blocks.iter()),
                 &[],
                 &prepared.regions,
                 &prepared.measurement,
@@ -17143,6 +17175,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     &blocks,
                     None,
                     &[300.0],
+                    FloatWidthPolicy::for_document(blocks.iter()),
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -17436,6 +17469,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     &blocks,
                     None,
                     &widths,
+                    FloatWidthPolicy::for_document(blocks.iter()),
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
