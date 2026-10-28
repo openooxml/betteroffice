@@ -154,10 +154,15 @@ pub(crate) fn paragraph_sizes(
             if field.kind("TOC") && scan.outside_text {
                 return false;
             }
+            let depth = scan.fields.len();
             scan.fields.push(field);
-            let valid = node.child_elements().all(|child| visit(child, scan));
+            if !node.child_elements().all(|child| visit(child, scan))
+                || scan.fields.len() != depth + 1
+            {
+                return false;
+            }
             scan.close();
-            return valid;
+            return true;
         }
         if node.matches_name("w", "r") {
             let mut control = false;
@@ -583,6 +588,27 @@ mod tests {
                 false,
             ),
             (format!(r#"<w:del w:id="1">{begin}</w:del>{entry}"#), false),
+            (
+                format!(
+                    concat!(
+                        r#"{entry}<w:fldSimple w:instr=" PAGEREF x "><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                        r#"<w:r><w:instrText> REF y </w:instrText></w:r></w:fldSimple>"#,
+                        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{entry}"#,
+                        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                    ),
+                    entry = entry,
+                ),
+                false,
+            ),
+            (
+                format!(
+                    concat!(
+                        r#"<w:fldSimple w:instr=" PAGEREF x "><w:r><w:fldChar w:fldCharType="end"/></w:r></w:fldSimple>{entry}"#,
+                    ),
+                    entry = entry,
+                ),
+                false,
+            ),
             (format!(r#"<w:ins w:id="1">{entry}</w:ins>"#), false),
             (
                 format!(
