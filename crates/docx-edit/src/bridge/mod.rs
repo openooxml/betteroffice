@@ -146,7 +146,9 @@ pub(crate) fn package_font_theme(
             parts.push((name.to_owned(), package.read(position).ok()?));
         }
     }
-    crate::seed::package_styles(&parts).ok().map(|(theme, _)| theme)
+    crate::seed::package_styles(&parts)
+        .ok()
+        .map(|(theme, _)| theme)
 }
 
 pub(crate) fn source_font_theme(doc: &EditingDoc) -> Option<docx_parse::Theme> {
@@ -4358,12 +4360,9 @@ fn resolve_font_slots(slots: &mut RunFontSlots, env: &RenderEnv) {
         (&mut slots.east_asia, &slots.east_asia_theme),
         (&mut slots.cs, &slots.cs_theme),
     ] {
-        if let Some(font) = reference
-            .as_deref()
-            .and_then(|reference| {
-                docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference)
-            })
-        {
+        if let Some(font) = reference.as_deref().and_then(|reference| {
+            docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference)
+        }) {
             *explicit = Some(font.to_owned());
         }
     }

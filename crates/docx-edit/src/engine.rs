@@ -12490,7 +12490,10 @@ mod tests {
 
         engine.doc().retain_source_docx(package("Times New Roman"));
         assert_eq!(engine.doc_epoch(), epoch);
-        assert!(Arc::ptr_eq(&engine.doc().source_metadata().unwrap(), &source));
+        assert!(Arc::ptr_eq(
+            &engine.doc().source_metadata().unwrap(),
+            &source
+        ));
         let second = engine.lower_story_json("body", &env).unwrap();
         let blocks: serde_json::Value = serde_json::from_str(&second).unwrap();
         assert_eq!(blocks[0]["runs"][0]["fontFamily"], "Times New Roman");

@@ -112,11 +112,15 @@ function pairedFontsPackage(slots: FontSlots, theme: 'custom' | 'default'): Uint
   return new Uint8Array(rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)]))));
 }
 
+function rFontsInXml(xml: string): string[] {
+  return [...xml.matchAll(/<w:rFonts\b[^>]*(?:\/>|>[\s\S]*?<\/w:rFonts>)/g)].map(match => match[0]);
+}
+
 function rFontsByPart(bytes: Uint8Array): Record<string, string[]> {
   return Object.fromEntries(Object.entries(unzipContainer(bytes)).flatMap(([part, content]) => {
     if (!part.endsWith('.xml')) return [];
     const xml = new TextDecoder().decode(content);
-    const fonts = [...xml.matchAll(/<w:rFonts\b[^>]*(?:\/>|>[\s\S]*?<\/w:rFonts>)/g)].map(match => match[0]);
+    const fonts = rFontsInXml(xml);
     return fonts.length ? [[part, fonts]] : [];
   }));
 }
@@ -127,10 +131,44 @@ function rFontsAttributes(parts: Record<string, string[]>): Record<string, Recor
   )]));
 }
 
+function textInXml(xml: string): string {
+  return [...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(text => text[1]).join('');
+}
+
+function authoredRFontsAfterEdit(
+  bytes: Uint8Array,
+  slots: FontSlots,
+  insertedPrefixes: readonly string[]
+): Record<string, Record<string, string>[]> {
+  const parts = rFontsByPart(bytes);
+  const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+  const sourceFonts = (site: string) => rFontsAttributes({ run: [pairedFonts(slots, site)] }).run[0]!;
+  const authored = xml.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (run, offset: number) => {
+    const fonts = rFontsInXml(run);
+    if (fonts.length === 0) return run;
+    if (/<w:fldChar\b/.test(run)) {
+      expect(fonts).toHaveLength(1);
+      expect(rFontsAttributes({ run: fonts }).run).toEqual([sourceFonts('ComplexField')]);
+      return run.replace(fonts[0]!, '');
+    }
+    if (textInXml(run) === '!') {
+      const prefix = insertedPrefixes.map(prefix => ({ prefix, offset: xml.lastIndexOf(prefix, offset) }))
+        .filter(entry => entry.offset >= 0).sort((left, right) => right.offset - left.offset)[0]?.prefix;
+      expect(prefix).toBeDefined();
+      const expected = sourceFonts(prefix === 'BeforeSimple' ? 'SimplePrefix' : 'ComplexPrefix');
+      delete expected['w:hint'];
+      expect(fonts).toHaveLength(1);
+      expect(rFontsAttributes({ run: fonts }).run).toEqual([expected]);
+      return run.replace(fonts[0]!, '');
+    }
+    return run;
+  });
+  parts['word/document.xml'] = rFontsInXml(authored);
+  return rFontsAttributes(parts);
+}
+
 function paragraphTexts(xml: string): string[] {
-  return [...xml.matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)].map(paragraph =>
-    [...paragraph[1].matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(text => text[1]).join('')
-  );
+  return [...xml.matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)].map(paragraph => textInXml(paragraph[1]));
 }
 
 beforeAll(() => preloadEditWasm(new Uint8Array(
@@ -155,8 +193,10 @@ function assertThemeFontPaint(session: YrsSession, document: Document, texts: st
   const requirements = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request))) as Array<{ family: string }>;
   expect(requirements.some(font => font.family === 'Calibri')).toBe(true);
   expect(requirements.some(font => font.family === 'Cambria')).toBe(false);
-  const layout = session.layoutDocumentWithRegionsJson(JSON.stringify(request));
-  const display = JSON.parse(session.buildDisplayListJson(layout)) as DisplayList;
+  const layout = JSON.parse(session.layoutDocumentWithRegionsJson(JSON.stringify(request)));
+  const display = JSON.parse(session.buildDisplayListJson(JSON.stringify({
+    ...layout, fontChains: request.measurement.fontChains,
+  }))) as DisplayList;
   const glyphs = display.pages.flatMap(page => page.primitives).filter(
     (primitive): primitive is GlyphRunPrimitive => primitive.kind === 'glyphRun' && texts.includes(primitive.text)
   );
@@ -338,13 +378,16 @@ for (const path of ['native', 'typescript'] as const) {
         else hydrated.insertText({ story: 'body', paraId: target.paraId, offset: 1 }, '!');
         const saved = unzipContainer((await saveYrsDocx(hydrated)).bytes);
         const xml = new TextDecoder().decode(saved['word/document.xml']);
-        expect([...xml.matchAll(/<w:rFonts\b[^>]*\/>/g)].map(match => match[0])).toEqual([FONTS]);
+        expect(rFontsInXml(xml)).toEqual(action === 'field edit' ? [FONTS, FONTS, FONTS, FONTS] : [FONTS]);
         expect([...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(match => match[1]).join(''))
           .toBe(action === 'field edit' ? 'T!itle' : 'ATitle');
         expect([...xml.matchAll(/<w:p\b[^>]*>/g)]).toHaveLength(action === 'split' ? 2 : 1);
         if (action === 'field edit') {
           expect(xml).toContain('TOC');
           expect(xml).toContain('_Toc1');
+          const runs = [...xml.matchAll(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)].map(match => match[0]);
+          expect(runs.filter(run => /<w:fldChar\b/.test(run)).flatMap(rFontsInXml)).toEqual([FONTS, FONTS, FONTS]);
+          expect(runs.filter(run => /<w:t\b/.test(run)).flatMap(rFontsInXml)).toEqual([FONTS]);
         }
       } finally {
         session.destroy();
@@ -376,14 +419,19 @@ for (const path of ['native', 'typescript'] as const) {
             else documentToYrs(source, document);
             session.openDocx(bytes, false);
             session.loadState(source.encodeState());
+            const insertedPrefixes: string[] = [];
             const assertSavedFonts = async () => {
               const saved = (await saveYrsDocx(session)).bytes;
               const savedParts = unzipContainer(saved);
               expect(savedParts['word/numbering.xml']).toEqual(originalParts['word/numbering.xml']);
               const actual = rFontsByPart(saved);
               if (action === 'unchanged save') expect(actual).toEqual(original);
-              else expect(rFontsAttributes(actual)).toEqual(rFontsAttributes(original));
-              return new TextDecoder().decode(savedParts['word/document.xml']);
+              else expect(authoredRFontsAfterEdit(saved, slots, insertedPrefixes)).toEqual(rFontsAttributes(original));
+              const xml = new TextDecoder().decode(savedParts['word/document.xml']);
+              let expectedText = textInXml(new TextDecoder().decode(originalParts['word/document.xml']));
+              for (const prefix of insertedPrefixes) expectedText = expectedText.replace(prefix, `${prefix}!`);
+              expect(textInXml(xml)).toBe(expectedText);
+              return xml;
             };
             if (action === 'unchanged save') {
               await assertSavedFonts();
@@ -400,8 +448,9 @@ for (const path of ['native', 'typescript'] as const) {
                 const paragraph = session.paragraphs('body').find(entry => entry.text.startsWith(prefix))!;
                 expect(paragraph).toBeDefined();
                 session.insertText({ story: 'body', paraId: paragraph.paraId, offset: prefix.length }, '!');
+                insertedPrefixes.push(prefix);
                 const xml = await assertSavedFonts();
-                expect(xml).toContain(`${prefix}!</w:t>`);
+                expect(paragraphTexts(xml).some(text => text.startsWith(`${prefix}!`))).toBe(true);
                 expect(xml).toContain('<w:fldSimple w:instr=" PAGE ">');
                 expect(xml).toContain('TOC');
                 expect(xml).toContain('_Toc1');
