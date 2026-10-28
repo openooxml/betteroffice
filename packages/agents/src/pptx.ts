@@ -570,7 +570,7 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (handle.version() !== version) continue;
       try { return handle.save(fonts); }
       catch (error) {
-        if (error instanceof Error && /^(?:could not write PPTX: )?render resource limit exceeded(?::|$)/u.test(error.message)) return handle.save();
+        if (error instanceof Error && /^(?:could not write PPTX: )?render resource limit exceeded(?::|$)/u.test(error.message)) return handle.save({ fonts: [] });
         throw error;
       }
     }
