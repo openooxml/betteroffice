@@ -62,9 +62,9 @@ const strings: Record<LocaleCode, DesktopStrings> = {
 export const locale: LocaleCode = resolveLocale(
   typeof navigator === "undefined"
     ? []
-    : navigator.languages?.length
-      ? navigator.languages
-      : [navigator.language]
+    : [...(navigator.languages ?? []), navigator.language].filter(
+        (tag): tag is string => typeof tag === "string"
+      )
 );
 
 if (typeof document !== "undefined") {
