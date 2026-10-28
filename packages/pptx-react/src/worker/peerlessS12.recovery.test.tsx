@@ -13,7 +13,7 @@ const last = <T,>(items: readonly T[]): T | undefined => items[items.length - 1]
 
 for (const update of [false, true]) for (const edited of [false, true]) test(`recovery reads the mount Blob lazily with update baseline ${update} and edits ${edited}`, async () => {
   const file = await deck();
-  let reference = file.slice();
+  let reference: Uint8Array = file.slice();
   const NativeBlob = globalThis.Blob;
   const constructed = mock((_parts?: BlobPart[]) => {});
   globalThis.Blob = new Proxy(NativeBlob, {
