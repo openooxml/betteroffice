@@ -327,10 +327,23 @@ fn align(
 
 fn drawing_object_id(element: &XmlElement) -> Option<&str> {
     if element.local_name() == "AlternateContent" {
-        return element
-            .child_elements()
-            .flat_map(|branch| branch.child_elements())
-            .find_map(drawing_object_id);
+        let mut id = None;
+        for branch in element.child_elements() {
+            if !matches!(branch.local_name(), "Choice" | "Fallback") {
+                return None;
+            }
+            let mut children = branch.child_elements();
+            let child = children.next()?;
+            if children.next().is_some() {
+                return None;
+            }
+            let branch_id = drawing_object_id(child)?;
+            if id.is_some_and(|current| current != branch_id) {
+                return None;
+            }
+            id = Some(branch_id);
+        }
+        return id;
     }
     let non_visual = if matches!(
         element.local_name(),
