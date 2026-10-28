@@ -4,7 +4,7 @@ use crate::types::{
 };
 
 /// Eligible: measured text, fields, breaks, font/color/bidi/spacing metadata,
-/// font-box highlights, bounded underline/strike rules and geometric tab leaders.
+/// font-box highlights, bounded single underlines/strikes and geometric tab leaders.
 /// Other painted features require full-height fitting.
 fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option<f64> {
     let mut tabs = None;
@@ -100,7 +100,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             font_family: _,
             font_slots: _,
             font_size,
-            font_size_cs: _,
+            font_size_cs,
             bold_cs: _,
             italic_cs: _,
             complex_script: _,
@@ -141,7 +141,11 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
         if comment_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return None;
         }
-        let font_px = font_size.unwrap_or(11.0) * 96.0 / 72.0;
+        let painted_size = font_size.unwrap_or(11.0);
+        if font_size_cs.is_some_and(|size| size != painted_size) {
+            return None;
+        }
+        let font_px = painted_size * 96.0 / 72.0;
         if !font_px.is_finite() || font_px <= 0.0 {
             return None;
         }
@@ -151,12 +155,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             None | Some(UnderlineSpec::Flag(false)) => false,
             Some(UnderlineSpec::Flag(true)) => true,
             Some(UnderlineSpec::Styled { style, color: _ }) => match style.as_deref() {
-                None
-                | Some(
-                    "single" | "solid" | "double" | "dotted" | "dash" | "dashed"
-                    | "dotDash" | "dotDotDash" | "wave" | "wavy" | "words" | "none"
-                    | "nil",
-                ) => true,
+                None | Some("single" | "solid") => true,
                 _ => return None,
             },
         };

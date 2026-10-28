@@ -348,6 +348,77 @@ fn underline_and_tab_leader_bounds_extend_the_fit_above_footnotes() {
 }
 
 #[test]
+fn non_single_underlines_require_full_pitch_above_footnotes() {
+    for style in [
+        "double", "wave", "wavy", "thick", "dotted", "dash", "dashed", "dotDash",
+        "dotDotDash", "words", "none", "nil",
+    ] {
+        let mut target = paragraph(
+            "text",
+            1,
+            120.0,
+            72.0,
+            24.0,
+            json!({"spacing": {"line": 1.25, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"][0]["fontSize"] = json!(72);
+        target["block"]["runs"][0]["underline"] = json!({"style": style});
+        let mut value = input(vec![prefix(84.0), target], 200.0);
+        value.options.footnote_reserved_heights =
+            Some([("1".to_owned(), 20.0)].into_iter().collect());
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(1, 0, 1)], "{style}");
+    }
+}
+
+#[test]
+fn split_script_font_sizes_require_full_pitch_above_footnotes() {
+    for (font_size, font_size_cs, complex_script, text, page) in [
+        (Some(72), 12, Some(true), "x", 1),
+        (Some(72), 12, None, "ع", 1),
+        (None, 12, Some(true), "x", 1),
+        (Some(12), 12, Some(true), "x", 0),
+    ] {
+        let mut target = paragraph(
+            "text",
+            1,
+            60.0,
+            14.0,
+            4.0,
+            json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"] = json!([{
+            "kind": "text", "text": text, "fontSize": font_size,
+            "fontSizeCs": font_size_cs, "complexScript": complex_script,
+        }]);
+        let mut value = footnote_boundary_input(target);
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(page, 0, 1)]);
+    }
+}
+
+#[test]
+fn single_underlines_keep_font_box_fit_above_footnotes() {
+    for underline in [
+        json!(true),
+        json!({"style": "single"}),
+        json!({"style": "solid"}),
+        json!({"color": "#0000ff"}),
+    ] {
+        let mut target = text(
+            1,
+            60.0,
+            json!({"spacing": {"line": 3, "lineUnit": "multiplier", "lineRule": "auto"}}),
+        );
+        target["block"]["runs"][0]["fontSize"] = json!(12);
+        target["block"]["runs"][0]["underline"] = underline;
+        let mut value = footnote_boundary_input(target);
+        let result = docx_layout::compute_layout_input(&mut value).unwrap();
+        assert_eq!(slices(&result, "text"), vec![(0, 0, 1)]);
+    }
+}
+
+#[test]
 fn normally_underlined_links_keep_font_box_fit_above_footnotes() {
     let mut target = text(
         1,
