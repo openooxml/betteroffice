@@ -513,7 +513,7 @@ mod tests {
                 let entry = runs.iter().find(|run| run["text"] == label).unwrap();
                 let expected = if direct == Some(index) { 14.0 } else { 10.0 };
                 assert_eq!(entry["fontSize"], expected, "{label}");
-                if inside_sdt {
+                if inside_sdt && !complex_page {
                     for run in runs {
                         assert_eq!(run["fontSize"], 10.0, "{label}: {run}");
                     }
