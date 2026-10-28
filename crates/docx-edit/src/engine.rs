@@ -23023,33 +23023,35 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     fn inline_shape_audit_block(run: serde_json::Value) -> LayoutBlock {
+        let nested_text = json!([{
+            "id": "nested-text", "pmStart": 1, "pmEnd": 5, "runs": [run.clone()]
+        }]);
+        let nested = json!({
+            "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+            "geometryPath": [], "children": [], "innerText": nested_text
+        });
+        let box_text = json!([{
+            "id": "box-text", "pmStart": 1, "pmEnd": 5, "runs": [{
+                "kind": "image", "src": "", "width": 20, "height": 20,
+                "pmStart": 2, "pmEnd": 3, "inlineShape": nested
+            }]
+        }]);
+        let child = json!({
+            "id": "child", "shapeType": "rect", "width": 20, "height": 20,
+            "geometryPath": [], "children": [], "innerText": [{
+                "id": "child-text", "pmStart": 1, "pmEnd": 5, "runs": [run]
+            }]
+        });
+        let shape = json!({
+            "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+            "geometryPath": [], "pmStart": 1, "pmEnd": 2,
+            "innerText": box_text, "children": [child]
+        });
         serde_json::from_value(json!({
             "kind": "paragraph", "id": "outer", "pmStart": 0, "pmEnd": 5,
             "runs": [{
                 "kind": "image", "src": "", "width": 60, "height": 40,
-                "pmStart": 1, "pmEnd": 2, "inlineShape": {
-                    "id": "box", "shapeType": "rect", "width": 60, "height": 40,
-                    "geometryPath": [], "pmStart": 1, "pmEnd": 2,
-                    "innerText": [{
-                        "id": "box-text", "pmStart": 1, "pmEnd": 5, "runs": [{
-                            "kind": "image", "src": "", "width": 20, "height": 20,
-                            "pmStart": 2, "pmEnd": 3, "inlineShape": {
-                                "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
-                                "geometryPath": [], "children": [],
-                                "innerText": [{
-                                    "id": "nested-text", "pmStart": 1, "pmEnd": 5,
-                                    "runs": [run]
-                                }]
-                            }
-                        }]
-                    }],
-                    "children": [{
-                        "id": "child", "shapeType": "rect", "width": 20, "height": 20,
-                        "geometryPath": [], "children": [], "innerText": [{
-                            "id": "child-text", "pmStart": 1, "pmEnd": 5, "runs": [run]
-                        }]
-                    }]
-                }
+                "pmStart": 1, "pmEnd": 2, "inlineShape": shape
             }]
         }))
         .unwrap()

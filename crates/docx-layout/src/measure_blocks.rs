@@ -5615,7 +5615,11 @@ mod tests {
             let mut blocks = source.clone();
             let measures =
                 measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
-            assert_eq!(measures, expected, "{wrap}, behindDoc={behind_doc}");
+            assert_eq!(
+                serde_json::to_value(&measures).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{wrap}, behindDoc={behind_doc}"
+            );
 
             let mut chunks = source.clone();
             let mut flow = FloatFlow::new(&chunks, &[200.0; 3], &config, None).unwrap();
@@ -5623,7 +5627,10 @@ mod tests {
                 flow.measure_until(&mut chunks, &[200.0; 3], &config, end)
                     .unwrap();
             }
-            assert_eq!(flow.into_extents(), expected);
+            assert_eq!(
+                serde_json::to_value(flow.into_extents()).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
 
             let mut columns = source.clone();
             let column_measures = measure_blocks_with_column_frames(
@@ -5643,14 +5650,20 @@ mod tests {
                 )]),
             )
             .unwrap();
-            assert_eq!(column_measures, expected);
+            assert_eq!(
+                serde_json::to_value(&column_measures).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
 
             let mut segment = source;
             let segment_measures =
                 measure_float_segment(&mut segment, &[200.0; 3], 200.0, &config, None, &[false; 3])
                     .unwrap()
                     .unwrap();
-            assert_eq!(segment_measures, expected);
+            assert_eq!(
+                serde_json::to_value(&segment_measures).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
         }
     }
 
@@ -6801,7 +6814,11 @@ mod tests {
             let mut cold: LayoutBlock = serde_json::from_value(cold).unwrap();
             let actual = measure_block(&mut warm, 300.0, &config).unwrap();
             let expected = measure_block(&mut cold, 300.0, &config).unwrap();
-            assert_eq!(actual, expected, "{change}");
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{change}"
+            );
             assert_eq!(warm, cold, "{change}");
             let updated = serde_json::to_value(&warm).unwrap();
             assert_ne!(
