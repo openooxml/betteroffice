@@ -1685,11 +1685,15 @@ fn extend_input_for_header_footer(
         });
     let fallback_margins =
         docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let mut refs = HeaderFooterRefs::default();
     let extended: Vec<_> = regions
         .sections
         .iter()
         .enumerate()
         .map(|(section_index, section)| {
+            if let Some(authored) = &section.header_footer_refs {
+                refs.inherit(authored);
+            }
             let page_size = section
                 .page_size
                 .clone()
@@ -1715,11 +1719,24 @@ fn extend_input_for_header_footer(
                         && variant.hf_type == hf_type
                 })
             };
+            let descriptors = header_footer_descriptors(section, refs.clone());
+            let height = |kind: HeaderFooterKind, hf_type: HeaderFooterType| {
+                variant(kind, hf_type)
+                    .map(|variant| variant.flow_height)
+                    .or_else(|| {
+                        descriptors
+                            .iter()
+                            .any(|(candidate_kind, candidate_type, r_id)| {
+                                *candidate_kind == kind
+                                    && *candidate_type == hf_type
+                                    && r_id.is_some()
+                            })
+                            .then_some(0.0)
+                    })
+            };
             let extend = |hf_type: HeaderFooterType| {
-                let header = variant(HeaderFooterKind::Header, hf_type)
-                    .map_or(0.0, |variant| variant.flow_height);
-                let footer = variant(HeaderFooterKind::Footer, hf_type)
-                    .map_or(0.0, |variant| variant.flow_height);
+                let header = height(HeaderFooterKind::Header, hf_type);
+                let footer = height(HeaderFooterKind::Footer, hf_type);
                 extend_body_margins(&page_size, &margins, header, footer)
             };
             let float_bands = |hf_type: HeaderFooterType| {
@@ -23691,7 +23708,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
-    fn an_exact_prefix_extends_margins_as_a_later_section_header_does_for_the_full_pass() {
+    fn an_exact_prefix_keeps_headerless_margins_when_a_later_section_has_a_header() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let first = r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="360" w:right="1440" w:bottom="360" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
@@ -23723,7 +23740,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         request["regions"]["sections"] = serde_json::json!([plain, headed]);
         let (full, laid, prefix) = full_and_exact_prefix(&bytes, &request.to_string(), 3, &|_| {});
         let top = &full["layout"]["pages"][0]["margins"]["top"];
-        assert_eq!(top.as_f64(), Some(48.0));
+        assert_eq!(top.as_f64(), Some(24.0));
+        assert_eq!(
+            full["layout"]["pages"][0]["margins"]["bottom"].as_f64(),
+            Some(24.0)
+        );
         assert!(laid.provisional);
         assert_eq!(first_pages(&prefix), first_pages(&full));
         docx_layout::clear_measure_fonts();
@@ -30161,6 +30182,53 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_eq!(paragraph_slices(&off, 1)[0], (0, 0, 1));
         assert!(paragraph_slices(&on, 1).iter().all(|(page, ..)| *page > 0));
         assert_eq!(paragraph_slices(&on, 1)[0].1, 0);
+    }
+
+    #[test]
+    fn inherited_zero_height_references_reserve_only_their_page_kind() {
+        use docx_layout::regions::{DocumentRegions, RegionSection};
+
+        let section = RegionSection {
+            page_size: Some(docx_layout::types::Size {
+                w: 816.0,
+                h: 1056.0,
+            }),
+            margins: Some(docx_layout::types::PageMargins {
+                top: 30.0,
+                right: 96.0,
+                bottom: 30.0,
+                left: 96.0,
+                header: Some(47.2),
+                footer: Some(47.2),
+            }),
+            title_pg: true,
+            ..Default::default()
+        };
+        let mut first = section.clone();
+        first.header_footer_refs = Some(HeaderFooterRefs {
+            header_default: Some("header".to_owned()),
+            footer_default: Some("footer".to_owned()),
+            ..Default::default()
+        });
+        let regions = DocumentRegions {
+            sections: vec![first, section],
+            even_and_odd_headers: true,
+            ..Default::default()
+        };
+        let mut input = LayoutInput {
+            measured: Vec::new(),
+            options: Default::default(),
+        };
+        extend_input_for_header_footer(&mut input, &regions, &[], None);
+        let margins = input.options.final_margins.unwrap();
+        assert_eq!(margins.top, 47.2);
+        assert_eq!(margins.bottom, 47.2);
+        for page_margins in input.options.section_page_margins.unwrap() {
+            for margins in [page_margins.first.unwrap(), page_margins.even.unwrap()] {
+                assert_eq!(margins.top, 30.0);
+                assert_eq!(margins.bottom, 30.0);
+            }
+        }
     }
 
     #[test]
