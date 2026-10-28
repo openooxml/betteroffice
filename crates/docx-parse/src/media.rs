@@ -69,6 +69,11 @@ pub struct MediaDescriptor {
 }
 
 impl MediaTable {
+    /// The retained archive containing this media.
+    pub fn retained_package(&self) -> &RetainedPackage {
+        &self.package
+    }
+
     /// Copies descriptors without inflating or transcoding parts.
     pub fn descriptors(&self) -> Vec<MediaDescriptor> {
         self.parts

@@ -113,6 +113,7 @@ export function buildResidentRegionLayoutRequest(
     },
     notes: { contents },
     renderEnv: {
+      fontTheme: document?.package.theme,
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),

@@ -8159,6 +8159,14 @@ impl EngineSession {
             self.note_separators.borrow_mut().take();
             return Ok(None);
         };
+        let sourced_env = RenderEnv {
+            font_theme: render_env
+                .font_theme
+                .clone()
+                .or_else(|| crate::bridge::source_font_theme(&self.doc)),
+            ..render_env.clone()
+        };
+        let render_env = &sourced_env;
         let mut cache = self.note_separators.borrow_mut();
         if cache
             .as_ref()
@@ -8209,7 +8217,7 @@ impl EngineSession {
         let (_, _, revealable, _) = crate::bridge::preview::lower_recorded(
             &cached.doc,
             kind,
-            render_env,
+            &cached.env,
             &mut local,
             false,
         )
@@ -26425,6 +26433,39 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 }
             }
         }
+    }
+
+    #[test]
+    fn note_separator_layout_uses_the_retained_package_theme() {
+        let notes = format!(
+            r#"<w:footnotes {}><w:footnote w:id="-1" w:type="separator"><w:p><w:r><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr><w:separator/></w:r></w:p></w:footnote></w:footnotes>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new("<w:p/>")
+            .part("footnotes.xml", "fn", "footnotes", "footnotes", &notes)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+        let engine = EngineSession::new(314);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let original = engine.doc().encode_state_as_update_v1();
+        let blocks = engine
+            .lower_note_separator("footnote", &RenderEnv::default())
+            .unwrap()
+            .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("missing separator paragraph");
+        };
+        let Run::Text(run) = &paragraph.runs[0] else {
+            panic!("missing separator run");
+        };
+        assert_eq!(run.fmt.font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(engine.doc().encode_state_as_update_v1(), original);
     }
 
     #[test]

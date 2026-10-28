@@ -826,6 +826,13 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
+    env.font_theme = value
+        .get("fontTheme")
+        .filter(|theme| !theme.is_null())
+        .cloned()
+        .map(crate::bridge::parse_font_theme)
+        .transpose()
+        .map_err(js_err)?;
     if let Some(Value::Array(ids)) = value.get("tocStyleIds") {
         env.toc_style_ids
             .extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));

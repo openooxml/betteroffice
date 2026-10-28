@@ -35,7 +35,7 @@ import type {
   TrackedChangeInfo,
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
-import { resolveRFontsThemeFont, resolveThemeFont } from '../utils/fontResolver';
+import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
@@ -1116,8 +1116,8 @@ function runBoundary(
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
-    ...(run.formatting ? { formatting: authoredSnapshot(run.formatting) } : {}),
-    ...(run.propertyChanges ? { propertyChanges: authoredSnapshot(run.propertyChanges) } : {}),
+    ...(run.formatting ? { formatting: run.formatting } : {}),
+    ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
   };
 }
 
@@ -1155,7 +1155,7 @@ function paragraphAttrs(
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
     listStartOverride: paragraph.listRendering?.startOverride ?? null,
-    _originalFormatting: authoredSnapshot(formatting) ?? null,
+    _originalFormatting: formatting ?? null,
     ...(formatting?.cnfStyle ? { cnfStyle: formatting.cnfStyle } : {}),
   };
 
@@ -1281,7 +1281,7 @@ function paragraphAttrs(
       date: paragraph.pPrDel.date ?? null,
     };
   }
-  if (paragraph.propertyChanges?.length) attrs.pPrChange = authoredSnapshot(paragraph.propertyChanges);
+  if (paragraph.propertyChanges?.length) attrs.pPrChange = paragraph.propertyChanges;
 
   const bookmarks: Attrs[] = [];
   let contentIndex = 0;
@@ -1540,7 +1540,7 @@ function projectCell(
       : (options.defaultMargins ?? null),
     textDirection: formatting?.textDirection ?? null,
     noWrap: formatting?.noWrap ?? false,
-    _originalFormatting: authoredSnapshot(formatting) ?? null,
+    _originalFormatting: formatting ?? null,
     _originalResolvedFill: backgroundColor ?? null,
   };
   if (cell.structuralChange) {
@@ -1557,7 +1557,7 @@ function projectCell(
       };
     }
   }
-  if (cell.propertyChanges?.length) attrs.tcPrChange = authoredSnapshot(cell.propertyChanges);
+  if (cell.propertyChanges?.length) attrs.tcPrChange = cell.propertyChanges;
   return {
     attrs: tableCellAttrsToTcPr(attrs, options.isHeader),
     content:
@@ -1582,7 +1582,7 @@ function projectRow(
     height: row.formatting?.height?.value ?? null,
     heightRule: row.formatting?.heightRule ?? null,
     isHeader: !!row.formatting?.header,
-    _originalFormatting: authoredSnapshot(row.formatting) ?? null,
+    _originalFormatting: row.formatting ?? null,
   };
   if (row.structuralChange) {
     if (row.structuralChange.type === 'tableRowInsertion') {
@@ -1591,7 +1591,7 @@ function projectRow(
       attrs.trDel = revisionAttrs(row.structuralChange.info);
     }
   }
-  if (row.propertyChanges?.length) attrs.trPrChange = authoredSnapshot(row.propertyChanges);
+  if (row.propertyChanges?.length) attrs.trPrChange = row.propertyChanges;
   if (row.extraAttributes) attrs._extraAttributes = row.extraAttributes;
 
   const columnWidths = table.columnWidths;
@@ -1753,9 +1753,9 @@ function projectTable(
     // Omit the default so pre-existing yrs snapshots (no field) keep matching;
     // the bridge treats an absent mode as 12.
     compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
-    _originalFormatting: authoredSnapshot(originalFormatting),
+    _originalFormatting: originalFormatting,
   };
-  if (table.propertyChanges?.length) attrs.tblPrChange = authoredSnapshot(table.propertyChanges);
+  if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
   const rowSpans = calculateRowSpans(table);
   const styleColumns = tableColumnCount(table);
   return {
@@ -2124,16 +2124,6 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
   session.applySeedRawOps(plan.storyId, ops);
 }
 
-const authoredFontFamilies = new WeakMap<object, object>();
-
-function authoredSnapshot<T>(value: T): T {
-  if (!value || typeof value !== 'object') return value;
-  const source = authoredFontFamilies.get(value);
-  if (source) return authoredSnapshot(source) as T;
-  if (Array.isArray(value)) return value.map(authoredSnapshot) as T;
-  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, authoredSnapshot(child)])) as T;
-}
-
 function seedFontNames(document: Document): () => void {
   const restore: Array<() => void> = [];
   const visit = (value: unknown): void => {
@@ -2148,19 +2138,13 @@ function seedFontNames(document: Document): () => void {
       const fonts = { ...original } as Record<string, unknown>;
       for (const [explicit, reference] of [['ascii', 'asciiTheme'], ['hAnsi', 'hAnsiTheme'], ['eastAsia', 'eastAsiaTheme'], ['cs', 'csTheme']] as const) {
         const referenceName = fonts[reference];
-        if (typeof referenceName === 'string') {
-          const name = resolveRFontsThemeFont(referenceName, document.package.theme?.fontScheme);
+        if (!fonts[explicit] && typeof referenceName === 'string') {
+          const name = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
           if (name !== null) fonts[explicit] = name;
-          else if (!fonts[explicit]) {
-            const fallback = resolveThemeFont(referenceName, document.package.theme?.fontScheme);
-            if (fallback !== null) fonts[explicit] = fallback;
-          }
         }
       }
       const keys = new Set(['ascii', 'hAnsi', 'eastAsia', 'cs', 'asciiTheme', 'hAnsiTheme', 'eastAsiaTheme', 'csTheme', 'hint', ...Object.keys(fonts)]);
-      const resolved = Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key]]));
-      authoredFontFamilies.set(resolved, original);
-      record.fontFamily = resolved;
+      record.fontFamily = Object.fromEntries([...keys].filter(key => key in fonts).map(key => [key, fonts[key]]));
       restore.push(() => { record.fontFamily = original; });
     }
     for (const child of Object.values(record)) visit(child);

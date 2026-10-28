@@ -845,33 +845,9 @@ fn validate_paragraph_clears(
     Ok(())
 }
 
-fn authored_font_family(snapshot: &Snapshot, offset: Option<u32>) -> Option<&Value> {
-    if let Some(offset) = offset
-        && let Some(boundaries) = snapshot
-            .carriers
-            .get("_originalRunBoundaries")
-            .and_then(Value::as_array)
-    {
-        let mut end = 0;
-        for boundary in boundaries {
-            end += boundary.get("text")?.as_str()?.encode_utf16().count() as u32;
-            if offset < end {
-                return boundary.get("formatting")?.get("fontFamily");
-            }
-        }
-    }
-    snapshot
-        .carriers
-        .get("_originalFormatting")?
-        .get("runProperties")?
-        .get("fontFamily")
-}
-
 fn validate_theme_fonts(
     before: &Attrs,
     changes: &[AttrDeltaV1],
-    source: &Snapshot,
-    offset: Option<u32>,
     context: &PatchContext<'_>,
 ) -> Result<(), LegacyParagraphV1> {
     let themes = [
@@ -886,29 +862,11 @@ fn validate_theme_fonts(
             .iter()
             .any(|key| fonts.get(*key).is_some_and(|value| !value.is_null()))
     });
-    let font_changes = || {
-        changes
-            .iter()
-            .filter(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
-    };
     if themed
-        && let Some(first) = font_changes().next()
+        && let Some(delta) = changes
+            .iter()
+            .find(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
     {
-        let authored = authored_font_family(source, offset);
-        let delta = font_changes()
-            .find(|delta| {
-                authored.is_some_and(|fonts| {
-                    let before = delta.path[1..]
-                        .iter()
-                        .try_fold(fonts, |value, key| value.get(key));
-                    let after = match &delta.after {
-                        SlotV1::Missing => None,
-                        SlotV1::Present { value } => Some(value),
-                    };
-                    before != after
-                })
-            })
-            .unwrap_or(first);
         let slot = delta.path.get(1).map_or("fontFamily", String::as_str);
         return Err(context.legacy(
             PatchErrorCode::AmbiguousAlignment,
@@ -1173,13 +1131,7 @@ pub(crate) fn diff_paragraph_v1(
                         return Err(context.restyle("inserted run inheritance"));
                     }
                     let changes = deltas(donor_attrs, &token.attrs);
-                    validate_theme_fonts(
-                        donor_attrs,
-                        &changes,
-                        &before,
-                        donors.text_donor(previous.0, i).map(|at| offsets[at]),
-                        &context,
-                    )?;
+                    validate_theme_fonts(donor_attrs, &changes, &context)?;
                     validate_deltas(&changes, run_key, &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                         let code = PatchErrorCode::UnsupportedStructure;
@@ -1244,13 +1196,7 @@ pub(crate) fn diff_paragraph_v1(
                     }
                 }
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
-                validate_theme_fonts(
-                    &old[i].attrs,
-                    &run_changes,
-                    &before,
-                    Some(offsets[i]),
-                    &context,
-                )?;
+                validate_theme_fonts(&old[i].attrs, &run_changes, &context)?;
                 validate_deltas(&run_changes, run_key, &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
                     return Err(context.legacy(

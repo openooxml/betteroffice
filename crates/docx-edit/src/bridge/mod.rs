@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use docx_layout::types::{
     BlockId, BorderStyle, BoxEdges, CellBorderSpec, CellBorders, ChartBlock, ColumnBreakBlock,
@@ -78,6 +78,11 @@ pub struct RenderEnv {
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
     /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_font_theme"
+    )]
+    pub font_theme: Option<docx_parse::Theme>,
     /// Interval between implicit tab stops, passed through to each paragraph.
     /// `None` leaves the layout engine's own default in effect.
     pub default_tab_stop_twips: Option<f64>,
@@ -127,6 +132,58 @@ pub struct RenderEnv {
     pub reservations: Reservations,
     #[serde(skip)]
     pub group_pictures: GroupPictureSources,
+}
+
+pub(crate) fn package_font_theme(
+    package: &ooxml_opc::RetainedPackage,
+) -> Option<docx_parse::Theme> {
+    let mut parts = Vec::new();
+    for name in ["word/settings.xml", "word/theme/theme1.xml"] {
+        if let Some(position) = package
+            .parts()
+            .position(|(path, _)| path.eq_ignore_ascii_case(name))
+        {
+            parts.push((name.to_owned(), package.read(position).ok()?));
+        }
+    }
+    crate::seed::package_styles(&parts).ok().map(|(theme, _)| theme)
+}
+
+pub(crate) fn source_font_theme(doc: &EditingDoc) -> Option<docx_parse::Theme> {
+    if let Some(index) = doc.source_index() {
+        return Some(index.render_theme().clone());
+    }
+    package_font_theme(doc.media_table()?.retained_package())
+}
+
+pub(crate) fn parse_font_theme(value: Value) -> Result<docx_parse::Theme, serde_json::Error> {
+    fn merge(target: &mut Value, source: Value) {
+        match (target, source) {
+            (Value::Object(target), Value::Object(source)) => {
+                for (key, value) in source {
+                    let entry = target.entry(key).or_insert(Value::Null);
+                    merge(entry, value);
+                }
+            }
+            (target, source) => *target = source,
+        }
+    }
+    let mut theme = docx_parse::Theme::default();
+    theme.font_scheme.major_font = docx_parse::ThemeFont::empty();
+    theme.font_scheme.minor_font = docx_parse::ThemeFont::empty();
+    let mut theme = serde_json::to_value(theme)?;
+    merge(&mut theme, value);
+    serde_json::from_value(theme)
+}
+
+fn deserialize_font_theme<'de, D>(deserializer: D) -> Result<Option<docx_parse::Theme>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<Value> as serde::Deserialize>::deserialize(deserializer)?
+        .map(parse_font_theme)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 impl RenderEnv {
@@ -386,6 +443,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     }
 
     let with_sources = RenderEnv {
+        font_theme: env.font_theme.clone().or_else(|| source_font_theme(doc)),
         media: if env.media_tokens && env.media.is_empty() {
             doc.media_sources()
         } else {
@@ -839,7 +897,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         if !paragraph_runs.is_empty() {
                             let join = field_join.as_mut().unwrap();
                             let offset = (paragraph_pm_start - join.pm_start) as u32;
-                            let defaults = paragraph_run_defaults(&values);
+                            let defaults = paragraph_run_defaults(&values, env);
                             for run in &mut paragraph_runs {
                                 run.pm_start += offset;
                                 run.pm_end += offset;
@@ -902,7 +960,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if let Some((hidden, target)) = code_join
                     && joinable
                 {
-                    let defaults = paragraph_run_defaults(&values);
+                    let defaults = paragraph_run_defaults(&values, env);
                     for run in &mut paragraph_runs {
                         apply_run_defaults(&mut run.formatting, &defaults);
                     }
@@ -3824,7 +3882,7 @@ fn flush_paragraph<T: ReadTxn>(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
-    let defaults = paragraph_run_defaults(&values);
+    let defaults = paragraph_run_defaults(&values, env);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
@@ -4213,7 +4271,7 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
         .and_then(|value| resolve_color(value, env));
     result.highlight = attribute(attributes, "highlight").and_then(resolve_highlight);
 
-    lower_font_family(attributes, &mut result);
+    lower_font_family(attributes, &mut result, env);
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
@@ -4288,7 +4346,27 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     result
 }
 
-fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
+fn resolve_font_slots(slots: &mut RunFontSlots, env: &RenderEnv) {
+    static DEFAULT_THEME: LazyLock<docx_parse::Theme> = LazyLock::new(docx_parse::Theme::default);
+    let theme = env.font_theme.as_ref().unwrap_or(&DEFAULT_THEME);
+    for (explicit, reference) in [
+        (&mut slots.ascii, &slots.ascii_theme),
+        (&mut slots.h_ansi, &slots.h_ansi_theme),
+        (&mut slots.east_asia, &slots.east_asia_theme),
+        (&mut slots.cs, &slots.cs_theme),
+    ] {
+        if let Some(font) = reference
+            .as_deref()
+            .and_then(|reference| {
+                docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference)
+            })
+        {
+            *explicit = Some(font.to_owned());
+        }
+    }
+}
+
+fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting, env: &RenderEnv) {
     let Some(value) =
         attribute(attributes, "fontFamily").or_else(|| attribute(attributes, "rFonts"))
     else {
@@ -4305,7 +4383,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
             });
         }
         Any::Map(map) => {
-            let slots = RunFontSlots {
+            let mut slots = RunFontSlots {
                 ascii: map_string(map, "ascii"),
                 h_ansi: map_string(map, "hAnsi"),
                 east_asia: map_string(map, "eastAsia"),
@@ -4316,6 +4394,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
                 cs_theme: map_string(map, "csTheme"),
                 hint: map_string(map, "hint"),
             };
+            resolve_font_slots(&mut slots, env);
             let rtl = mark_bool(attributes, "rtl") == Some(true);
             result.font_family = if rtl { slots.cs.clone() } else { None }
                 .or_else(|| slots.ascii.clone())
@@ -4531,6 +4610,20 @@ fn lower_paragraph_attrs(
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
+    if let Some(fonts) = result.num_pr.as_ref().and_then(|properties| {
+        list_state.marker_fonts(properties.num_id?, properties.ilvl.unwrap_or(0.0))
+    }) {
+        let mut slots = RunFontSlots {
+            ascii_theme: fonts.ascii_theme,
+            h_ansi_theme: fonts.h_ansi_theme,
+            ..RunFontSlots::default()
+        };
+        resolve_font_slots(&mut slots, env);
+        result.list_marker_font_family = slots
+            .ascii
+            .or(slots.h_ansi)
+            .or(result.list_marker_font_family);
+    }
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
     if result.list_marker.is_some() {
         let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
@@ -4554,7 +4647,7 @@ fn lower_paragraph_attrs(
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
-    lower_paragraph_defaults(values, &mut result);
+    lower_paragraph_defaults(values, &mut result, env);
 
     result.p_pr_ins = values
         .get("pPrIns")
@@ -4881,18 +4974,29 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .map_or(10.0, font_size_pt)
 }
 
-fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn lower_paragraph_defaults(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    env: &RenderEnv,
+) {
     result.default_font_size = Some(paragraph_default_font_size(values));
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        result.default_font_family =
-            map_string(fonts, "ascii").or_else(|| map_string(fonts, "hAnsi"));
+        let mut slots = RunFontSlots {
+            ascii: map_string(fonts, "ascii"),
+            h_ansi: map_string(fonts, "hAnsi"),
+            ascii_theme: map_string(fonts, "asciiTheme"),
+            h_ansi_theme: map_string(fonts, "hAnsiTheme"),
+            ..RunFontSlots::default()
+        };
+        resolve_font_slots(&mut slots, env);
+        result.default_font_family = slots.ascii.or(slots.h_ansi);
     }
 }
 
-fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
+fn paragraph_run_defaults(values: &BTreeMap<String, Any>, env: &RenderEnv) -> RunFormatting {
     let mut result = RunFormatting {
         font_size: Some(paragraph_default_font_size(values)),
         ..RunFormatting::default()
@@ -4901,7 +5005,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
         return result;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        let slots = RunFontSlots {
+        let mut slots = RunFontSlots {
             ascii: map_string(fonts, "ascii"),
             h_ansi: map_string(fonts, "hAnsi"),
             east_asia: map_string(fonts, "eastAsia"),
@@ -4912,6 +5016,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             cs_theme: map_string(fonts, "csTheme"),
             hint: map_string(fonts, "hint"),
         };
+        resolve_font_slots(&mut slots, env);
         result.font_family = slots
             .ascii
             .clone()
@@ -5348,6 +5453,179 @@ mod tests {
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
 
     const DATE: &str = "2026-07-13T12:00:00Z";
+
+    fn yrs_attrs(value: Value) -> Attrs {
+        let value = crate::seed::any_from_value(value).unwrap();
+        attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn theme_font_precedence_is_applied_only_to_layout_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Calibri".to_owned();
+        theme.font_scheme.major_font.ea = "Theme East Asia".to_owned();
+        theme.font_scheme.major_font.cs = "Theme Bidi".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let fonts = json!({
+            "ascii": "Cambria", "hAnsi": "Cambria", "eastAsia": "Explicit East Asia",
+            "cs": "Explicit Bidi", "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi",
+            "eastAsiaTheme": "majorEastAsia", "csTheme": "majorBidi"
+        });
+        let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+        let original = attrs.clone();
+        let formatting = lower_run_formatting(Some(&attrs), &env);
+        assert_eq!(formatting.font_family.as_deref(), Some("Calibri"));
+        let slots = formatting.font_slots.unwrap();
+        assert_eq!(slots.ascii.as_deref(), Some("Calibri"));
+        assert_eq!(slots.h_ansi.as_deref(), Some("Calibri"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Theme East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Theme Bidi"));
+        assert_eq!(attrs, original);
+
+        let defaults = BTreeMap::from([(
+            "defaultTextFormatting".to_owned(),
+            crate::seed::any_from_value(json!({"fontFamily": fonts})).unwrap(),
+        )]);
+        let run = paragraph_run_defaults(&defaults, &env);
+        assert_eq!(run.font_family.as_deref(), Some("Calibri"));
+        let mut paragraph = ParagraphAttrs::default();
+        lower_paragraph_defaults(&defaults, &mut paragraph, &env);
+        assert_eq!(paragraph.default_font_family.as_deref(), Some("Calibri"));
+
+        let shape = json!({
+            "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "formatting": {"fontFamily": fonts},
+                "content": [{"type": "text", "text": "Box"}]
+            }]}]}
+        });
+        let original = shape.clone();
+        let block = shapes::lower_shape_json(&shape, 1, &env).unwrap();
+        let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+            panic!("missing text box run");
+        };
+        assert_eq!(run.fmt.font_family.as_deref(), Some("Calibri"));
+        assert_eq!(run.fmt.font_slots.as_ref().unwrap(), &slots);
+        assert_eq!(shape, original);
+        let blocks = [LayoutBlock::Shape(block)];
+        let requirements =
+            docx_layout::measure_blocks::collect_font_requirements(&blocks, "Calibri");
+        assert!(requirements.iter().any(|font| font.family == "Calibri"));
+        assert!(!requirements.iter().any(|font| font.family == "Cambria"));
+    }
+
+    #[test]
+    fn partial_layout_themes_preserve_names_for_missing_slots() {
+        let env: RenderEnv = serde_json::from_value(json!({"fontTheme": {
+            "fontScheme": {"majorFont": {"latin": "Calibri"}}
+        }}))
+        .unwrap();
+        let attrs = yrs_attrs(json!({"fontFamily": {
+            "ascii": "Cambria", "asciiTheme": "majorHAnsi",
+            "hAnsi": "Cambria", "hAnsiTheme": "minorHAnsi",
+            "eastAsia": "Explicit East Asia", "eastAsiaTheme": "majorEastAsia",
+            "cs": "Explicit Bidi", "csTheme": "majorBidi"
+        }}));
+        let formatting = lower_run_formatting(Some(&attrs), &env);
+        assert_eq!(formatting.font_family.as_deref(), Some("Calibri"));
+        let slots = formatting.font_slots.unwrap();
+        assert_eq!(slots.h_ansi.as_deref(), Some("Cambria"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Explicit East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Explicit Bidi"));
+    }
+
+    #[test]
+    fn empty_or_unknown_theme_slots_preserve_layout_names() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin.clear();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        for reference in ["majorHAnsi", "unknown"] {
+            let attrs = yrs_attrs(json!({"fontFamily": {
+                "ascii": "Cambria", "hAnsi": "Cambria",
+                "asciiTheme": reference, "hAnsiTheme": reference
+            }}));
+            let formatting = lower_run_formatting(Some(&attrs), &env);
+            assert_eq!(formatting.font_family.as_deref(), Some("Cambria"));
+            assert_eq!(
+                formatting.font_slots.unwrap().ascii.as_deref(),
+                Some("Cambria")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_only_and_theme_only_layout_fonts_keep_their_names() {
+        for fonts in [
+            json!({"ascii": "Cambria", "hAnsi": "Cambria"}),
+            json!({
+                "ascii": "Calibri Light", "hAnsi": "Calibri Light",
+                "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi"
+            }),
+        ] {
+            let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+            let formatting = lower_run_formatting(Some(&attrs), &RenderEnv::default());
+            assert_eq!(formatting.font_family.as_deref(), fonts["ascii"].as_str());
+            assert_eq!(
+                formatting.font_slots.unwrap().h_ansi.as_deref(),
+                fonts["hAnsi"].as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn retained_package_theme_resolves_runs_and_numbering_for_layout() {
+        let fonts = r#"<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#;
+        let body = format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>{fonts}</w:rPr><w:t>Title</w:t></w:r></w:p>"#
+        );
+        let numbering = format!(
+            r#"<w:numbering {}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>{fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+            crate::seed::fixture::NS
+        );
+        let bytes = crate::seed::fixture::Package::new(&body)
+            .numbering(&numbering)
+            .part(
+                "theme/theme1.xml",
+                "theme",
+                "theme",
+                "theme",
+                r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"#,
+            )
+            .bytes();
+        for preview in [false, true] {
+            let doc = EditingDoc::new(75303);
+            if preview {
+                assert!(crate::seed::seed_docx_preview(&doc, &bytes, 1).unwrap());
+            } else {
+                crate::seed::seed_from_docx(&doc, &bytes).unwrap();
+            }
+            let original = doc.encode_state_as_update_v1();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("missing paragraph");
+            };
+            let Run::Text(run) = &paragraph.runs[0] else {
+                panic!("missing run");
+            };
+            assert_eq!(run.fmt.font_family.as_deref(), Some("Calibri"));
+            assert_eq!(
+                paragraph
+                    .attrs
+                    .as_ref()
+                    .unwrap()
+                    .list_marker_font_family
+                    .as_deref(),
+                Some("Calibri")
+            );
+            assert_eq!(doc.encode_state_as_update_v1(), original);
+        }
+    }
 
     #[test]
     fn hard_break_spacing_suppression_clears_line_units_without_changing_authored_values() {

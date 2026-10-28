@@ -431,6 +431,8 @@ pub(crate) struct SourceIndex {
     own_digest: OnceLock<bool>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+    #[serde(skip)]
+    render_theme: OnceLock<docx_parse::Theme>,
 }
 
 #[derive(Default)]
@@ -497,6 +499,7 @@ impl SourceIndex {
             }
         }
         self.bytes = bytes;
+        self.render_theme = OnceLock::new();
         Ok(())
     }
 
@@ -513,6 +516,16 @@ impl SourceIndex {
         self.group_pictures
             .get_or_init(|| crate::bridge::group_pictures::source_shapes(self.bytes(), &self.roots))
             .clone()
+    }
+
+    pub(crate) fn render_theme(&self) -> &docx_parse::Theme {
+        self.render_theme.get_or_init(|| {
+            ooxml_opc::RetainedPackage::from_bytes(self.bytes())
+                .ok()
+                .as_ref()
+                .and_then(crate::bridge::package_font_theme)
+                .unwrap_or_default()
+        })
     }
 
     pub(crate) fn bytes(&self) -> PackageBytes {
@@ -588,6 +601,7 @@ impl SourceIndex {
             seed_states: OnceLock::new(),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            render_theme: OnceLock::new(),
         }
     }
 
