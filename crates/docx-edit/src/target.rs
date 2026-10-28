@@ -129,7 +129,13 @@ pub struct TextAtom {
     pub drawing: Option<DrawingProperties>,
 }
 
-fn drawing_properties<T: ReadTxn>(map: Option<&MapRef>, txn: &T) -> Option<DrawingProperties> {
+/// The drawing's `wp:docPr` facts; an image's title and description come from its live `title`
+/// and `alt`, which image edits change and saves write.
+fn drawing_properties<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+) -> Option<DrawingProperties> {
     let map = map?;
     let Out::Any(Any::Map(properties)) = map.get(txn, "docPr")? else {
         return None;
@@ -137,6 +143,15 @@ fn drawing_properties<T: ReadTxn>(map: Option<&MapRef>, txn: &T) -> Option<Drawi
     let text = |key: &str| match properties.get(key) {
         Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
         _ => None,
+    };
+    let live = |key: &str| match map.get(txn, key) {
+        Some(Out::Any(Any::String(value))) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if kind == "image" {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
     };
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
     let placement = match text("placement").as_deref() {
@@ -155,8 +170,8 @@ fn drawing_properties<T: ReadTxn>(map: Option<&MapRef>, txn: &T) -> Option<Drawi
     Some(DrawingProperties {
         doc_pr_id: text("docPrId"),
         name: text("name"),
-        title: text("title"),
-        descr: text("descr"),
+        title,
+        descr,
         hidden: flag("hidden"),
         decorative: flag("decorative"),
         placement,
@@ -738,7 +753,7 @@ impl StoryView {
                         current.atoms.push(TextAtom {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
-                            drawing: drawing_properties(map.as_ref(), txn),
+                            drawing: drawing_properties(&kind, map.as_ref(), txn),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);

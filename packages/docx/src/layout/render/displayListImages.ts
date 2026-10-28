@@ -94,11 +94,39 @@ function drawingPrimitivesForRegion(
 
 type DisplayPrimitive = DisplayPage['primitives'][number];
 
+type Box = { x: number; y: number; w: number; h: number };
+
+function unionBox(boxes: readonly Box[]): Box | null {
+  if (!boxes.length) return null;
+  const x = Math.min(...boxes.map((box) => box.x));
+  const y = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map((box) => box.x + box.w));
+  const bottom = Math.max(...boxes.map((box) => box.y + box.h));
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+function primitiveBox(primitive: DisplayPrimitive): Box | null {
+  if (!('x' in primitive) || !('y' in primitive)) return null;
+  const w = 'w' in primitive && typeof primitive.w === 'number' ? primitive.w : 0;
+  const h = 'h' in primitive && typeof primitive.h === 'number' ? primitive.h : 0;
+  return { x: primitive.x, y: primitive.y, w, h };
+}
+
+function chartFrame(primitives: readonly DisplayPrimitive[]): Box | null {
+  for (const primitive of primitives) {
+    const frame = primitive.chart?.frame;
+    if (frame && [frame.x, frame.y, frame.w, frame.h].every((value) => typeof value === 'number')) {
+      return { x: frame.x!, y: frame.y!, w: frame.w!, h: frame.h! };
+    }
+  }
+  return null;
+}
+
 /**
  * The drawn frame box of the drawing atom at `pos`, one per page that paints
- * it: the placed extent rectangle, unrotated, without effect extent. Pictures
- * and shapes paint their own primitive; a group or chart paints several
- * primitives at the same atom position and their union is the frame.
+ * it: the placed extent rectangle, unrotated, without effect extent. A chart
+ * answers its placed box; pictures answer their frames, several pictures of
+ * one drawing their union; a group of shapes the union of its shapes.
  */
 export function findDrawingRectsByDocPos(
   list: DisplayList,
@@ -112,46 +140,32 @@ export function findDrawingRectsByDocPos(
     const primitives = drawingPrimitivesForRegion(page, region, rId).filter(
       (primitive) => primitive.docStart === pos
     );
-    const image = primitives.find(
+    const images = primitives.filter(
       (primitive): primitive is ImagePrimitive => primitive.kind === 'image'
     );
-    if (image) {
-      const frame = image.contentFrame;
-      rects.push({
-        pageIndex: page.pageIndex,
-        x: frame?.x ?? image.x,
-        y: frame?.y ?? image.y,
-        width: frame?.w ?? image.w,
-        height: frame?.h ?? image.h,
-      });
-      continue;
-    }
-    const shapes = primitives.filter(
-      (primitive) =>
-        primitive.kind === 'shape' || (primitive.chart !== undefined && 'w' in primitive)
-    );
-    const candidates = shapes.length
-      ? shapes
-      : primitives.filter(
-          (primitive) => primitive.kind === 'rect' && primitive.docEnd === pos + 1
-        );
-    if (!candidates.length) continue;
-    let x = Infinity;
-    let y = Infinity;
-    let right = -Infinity;
-    let bottom = -Infinity;
-    for (const primitive of candidates) {
-      if (!('x' in primitive) || !('y' in primitive)) continue;
-      const w = 'w' in primitive && typeof primitive.w === 'number' ? primitive.w : 0;
-      const h = 'h' in primitive && typeof primitive.h === 'number' ? primitive.h : 0;
-      x = Math.min(x, primitive.x);
-      y = Math.min(y, primitive.y);
-      right = Math.max(right, primitive.x + w);
-      bottom = Math.max(bottom, primitive.y + h);
-    }
-    if (Number.isFinite(x)) {
-      rects.push({ pageIndex: page.pageIndex, x, y, width: right - x, height: bottom - y });
-    }
+    const box =
+      chartFrame(primitives) ??
+      unionBox(
+        images.map((image) => ({
+          x: image.contentFrame?.x ?? image.x,
+          y: image.contentFrame?.y ?? image.y,
+          w: image.contentFrame?.w ?? image.w,
+          h: image.contentFrame?.h ?? image.h,
+        }))
+      ) ??
+      unionBox(
+        primitives
+          .filter((primitive) => primitive.kind === 'shape')
+          .map(primitiveBox)
+          .filter((box): box is Box => box !== null)
+      ) ??
+      unionBox(
+        primitives
+          .filter((primitive) => primitive.kind === 'rect' && primitive.docEnd === pos + 1)
+          .map(primitiveBox)
+          .filter((box): box is Box => box !== null)
+      );
+    if (box) rects.push({ pageIndex: page.pageIndex, x: box.x, y: box.y, width: box.w, height: box.h });
   }
   return rects;
 }

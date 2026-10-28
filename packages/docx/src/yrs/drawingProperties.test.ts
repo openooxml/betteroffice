@@ -145,4 +145,43 @@ describe('findDrawingRectsByDocPos', () => {
     ]);
     expect(findDrawingRectsByDocPos(list, 3, 'header', 'other')).toEqual([]);
   });
+
+  test('answers a chart its placed frame, not the bounds of what it paints', () => {
+    const chart = { label: 'Chart', frame: { x: 20, y: 30, w: 60, h: 40 } };
+    const charted = {
+      pages: [
+        {
+          pageIndex: 0,
+          width: 100,
+          height: 200,
+          primitives: [
+            { kind: 'text', text: 'Q1', x: 25, y: 60, docStart: 5, chart },
+            { kind: 'rect', x: 40, y: 50, w: 5, h: 10, fill: '#000', docStart: 5, chart },
+          ],
+        },
+      ],
+    } as unknown as DisplayList;
+    expect(findDrawingRectsByDocPos(charted, 5)).toEqual([
+      { pageIndex: 0, x: 20, y: 30, width: 60, height: 40 },
+    ]);
+  });
+
+  test('unions every picture one drawing paints', () => {
+    const pictures = {
+      pages: [
+        {
+          pageIndex: 0,
+          width: 100,
+          height: 200,
+          primitives: [
+            { kind: 'image', relId: 'r1', x: 10, y: 10, w: 20, h: 10, docStart: 9 },
+            { kind: 'image', relId: 'r2', x: 50, y: 40, w: 20, h: 30, docStart: 9 },
+          ],
+        },
+      ],
+    } as unknown as DisplayList;
+    expect(findDrawingRectsByDocPos(pictures, 9)).toEqual([
+      { pageIndex: 0, x: 10, y: 10, width: 60, height: 60 },
+    ]);
+  });
 });

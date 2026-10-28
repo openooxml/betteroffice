@@ -109,18 +109,29 @@ fn any_flag(value: Option<&Any>) -> bool {
     }
 }
 
-fn drawing_from_payload(payload: &Payload) -> Option<crate::DrawingProperties> {
+/// The drawing's `wp:docPr` facts; an image's title and description come from its live `title`
+/// and `alt`, which image edits change and saves write.
+fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::DrawingProperties> {
     let properties = any_map(payload.get("docPr"))?;
     let text = |key: &str| match properties.get(key) {
         Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
         _ => None,
     };
+    let live = |key: &str| match payload.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if image {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
+    };
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
     Some(crate::DrawingProperties {
         doc_pr_id: text("docPrId"),
         name: text("name"),
-        title: text("title"),
-        descr: text("descr"),
+        title,
+        descr,
         hidden: flag("hidden"),
         decorative: flag("decorative"),
         placement: match text("placement").as_deref() {
@@ -3280,7 +3291,7 @@ impl<'a> Exporter<'a> {
                 }
             }
             "field" => self.field(ctx, payload, &base, depth),
-            "image" => self.image(ctx, payload, &anchor, drawing_from_payload(payload)),
+            "image" => self.image(ctx, payload, &anchor, drawing_from_payload(payload, true)),
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
@@ -3302,12 +3313,12 @@ impl<'a> Exporter<'a> {
                 );
                 match preview {
                     Some(preview) => {
-                        self.image(ctx, preview, &anchor, drawing_from_payload(payload))
+                        self.image(ctx, preview, &anchor, drawing_from_payload(payload, false))
                     }
                     None => InlineKind::Unsupported {
                         element,
                         alt_text: None,
-                        drawing: drawing_from_payload(payload),
+                        drawing: drawing_from_payload(payload, false),
                     },
                 }
             }
@@ -3356,7 +3367,7 @@ impl<'a> Exporter<'a> {
                 InlineKind::Unsupported {
                     element: element.to_owned(),
                     alt_text,
-                    drawing: drawing_from_payload(payload),
+                    drawing: drawing_from_payload(payload, false),
                 }
             }
         };

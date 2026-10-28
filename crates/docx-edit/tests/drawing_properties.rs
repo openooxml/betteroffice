@@ -2,10 +2,11 @@ use docx_edit::structured::{
     Block, BlockKind, ExportOptions, Inline, InlineKind, RevisionView, StorySelection,
 };
 use docx_edit::{
-    DrawingProperties, EditTextView, EditingDoc, ReadParagraphsRequest, ReadStoriesRequest,
-    StoryText, TextAtom, seed_from_docx,
+    DrawingProperties, EditCtx, EditTextView, EditingDoc, Position, ReadParagraphsRequest,
+    ReadStoriesRequest, SegmentContent, StoryText, TextAtom, seed_from_docx,
 };
 use docx_parse::image::{DrawingPlacement, DrawingType};
+use yrs::Any;
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS: &str = concat!(
@@ -428,4 +429,84 @@ fn saves_ignore_drawing_properties() {
     let mut stripped = body.clone();
     assert!(without_drawing_properties(&mut stripped) >= 4);
     assert_eq!(save(body), save(stripped));
+}
+
+fn body_atoms(doc: &EditingDoc) -> Vec<TextAtom> {
+    let stories = doc
+        .read_stories(&ReadStoriesRequest {
+            stories: None,
+            by_root: false,
+            view: EditTextView::Accepted,
+            expect_version: None,
+        })
+        .unwrap()
+        .stories;
+    stories
+        .iter()
+        .flat_map(|story| match story {
+            StoryText::Read { paragraphs, .. } => paragraphs.clone(),
+            StoryText::Refused { .. } => Vec::new(),
+        })
+        .flat_map(|paragraph| paragraph.atoms)
+        .collect()
+}
+
+#[test]
+fn image_alt_text_edits_show_in_reads_and_export() {
+    let doc = open(&fixture());
+    let mut index = 0;
+    let mut position = None;
+    for segment in doc.story_segments("body").unwrap() {
+        match &segment.content {
+            SegmentContent::Text(text) => index += text.encode_utf16().count() as u32,
+            SegmentContent::OtherEmbed { kind, payload }
+                if kind == "image"
+                    && matches!(payload.get("docPr"), Some(Any::Map(map))
+                        if map.get("name") == Some(&Any::from("N-inline"))) =>
+            {
+                position = Some(index);
+                break;
+            }
+            _ => index += 1,
+        }
+    }
+    let ctx = EditCtx::local("Author", "2026-01-01T00:00:00Z");
+    doc.set_embed_attrs(
+        &ctx,
+        Position::new("body", position.expect("inline picture")),
+        vec![
+            ("alt".to_owned(), Any::from("D-edited")),
+            ("title".to_owned(), Any::Null),
+        ],
+    )
+    .unwrap();
+    let atoms = body_atoms(&doc);
+    let inline = by_name(&atoms, "N-inline");
+    assert_eq!(inline.descr.as_deref(), Some("D-edited"));
+    assert_eq!(inline.title, None);
+    assert_eq!(inline.doc_pr_id.as_deref(), Some("1"));
+    let content = doc
+        .export_structured(&ExportOptions::new(RevisionView::Accepted))
+        .unwrap()
+        .content;
+    let mut inlines = Vec::new();
+    for story in &content.stories {
+        collect_inlines(&story.blocks, &mut inlines);
+    }
+    let exported = inlines
+        .iter()
+        .find_map(|inline| match &inline.content {
+            InlineKind::Image {
+                drawing: Some(drawing),
+                alt_text,
+                ..
+            } if drawing.name.as_deref() == Some("N-inline") => {
+                Some((drawing.clone(), alt_text.clone()))
+            }
+            _ => None,
+        })
+        .expect("exported inline picture");
+    assert_eq!(exported.0.descr.as_deref(), Some("D-edited"));
+    assert_eq!(exported.0.title, None);
+    assert_eq!(exported.1.as_deref(), Some("D-edited"));
 }

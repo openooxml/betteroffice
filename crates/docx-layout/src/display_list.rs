@@ -606,6 +606,9 @@ pub struct HighlightSliceMetadata {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ChartA11yAttrs {
     pub label: String,
+    /// The placed chart box every primitive of the chart paints inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<ContentFrame>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -9413,13 +9416,6 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(block.pm_end);
     attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs {
-        label: chart_aria_label(&chart),
-    });
-    attrs.aria_label = block.chart.title.clone();
-    attrs.aria_description = block.chart.description.clone();
-    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
-
     let width = if frag.width > 0.0 {
         frag.width
     } else {
@@ -9430,6 +9426,18 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
+    attrs.chart = Some(ChartA11yAttrs {
+        label: chart_aria_label(&chart),
+        frame: Some(ContentFrame {
+            x: Some(px(frag.x)),
+            y: Some(px(frag.y)),
+            w: Some(px(width)),
+            h: Some(px(height)),
+        }),
+    });
+    attrs.aria_label = block.chart.title.clone();
+    attrs.aria_description = block.chart.description.clone();
+    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
 
     plot_chart_into(
         &chart,

@@ -58,7 +58,13 @@ function harness({
   docPr = { name: 'N-inline', placement: 'inline', type: 'picture' },
   painted = true,
   complete = true,
-}: { docPr?: Record<string, unknown>; painted?: boolean; complete?: boolean } = {}) {
+  unbuilt = false,
+}: {
+  docPr?: Record<string, unknown>;
+  painted?: boolean;
+  complete?: boolean;
+  unbuilt?: boolean;
+} = {}) {
   const pages = document.createElement('div');
   const layer = document.createElement('div');
   pages.getBoundingClientRect = () => rectAt(0, 0, 100, 400);
@@ -87,8 +93,9 @@ function harness({
       pages: [0, 1].map((pageIndex) => ({
         pageIndex,
         ...PAGE,
+        ...(unbuilt && pageIndex === 0 ? { unbuilt: true, positionSpan: [0, 10] } : {}),
         primitives:
-          painted && pageIndex === 0
+          painted && !unbuilt && pageIndex === 0
             ? [
                 {
                   kind: 'image',
@@ -224,5 +231,12 @@ describe('drawing geometry targets', () => {
     ]);
     expect(results[0]).toMatchObject({ ok: true, rects: [{ ...frame, pageIndex: 0 }] });
     expect(results[1]).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  });
+
+  test('a drawing on a page not built yet waits instead of going missing', () => {
+    const { geometry } = harness({ unbuilt: true, complete: true });
+    expect(
+      geometry.getAnchorGeometry({ kind: 'drawing', paragraph: BODY_ANCHOR, offset: 2 })
+    ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
   });
 });

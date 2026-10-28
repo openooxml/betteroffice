@@ -594,7 +594,7 @@ export function placeDrawing(
     const sorted = [...rects].sort((a, b) => a.pageIndex - b.pageIndex);
     return respond(sorted, sorted[0]!, unbuiltPages);
   }
-  if (unbuiltPages.length && !complete()) return unavailable();
+  if (unbuiltPages.length) return unavailable();
   return complete()
     ? anchorFailure('missing-target', 'No page paints this drawing')
     : anchorFailure('layout-unavailable', 'No laid-out page paints this drawing');
