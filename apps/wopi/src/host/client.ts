@@ -535,6 +535,10 @@ export function createHostClient(options: HostClientOptions): HostClient {
 
   async function getFile(input: WopiRequest): Promise<GetFileResult> {
     const { response, controller } = await execute(input, { op: "GetFile", contents: true, method: "GET", idempotent: true });
+    if (response.status !== 200) {
+      cancelStream(response.body, () => controller.abort());
+      throw new WopiHostError("invalidResponse", `GetFile returned status ${response.status} instead of the whole file`);
+    }
     const announced = parseContentLength(response.headers.get("Content-Length"));
     if (announced !== null && announced > maxFileBytes) {
       cancelStream(response.body, () => controller.abort());

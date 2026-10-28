@@ -755,6 +755,22 @@ describe("content length and truncation", () => {
     }
   }, 1000);
 
+  test("GetFile rejects partial and empty success statuses", async () => {
+    for (const [status, body, headers] of [
+      [206, new Uint8Array([1, 2, 3]), { "Content-Length": "3", "Content-Range": "bytes 0-2/10" }],
+      [204, null, {}],
+    ] as const) {
+      let signal: AbortSignal | null | undefined;
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(body, { status, headers });
+      });
+      expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect((await kindOf(client.getFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect(signal?.aborted).toBe(true);
+    }
+  });
+
   test("readFile fails on premature EOF instead of returning a truncated file", async () => {
     const client = makeClient(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Length": "10" } }));
     expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
