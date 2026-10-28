@@ -8,6 +8,7 @@ use skrifa::raw::TableProvider;
 use skrifa::raw::tables::os2::SelectionFlags;
 use skrifa::{FontRef, MetadataProvider};
 
+use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics, runs_at_own_widths};
 use crate::shape::ShapedGlyph;
 
 const MAX_SHAPE_CACHE_ENTRIES: usize = 4_096;
@@ -171,9 +172,8 @@ pub struct RequestedLineMetrics {
     /// ([`crate::word_metrics::EAST_ASIAN_CODE_PAGES`]) rather than the Latin
     /// win-box rule. Decides which fields the view has to move.
     pub east_asian: bool,
-    /// How much wider the requested face's advances run than the substitute's.
-    /// `1.0` leaves the substitute's own pitch alone, which is what every
-    /// family whose ratio is unmeasured carries — see [`crate::word_fonts`].
+    /// Fallback advance ratio when no named width table applies.
+    /// `1.0` leaves the substitute's own pitch alone.
     pub advance_scale: f32,
 }
 
@@ -236,9 +236,9 @@ struct FontEntry {
     face: Option<rustybuzz::Face<'static>>,
     data: Box<[u8]>,
     metrics: FontMetrics,
-    /// Horizontal multiplier every advance, offset and outline this entry
-    /// reports is scaled by. See [`FontStore::advance_scale`].
+    /// Horizontal multiplier for fallback advances, offsets and outlines.
     advance_scale: f32,
+    widths: Option<&'static FamilyMetrics>,
     char_cache: RefCell<HashMap<char, CharEntry>>,
 }
 
@@ -324,6 +324,7 @@ impl FontStore {
             data,
             metrics,
             advance_scale: 1.0,
+            widths: None,
             char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
@@ -342,33 +343,72 @@ impl FontStore {
         base: FontId,
         requested: RequestedLineMetrics,
     ) -> Result<FontId, FontError> {
+        self.register_substitute_view(base, Some(requested), None)
+    }
+
+    /// A substitute view with the named family's line metrics and glyph widths.
+    /// Matching faces retain their own advances and kerning.
+    pub fn register_named_substitute(
+        &mut self,
+        base: FontId,
+        family: &str,
+    ) -> Result<FontId, FontError> {
+        let entry = self.entry(base)?;
+        let owner = FontId(entry.bytes_of.unwrap_or(base.0 as usize) as u32);
+        let selection = entry.metrics.os2_fs_selection;
+        let family = family.trim().to_lowercase();
+        let table = family_metrics(&family, selection & (1 << 5) != 0, selection & 1 != 0);
+        let requested = crate::word_fonts::requested_line_metrics(&family).map(|mut requested| {
+            if table.is_some() {
+                requested.advance_scale = 1.0;
+            }
+            requested
+        });
+        let widths = table.filter(|metrics| !runs_at_own_widths(self, owner, metrics));
+        if requested.is_none() && widths.is_none() {
+            return Ok(base);
+        }
+        self.register_substitute_view(base, requested, widths)
+    }
+
+    fn register_substitute_view(
+        &mut self,
+        base: FontId,
+        requested: Option<RequestedLineMetrics>,
+        widths: Option<&'static FamilyMetrics>,
+    ) -> Result<FontId, FontError> {
         let entry = self.entry(base)?;
         let owner = entry.bytes_of.unwrap_or(base.0 as usize);
         let mut metrics = entry.metrics;
-        if requested.units_per_em == 0 || metrics.units_per_em == 0 {
+        if metrics.units_per_em == 0 || requested.is_some_and(|metrics| metrics.units_per_em == 0) {
             return Ok(base);
         }
-        let advance_scale = if requested.advance_scale.is_finite() && requested.advance_scale > 0.0
-        {
-            requested.advance_scale
+        let advance_scale = match widths {
+            Some(widths) => self.width_scale(FontId(owner as u32), widths)?,
+            None => requested.map_or(1.0, |metrics| metrics.advance_scale),
+        };
+        let advance_scale = if advance_scale.is_finite() && advance_scale > 0.0 {
+            advance_scale
         } else {
             1.0
         };
-        let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
-        let rescale = |design: i16| {
-            (f32::from(design) * scale)
-                .round()
-                .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
-        };
-        metrics.hhea_ascender = rescale(requested.hhea_ascender);
-        metrics.hhea_descender = rescale(requested.hhea_descender);
-        metrics.hhea_line_gap = rescale(requested.hhea_line_gap);
-        if requested.east_asian {
-            metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
-        } else {
-            metrics.os2_code_page_range1 &= !crate::word_metrics::EAST_ASIAN_CODE_PAGES;
-            metrics.os2_win_ascent = metrics.hhea_ascender.max(0) as u16;
-            metrics.os2_win_descent = metrics.hhea_descender.saturating_neg().max(0) as u16;
+        if let Some(requested) = requested {
+            let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
+            let rescale = |design: i16| {
+                (f32::from(design) * scale)
+                    .round()
+                    .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+            };
+            metrics.hhea_ascender = rescale(requested.hhea_ascender);
+            metrics.hhea_descender = rescale(requested.hhea_descender);
+            metrics.hhea_line_gap = rescale(requested.hhea_line_gap);
+            if requested.east_asian {
+                metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+            } else {
+                metrics.os2_code_page_range1 &= !crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+                metrics.os2_win_ascent = metrics.hhea_ascender.max(0) as u16;
+                metrics.os2_win_descent = metrics.hhea_descender.saturating_neg().max(0) as u16;
+            }
         }
 
         let id = FontId(self.fonts.len() as u32);
@@ -378,23 +418,19 @@ impl FontStore {
             data: Box::default(),
             metrics,
             advance_scale,
+            widths,
             char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
     }
 
-    /// Horizontal multiplier this id reports advances, offsets and outlines
-    /// with — `1.0` for anything but a substitute view whose requested face
-    /// has a measured advance ratio.
-    ///
-    /// Measurement and painting both read it here, so the two projections
-    /// cannot disagree about how wide a substituted run is.
+    /// Horizontal multiplier for fallback advances, offsets and outlines.
+    /// Width tables take precedence for covered characters.
     pub fn advance_scale(&self, id: FontId) -> Result<f32, FontError> {
         self.entry(id).map(|entry| entry.advance_scale)
     }
 
-    /// What `id` measures with: the bytes it shapes, its metrics and its advance scale. Two
-    /// ids that answer the same measure identically.
+    /// The bytes, metrics and fallback advance scale of `id`.
     pub fn measured_face(&self, id: FontId) -> Result<(&[u8], &FontMetrics, f32), FontError> {
         let entry = self.entry(id)?;
         Ok((
@@ -402,6 +438,35 @@ impl FontStore {
             &entry.metrics,
             entry.advance_scale,
         ))
+    }
+
+    /// Width table carried by a substitute view, if its base widths differ.
+    pub fn family_widths(&self, id: FontId) -> Result<Option<&'static FamilyMetrics>, FontError> {
+        self.entry(id).map(|entry| entry.widths)
+    }
+
+    fn width_scale(&self, base: FontId, widths: &FamilyMetrics) -> Result<f32, FontError> {
+        const FREQUENCIES: [f32; 26] = [
+            8.167, 1.492, 2.782, 4.253, 12.702, 2.228, 2.015, 6.094, 6.966, 0.153, 0.772, 4.025,
+            2.406, 6.749, 7.507, 1.929, 0.095, 5.987, 6.327, 9.056, 2.758, 0.978, 2.360, 0.150,
+            1.974, 0.074,
+        ];
+        let upem = f32::from(self.metrics(base)?.units_per_em);
+        let sample = ('a'..='z').zip(FREQUENCIES).chain(std::iter::once((
+            ' ',
+            FREQUENCIES.iter().sum::<f32>() / 5.1,
+        )));
+        let mut wanted = 0.0;
+        let mut own = 0.0;
+        for (ch, frequency) in sample {
+            if let Some(width) = family_advance(widths, ch)
+                && let Some(advance) = self.char_entry(base, ch)?.advance
+            {
+                wanted += width * frequency;
+                own += advance / upem * frequency;
+            }
+        }
+        Ok(if own > 0.0 { wanted / own } else { 1.0 })
     }
 
     /// Per-font design-space metrics captured at registration.
@@ -499,16 +564,20 @@ impl FontStore {
         Ok(self.char_entry(id, ch)?.mapped.filter(|&g| g != 0))
     }
 
-    /// Horizontal advance width for a character, in font units, at this id's
-    /// [`FontStore::advance_scale`]. `None` if the character is not covered by
-    /// this font's cmap.
+    /// Horizontal character advance in font units, using the view's widths.
+    /// `None` if the character is not covered by this font's cmap.
     pub fn advance_width(&self, id: FontId, ch: char) -> Result<Option<f32>, FontError> {
         let entry = self.char_entry(id, ch)?;
         if entry.mapped.is_none() {
             return Ok(None);
         }
-        let scale = self.advance_scale(id)?;
-        Ok(entry.advance.map(|advance| advance * scale))
+        let font = self.entry(id)?;
+        if let Some(widths) = font.widths
+            && let Some(advance) = family_advance(widths, ch)
+        {
+            return Ok(Some(advance * f32::from(font.metrics.units_per_em)));
+        }
+        Ok(entry.advance.map(|advance| advance * font.advance_scale))
     }
 
     /// Whether the font's cmap covers `ch`.

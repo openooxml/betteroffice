@@ -3,7 +3,7 @@
 //! keystroke can paint before the engine relays out.
 //!
 //! For one font at one shaping size, each alphabet character gets its isolated
-//! glyph and advance in font units, and every ordered pair of characters gets
+//! glyph and advance in font or width-table units, and every ordered pair gets
 //! the advance change shaping applies to the left one (pair kerning). Pairs
 //! whose shaping is not two independent glyphs (ligatures, contextual forms,
 //! glyph offsets) are reported unsafe. A host's advance in pixels is then
@@ -26,7 +26,7 @@ pub struct EchoGlyphSet {
     pub horizontal: f32,
     /// Isolated glyph per character; 0 when the font cannot echo it.
     pub glyph_ids: Vec<u32>,
-    /// Isolated advance per character, in font units.
+    /// Isolated advance per character, in font or width-table units.
     pub advances: Vec<i32>,
     /// `[left, right, units]` for every pair whose left advance changes.
     pub kerning: Vec<[i32; 3]>,
@@ -46,7 +46,11 @@ pub fn echo_glyph_set(
     let features = kern_features(kern);
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
-    let horizontal = scale * store.advance_scale(font)?;
+    let horizontal = if store.family_widths(font)?.is_some() {
+        size / 1000.0
+    } else {
+        scale * store.advance_scale(font)?
+    };
     let shape =
         |text: &str| shape_with_direction(store, font, text, size, &features, ShapeDirection::Ltr);
     let units = |glyph: &ShapedGlyph| {
@@ -674,6 +678,31 @@ mod tests {
             !set.unsafe_pairs.contains(&[0, 1]) && !set.unsafe_pairs.contains(&[0, 2]),
             "a ligature start leaves the pairs no ligature continues with echoable"
         );
+    }
+
+    #[test]
+    fn substituted_ligature_advances_by_all_its_characters() {
+        let (mut store, base) = f_ligature_font(&['f', 'i']);
+        let view = store
+            .register_named_substitute(base, "Arial Narrow")
+            .unwrap();
+        let glyphs = shape_with_direction(
+            &store,
+            view,
+            "ffi",
+            16.0,
+            &kern_features(true),
+            ShapeDirection::Ltr,
+        )
+        .unwrap();
+        assert_eq!(glyphs.len(), 1);
+        let widths = crate::family_metrics::family_metrics("arial narrow", false, false).unwrap();
+        let expected = "ffi"
+            .chars()
+            .map(|ch| crate::family_metrics::family_advance(widths, ch).unwrap())
+            .sum::<f32>()
+            * 16.0;
+        assert!((glyphs[0].x_advance - expected).abs() < 1e-4);
     }
 
     fn contextual_positioning_font(kind: u16, extension: bool, feature: &[u8; 4]) -> Vec<u8> {

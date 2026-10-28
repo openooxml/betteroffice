@@ -11,7 +11,10 @@
 //! the face Office draws the family with on macOS and checked against the font
 //! programs Word and PowerPoint embed in their own exports.
 
+use crate::{FontId, FontStore};
+
 /// One family's own metrics, all in 1/1000 em.
+#[derive(Debug)]
 pub struct FamilyMetrics {
     /// `hhea` ascender, descender and line gap.
     pub ascent: i32,
@@ -49,15 +52,37 @@ pub fn family_advance(metrics: &FamilyMetrics, character: char) -> Option<f32> {
 }
 
 /// The metrics of `family` at this weight and slope, when we have them.
-pub fn family_metrics(
-    family: &str,
-    bold: bool,
-    italic: bool,
-) -> Option<&'static FamilyMetrics> {
+pub fn family_metrics(family: &str, bold: bool, italic: bool) -> Option<&'static FamilyMetrics> {
     FAMILIES
         .iter()
         .find(|entry| entry.family == family && entry.bold == bold && entry.italic == italic)
         .map(|entry| entry.metrics)
+}
+
+/// Characters used to check whether a registered face matches a metric table.
+const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
+
+/// Preserve the face's kerning when its individual advances already match.
+pub fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    for character in ADVANCE_SAMPLE.chars() {
+        let Some(wanted) = family_advance(metrics, character) else {
+            continue;
+        };
+        let Ok(Some(advance)) = fonts.advance_width(id, character) else {
+            return false;
+        };
+        if (wanted - advance / units).abs() > 0.002 {
+            return false;
+        }
+    }
+    true
 }
 
 static FAMILIES: &[FamilyEntry] = &[

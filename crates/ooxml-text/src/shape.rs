@@ -6,7 +6,9 @@
 //! [`shape_with_direction`]. Bidi reordering happens above this layer using
 //! [`crate::bidi`] runs, so text handed in here is a single directional run.
 
+use crate::family_metrics::{FamilyMetrics, family_advance};
 use crate::font_store::{FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 /// One positioned glyph produced by shaping.
@@ -162,10 +164,40 @@ pub fn shape_with_properties(
     {
         glyphs.reverse();
     }
+    if let Some(widths) = store.family_widths(font)? {
+        apply_family_widths(&mut glyphs, text, size, widths);
+    }
     if let Some(cache_key) = cache_key {
         store.cache_shape(cache_key, &glyphs);
     }
     Ok(glyphs)
+}
+
+fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths: &FamilyMetrics) {
+    let mut clusters: BTreeMap<u32, Option<f32>> =
+        glyphs.iter().map(|glyph| (glyph.cluster, None)).collect();
+    let offsets: Vec<_> = clusters
+        .keys()
+        .map(|&offset| offset as usize)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    for bounds in offsets.windows(2) {
+        let advance = text.get(bounds[0]..bounds[1]).and_then(|cluster| {
+            cluster.chars().try_fold(0.0, |total, ch| {
+                family_advance(widths, ch).map(|advance| total + (advance * 1000.0).round())
+            })
+        });
+        clusters.insert(
+            bounds[0] as u32,
+            advance.map(|advance| advance * (size / 1000.0)),
+        );
+    }
+    for glyph in glyphs {
+        if let Some(Some(advance)) = clusters.get_mut(&glyph.cluster) {
+            glyph.x_advance = *advance;
+            *advance = 0.0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +205,46 @@ mod tests {
     use super::*;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn table_clusters_assign_the_total_to_the_first_visual_glyph() {
+        let widths = crate::family_metrics::family_metrics("arial narrow", false, false).unwrap();
+        for rtl in [false, true] {
+            let mut glyphs: Vec<_> = [0, 0, 2, 3]
+                .into_iter()
+                .map(|cluster| ShapedGlyph {
+                    glyph_id: 1,
+                    cluster,
+                    x_advance: 7.0,
+                    x_offset: 2.0,
+                    y_offset: 3.0,
+                })
+                .collect();
+            if rtl {
+                glyphs.reverse();
+            }
+            apply_family_widths(&mut glyphs, "fiA\u{03A9}", 32.0, widths);
+            let cluster: Vec<_> = glyphs.iter().filter(|glyph| glyph.cluster == 0).collect();
+            let expected = (family_advance(widths, 'f').unwrap()
+                + family_advance(widths, 'i').unwrap())
+                * 32.0;
+            assert!((cluster[0].x_advance - expected).abs() < 1e-4);
+            assert_eq!(cluster[1].x_advance, 0.0);
+            assert_eq!(
+                glyphs
+                    .iter()
+                    .find(|glyph| glyph.cluster == 3)
+                    .unwrap()
+                    .x_advance,
+                7.0
+            );
+            assert!(
+                glyphs
+                    .iter()
+                    .all(|glyph| glyph.x_offset == 2.0 && glyph.y_offset == 3.0)
+            );
+        }
+    }
 
     #[test]
     fn first_shape_caches_and_repeats_reuse_the_resident_entry() {
