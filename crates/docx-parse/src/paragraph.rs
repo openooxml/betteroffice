@@ -1220,6 +1220,7 @@ fn parse_run_with_context(
         match run.content.as_mut_slice() {
             [RunContent::Shape { shape, .. }] if shape.drawing_xml.is_some() => {
                 shape.drawing_run_xml = Some(element.to_raw_inline_xml());
+                shape.drawing_xml = None;
             }
             [RunContent::OpaqueDrawing { kind, xml, .. }]
                 if element

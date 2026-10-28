@@ -882,7 +882,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
 function storedShape(value: unknown): Shape | undefined {
   const json = asString(value);
-  if (!json || json.length > 2_000_000) return undefined;
+  if (!json) return undefined;
   try {
     const parsed = JSON.parse(json) as Shape;
     if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;

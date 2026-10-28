@@ -579,7 +579,11 @@ fn preserved_drawing(kind: &str, payload: &Attrs) -> bool {
             .get("shapeJson")
             .and_then(Value::as_str)
             .and_then(|json| serde_json::from_str::<Value>(json).ok())
-            .is_some_and(|shape| shape.get("drawingXml").and_then(Value::as_str).is_some()),
+            .is_some_and(|shape| {
+                ["drawingXml", "drawingRunXml"]
+                    .iter()
+                    .any(|key| shape.get(key).and_then(Value::as_str).is_some())
+            }),
         "opaqueDrawing" => payload
             .get("xml")
             .and_then(Value::as_str)

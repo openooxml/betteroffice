@@ -165,15 +165,15 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
 pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
     let rendered_page_breaks = context.take_rendered_page_breaks();
     let raw_run = match run.content.as_slice() {
-        [RunContent::Shape { shape, .. }] => shape.drawing_run_xml.as_deref(),
-        [RunContent::OpaqueDrawing { kind, xml, .. }] if kind == "drawingRun" => Some(xml.as_str()),
+        [RunContent::Shape { shape, .. }] => super::smart_art::replay(shape, context, true)?,
+        [RunContent::OpaqueDrawing { kind, xml, .. }] if kind == "drawingRun" => Some(xml.clone()),
         _ => None,
     };
     if let Some(xml) = raw_run {
-        validate_replayed_fragment(xml)?;
-        let mut output = xml.to_owned();
+        validate_replayed_fragment(&xml)?;
+        let mut output = xml.clone();
         if rendered_page_breaks > 0 {
-            let root = super::splice::root_tag(xml)
+            let root = super::splice::root_tag(&xml)
                 .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
             if root.empty {
                 output.replace_range(
@@ -543,9 +543,8 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    if let Some(xml) = shape.drawing_xml.as_deref() {
-        validate_replayed_fragment(xml)?;
-        return Ok(xml.to_owned());
+    if let Some(xml) = super::smart_art::replay(shape, context, false)? {
+        return Ok(xml);
     }
     let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
@@ -1428,6 +1427,8 @@ mod tests {
                         panic!("SmartArt preview missing")
                     };
                     assert!(!shape.children.as_ref().unwrap().is_empty());
+                    assert!(shape.drawing_xml.is_none());
+                    assert!(shape.drawing_run_xml.is_some());
                     assert_eq!(
                         canonical_xml_events(
                             &serialize_shape_content(shape, &mut context()).unwrap(),

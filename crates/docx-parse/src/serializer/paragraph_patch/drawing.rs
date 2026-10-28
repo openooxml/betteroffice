@@ -29,6 +29,46 @@ fn canonical(xml: &str) -> Option<String> {
     Some(document.root()?.to_raw_inline_xml())
 }
 
+fn equivalent(source: &str, lowered: &Lowered, node: usize, left: &str, right: &str) -> bool {
+    let target = &lowered.xml.nodes[node];
+    let mut namespaces = lowered.xml.root_namespaces.clone();
+    for ancestor in &lowered.xml.nodes {
+        if ancestor.span.start <= target.span.start && target.span.end <= ancestor.span.end {
+            for attribute in &ancestor.attributes {
+                if let Some(prefix) = attribute.name.strip_prefix("xmlns:") {
+                    if let Some(value) = ancestor.attr(source, &attribute.name) {
+                        namespaces.insert(prefix.to_owned(), value);
+                    }
+                } else if attribute.name == "xmlns"
+                    && let Some(value) = ancestor.attr(source, "xmlns")
+                {
+                    namespaces.insert(String::new(), value);
+                }
+            }
+        }
+    }
+    let mut wrapper = String::from("<sourceContext");
+    for (prefix, namespace) in namespaces {
+        wrapper.push_str(&format!(
+            " {}=\"{}\"",
+            if prefix.is_empty() {
+                "xmlns".to_owned()
+            } else {
+                format!("xmlns:{prefix}")
+            },
+            crate::serializer::xml_writer::escape_xml(&namespace)
+        ));
+    }
+    wrapper.push('>');
+    let events = |xml: &str| {
+        crate::serializer::canonical_xml_events(&format!("{wrapper}{xml}</sourceContext>"), false)
+    };
+    match (events(left), events(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 pub(super) fn payload(source: &str, node: &Node) -> Result<super::Attrs, Failure> {
     let xml = canonical(&source[node.span.clone()])
         .ok_or_else(|| Failure::structure("drawing: invalid SmartArt XML"))?;
@@ -43,7 +83,12 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
     {
         return Ok(());
     }
-    for (cell, expected) in lowered.cells.iter_mut().zip(flatten(units)) {
+    for (at, expected) in flatten(units)
+        .into_iter()
+        .enumerate()
+        .take(lowered.cells.len())
+    {
+        let cell = &lowered.cells[at];
         if !lowered.xml.nodes[cell.node].word("drawing") {
             continue;
         }
@@ -63,7 +108,11 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
         let xml = match atom_kind.as_str() {
             "shape" => shape
                 .as_ref()
-                .and_then(|shape| shape.get("drawingXml"))
+                .and_then(|shape| {
+                    shape
+                        .get("drawingRunXml")
+                        .or_else(|| shape.get("drawingXml"))
+                })
                 .and_then(Value::as_str),
             "opaqueDrawing" => payload.get("xml").and_then(Value::as_str),
             _ => None,
@@ -75,9 +124,14 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
             unreachable!()
         };
         let xml = xml.and_then(|xml| {
-            if atom_kind == "opaqueDrawing"
-                && payload.get("kind").and_then(Value::as_str) == Some("drawingRun")
-            {
+            let whole_run = shape
+                .as_ref()
+                .and_then(|shape| shape.get("drawingRunXml"))
+                .and_then(Value::as_str)
+                .is_some()
+                || (atom_kind == "opaqueDrawing"
+                    && payload.get("kind").and_then(Value::as_str) == Some("drawingRun"));
+            if whole_run {
                 let limits = ParseLimits::default();
                 let parsed = parse_xml(
                     xml.as_bytes(),
@@ -95,7 +149,13 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
                 canonical(xml)
             }
         });
-        if xml.as_deref() != actual.get("drawingXml").and_then(Value::as_str) {
+        if !xml
+            .as_deref()
+            .zip(actual.get("drawingXml").and_then(Value::as_str))
+            .is_some_and(|(expected, actual)| {
+                equivalent(source, lowered, cell.node, expected, actual)
+            })
+        {
             return Err(Failure::new(
                 PatchErrorCode::SeedMismatch,
                 "drawing: SmartArt XML differs from seed",
@@ -105,15 +165,20 @@ pub(super) fn bind(source: &str, lowered: &mut Lowered, units: &[UnitV1]) -> Res
             .as_ref()
             .and_then(|shape| shape.get("drawingRunXml"))
             .and_then(Value::as_str)
-            && canonical(xml)
-                != canonical(&source[lowered.xml.nodes[lowered.runs[cell.run].node].span.clone()])
+            && !equivalent(
+                source,
+                lowered,
+                lowered.runs[cell.run].node,
+                xml,
+                &source[lowered.xml.nodes[lowered.runs[cell.run].node].span.clone()],
+            )
         {
             return Err(Failure::new(
                 PatchErrorCode::SeedMismatch,
                 "drawing: SmartArt run differs from seed",
             ));
         }
-        cell.unit = expected;
+        lowered.cells[at].unit = expected;
     }
     Ok(())
 }

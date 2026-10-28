@@ -46,6 +46,7 @@ export interface Shape {
   type: 'shape';
   drawingXml?: string;
   drawingRunXml?: string;
+  drawingModel?: { frame: Record<string, unknown>; otherSha256: string };
   /** Shape type preset */
   shapeType: ShapeType;
   /** Unique ID */
