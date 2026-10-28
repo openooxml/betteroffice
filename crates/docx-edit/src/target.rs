@@ -129,8 +129,8 @@ pub struct TextAtom {
     pub drawing: Option<DrawingProperties>,
 }
 
-/// The drawing's `wp:docPr` facts; an image's title and description come from its live `title`
-/// and `alt`, which image edits change and saves write.
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
 fn drawing_properties<T: ReadTxn>(
     kind: &str,
     map: Option<&MapRef>,
@@ -153,9 +153,11 @@ fn drawing_properties<T: ReadTxn>(
     } else {
         (text("title"), text("descr"))
     };
+    let wrap = (kind == "image").then(|| live("wrapType")).flatten();
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
-    let placement = match text("placement").as_deref() {
-        Some("anchor") => docx_parse::image::DrawingPlacement::Anchor,
+    let placement = match (wrap.as_deref(), text("placement").as_deref()) {
+        (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+        (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
         _ => docx_parse::image::DrawingPlacement::Inline,
     };
     let drawing_type = match text("type").as_deref() {

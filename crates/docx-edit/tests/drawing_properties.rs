@@ -452,7 +452,7 @@ fn body_atoms(doc: &EditingDoc) -> Vec<TextAtom> {
 }
 
 #[test]
-fn image_alt_text_edits_show_in_reads_and_export() {
+fn image_edits_show_in_reads_and_export() {
     let doc = open(&fixture());
     let mut index = 0;
     let mut position = None;
@@ -477,6 +477,7 @@ fn image_alt_text_edits_show_in_reads_and_export() {
         vec![
             ("alt".to_owned(), Any::from("D-edited")),
             ("title".to_owned(), Any::Null),
+            ("wrapType".to_owned(), Any::from("square")),
         ],
     )
     .unwrap();
@@ -484,6 +485,7 @@ fn image_alt_text_edits_show_in_reads_and_export() {
     let inline = by_name(&atoms, "N-inline");
     assert_eq!(inline.descr.as_deref(), Some("D-edited"));
     assert_eq!(inline.title, None);
+    assert_eq!(inline.placement, DrawingPlacement::Anchor);
     assert_eq!(inline.doc_pr_id.as_deref(), Some("1"));
     let content = doc
         .export_structured(&ExportOptions::new(RevisionView::Accepted))
@@ -508,5 +510,6 @@ fn image_alt_text_edits_show_in_reads_and_export() {
         .expect("exported inline picture");
     assert_eq!(exported.0.descr.as_deref(), Some("D-edited"));
     assert_eq!(exported.0.title, None);
+    assert_eq!(exported.0.placement, DrawingPlacement::Anchor);
     assert_eq!(exported.1.as_deref(), Some("D-edited"));
 }

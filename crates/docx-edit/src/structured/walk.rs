@@ -109,8 +109,8 @@ fn any_flag(value: Option<&Any>) -> bool {
     }
 }
 
-/// The drawing's `wp:docPr` facts; an image's title and description come from its live `title`
-/// and `alt`, which image edits change and saves write.
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
 fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::DrawingProperties> {
     let properties = any_map(payload.get("docPr"))?;
     let text = |key: &str| match properties.get(key) {
@@ -126,6 +126,7 @@ fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::Drawing
     } else {
         (text("title"), text("descr"))
     };
+    let wrap = image.then(|| live("wrapType")).flatten();
     let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
     Some(crate::DrawingProperties {
         doc_pr_id: text("docPrId"),
@@ -134,8 +135,9 @@ fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::Drawing
         descr,
         hidden: flag("hidden"),
         decorative: flag("decorative"),
-        placement: match text("placement").as_deref() {
-            Some("anchor") => docx_parse::image::DrawingPlacement::Anchor,
+        placement: match (wrap.as_deref(), text("placement").as_deref()) {
+            (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+            (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
             _ => docx_parse::image::DrawingPlacement::Inline,
         },
         drawing_type: match text("type").as_deref() {

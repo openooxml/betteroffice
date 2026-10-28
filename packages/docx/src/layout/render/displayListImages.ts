@@ -155,7 +155,10 @@ export function findDrawingRectsByDocPos(
       ) ??
       unionBox(
         primitives
-          .filter((primitive) => primitive.kind === 'shape')
+          .filter(
+            (primitive) =>
+              primitive.kind === 'shape' || (primitive.chart !== undefined && 'w' in primitive)
+          )
           .map(primitiveBox)
           .filter((box): box is Box => box !== null)
       ) ??

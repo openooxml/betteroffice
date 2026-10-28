@@ -9531,6 +9531,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 color,
                 dash: None,
                 role: None,
+                attrs: attrs.clone(),
                 ..LinePrimitive::contract_defaults()
             })),
             PlotOp::Path {
@@ -11479,6 +11480,21 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                 rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
             }
         }
+        let attrs = match primitive {
+            Primitive::Line(line) => Some(&mut line.attrs),
+            other => doc_attrs_mut(other),
+        };
+        if let Some(ContentFrame {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+        }) = attrs
+            .and_then(|attrs| attrs.chart.as_mut())
+            .and_then(|chart| chart.frame.as_mut())
+        {
+            rect(x, y, w, h);
+        }
     }
 }
 
@@ -11973,6 +11989,10 @@ fn doc_attrs_mut(p: &mut Primitive) -> Option<&mut DocAttrs> {
 /// vmerge continuation slices are re-paints of content owned by another
 /// fragment — visible but not selectable, so their doc positions are stripped
 fn strip_doc_positions(p: &mut Primitive) {
+    if let Primitive::Line(line) = p {
+        line.attrs.doc_start = None;
+        line.attrs.doc_end = None;
+    }
     if let Some(attrs) = doc_attrs_mut(p) {
         attrs.doc_start = None;
         attrs.doc_end = None;
@@ -17155,5 +17175,63 @@ mod tests {
             (child["x"].as_i64(), child["y"].as_i64()),
             (Some(145), Some(125))
         );
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
+        let attrs = DocAttrs {
+            chart: Some(ChartA11yAttrs {
+                label: "Chart".to_owned(),
+                frame: Some(ContentFrame {
+                    x: Some(px(10.0)),
+                    y: Some(px(20.0)),
+                    w: Some(px(40.0)),
+                    h: Some(px(30.0)),
+                }),
+            }),
+            ..DocAttrs::default()
+        };
+        let mut prims = vec![
+            Primitive::Rect(RectPrimitive {
+                x: px(10.0),
+                y: px(20.0),
+                w: px(40.0),
+                h: px(30.0),
+                fill: "#000000".to_owned(),
+                attrs: attrs.clone(),
+            }),
+            Primitive::Line(LinePrimitive {
+                attrs,
+                ..LinePrimitive::contract_defaults()
+            }),
+        ];
+        rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), 90.0);
+        let Primitive::Rect(rect) = &prims[0] else {
+            unreachable!()
+        };
+        let expected = (
+            Some(rect.x.clone()),
+            Some(rect.y.clone()),
+            Some(rect.w.clone()),
+            Some(rect.h.clone()),
+        );
+        assert_ne!(expected.0, Some(px(10.0)));
+        for primitive in &prims {
+            let attrs = match primitive {
+                Primitive::Rect(rect) => &rect.attrs,
+                Primitive::Line(line) => &line.attrs,
+                _ => unreachable!(),
+            };
+            let frame = attrs.chart.as_ref().unwrap().frame.as_ref().unwrap();
+            assert_eq!(
+                (
+                    frame.x.clone(),
+                    frame.y.clone(),
+                    frame.w.clone(),
+                    frame.h.clone()
+                ),
+                expected
+            );
+        }
     }
 }

@@ -184,4 +184,43 @@ describe('findDrawingRectsByDocPos', () => {
       { pageIndex: 0, x: 10, y: 10, width: 60, height: 60 },
     ]);
   });
+
+  test('finds a chart that paints only lines by its frame', () => {
+    const chart = { label: 'Chart', frame: { x: 20, y: 30, w: 60, h: 40 } };
+    const lines = {
+      pages: [
+        {
+          pageIndex: 0,
+          width: 100,
+          height: 200,
+          primitives: [
+            { kind: 'line', x1: 25, y1: 60, x2: 70, y2: 35, strokeWidth: 1, color: '#000', docStart: 5, chart },
+          ],
+        },
+      ],
+    } as unknown as DisplayList;
+    expect(findDrawingRectsByDocPos(lines, 5)).toEqual([
+      { pageIndex: 0, x: 20, y: 30, width: 60, height: 40 },
+    ]);
+  });
+
+  test('unions chart rects and shapes when a display list carries no chart frame', () => {
+    const chart = { label: 'Chart' };
+    const pie = {
+      pages: [
+        {
+          pageIndex: 0,
+          width: 100,
+          height: 200,
+          primitives: [
+            { kind: 'rect', x: 10, y: 10, w: 80, h: 60, fill: '#fff', docStart: 5, chart },
+            { kind: 'shape', x: 30, y: 20, w: 40, h: 40, geometryPath: [], docStart: 5, chart },
+          ],
+        },
+      ],
+    } as unknown as DisplayList;
+    expect(findDrawingRectsByDocPos(pie, 5)).toEqual([
+      { pageIndex: 0, x: 10, y: 10, width: 80, height: 60 },
+    ]);
+  });
 });
