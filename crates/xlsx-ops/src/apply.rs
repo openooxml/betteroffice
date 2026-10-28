@@ -987,9 +987,24 @@ fn apply_range_formats(
                     let source_col = (col - range.start.col) % captured.columns;
                     let index = (source_row * captured.columns + source_col) as usize;
                     if let Some(source) = captured.source_formats.get(index) {
-                        let matches = |style| {
-                            crate::formatting::PreservedCellFormat::from_style(styles, style)
-                                == *source
+                        if source.source_xf.is_none()
+                            && source.derived_from.is_none()
+                            && format == styles.cell_format(Some(0))
+                        {
+                            staged.push(
+                                defaults
+                                    .inherited_style(at)
+                                    .is_some_and(|inherited| inherited != 0)
+                                    .then_some(0),
+                            );
+                            continue;
+                        }
+                        let matches = |style: Option<u32>| {
+                            (source.source_xf.is_some()
+                                || source.derived_from.is_some()
+                                || style.is_none_or(|index| !styles.xf_has_extra_xml(index)))
+                                && crate::formatting::PreservedCellFormat::from_style(styles, style)
+                                    == *source
                         };
                         let selected = if source.format == format {
                             resolved_formats.get(&index).copied().or_else(|| {
