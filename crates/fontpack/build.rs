@@ -24,6 +24,7 @@ fn main() {
     }
     if target == "wasm32-unknown-unknown" {
         build.include("wasm-include").flag("-ffreestanding");
+        println!("cargo:rustc-link-arg-cdylib=--max-memory=1073741824");
     }
     build.compile("fontpack_zstd");
 }

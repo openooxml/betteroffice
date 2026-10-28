@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import * as nodeZlib from 'node:zlib';
 import { decodeFontBytes } from './decode';
 
@@ -157,6 +157,13 @@ describe('internal font decoder', () => {
     corrupt[corrupt.length - 1] ^= 1;
     await expect(decodeFontBytes(corrupt, undefined, { wasmUrl })).rejects.toThrow('checksum');
     expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
+  });
+
+  test.skipIf(!hasWasm)('wasm linear memory cannot grow past 1 GiB', async () => {
+    const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
+    const memory = instance.exports.memory as WebAssembly.Memory;
+    const pages = memory.buffer.byteLength / 65536;
+    expect(() => memory.grow(16384 - pages + 1)).toThrow();
   });
 
   test.skipIf(!hasWasm)('wasm path refuses a 2 GiB content size without allocating it', async () => {
