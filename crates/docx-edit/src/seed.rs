@@ -4180,7 +4180,7 @@ fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
                 },
             );
         } else if floating_run_content(content) {
-            continue;
+            tokens.push("floating");
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -4230,15 +4230,33 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<&'static str>) {
     }
 }
 
-fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
+/// A paragraph's flow tokens. Floating content before the first break takes
+/// no line room, so it drops out; after a break it is content on the next page.
+fn paragraph_tokens(paragraph: &Value) -> Vec<&'static str> {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let first_break = tokens
+        .iter()
+        .position(|token| matches!(*token, "pageBreak" | "columnBreak"));
+    tokens
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, token)| match token {
+            "floating" => first_break
+                .is_some_and(|first| index > first)
+                .then_some("visible"),
+            _ => Some(token),
+        })
+        .collect()
+}
+
+fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
+    let tokens = paragraph_tokens(paragraph);
     tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
 }
 
 fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
-    let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let tokens = paragraph_tokens(paragraph);
     if !tokens.contains(&"visible") {
         let split = tokens
             .iter()
@@ -5416,8 +5434,7 @@ fn record_breaks(
     breaks: Vec<FlowBreak>,
     embeds: Vec<u32>,
 ) {
-    let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let tokens = paragraph_tokens(paragraph);
     let expected = tokens
         .iter()
         .filter(|token| matches!(**token, "pageBreak" | "columnBreak"))
@@ -7815,6 +7832,16 @@ mod tests {
             drawing_run("inFront"),
             page_break_run(),
             run("Version Control Table")
+        ]});
+        assert_eq!(paragraph_flow_breaks(&paragraph), (Vec::new(), Vec::new()));
+        assert!(paragraph_starts_with_page_break(&paragraph));
+    }
+
+    #[test]
+    fn anchored_drawing_after_a_leading_page_break_stays_on_the_next_page() {
+        let paragraph = json!({"type":"paragraph","content":[
+            page_break_run(),
+            drawing_run("inFront")
         ]});
         assert_eq!(paragraph_flow_breaks(&paragraph), (Vec::new(), Vec::new()));
         assert!(paragraph_starts_with_page_break(&paragraph));
