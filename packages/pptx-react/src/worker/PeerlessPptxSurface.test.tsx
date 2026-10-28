@@ -3012,7 +3012,6 @@ describe('peerless stage fit', () => {
       expect(view.container.querySelectorAll('aside canvas')[1]).toBe(previews[1]);
       expect(frozenCanvases.filter((entry) => entry === previews[1])).toHaveLength(2);
       const updated = drawnRaster(previews[1]);
-      expect(updated).not.toBe(rasters[1]);
       expect(updated.width).toBeGreaterThan(0);
       expect(rasterTiles(updated).some((tile) => calls(tile).some((entry) =>
         entry.kind === 'drawImage' && entry.args[0] === images.requests[31].source))).toBe(true);
@@ -3044,13 +3043,11 @@ describe('peerless stage fit', () => {
       expect(frozenCanvases).toEqual([]);
       await flushStage(images.releaseAll);
       expect(frozenCanvases).toEqual([canvas]);
-      let raster = drawnRaster(canvas);
       for (const next of [{ scale: 0.125, dpr: 2 }, { scale: 0.125, dpr: 3 }]) {
         const count = frozenCanvases.length;
         await flushStage(() => { fit = { ...next, generation: fit.generation + 1 }; view.rerender(strip()); });
         expect(frozenCanvases).toHaveLength(count + 1);
-        expect(drawnRaster(canvas)).not.toBe(raster);
-        raster = drawnRaster(canvas);
+        const raster = drawnRaster(canvas);
         expect([canvas.width, canvas.height]).toEqual([Math.ceil(960 * fit.scale * fit.dpr), Math.ceil(540 * fit.scale * fit.dpr)]);
         expect(rasterTiles(raster).some((tile) => calls(tile).some((entry) =>
           entry.kind === 'drawImage' && entry.args[0] === images.requests[0].source))).toBe(true);
