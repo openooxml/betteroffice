@@ -7560,6 +7560,8 @@ impl EngineSession {
         // Placement only zeroes contextual spacing, which every pass applies
         // again, so the note passes replay the body arena in place. Page-side
         // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let physical_note_widths =
+            section_region_indices(input.measured.iter().map(|entry| &entry.block)).is_some();
         let mut separator_heights = input
             .options
             .note_separator_heights
@@ -7601,6 +7603,7 @@ impl EngineSession {
                 &mut notes.contents,
                 &refs,
                 &initial_layout,
+                physical_note_widths,
                 &regions,
                 &measurement,
                 parsed_render_env
@@ -7613,6 +7616,12 @@ impl EngineSession {
             separator_heights
                 .endnote
                 .extend(measured_separator_heights.endnote);
+            separator_heights
+                .footnote_widths
+                .extend(measured_separator_heights.footnote_widths);
+            separator_heights
+                .endnote_widths
+                .extend(measured_separator_heights.endnote_widths);
         }
         if separator_heights != NoteSeparatorHeights::default() {
             for input in base_input.iter_mut().chain(arena.iter_mut()) {
@@ -7957,6 +7966,8 @@ impl EngineSession {
         // Placement only zeroes contextual spacing, which every pass applies
         // again, so the note passes replay the body arena in place. Page-side
         // wrapping rewrites shapes per pass, so it replays a copy instead.
+        let physical_note_widths =
+            section_region_indices(input.measured.iter().map(|entry| &entry.block)).is_some();
         let mut separator_heights = input
             .options
             .note_separator_heights
@@ -8007,6 +8018,7 @@ impl EngineSession {
                 &mut notes.contents,
                 &refs,
                 &initial_layout,
+                physical_note_widths,
                 &regions,
                 &measurement,
                 parsed_render_env
@@ -8019,6 +8031,12 @@ impl EngineSession {
             separator_heights
                 .endnote
                 .extend(measured_separator_heights.endnote);
+            separator_heights
+                .footnote_widths
+                .extend(measured_separator_heights.footnote_widths);
+            separator_heights
+                .endnote_widths
+                .extend(measured_separator_heights.endnote_widths);
         }
         if separator_heights != NoteSeparatorHeights::default() {
             for input in base_input.iter_mut().chain(arena.iter_mut()) {
@@ -8482,6 +8500,7 @@ impl EngineSession {
         &self,
         contents: &[docx_layout::footnotes::NoteContent],
         layout: &Layout,
+        physical_widths: bool,
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
@@ -8501,6 +8520,18 @@ impl EngineSession {
         for page in &layout.pages {
             first_pages.entry(page.region_section_index).or_insert(page);
         }
+        let mut frames: Vec<_> = sections
+            .iter()
+            .map(|&section| (section, first_pages.get(&section).copied(), false))
+            .collect();
+        if physical_widths {
+            frames.extend(
+                layout
+                    .pages
+                    .iter()
+                    .map(|page| (page.region_section_index, Some(page), true)),
+            );
+        }
         for (kind, name) in [
             (NoteKind::Footnote, "footnote"),
             (NoteKind::Endnote, "endnote"),
@@ -8512,8 +8543,7 @@ impl EngineSession {
                 continue;
             };
             let mut measured_heights = HashMap::new();
-            for &section_index in &sections {
-                let page = first_pages.get(&section_index).copied();
+            for &(section_index, page, physical) in &frames {
                 let section = regions
                     .sections
                     .get(section_index)
@@ -8572,27 +8602,39 @@ impl EngineSession {
                     measured_heights.insert(key, height);
                     height
                 };
-                match kind {
-                    NoteKind::Footnote => &mut heights.footnote,
-                    NoteKind::Endnote => &mut heights.endnote,
+                if physical {
+                    heights.insert_for_width(kind, section_index, width, height);
+                } else {
+                    match kind {
+                        NoteKind::Footnote => &mut heights.footnote,
+                        NoteKind::Endnote => &mut heights.endnote,
+                    }
+                    .insert(section_index, height);
                 }
-                .insert(section_index, height);
             }
         }
         Ok(heights)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn measure_resident_notes(
         &self,
         contents: &mut [docx_layout::footnotes::NoteContent],
         refs: &[docx_layout::footnotes::NoteRefLocation],
         layout: &Layout,
+        physical_widths: bool,
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         render_env: &RenderEnv,
     ) -> Result<NoteSeparatorHeights, String> {
-        let separator_heights =
-            self.measure_note_separators(contents, layout, regions, measurement, render_env)?;
+        let separator_heights = self.measure_note_separators(
+            contents,
+            layout,
+            physical_widths,
+            regions,
+            measurement,
+            render_env,
+        )?;
         let anchors = map_note_anchors_to_pages(&layout.pages, refs);
         for content in contents {
             let Some(page_number) = anchors

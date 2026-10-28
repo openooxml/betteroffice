@@ -1291,3 +1291,131 @@ fn a_host_batch_moving_a_wrapped_section_break_remeasures_the_document_float_pol
         engine.build_display_list_frame(&extras, 0).unwrap();
     }
 }
+
+#[test]
+fn a_body_footnote_measures_its_separator_at_the_body_width_after_a_narrow_wrapped_cover() {
+    let paragraph = |id: u32, properties: &str, content: &str| {
+        p(
+            &format!("{id:08X}"),
+            &format!(
+                concat!(
+                    "<w:pPr><w:spacing w:before=\"0\" w:after=\"0\" ",
+                    "w:line=\"300\" w:lineRule=\"exact\"/>{properties}</w:pPr>{content}"
+                ),
+                properties = properties,
+                content = content,
+            ),
+        )
+    };
+    let cover = paragraph(1, &section(2880, 9000, 900, 1200, ""), &r("Cover"));
+    let paragraphs = (0..20)
+        .map(|index| {
+            let text = if index == 0 {
+                format!(
+                    "{}<w:r><w:footnoteReference w:id=\"1\"/></w:r>",
+                    r("Body with a note"),
+                )
+            } else {
+                r("Following body text")
+            };
+            paragraph(0x4000 + index, "", &text)
+        })
+        .collect::<String>();
+    let body = format!(
+        concat!(
+            "<w:sdt><w:sdtPr><w:id w:val=\"7\"/></w:sdtPr><w:sdtContent>",
+            "{cover}</w:sdtContent></w:sdt>{paragraphs}{section}"
+        ),
+        cover = cover,
+        paragraphs = paragraphs,
+        section = section(10800, 9000, 900, 1200, ""),
+    );
+    let notes = format!(
+        concat!(
+            "<w:footnotes ",
+            "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+            "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">",
+            "<w:footnote w:type=\"separator\" w:id=\"-1\">{separator}</w:footnote>",
+            "<w:footnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r>",
+            "<w:continuationSeparator/></w:r></w:p></w:footnote>",
+            "<w:footnote w:id=\"1\">{note}</w:footnote></w:footnotes>"
+        ),
+        separator = paragraph(
+            0x5000,
+            "",
+            &r("Separate the footnote area from the body text on this page."),
+        ),
+        note = paragraph(
+            0x5001,
+            "",
+            &format!("<w:r><w:footnoteRef/></w:r>{}", r("Note body")),
+        ),
+    );
+    let mut parts = fixture::page_parts(false);
+    for (name, bytes) in &mut parts {
+        match name.as_str() {
+            "word/document.xml" => {
+                *bytes = format!(
+                    concat!(
+                        "<w:document ",
+                        "xmlns:w=\"",
+                        "http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+                        "xmlns:r=\"",
+                        "http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+                        "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">",
+                        "<w:body>{body}</w:body></w:document>"
+                    ),
+                    body = body,
+                )
+                .into_bytes();
+            }
+            "word/footnotes.xml" => *bytes = notes.as_bytes().to_vec(),
+            _ => {}
+        }
+    }
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let engine = EngineSession::new(75250);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let mut request = region_request(&engine, &bytes, font);
+    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    request["regions"]["sections"] = json!([{
+        "properties": package.document.final_section_properties,
+    }]);
+    request["regions"]["noteSettings"] = json!({
+        "footnoteColumns": 2,
+        "footnote": {"numStart": 7, "numFmt": "upperRoman", "position": "pageBottom"},
+    });
+    request["notes"]["contents"] = json!([{"id": 1, "noteKind": "footnote", "height": 0}]);
+    let output: Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_retained_json(&request.to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(output["notesConverged"], true);
+    let pages = output["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0]["size"], json!({"w": 192.0, "h": 600.0}));
+    assert!(pages[0].get("noteAreas").is_none());
+    let body = &pages[1];
+    assert_eq!(body["size"], json!({"w": 720.0, "h": 600.0}));
+    assert_eq!(body["sectionIndex"], 0);
+    let area = &body["noteAreas"][0];
+    assert_eq!(area["columns"], 2);
+    assert_eq!(area["placement"], "pageBottom");
+    assert_eq!(area["separator"]["height"], 20.0);
+    assert_eq!(area["notes"][0]["displayLabel"], "VII");
+    assert_eq!(area["notes"][0]["height"], 20.0);
+    assert_eq!(area["height"], 40.0);
+    assert_eq!(body["footnoteReservedHeight"], 40.0);
+    let input: docx_layout::types::Input =
+        serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+    let heights = input.options.note_separator_heights.unwrap();
+    assert!(heights.height(docx_layout::footnotes::NoteKind::Footnote, 0) > 20.0);
+    assert!(heights.footnote_widths[&0][&96.0_f64.to_bits()] > 20.0);
+    assert_eq!(heights.footnote_widths[&0][&624.0_f64.to_bits()], 20.0);
+}
