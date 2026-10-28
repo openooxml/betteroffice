@@ -1272,6 +1272,38 @@ test('an aborted toolbar font pick whose loader never settles no longer holds fo
   await waitFor(() => expect(environments()).toBe(2));
 });
 
+test('a toolbar font pick the worker refuses leaves its fonts uncovered for the next refresh', async () => {
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false }];
+  const measure = spyOn(measurement, 'createRustMeasureSource').mockImplementation(({ engine }) => {
+    let chains: Record<string, number[]> = {};
+    return { setCompat() {}, setEmbeddedFaces() {}, clear() {},
+      async prepareFontRequirements(requirements) {
+        chains = Object.fromEntries(requirements.map(({ key, scripts }) => [key, [key, ...scripts ?? []]
+          .map(name => engine.registerFont(new TextEncoder().encode(name.padEnd(12))))]));
+        return true;
+      },
+      measurementConfigForRequirements: () => ({ fontChains: chains, defaults: { fontFamily: 'Calibri', fontSize: 11 },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true }) };
+  });
+  restorers.push(() => measure.mockRestore());
+  const ref = createRef<DocxEditorRef>();
+  render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(binding).toBeDefined());
+  const worker = workers[0]!;
+  const { session, incarnation, epoch } = worker.initial!;
+  const environments = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'setFontEnvironment').length;
+  selectWorkerText();
+  worker.refuseNextEdit = true;
+  await act(async () => { expect(await ref.current!.commands.execute('fontFamily', { family: 'Picked' })).toMatchObject({ ok: false }); });
+  expect(environments()).toBe(1);
+  fontRequirements = [{ key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false },
+    { key: 'picked|0|0', family: 'Picked', bold: false, italic: false }];
+  await act(async () => {
+    worker.onmessage?.({ data: { id: 0, ok: true, fontRequirementsHint: { session, incarnation, epoch } } } as MessageEvent<DocxEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(environments()).toBe(2));
+});
+
 test('peerless shell ref and plugin readiness use worker state', async () => {
   const ref = createRef<DocxEditorRef>();
   const setup = mock(() => {});

@@ -217,6 +217,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     } finally { if (capture) printCaptures.current.delete(capture); }
   }, [props.onPrint, reportRecoverableError]);
   const prepareFontFamily = useRef<(family: string) => Promise<DocxFontEnvironment>>(async () => { throw new Error('Worker fonts are unavailable'); });
+  const pickedFonts = useRef(new WeakMap<DocxFontEnvironment, { source: object; requirements: ResidentFontRequirement[] }>());
   const [commentsOpen, setCommentsOpen] = useControllableBoolean(props.commentsSidebarOpen, props.onCommentsSidebarOpenChange);
   const [expandedSidebarItem, setExpandedSidebarItem] = useState<string | null>(null);
   const controllerOptions = { ...recoverableProps, zoom, focus, read, readAt, save, loadBuffer, loadDocument, print, onZoom: setZoom, isDark,
@@ -231,7 +232,12 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const layout = JSON.parse(opened.layoutInput);
       return JSON.stringify({ ...layout, renderEnv: { ...layout.renderEnv, ...JSON.parse(current.requestedRenderEnvironment || '{}') } });
     },
-    prepareFontFamily: (family: string) => prepareFontFamily.current(family) };
+    prepareFontFamily: (family: string) => prepareFontFamily.current(family),
+    fontEnvironmentApplied: (environment: DocxFontEnvironment) => {
+      const picked = pickedFonts.current.get(environment);
+      const opened = fontSource.current;
+      if (picked && opened === picked.source) opened.requirements = picked.requirements;
+    } };
   const [controller] = useState(() => createPeerlessShellController(controllerOptions));
   const [search] = useState(() => createWorkerSearch(controller, (rect) => {
     const element = scroller.current;
@@ -726,7 +732,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }
     const signature = JSON.stringify(settings.current.fonts ?? []);
     const provider = settings.current.measurementFontProvider;
-    if (requirementsChanged) { fontRefresh.current.pending = false; fontRefresh.current.read = performance.now(); }
+    if (requirementsChanged) fontRefresh.current.pending = false;
     else {
       if (fontJob.current?.signature === signature && fontJob.current.provider === provider) return;
       if (!fontJob.current && opened.signature === signature && opened.provider === provider) return;
@@ -751,6 +757,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       let requirements = opened.requirements;
       if (!requirementsChanged && opened.signature === null && !fonts?.length && provider === opened.provider) payload = structuredClone(opened.initial);
       else {
+        if (requirementsChanged) fontRefresh.current.read = performance.now();
         const next = JSON.parse(await client.fontRequirements(opened.layoutInput)) as ResidentFontRequirement[];
         if (!isCurrent()) return;
         const uncovered = requirementsChanged ? uncoveredFontRequirements(opened.requirements, next) : next;
@@ -815,7 +822,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');
       abort.signal.throwIfAborted();
-      opened.requirements = requirements;
+      pickedFonts.current.set(payload, { source: opened, requirements });
       return payload;
     } finally {
       if (refresh.pick === abort.signal) {

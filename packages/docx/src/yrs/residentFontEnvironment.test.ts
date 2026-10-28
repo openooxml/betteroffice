@@ -125,7 +125,11 @@ test('commands that may need new fonts: fallback script text, reformatting and r
     expect(commandMayNeedNewFonts('insertText', { text })).toBe(true);
   }
   expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: '\u4e2d' }] } })).toBe(true);
-  for (const kind of ['pasteFragment', 'undo', 'redo', 'toggleMark', 'formatRange', 'applyRemoteUpdate', 'applyRemoteUpdateChunks', 'collabPipe']) {
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: 'abc' }] } })).toBe(false);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'setParagraphStyle', target: { paraId: 'a' }, styleId: 'Heading1' }] } })).toBe(true);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertParagraphs', paragraphs: [{ text: 'a', styleId: 'Title' }] }] } })).toBe(true);
+  for (const kind of ['pasteFragment', 'undo', 'redo', 'toggleMark', 'formatRange', 'acceptRevision', 'rejectRevision', 'setProposalStates',
+    'applyRemoteUpdate', 'applyRemoteUpdateChunks', 'collabPipe']) {
     expect(commandMayNeedNewFonts(kind, {})).toBe(true);
   }
   const japanese = new TextEncoder().encode('\u65e5\u672c');
