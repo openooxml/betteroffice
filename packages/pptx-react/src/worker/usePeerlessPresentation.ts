@@ -131,7 +131,9 @@ export function usePeerlessPresentation(
       catch (error) { console.error('documentChange listener threw:', error); }
     };
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-    let recoveryBase: Blob | undefined = new Blob([props.file as BlobPart]);
+    const fileView = props.file instanceof Uint8Array ? props.file : new Uint8Array(props.file);
+    let recoveryBase: Blob | undefined = new Blob([fileView.buffer instanceof ArrayBuffer &&
+      !(fileView.buffer as ArrayBuffer & { resizable?: boolean }).resizable ? fileView as Uint8Array<ArrayBuffer> : fileView.slice()]);
     const recovery = peerlessRecoveryFactory.create(recoveryBase);
     const readRecoveryBase = async () => {
       if (!recoveryBase?.size) throw new Error('Recovery baseline is unavailable');

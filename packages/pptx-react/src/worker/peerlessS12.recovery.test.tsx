@@ -440,3 +440,24 @@ for (const fault of ['gap', 'engine'] as const) test(`source recovery rejects ${
     await expect(value.api.recoverySave()).rejects.toThrow('Recovery baseline is unavailable');
   } finally { factory.mockRestore(); }
 });
+
+test('recovery copies a shared-memory file before keeping it as a Blob', async () => {
+  const bytes = await deck();
+  const shared = new Uint8Array(new SharedArrayBuffer(bytes.byteLength + 8), 4, bytes.byteLength);
+  shared.set(bytes);
+  const Original = globalThis.Blob;
+  globalThis.Blob = class extends Original {
+    constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+      if (parts?.some((part) => ArrayBuffer.isView(part) && !(part.buffer instanceof ArrayBuffer))) {
+        throw new TypeError('Blob parts must not be backed by shared memory');
+      }
+      super(parts, options);
+    }
+  };
+  try {
+    const value = await open({ file: shared });
+    shared.fill(0);
+    const recovered = await value.api.recoverySave();
+    expect(recovered.bytes).toEqual(bytes);
+  } finally { globalThis.Blob = Original; }
+});
