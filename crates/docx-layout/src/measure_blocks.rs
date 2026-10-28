@@ -79,6 +79,32 @@ pub struct FloatPageGeometry {
     pub content_height: f64,
 }
 
+/// Float widths selected once for the complete document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FloatWidthPolicy {
+    FirstBlock,
+    PerBlock,
+}
+
+impl FloatWidthPolicy {
+    pub fn for_document<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> Self {
+        if blocks.into_iter().any(|block| {
+            matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
+        }) {
+            Self::PerBlock
+        } else {
+            Self::FirstBlock
+        }
+    }
+
+    fn resolve(self, default_width: f64, block_width: Option<f64>) -> f64 {
+        match self {
+            Self::FirstBlock => default_width,
+            Self::PerBlock => block_width.unwrap_or(default_width),
+        }
+    }
+}
+
 const MAX_COLUMN_ZONE_Y: f64 = 10_000_000.0;
 
 /// Paragraph-relative column slots selected by pagination.
@@ -779,6 +805,7 @@ pub fn measure_blocks_with_column_frames(
         blocks,
         default_width,
         widths,
+        FloatWidthPolicy::for_document(blocks.iter()),
         table_frames,
         config,
         page_geometry,
@@ -837,14 +864,34 @@ pub fn floating_zone_kinds(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<(bool, bool), String> {
-    let zones = extract_floating_zones(
+    floating_zone_kinds_with_width_policy(
         blocks,
         content_width,
         &[],
-        &[],
+        FloatWidthPolicy::for_document(blocks.iter()),
+        config,
+        page_geometry,
+    )
+}
+
+pub fn floating_zone_kinds_with_width_policy(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    widths: &[f64],
+    width_policy: FloatWidthPolicy,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+) -> Result<(bool, bool), String> {
+    let (zones, _) = extract_floating_zones_recorded(
+        blocks,
+        content_width,
+        widths,
+        width_policy,
+        &[] as &[bool],
         config,
         page_geometry,
         &BTreeMap::new(),
+        false,
     )?;
     Ok((
         !zones.is_empty(),
@@ -928,10 +975,36 @@ pub fn measure_float_segment_with_table_frames(
     page_geometry: Option<&FloatPageGeometry>,
     section_break_marks: &[bool],
 ) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
+    let width_policy = FloatWidthPolicy::for_document(blocks.iter());
+    measure_float_segment_with_width_policy(
+        blocks,
+        widths,
+        default_width,
+        width_policy,
+        table_frames,
+        config,
+        page_geometry,
+        section_break_marks,
+    )
+}
+
+/// Measures a segment using its complete document's float width policy.
+#[allow(clippy::too_many_arguments)]
+pub fn measure_float_segment_with_width_policy(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    default_width: f64,
+    width_policy: FloatWidthPolicy,
+    table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    section_break_marks: &[bool],
+) -> Result<Option<(Vec<BlockExtent>, Vec<FontChainDependencies>)>, String> {
     let (extracted, zone_dependencies) = extract_floating_zones_recorded(
         blocks,
         default_width,
         widths,
+        width_policy,
         table_frames,
         config,
         page_geometry,
@@ -1338,11 +1411,30 @@ impl FloatFlow {
         config: &MeasurementConfig,
         page_geometry: Option<&FloatPageGeometry>,
     ) -> Result<Self, String> {
+        Self::with_width_policy(
+            blocks,
+            widths,
+            FloatWidthPolicy::for_document(blocks.iter()),
+            table_frames,
+            config,
+            page_geometry,
+        )
+    }
+
+    pub fn with_width_policy(
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        width_policy: FloatWidthPolicy,
+        table_frames: &[impl Copy + Into<TableMeasurementFrame>],
+        config: &MeasurementConfig,
+        page_geometry: Option<&FloatPageGeometry>,
+    ) -> Result<Self, String> {
         let default_width = widths.first().copied().unwrap_or(0.0);
         let (extracted, zone_dependencies) = extract_floating_zones_recorded(
             blocks,
             default_width,
             widths,
+            width_policy,
             table_frames,
             config,
             page_geometry,
@@ -2355,6 +2447,7 @@ fn extract_floating_zones(
         blocks,
         content_width,
         widths,
+        FloatWidthPolicy::for_document(blocks.iter()),
         table_wrap_frames,
         config,
         page_geometry,
@@ -2369,15 +2462,13 @@ fn extract_floating_zones_recorded(
     blocks: &[LayoutBlock],
     content_width: f64,
     widths: &[f64],
+    width_policy: FloatWidthPolicy,
     table_wrap_frames: &[impl Copy + Into<TableMeasurementFrame>],
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
     shape_offsets: &BTreeMap<usize, f64>,
     record_dependencies: bool,
 ) -> Result<(Vec<AnchoredFloatingZone>, Vec<FontChainDependencies>), String> {
-    let section_local_widths = blocks.iter().any(|block| {
-        matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
-    });
     let mut zones = Vec::new();
     let mut dependencies = if record_dependencies {
         Vec::with_capacity(blocks.len())
@@ -2385,11 +2476,7 @@ fn extract_floating_zones_recorded(
         Vec::new()
     };
     for (block_index, block) in blocks.iter().enumerate() {
-        let content_width = if section_local_widths {
-            widths.get(block_index).copied().unwrap_or(content_width)
-        } else {
-            content_width
-        };
+        let content_width = width_policy.resolve(content_width, widths.get(block_index).copied());
         let mut extract = || -> Result<(), String> {
             match block {
                 LayoutBlock::Paragraph(paragraph) => {
@@ -4844,6 +4931,130 @@ mod tests {
         };
         assert_eq!(image.total_height, 20.0);
         assert_eq!(image.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+    }
+
+    fn wrapped_section_float_blocks(relative_to: &str) -> Vec<LayoutBlock> {
+        serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "cover", "runs": []},
+            {"kind": "sectionBreak", "id": "cover-break", "type": "nextPage",
+             "sdtGroups": [{"id": "cover-sdt", "sdtType": "richText"}]},
+            {"kind": "paragraph", "id": "body-start", "runs": []},
+            {"kind": "pageBreak", "id": "body-page"},
+            {"kind": "paragraph", "id": "body-image",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "image", "src": "image", "width": 614.4, "height": 512,
+                       "wrapType": "square", "distLeft": 12, "distRight": 12,
+                       "position": {"horizontal": {"relativeTo": "margin", "align": "left"},
+                                    "vertical": {"relativeTo": relative_to, "posOffset": 0}}}]},
+            {"kind": "paragraph", "id": "body-text",
+             "attrs": {"spacing": {"line": 20, "lineRule": "exact"}},
+             "runs": [{"kind": "text", "text": "Body text beside the floating image. ".repeat(20)}]}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn wrapped_section_float_segments_keep_width_policy_after_a_text_edit() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            ..Default::default()
+        };
+        for (cover_width, body_width) in [(690.0, 624.0), (624.0, 690.0)] {
+            let mut blocks = wrapped_section_float_blocks("paragraph");
+            let widths = [
+                cover_width,
+                cover_width,
+                body_width,
+                body_width,
+                body_width,
+                body_width,
+            ];
+            let policy = FloatWidthPolicy::for_document(blocks.iter());
+            let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
+            flow.measure_until(&mut blocks, &widths, &config, 6).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &mut blocks[5] else {
+                panic!("paragraph expected");
+            };
+            let Run::Text(text) = &mut paragraph.runs[0] else {
+                panic!("text expected");
+            };
+            text.text.push_str("Edited text.");
+            let mut segment = blocks[3..].to_vec();
+            assert_eq!(
+                FloatWidthPolicy::for_document(segment.iter()),
+                FloatWidthPolicy::FirstBlock
+            );
+            let marks = section_break_marks(&blocks);
+            let (incremental, _) = measure_float_segment_with_width_policy(
+                &mut segment,
+                &widths[3..],
+                cover_width,
+                policy,
+                &[] as &[bool],
+                &config,
+                None,
+                &marks[3..],
+            )
+            .unwrap()
+            .unwrap();
+            let fresh = measure_blocks_with_floats(&mut blocks, &widths, &config, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(&incremental).unwrap(),
+                serde_json::to_value(&fresh[3..]).unwrap(),
+                "cover {cover_width}, body {body_width}"
+            );
+            let BlockExtent::Paragraph(text) = &incremental[2] else {
+                panic!("paragraph extent expected");
+            };
+            let offset = text.lines[0].left_offset.unwrap_or(0.0);
+            assert_eq!(offset > 600.0, body_width == 690.0);
+            assert_eq!(text.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn wrapped_section_float_classification_uses_body_width_and_detects_margin_coupling() {
+        let config = MeasurementConfig::default();
+        for relative_to in ["paragraph", "margin", "page"] {
+            for (cover_width, body_width) in [(690.0, 624.0), (624.0, 690.0)] {
+                let mut blocks = wrapped_section_float_blocks(relative_to);
+                let policy = FloatWidthPolicy::for_document(blocks.iter());
+                let kinds = floating_zone_kinds_with_width_policy(
+                    &blocks[4..5],
+                    cover_width,
+                    &[body_width],
+                    policy,
+                    &config,
+                    None,
+                )
+                .unwrap();
+                let has_float = body_width == 690.0;
+                assert_eq!(kinds, (has_float, has_float && relative_to != "paragraph"));
+                let LayoutBlock::SectionBreak(section) = &mut blocks[1] else {
+                    panic!("section break expected");
+                };
+                section.sdt_groups = None;
+                let policy = FloatWidthPolicy::for_document(blocks.iter());
+                assert_eq!(policy, FloatWidthPolicy::FirstBlock);
+                assert_eq!(
+                    floating_zone_kinds_with_width_policy(
+                        &blocks[4..5],
+                        cover_width,
+                        &[body_width],
+                        policy,
+                        &config,
+                        None,
+                    )
+                    .unwrap(),
+                    floating_zone_kinds(&blocks[4..5], cover_width, &config, None).unwrap()
+                );
+            }
+        }
     }
 
     #[test]
