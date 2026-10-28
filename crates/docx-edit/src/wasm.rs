@@ -66,13 +66,13 @@ use crate::session::{
 use crate::structured::ExportOptions;
 use crate::{
     AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
-    EditRefusal, EditRequest, EditTextView, EditingDoc, FindTextRequest,
-    FontFamilyPatch, FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError,
-    ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
-    ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
-    RawOp, ReadParagraphsRequest, ReadStoriesRequest, SegmentContent, SimpleFormat,
-    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop,
-    TableLocator, TableRange, TextTarget, TriState, UndoCaptureMode,
+    EditRefusal, EditRequest, EditTextView, EditingDoc, FindTextRequest, FontFamilyPatch,
+    FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError, ParaAttrDelta,
+    ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal,
+    ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position, RawOp,
+    ReadParagraphsRequest, ReadStoriesRequest, SegmentContent, SimpleFormat, SourceParagraphRef,
+    SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop, TableLocator, TableRange,
+    TextTarget, TriState, UndoCaptureMode,
 };
 
 #[wasm_bindgen]

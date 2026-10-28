@@ -42,7 +42,10 @@ impl EditSessionCore {
                 .map(|source| source.read().comment_writes.snapshot())
                 .unwrap_or_default()
         });
-        self.engine.doc().load_state_v1(update).map_err(EngineError::message)?;
+        self.engine
+            .doc()
+            .load_state_v1(update)
+            .map_err(EngineError::message)?;
         if self.engine.doc().session_id() != session_id {
             self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         }
@@ -87,7 +90,6 @@ impl EditSessionCore {
         self.engine.doc().rotate_version(self.host.entropy());
         self.load(state)
     }
-
 
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
     pub fn begin_opening(&self, generation: Option<String>) {
@@ -199,9 +201,8 @@ impl EditSessionCore {
             .borrow()
             .clone()
             .unwrap_or_else(|| crate::seed::package_digest(source));
-        let (envelope, _) =
-            crate::seed::parse_docx_package_with_digest(source, digest)
-                .map_err(EngineError::message)?;
+        let (envelope, _) = crate::seed::parse_docx_package_with_digest(source, digest)
+            .map_err(EngineError::message)?;
         let json = serde_json::to_string(&envelope).map_err(EngineError::message)?;
         Ok(Some(json))
     }
@@ -339,7 +340,10 @@ impl EditSessionCore {
     /// local origin, so this replica's undo manager never claims it. Errors on
     /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> EngineResult<()> {
-        self.engine.doc().apply_update_v1(update).map_err(EngineError::message)
+        self.engine
+            .doc()
+            .apply_update_v1(update)
+            .map_err(EngineError::message)
     }
 
     pub fn apply_update_chunks(&self, chunks: &[Vec<u8>]) -> EngineResult<()> {
@@ -356,9 +360,8 @@ impl EditSessionCore {
     /// than one client, ends in a non-text insertion, or inserts nothing.
     /// Errors on a malformed update.
     pub fn apply_update_with_inference(&self, update: &[u8]) -> EngineResult<String> {
-        let inference =
-            apply_update_with_typing_inference(self.engine.doc(), update)
-                .map_err(EngineError::message)?;
+        let inference = apply_update_with_typing_inference(self.engine.doc(), update)
+            .map_err(EngineError::message)?;
         serde_json::to_string(&inference.map(|inference| {
             json!({
                 "clientId": inference.client_id,

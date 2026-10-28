@@ -20,6 +20,7 @@ mod open;
 #[cfg(test)]
 mod tests;
 
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct ParagraphIdentitiesCache {
     pub(crate) version: crate::DocumentVersion,
     pub(crate) source: Option<Arc<crate::identity::SourceIndex>>,
@@ -34,6 +35,7 @@ pub struct UpdateEventObserver {
 /// Per-peer selection state. These sticky positions are deliberately held
 /// outside the yrs document: an awareness transport may publish them, but they
 /// are never serialized as document content or included in save updates.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 #[derive(Clone)]
 pub struct LocalSelection {
     pub(crate) story: String,
@@ -43,6 +45,7 @@ pub struct LocalSelection {
 
 /// One endpoint of a local table selection. The cell story is the stable
 /// identity; row/column are a fallback if that cell is removed locally.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct LocalCellPoint {
     pub(crate) cell_story: String,
     pub(crate) row: u32,
@@ -52,6 +55,7 @@ pub struct LocalCellPoint {
 /// Per-peer cell selection, held outside the yrs document. The sticky table
 /// position survives unrelated edits in the parent story; cell-story identity
 /// lets each endpoint follow inserted/deleted rows and columns.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct LocalCellSelection {
     pub(crate) parent_story: String,
     pub(crate) table: StickyIndex,
@@ -59,6 +63,8 @@ pub struct LocalCellSelection {
     pub(crate) head: LocalCellPoint,
 }
 
+// Until slice 4 moves the remaining bodies, some state is read only by the wasm shim.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct EditSessionCore {
     pub(crate) host: Host,
     pub(crate) engine: EngineSession,
