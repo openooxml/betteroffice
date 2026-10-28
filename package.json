@@ -49,7 +49,7 @@
     "deploy:evals": "bun run --filter './apps/evals' deploy",
     "deploy:fidelity": "bun run --filter './apps/fidelity' deploy",
     "build": "bun run --filter './apps/web' build",
-    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test --isolate packages shared apps/relay/test apps/web/app apps/web/lib apps/demo/lib apps/fidelity/src apps/evals/src eval/formats scripts e2e",
+    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test --isolate packages shared apps/relay/test apps/web/app apps/web/lib apps/demo/lib apps/fidelity/src apps/evals/src apps/wopi/src eval/formats scripts e2e",
     "build:wasm": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun run build:pptx-wasm && bun run build:vsdx-wasm",
     "pretest:e2e": "bun run build:wasm && bun run build:fonts",
     "test:e2e": "bun e2e/run.ts",
@@ -78,7 +78,7 @@
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "test:e2e:browser:plugins": "playwright test --config e2e/browser/plugin-host/playwright.config.ts",
     "typecheck:e2e": "tsc -p e2e/tsconfig.json",
-    "typecheck:shared": "tsc --noEmit -p shared/office-session/tsconfig.json"
+    "typecheck:shared": "tsc --noEmit -p shared/office-session/tsconfig.json && tsc --noEmit -p shared/editor-host/tsconfig.typecheck.json"
   },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev",

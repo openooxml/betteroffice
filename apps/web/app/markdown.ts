@@ -24,7 +24,7 @@ import {
   SUITE,
 } from "./content";
 import { usedByLine } from "./used-by";
-import { BLOG_MARKDOWN_URL, type BlogPost } from "../lib/blog";
+import { BLOG_MARKDOWN_URL, FEED_URL, formatDate, latestPosts, markdownUrl, type BlogPost } from "../lib/blog";
 
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
@@ -114,6 +114,11 @@ export function homepageMarkdown(
       `- **${eco.name}** (\`${eco.install}\`) — ${eco.desc} [${eco.registry}](${eco.url}), [guide](${eco.docs})`,
   ).join("\n");
 
+  const latest = latestPosts(posts);
+  const blog = latest.length
+    ? `\n## From the blog\n\n${latest.map((post) => `- [${post.title}](${markdownUrl(post)}), ${formatDate(post.date)}: ${post.description}`).join("\n")}\n\n[All posts](${BLOG_MARKDOWN_URL}) · [Atom feed](${FEED_URL})\n`
+    : "";
+
   return `# ${HERO.title}
 
 ${HERO.tagline}
@@ -158,7 +163,7 @@ One install line per ecosystem:
 ${ecosystems}
 
 ${packages}
-
+${blog}
 ## ${CODA.heading}
 
 [Try it out](${DEMO}), or [explore the docs](${DOCS}) for setup, APIs, and format support.

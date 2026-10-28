@@ -54,6 +54,10 @@ export function publishedPosts(): BlogPost[] {
   return listed(blogPosts());
 }
 
+export function latestPosts(posts: BlogPost[], count = 3): BlogPost[] {
+  return [...posts].sort((a, b) => b.date.localeCompare(a.date)).slice(0, count);
+}
+
 export const postPath = (post: Pick<BlogPost, "slug">) => `${BLOG_PATH}/${post.slug}`;
 export const postUrl = (post: Pick<BlogPost, "slug">) => `${SITE}${postPath(post)}`;
 export const markdownUrl = (post: Pick<BlogPost, "slug">) => `${postUrl(post)}.md`;

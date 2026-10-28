@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::measure_blocks::{
     MeasurementConfig, extent_height, measure_blocks_without_table_compat_shift, measure_paragraph,
 };
-use crate::paragraph_spacing::apply_contextual_spacing_blocks;
+use crate::paragraph_spacing::{apply_contextual_spacing_blocks, suppress_document_auto_before};
 use crate::types::{
     AxisPosition, BlockExtent, BlockId, BoxEdges, FieldRun, ImageRun, ImageRunPosition, Layout,
     LayoutBlock, MeasuredBlock, PageFloatBand, PageMargins, ParagraphBlock, Run, Size,
@@ -120,6 +120,15 @@ pub fn measure_header_footer(
         return Ok(None);
     }
     let mut blocks = blocks;
+    if kind == HeaderFooterKind::Header {
+        for block in &mut blocks {
+            if !contributes_to_flow(block) {
+                continue;
+            }
+            suppress_document_auto_before(block);
+            break;
+        }
+    }
     apply_contextual_spacing_blocks(&mut blocks);
     let mut detached = float_detached_top_and_bottom_images(&mut blocks);
     let mut measures =

@@ -62,7 +62,7 @@ enum StopKind {
 
 fn stop_kind(val: &str) -> StopKind {
     match val {
-        "end" => StopKind::End,
+        "end" | "right" => StopKind::End,
         "center" => StopKind::Center,
         "decimal" => StopKind::Decimal,
         "bar" => StopKind::Bar,
