@@ -17,8 +17,8 @@ use crate::table_grid::{
     widen_columns_to_minimums,
 };
 use crate::types::{
-    BlockExtent, BlockId, ChartBlock, ChartExtent, ColumnLayout, FloatingTablePosition,
-    ImageExtent, ImageRunPosition, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent,
+    BlockExtent, BlockId, ChartExtent, ColumnLayout, FloatingTablePosition, ImageExtent,
+    ImageRunPosition, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent,
     ParagraphSpacing, Run, SectionBreakType, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
     TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
     TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
@@ -35,19 +35,63 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
-fn floating_chart(chart: &ChartBlock) -> bool {
-    crate::anchor::chart_floats(
-        chart.position.as_ref(),
-        chart.wrap_type.as_deref(),
-        chart.behind_doc,
-    )
+#[derive(Default)]
+struct InlineShapeDependencies {
+    entries: HashMap<Vec<u8>, FontChainDependencies, foldhash::fast::RandomState>,
+    retained_bytes: usize,
 }
 
-/// Measures the text a shape carried by an inline image run holds, so the
-/// painter finds the inner measures it emits that text from. Measured
-/// once per shape: re-measuring the outer paragraph (float zones, table
-/// floats) reuses the measures already on the shape. Textless carriers
-/// without nested content keep their absent measures, as before.
+impl InlineShapeDependencies {
+    fn replay(&self, key: &[u8], chains: FontChains<'_>) -> bool {
+        let Some(dependencies) = self.entries.get(key) else {
+            return false;
+        };
+        if !dependencies.matches(chains) {
+            return false;
+        }
+        dependencies.record();
+        true
+    }
+
+    fn insert(&mut self, key: Vec<u8>, dependencies: FontChainDependencies) {
+        if let Some(previous) = self.entries.remove(&key) {
+            self.retained_bytes -= key.len() + previous.retained_bytes();
+        }
+        let weight = key.len() + dependencies.retained_bytes();
+        if weight > MAX_EXTENT_CACHE_KEY_BYTES {
+            return;
+        }
+        if self.entries.len() >= MAX_EXTENT_CACHE_ENTRIES
+            || self.retained_bytes + weight > MAX_EXTENT_CACHE_KEY_BYTES
+        {
+            *self = Self::default();
+        }
+        self.retained_bytes += weight;
+        self.entries.insert(key, dependencies);
+    }
+}
+
+thread_local! {
+    static INLINE_SHAPE_DEPENDENCIES: RefCell<InlineShapeDependencies> =
+        RefCell::new(InlineShapeDependencies::default());
+}
+
+fn inline_shape_dependency_key(shape: &ShapeBlock, config: &MeasurementConfig) -> Option<Vec<u8>> {
+    let mut key = Vec::new();
+    crate::extent_key::encode(
+        &mut key,
+        &(
+            shape,
+            &config.defaults,
+            &config.compat,
+            config.authoritative_shaping,
+            crate::measure_font_cache_identity(&config.font_chains),
+        ),
+    )
+    .ok()?;
+    (key.len() <= MAX_EXTENT_KEY_BYTES).then_some(key)
+}
+
 fn measure_inline_shape_text(
     paragraph: &mut ParagraphBlock,
     config: &MeasurementConfig,
@@ -59,15 +103,27 @@ fn measure_inline_shape_text(
         let Some(shape) = &mut image.inline_shape else {
             continue;
         };
-        if shape.inner_measures.is_none()
-            && (shape
-                .inner_text
-                .as_ref()
-                .is_some_and(|paragraphs| !paragraphs.is_empty())
-                || !shape.nested_sequences.is_empty()
-                || !shape.children.is_empty())
+        if shape.inner_text.as_ref().is_none_or(Vec::is_empty)
+            && shape.nested_sequences.is_empty()
+            && shape.children.is_empty()
         {
-            measure_shape(shape, config)?;
+            shape.inner_measures = None;
+            continue;
+        }
+        if let Some(key) = inline_shape_dependency_key(shape, config)
+            && INLINE_SHAPE_DEPENDENCIES.with(|cache| {
+                cache
+                    .borrow()
+                    .replay(&key, FontChains::BTree(&config.font_chains))
+            })
+        {
+            continue;
+        }
+        let (result, dependencies) =
+            FontChainDependencies::capture(|| measure_shape(shape, config));
+        result?;
+        if let Some(key) = inline_shape_dependency_key(shape, config) {
+            INLINE_SHAPE_DEPENDENCIES.with(|cache| cache.borrow_mut().insert(key, dependencies));
         }
     }
     Ok(())
@@ -832,7 +888,7 @@ pub fn measure_blocks_with_column_frames(
             &marks,
         );
     }
-    let mut flow = FlowState::new(blocks);
+    let mut flow = FlowState::default();
     blocks
         .iter_mut()
         .enumerate()
@@ -860,24 +916,6 @@ pub fn resets_float_flow(block: &LayoutBlock) -> bool {
         block,
         LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
     ) || crate::keep_together::paragraph_breaks_before(block)
-}
-
-pub fn float_flow_breaks<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> Vec<bool> {
-    let blocks: Vec<_> = blocks.into_iter().collect();
-    let mut breaks: Vec<_> = blocks
-        .iter()
-        .map(|block| resets_float_flow(block))
-        .collect();
-    let mut owners = crate::anchor::FloatingGroupOwner::default();
-    for index in 0..blocks.len() {
-        if let Some(owner) = owners.at(blocks.len(), index, |index| blocks[index])
-            && breaks[owner]
-        {
-            breaks[index] = true;
-            breaks[owner] = false;
-        }
-    }
-    breaks
 }
 
 /// `(anchors a floating zone, anchors a margin-relative one)` for `blocks`.
@@ -1168,7 +1206,7 @@ fn measure_float_flow(
     zones_by_anchor: &AnchorZones,
     section_break_marks: &[bool],
 ) -> Result<Vec<BlockExtent>, String> {
-    let mut flow = FlowState::new(blocks);
+    let mut flow = FlowState::default();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
         measured.push(flow.measure(
@@ -1197,7 +1235,7 @@ fn measure_float_flow_recorded(
     section_break_marks: &[bool],
     zone_dependencies: &[FontChainDependencies],
 ) -> Result<(Vec<BlockExtent>, Vec<FontChainDependencies>), String> {
-    let mut flow = FlowState::new(blocks);
+    let mut flow = FlowState::default();
     let mut measured = Vec::with_capacity(blocks.len());
     let mut dependencies = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
@@ -1225,21 +1263,13 @@ fn measure_float_flow_recorded(
 }
 
 /// Where the float flow stands between two blocks.
+#[derive(Default)]
 struct FlowState {
     cumulative_y: f64,
     active_zones: Vec<FloatingZone>,
-    breaks: Vec<bool>,
 }
 
 impl FlowState {
-    fn new(blocks: &[LayoutBlock]) -> Self {
-        Self {
-            cumulative_y: 0.0,
-            active_zones: Vec::new(),
-            breaks: float_flow_breaks(blocks),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn measure(
         &mut self,
@@ -1256,9 +1286,8 @@ impl FlowState {
         let Self {
             cumulative_y,
             active_zones,
-            breaks,
         } = self;
-        if breaks[index] {
+        if resets_float_flow(block) {
             active_zones.clear();
             *cumulative_y = 0.0;
         }
@@ -1351,7 +1380,6 @@ impl FlowState {
         }
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
-            && !matches!(block, LayoutBlock::Chart(chart) if floating_chart(chart))
         {
             *cumulative_y += extent_height(&extent);
         }
@@ -1417,7 +1445,7 @@ impl FloatFlow {
             paragraph_zones,
             zones_by_anchor,
             marks: section_break_marks(blocks),
-            state: FlowState::new(blocks),
+            state: FlowState::default(),
             measured: Vec::with_capacity(blocks.len()),
             font_dependencies: Vec::with_capacity(blocks.len()),
             zone_dependencies,
@@ -1782,6 +1810,8 @@ thread_local! {
 pub(crate) fn clear_extent_cache() {
     let _ = EXTENT_CACHE.try_with(|cache| *cache.borrow_mut() = ExtentCache::default());
     let _ = EXTENT_KEY_BUF.try_with(|scratch| *scratch.borrow_mut() = Vec::new());
+    let _ = INLINE_SHAPE_DEPENDENCIES
+        .try_with(|cache| *cache.borrow_mut() = InlineShapeDependencies::default());
 }
 
 #[cfg(test)]
@@ -2520,40 +2550,11 @@ fn extract_shape_zone(
     let Some(position) = shape.position.as_ref() else {
         return;
     };
-    extract_anchored_zone(
-        position,
-        shape.wrap_type.as_deref(),
-        shape.wrap_text.as_deref(),
-        shape.width,
-        shape.height,
-        shape.wrap_distances.as_ref(),
-        block_index,
-        content_width,
-        geometry,
-        resolved_x,
-        zones,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extract_anchored_zone(
-    position: &ImageRunPosition,
-    wrap_type: Option<&str>,
-    wrap_text: Option<&str>,
-    width: f64,
-    height: f64,
-    distances: Option<&crate::types::BoxEdges>,
-    block_index: usize,
-    content_width: f64,
-    geometry: Option<&FloatPageGeometry>,
-    resolved_x: Option<f64>,
-    zones: &mut Vec<AnchoredFloatingZone>,
-) {
     if !matches!(
-        wrap_type,
+        shape.wrap_type.as_deref(),
         Some("square" | "tight" | "through" | "topAndBottom")
-    ) || width <= 0.0
-        || height <= 0.0
+    ) || shape.width <= 0.0
+        || shape.height <= 0.0
     {
         return;
     }
@@ -2570,8 +2571,8 @@ fn extract_anchored_zone(
     let x = resolved_x.unwrap_or_else(|| {
         base_x
             + match horizontal.and_then(|axis| axis.align.as_deref()) {
-                Some("right" | "outside") => frame_width - width,
-                Some("center") => (frame_width - width) / 2.0,
+                Some("right" | "outside") => frame_width - shape.width,
+                Some("center") => (frame_width - shape.width) / 2.0,
                 Some("left" | "inside") => 0.0,
                 _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
             }
@@ -2589,27 +2590,28 @@ fn extract_anchored_zone(
     };
     let y = base_y
         + match vertical.and_then(|axis| axis.align.as_deref()) {
-            Some("bottom") => frame_height - height,
-            Some("center") => (frame_height - height) / 2.0,
+            Some("bottom") => frame_height - shape.height,
+            Some("center") => (frame_height - shape.height) / 2.0,
             Some("top") => 0.0,
             _ => vertical.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
         };
+    let distances = shape.wrap_distances.as_ref();
     let left = x - distances.map_or(0.0, |d| d.left);
-    let right = x + width + distances.map_or(0.0, |d| d.right);
+    let right = x + shape.width + distances.map_or(0.0, |d| d.right);
     let top_y = y - distances.map_or(0.0, |d| d.top);
-    let bottom_y = y + height + distances.map_or(0.0, |d| d.bottom);
+    let bottom_y = y + shape.height + distances.map_or(0.0, |d| d.bottom);
     if right <= 0.0 || left >= content_width || bottom_y <= 0.0 {
         return;
     }
-    let full_width_block =
-        wrap_type == Some("topAndBottom") || (left <= 0.0 && right >= content_width);
+    let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
+        || (left <= 0.0 && right >= content_width);
     let mut segments = Vec::new();
     let (left_margin, right_margin) = if full_width_block {
         (0.0, 0.0)
     } else {
         let strip_left = left.max(0.0);
         let strip_right = (content_width - right).max(0.0);
-        let text_on_left = match wrap_text {
+        let text_on_left = match shape.wrap_text.as_deref() {
             Some("left") => true,
             Some("right") => false,
             // `bothSides` is the schema default and the only value that puts
@@ -2716,10 +2718,9 @@ fn extract_image_zones(
 /// passed to [`measure_blocks_with_table_wrap_frames`] must be false there.
 pub fn negative_indent_float_flows(blocks: &[&LayoutBlock]) -> Vec<bool> {
     let mut flows = vec![false; blocks.len()];
-    let breaks = float_flow_breaks(blocks.iter().copied());
     let mut start = 0;
     for index in 1..=blocks.len() {
-        if index == blocks.len() || breaks[index] {
+        if index == blocks.len() || resets_float_flow(blocks[index]) {
             let negative = blocks[start..index]
                 .iter()
                 .any(|block| has_negative_side_indent(block));
@@ -3067,11 +3068,14 @@ fn measure_shape(
     };
     let inner_measures = shape
         .inner_text
-        .as_ref()
+        .as_mut()
         .map(|paragraphs| {
             paragraphs
-                .iter()
-                .map(|paragraph| measure_paragraph(paragraph, inner_width, config))
+                .iter_mut()
+                .map(|paragraph| {
+                    measure_inline_shape_text(paragraph, config)?;
+                    measure_paragraph(paragraph, inner_width, config)
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
@@ -3250,8 +3254,7 @@ fn cell_content_widths(
             LayoutBlock::Image(image) if image.anchor.is_none() => (image.width, image.width),
             LayoutBlock::Shape(shape) if !anchored_shape(shape) => (shape.width, shape.width),
             LayoutBlock::Image(_) | LayoutBlock::Shape(_) => return None,
-            LayoutBlock::Chart(chart) if !floating_chart(chart) => (chart.width, chart.width),
-            LayoutBlock::Chart(_) => return None,
+            LayoutBlock::Chart(chart) => (chart.width, chart.width),
             LayoutBlock::TextBox(text_box) => (text_box.width, text_box.width),
             LayoutBlock::Reserved(reserved) => {
                 let width = reserved.width.unwrap_or_default();
@@ -3863,15 +3866,6 @@ fn measure_table_with_compat_shift(
                     && crate::cell_layout::cell_overlay_drawing(
                         shape.position.is_some(),
                         shape.wrap_type.as_deref(),
-                    )
-                {
-                    continue;
-                }
-                if let LayoutBlock::Chart(chart) = block
-                    && crate::anchor::chart_floats(
-                        chart.position.as_ref(),
-                        chart.wrap_type.as_deref(),
-                        chart.behind_doc,
                     )
                 {
                     continue;
@@ -5577,11 +5571,12 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_and_behind_doc_charts_match_main_block_measurement() {
+    fn anchored_charts_match_main_block_measurement() {
         let fonts = crate::MeasureFonts::default();
         let _fonts = fonts.enter();
         let config = cache_measurement_config();
         for (wrap, behind_doc) in [
+            ("none", false),
             ("topAndBottom", false),
             ("square", false),
             ("tight", false),
@@ -6748,6 +6743,162 @@ mod tests {
     }
 
     #[test]
+    fn inline_shape_measurements_invalidate_when_inputs_change() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        let mut block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 80, "height": 60,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 80, "height": 60,
+                    "geometryPath": [], "children": [], "innerText": [{
+                        "id": "box-text", "runs": [{
+                            "kind": "text", "text": "Words to wrap inside the text box. ".repeat(4)
+                        }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        measure_block(&mut block, 300.0, &config).unwrap();
+        let measured = serde_json::to_value(&block).unwrap();
+        let original = &measured["runs"][0]["inlineShape"]["innerMeasures"];
+        assert!(
+            original
+                .as_array()
+                .is_some_and(|measures| !measures.is_empty())
+        );
+        for change in [
+            "width",
+            "padding",
+            "text",
+            "spacing",
+            "defaults",
+            "remove text",
+        ] {
+            let mut warm = measured.clone();
+            let shape = &mut warm["runs"][0]["inlineShape"];
+            let mut config = config.clone();
+            match change {
+                "width" => shape["width"] = json!(40),
+                "padding" => shape["textBodyProperties"] = json!({"margins": {"left": 30}}),
+                "text" => shape["innerText"][0]["runs"][0]["text"] = json!("Short"),
+                "spacing" => {
+                    shape["innerText"][0]["attrs"] =
+                        json!({"spacing": {"line": 40, "lineRule": "exact"}});
+                }
+                "defaults" => config.defaults["fontSize"] = json!(24),
+                "remove text" => shape["innerText"] = json!([]),
+                _ => unreachable!(),
+            }
+            let mut cold = warm.clone();
+            cold["runs"][0]["inlineShape"]
+                .as_object_mut()
+                .unwrap()
+                .remove("innerMeasures");
+            let mut warm: LayoutBlock = serde_json::from_value(warm).unwrap();
+            let mut cold: LayoutBlock = serde_json::from_value(cold).unwrap();
+            let actual = measure_block(&mut warm, 300.0, &config).unwrap();
+            let expected = measure_block(&mut cold, 300.0, &config).unwrap();
+            assert_eq!(actual, expected, "{change}");
+            assert_eq!(warm, cold, "{change}");
+            let updated = serde_json::to_value(&warm).unwrap();
+            assert_ne!(
+                &updated["runs"][0]["inlineShape"]["innerMeasures"], original,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_shape_measurements_refresh_when_a_pending_font_arrives() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = cache_measurement_config();
+        config
+            .font_chains
+            .insert("box font|0|0".to_owned(), vec![1]);
+        let source: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 80, "height": 60,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 80, "height": 60,
+                    "geometryPath": [], "children": [], "innerText": [{
+                        "id": "box-text", "runs": [{
+                            "kind": "text", "text": "Text inside the box",
+                            "fontFamily": "Box Font"
+                        }]
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let mut warm = source.clone();
+        measure_block(&mut warm, 300.0, &config).unwrap();
+        let original = serde_json::to_value(&warm).unwrap();
+        assert_eq!(
+            crate::register_measure_font_bytes(include_bytes!(
+                "../../docx-raster/tests/assets/Carlito-Regular.ttf"
+            ))
+            .unwrap(),
+            1
+        );
+        measure_block(&mut warm, 300.0, &config).unwrap();
+        let mut cold = source;
+        measure_block(&mut cold, 300.0, &config).unwrap();
+        assert_eq!(warm, cold);
+        let updated = serde_json::to_value(&warm).unwrap();
+        assert_ne!(
+            updated["runs"][0]["inlineShape"]["innerMeasures"],
+            original["runs"][0]["inlineShape"]["innerMeasures"]
+        );
+    }
+
+    #[test]
+    fn anchored_charts_keep_main_table_cell_geometry() {
+        for (wrap_type, behind_doc) in [
+            ("none", false),
+            ("none", true),
+            ("topAndBottom", false),
+            ("square", false),
+            ("tight", false),
+            ("through", false),
+        ] {
+            let mut cell_blocks = vec![json!({
+                "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
+                "position": {}, "wrapType": wrap_type, "behindDoc": behind_doc
+            })];
+            cell_blocks.extend((0..6).map(|index| {
+                json!({
+                    "kind": "paragraph", "id": index, "runs": [],
+                    "attrs": {"spacing": {"line": 20, "lineRule": "exact"}}
+                })
+            }));
+            let mut block: LayoutBlock = serde_json::from_value(json!({
+                "kind": "table", "id": "table", "columnWidths": [200],
+                "rows": [{"id": "row", "cells": [{
+                    "id": "cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                    "blocks": cell_blocks
+                }]}]
+            }))
+            .unwrap();
+            let extent = measure_block(&mut block, 200.0, &MeasurementConfig::default()).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &extent) else {
+                panic!("table measure");
+            };
+            assert_eq!(extent.rows[0].height, 221.0, "{wrap_type}, {behind_doc}");
+            assert_eq!(extent.rows[0].cells[0].height, 221.0);
+            let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
+            assert_eq!(
+                breaks.break_offsets[0].as_slice(),
+                &[101.0, 121.0, 141.0, 161.0, 181.0, 201.0, 221.0],
+                "{wrap_type}, behindDoc={behind_doc}"
+            );
+        }
+    }
+
+    #[test]
     fn collects_fonts_from_inline_shape_children_and_nested_carriers() {
         let nested = json!({
             "kind": "image", "src": "", "width": 100, "height": 40,
@@ -6789,56 +6940,6 @@ mod tests {
             serde_json::to_value(preview.finish()).unwrap(),
             serde_json::to_value(ordinary).unwrap()
         );
-    }
-
-    #[test]
-    fn only_front_wrap_none_charts_add_no_table_cell_height() {
-        for (wrap_type, behind_doc, floating) in [
-            ("none", false, true),
-            ("none", true, false),
-            ("square", false, false),
-            ("square", true, false),
-            ("topAndBottom", false, false),
-            ("tight", false, false),
-            ("through", false, false),
-        ] {
-            let mut cell_blocks = vec![json!({
-                "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
-                "position": {}, "wrapType": wrap_type, "behindDoc": behind_doc
-            })];
-            cell_blocks.extend((0..6).map(|index| {
-                json!({
-                    "kind": "paragraph", "id": index, "runs": [],
-                    "attrs": {"spacing": {"line": 20, "lineRule": "exact"}}
-                })
-            }));
-            let mut block: LayoutBlock = serde_json::from_value(json!({
-                "kind": "table", "id": "table", "columnWidths": [200],
-                "rows": [{"id": "row", "cells": [{
-                    "id": "cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
-                    "blocks": cell_blocks
-                }]}]
-            }))
-            .unwrap();
-            let extent = measure_block(&mut block, 200.0, &MeasurementConfig::default()).unwrap();
-            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &extent) else {
-                panic!("table measure");
-            };
-            let height = if floating { 120.0 } else { 221.0 };
-            assert_eq!(extent.rows[0].height, height, "{wrap_type}, {behind_doc}");
-            assert_eq!(extent.rows[0].cells[0].height, height);
-            let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
-            let expected: &[f64] = if floating {
-                &[20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
-            } else {
-                &[101.0, 121.0, 141.0, 161.0, 181.0, 201.0, 221.0]
-            };
-            assert_eq!(
-                breaks.break_offsets[0].as_slice(),
-                expected,
-                "{wrap_type}, behindDoc={behind_doc}"
-            );
-        }
     }
 
     fn font_requirement_keys(run: Value) -> Vec<String> {

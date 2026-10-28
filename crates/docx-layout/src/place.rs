@@ -33,7 +33,6 @@
 //! layout, so an edit late in a document does not re-place everything above it.
 
 use crate::LayoutError;
-use crate::anchor::{FloatingGroupOwner, is_floating_drawing, is_floating_text_box_block};
 use crate::hooks;
 use crate::keep_together::{
     measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_min_leading_slice,
@@ -152,6 +151,16 @@ fn pristine_paragraph_start(
                         LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
                     )
                 }))
+}
+
+fn is_floating_drawing(block: &LayoutBlock) -> bool {
+    match block {
+        LayoutBlock::Shape(shape) => shape.position.is_some(),
+        LayoutBlock::TextBox(text_box) => is_floating_text_box_block(text_box),
+        LayoutBlock::Table(table) => table.floating.is_some(),
+        LayoutBlock::Image(image) => is_anchored_image(image),
+        _ => false,
+    }
 }
 
 fn is_anchored_image(image: &ImageBlock) -> bool {
@@ -441,6 +450,21 @@ fn get_paragraph_fragment_pm_range(
     }
 
     (pm_start, pm_end)
+}
+
+fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
+    matches!(
+        wrap_type,
+        Some("square") | Some("tight") | Some("through") | Some("behind") | Some("inFront")
+    )
+}
+
+/// A text box floats when it declares float display, a floating wrap type, or
+/// `topAndBottom` wrapping.
+fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
+    block.display_mode.as_deref() == Some("float")
+        || is_floating_wrap_type(block.wrap_type.as_deref())
+        || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
 /// The paginator a pass from the document's first block starts with.
@@ -942,8 +966,6 @@ fn place<F: PartialEq>(
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
-    let mut prepared_paragraph = None;
-    let mut floating_group_owner = FloatingGroupOwner::default();
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -993,31 +1015,17 @@ fn place<F: PartialEq>(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
-        let decision_index = prepared_paragraph
-            .filter(|&owner| i <= owner)
-            .or_else(|| floating_group_owner.at(measured.len(), i, |index| &measured[index].block))
-            .unwrap_or(i);
-        let prepare = prepared_paragraph != Some(decision_index);
-        let decision = &measured[decision_index];
-        let decision_section_mark = plan.section_marks[decision_index];
         // pageBreakBefore, or a hard page-break run, forces a fresh page and
         // keeps the paragraph's space-before net of the previous space-after
-        if prepare
-            && !decision_section_mark
-            && let Some(authored) = hooks::breaks_before_block(&decision.block)?
-        {
+        if !section_mark && let Some(authored) = hooks::breaks_before_block(&mb.block)? {
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh column when the
         // whole group would otherwise straddle the boundary
-        if prepare
-            && !decision_section_mark
-            && let Some(group) = plan.keep_with_next.groups_by_head.get(&decision_index)
-            && !plan
-                .keep_with_next
-                .interior_members
-                .contains(&decision_index)
+        if !section_mark
+            && let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
+            && !plan.keep_with_next.interior_members.contains(&i)
         {
             let state_idx = paginator.get_current();
             let page_content_height =
@@ -1029,18 +1037,18 @@ fn place<F: PartialEq>(
             let every_cell_starts = split_first_row && !paginator.next_page_may_be_shorter();
             let droppable = can_drop_lead_skip(paginator);
             let fresh_top = at_fresh_page_top(paginator, page_index_offset);
-            let (lead_skip, fresh_lead_skip) = match (&decision.block, &decision.measure) {
+            let (lead_skip, fresh_lead_skip) = match (&mb.block, &mb.measure) {
                 (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) if droppable => {
                     let kept = paginator
                         .leading_spacing(get_spacing_before(block))
                         .max(paginator.state(state_idx).deferred_spacing);
                     (
                         if fresh_top {
-                            removable_lead_skip(&measured[..decision_index], block, measure, kept)
+                            removable_lead_skip(&measured[..i], block, measure, kept)
                         } else {
                             0.0
                         },
-                        removable_lead_skip(&measured[..decision_index], block, measure, 0.0),
+                        removable_lead_skip(&measured[..i], block, measure, 0.0),
                     )
                 }
                 _ => (0.0, 0.0),
@@ -1085,30 +1093,6 @@ fn place<F: PartialEq>(
                     }
                 }
             }
-        }
-
-        if prepare && decision_index != i {
-            if !decision_section_mark
-                && let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
-                    (&decision.block, &decision.measure)
-            {
-                let skip = stale_lead_skip(
-                    &measured[..decision_index],
-                    block,
-                    measure,
-                    paginator,
-                    page_index_offset,
-                );
-                let slice = paragraph_min_leading_slice(block, measure) - skip;
-                let state_index = paginator.get_current();
-                let before = paginator
-                    .leading_spacing(get_spacing_before(block))
-                    .max(paginator.state(state_index).deferred_spacing);
-                if slice <= paginator.get_column_capacity() {
-                    paginator.ensure_fits(before + slice);
-                }
-            }
-            prepared_paragraph = Some(decision_index);
         }
 
         match &mb.block {
@@ -1975,43 +1959,32 @@ fn owns_float_over_first_line(preceding: &[MeasuredBlock], line_foot: f64) -> bo
         .iter()
         .rev()
         .map_while(|measured| match &measured.block {
-            LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some((
-                shape.wrap_type.as_deref(),
-                shape
-                    .position
-                    .as_ref()
-                    .and_then(|position| position.vertical.as_ref()),
-                shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top),
-            ))),
-            LayoutBlock::Chart(chart)
-                if crate::anchor::chart_floats(
-                    chart.position.as_ref(),
-                    chart.wrap_type.as_deref(),
-                    chart.behind_doc,
-                ) =>
-            {
-                Some(Some((Some("none"), None, 0.0)))
-            }
+            LayoutBlock::Shape(shape) if shape.position.is_some() => Some(Some(shape)),
             LayoutBlock::TextBox(text_box) if is_floating_text_box_block(text_box) => Some(None),
             LayoutBlock::Table(table) if table.floating.is_some() => Some(None),
             LayoutBlock::Image(image) if is_anchored_image(image) => Some(None),
             _ => None,
         })
-        .any(|float| {
-            let Some((wrap_type, vertical, top)) = float else {
+        .any(|shape| {
+            let Some(shape) = shape else {
                 return true;
             };
             if !matches!(
-                wrap_type,
+                shape.wrap_type.as_deref(),
                 Some("square" | "tight" | "through" | "topAndBottom")
             ) {
                 return false;
             }
+            let vertical = shape
+                .position
+                .as_ref()
+                .and_then(|position| position.vertical.as_ref());
             match vertical {
                 Some(axis)
                     if axis.align.is_none()
                         && matches!(axis.relative_to.as_deref(), Some("paragraph" | "line")) =>
                 {
+                    let top = shape.wrap_distances.as_ref().map_or(0.0, |gap| gap.top);
                     axis.pos_offset.unwrap_or(0.0) - top < line_foot
                 }
                 _ => true,
@@ -2135,32 +2108,6 @@ fn shape_has_text(shape: &ShapeBlock) -> bool {
 
 /// Charts use the same bbox placement rule as an in-flow image.
 fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Paginator) {
-    if crate::anchor::chart_floats(
-        block.position.as_ref(),
-        block.wrap_type.as_deref(),
-        block.behind_doc,
-    ) {
-        let (x, y) = resolve_object_position(
-            block.position.as_ref(),
-            measure.width,
-            measure.height,
-            paginator,
-        );
-        paginator.push_fragment_direct(Fragment::Chart(ChartFragment {
-            block_id: block.id.clone(),
-            x,
-            y,
-            width: measure.width,
-            height: measure.height,
-            pm_start: block.pm_start,
-            pm_end: block.pm_end,
-            doc_start: block.doc_start,
-            doc_end: block.doc_end,
-            is_anchored: Some(true),
-            z_index: Some(block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64),
-        }));
-        return;
-    }
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Chart(ChartFragment {
@@ -2395,208 +2342,6 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
-    }
-
-    #[test]
-    fn anchored_chart_pairs_follow_their_paragraph_pagination() {
-        for attrs in [
-            json!({"pageBreakBefore": true}),
-            json!({"keepLines": true}),
-            json!({"keepNext": true}),
-        ] {
-            let mut owner = paragraph(1, 2, 20.0, attrs.clone());
-            owner["block"]["pmStart"] = json!(10);
-            owner["block"]["pmEnd"] = json!(30);
-            let chart = |id: &str, start: usize| {
-                json!({
-                    "block": {
-                        "kind": "chart", "id": id, "chart": {}, "width": 40, "height": 30,
-                        "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}},
-                        "wrapType": "none", "pmStart": start, "pmEnd": start + 1
-                    },
-                    "measure": {"kind": "chart", "width": 40, "height": 30}
-                })
-            };
-            let result = layout(vec![
-                paragraph(0, 1, 80.0, json!({})),
-                chart("first", 12),
-                chart("second", 13),
-                owner,
-                paragraph(2, 1, 20.0, json!({})),
-            ]);
-            assert_eq!(result.pages.len(), 2, "{attrs}");
-            assert!(
-                result.pages[0]
-                    .fragments
-                    .iter()
-                    .all(|fragment| !matches!(fragment, Fragment::Chart(_))),
-                "{attrs}"
-            );
-            let charts: Vec<_> = result.pages[1]
-                .fragments
-                .iter()
-                .filter_map(|fragment| match fragment {
-                    Fragment::Chart(chart) => Some(chart),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(charts.len(), 2, "{attrs}");
-            assert_eq!(charts[0].y, charts[1].y, "{attrs}");
-            assert_eq!(charts[0].y, 10.0, "{attrs}");
-        }
-    }
-
-    #[test]
-    fn wrapped_and_behind_doc_charts_match_main_blocks_in_a_second_column() {
-        for (wrap, behind_doc) in [
-            ("topAndBottom", false),
-            ("square", false),
-            ("tight", false),
-            ("through", false),
-            ("none", true),
-        ] {
-            let mut value = input(vec![
-                paragraph(0, 1, 20.0, json!({})),
-                json!({
-                    "block":{"kind":"columnBreak","id":"column"},
-                    "measure":{"kind":"columnBreak"}
-                }),
-                paragraph(1, 1, 10.0, json!({})),
-                json!({
-                    "block":{
-                        "kind":"chart","id":"chart","chart":{},"width":40,"height":30,
-                        "wrapType":wrap,"behindDoc":behind_doc,
-                        "position":{
-                            "horizontal":{"relativeTo":"margin","posOffset":100},
-                            "vertical":{"relativeTo":"paragraph","posOffset":0}
-                        }
-                    },
-                    "measure":{"kind":"chart","width":40,"height":30}
-                }),
-                paragraph(2, 1, 10.0, json!({})),
-            ]);
-            value.options.columns =
-                Some(serde_json::from_value(json!({"count":2,"gap":20})).unwrap());
-            let mut main = value.clone();
-            let LayoutBlock::Chart(chart) = &mut main.measured[3].block else {
-                panic!()
-            };
-            chart.position = None;
-            chart.wrap_type = None;
-            chart.behind_doc = None;
-            let expected = layout_document(&mut main).unwrap();
-            let actual = layout_document(&mut value).unwrap();
-            assert_eq!(
-                serde_json::to_value(&actual).unwrap(),
-                serde_json::to_value(&expected).unwrap(),
-                "{wrap}, behindDoc={behind_doc}"
-            );
-            let chart = actual
-                .pages
-                .iter()
-                .flat_map(|page| &page.fragments)
-                .find_map(|fragment| match fragment {
-                    Fragment::Chart(chart) => Some(chart),
-                    _ => None,
-                })
-                .unwrap();
-            assert_eq!(chart.x, 110.0);
-            assert_eq!(chart.is_anchored, None);
-        }
-    }
-
-    #[test]
-    fn many_anchors_with_and_without_a_split_paragraph_chart_owner_lay_out() {
-        const ANCHORS: usize = 4096;
-        for with_chart in [false, true] {
-            let mut measured = vec![paragraph(0, 1, 20.0, json!({}))];
-            measured.extend((0..ANCHORS).map(|index| {
-                let position = json!({
-                    "horizontal": {"relativeTo": "paragraph", "posOffset": 0},
-                    "vertical": {"relativeTo": "paragraph", "posOffset": 0}
-                });
-                if index % 2 == 0 {
-                    json!({
-                        "block": {
-                            "kind": "shape", "id": format!("shape-{index}"), "shapeType": "rect",
-                            "width": 1, "height": 1, "geometryPath": [], "children": [],
-                            "position": position, "wrapType": "none", "pmStart": index + 1,
-                            "pmEnd": index + 2
-                        },
-                        "measure": {"kind": "shape", "width": 1, "height": 1}
-                    })
-                } else {
-                    json!({
-                        "block": {
-                            "kind": "image", "id": format!("picture-{index}"), "src": "",
-                            "width": 1, "height": 1, "pmStart": index + 1, "pmEnd": index + 2,
-                            "anchor": {"isAnchored": true, "position": position}
-                        },
-                        "measure": {"kind": "image", "width": 1, "height": 1}
-                    })
-                }
-            }));
-            if with_chart {
-                measured.push(json!({
-                    "block": {
-                        "kind": "chart", "id": "chart", "chart": {}, "width": 20, "height": 20,
-                        "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 0}},
-                        "wrapType": "none", "pmStart": ANCHORS + 3, "pmEnd": ANCHORS + 4
-                    },
-                    "measure": {"kind": "chart", "width": 20, "height": 20}
-                }));
-            }
-            let attrs = json!({
-                "pageBreakBefore": true, "anchorParagraphOffsets": [0, ANCHORS + 5]
-            });
-            let mut owner = paragraph(1, 1, 10.0, attrs);
-            owner["block"]["pmStart"] = json!(0);
-            owner["block"]["pmEnd"] = json!(ANCHORS + 3);
-            measured.push(owner);
-            measured.push(json!({
-                "block": {
-                    "kind": "shape", "id": "inline-box", "shapeType": "rect",
-                    "width": 20, "height": 20, "geometryPath": [], "children": [],
-                    "pmStart": ANCHORS + 2, "pmEnd": ANCHORS + 3
-                },
-                "measure": {"kind": "shape", "width": 20, "height": 20}
-            }));
-            let result = layout(measured);
-            assert_eq!(result.pages.len(), 2);
-            let anchor_page = usize::from(with_chart);
-            let anchors = &result.pages[anchor_page].fragments;
-            assert_eq!(
-                anchors
-                    .iter()
-                    .filter(|fragment| match fragment {
-                        Fragment::Shape(shape) => shape.is_anchored == Some(true),
-                        _ => false,
-                    })
-                    .count(),
-                ANCHORS / 2
-            );
-            assert_eq!(
-                anchors
-                    .iter()
-                    .filter(|fragment| match fragment {
-                        Fragment::Image(image) => image.is_anchored == Some(true),
-                        _ => false,
-                    })
-                    .count(),
-                ANCHORS / 2
-            );
-            assert_eq!(
-                anchors
-                    .iter()
-                    .filter(|fragment| matches!(fragment, Fragment::Chart(_)))
-                    .count(),
-                usize::from(with_chart)
-            );
-            assert!(result.pages[1].fragments.iter().any(|fragment| {
-                matches!(fragment, Fragment::Paragraph(paragraph)
-                    if paragraph.block_id == BlockId::Num(1.0))
-            }));
-        }
     }
 
     fn widow_rounding_input(

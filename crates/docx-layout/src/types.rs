@@ -603,8 +603,6 @@ pub struct ListNumPr {
 pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_source_content: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anchor_paragraph_offsets: Option<(f64, f64)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub horizontal_rules: Vec<HorizontalRule>,
     #[serde(skip_serializing_if = "Option::is_none")]

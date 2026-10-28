@@ -189,14 +189,6 @@ pub fn layout_cell_content(
             && cell_overlay_drawing(shape.position.is_some(), shape.wrap_type.as_deref())
         {
             line_tops.push(Vec::new());
-        } else if let Some(LayoutBlock::Chart(chart)) = block
-            && crate::anchor::chart_floats(
-                chart.position.as_ref(),
-                chart.wrap_type.as_deref(),
-                chart.behind_doc,
-            )
-        {
-            line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
             y += prev_after;

@@ -1616,7 +1616,6 @@ fn walk_story_chunks<T: ReadTxn>(
                         index: story_index,
                     });
                 };
-                let anchored = block.position.is_some();
                 let provenance = chart_drawing_provenance(&block.chart);
                 paragraph_drawings.push(DrawingMarker {
                     pm_offset,
@@ -1624,7 +1623,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     block: LayoutBlock::Chart(block),
                     hidden: mark_bool(attributes, "hidden") == Some(true),
                     revision_hidden: env.revision_hidden(attributes),
-                    anchored,
+                    anchored: false,
                     formatting: lower_run_formatting(attributes, env),
                     inline_text_box: false,
                     from_opaque: false,
@@ -2983,25 +2982,6 @@ fn lower_chart_block(
             .unwrap_or(220.0),
         env,
     );
-    let wrap = chart.get("wrap");
-    let floating = wrap
-        .and_then(|wrap| wrap.get("type"))
-        .and_then(Value::as_str)
-        == Some("none");
-    let position = floating
-        .then(|| shapes::shape_position(&chart))
-        .flatten()
-        .filter(|position| position.behind_doc != Some(true));
-    let wrap_type = position.as_ref().map(|_| "none".to_owned());
-    let behind_doc = position.as_ref().and_then(|position| position.behind_doc);
-    let relative_height = position.as_ref().and_then(|position| {
-        chart
-            .get("relativeHeight")
-            .and_then(Value::as_f64)
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| value as u64)
-            .or(position.relative_height)
-    });
     Some(ChartBlock {
         sdt_groups: None,
         id: BlockId::Str(
@@ -3012,11 +2992,11 @@ fn lower_chart_block(
         chart,
         width,
         height,
-        position,
-        wrap_type,
+        position: None,
+        wrap_type: None,
         wrap_text: None,
-        relative_height,
-        behind_doc,
+        relative_height: None,
+        behind_doc: None,
         doc_start: pm_start.map(|start| start as f64),
         doc_end: pm_start.map(|start| (start + 1) as f64),
         pm_start: pm_start.map(|start| start as f64),
@@ -4114,9 +4094,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
-    let mut anchor_ownership_pending = anchored
-        .iter()
-        .any(|drawing| matches!(drawing.block, LayoutBlock::Chart(_)));
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
@@ -4233,16 +4210,10 @@ fn flush_paragraph_parts<T: ReadTxn>(
     }
     for block in &mut blocks {
         if let LayoutBlock::Paragraph(paragraph) = block {
-            let attrs = paragraph.attrs.get_or_insert_with(Default::default);
-            attrs.has_source_content = Some(true);
-            if anchor_ownership_pending {
-                let start = paragraph.pm_start.expect("paragraph position");
-                attrs.anchor_paragraph_offsets = Some((
-                    paragraph_pm_start as f64 - start,
-                    (paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64 - start,
-                ));
-                anchor_ownership_pending = false;
-            }
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
         }
     }
     blocks

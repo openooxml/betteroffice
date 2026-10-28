@@ -9633,13 +9633,14 @@ impl EngineSession {
         }
         if let Some(geometry) = floats {
             let default_width = widths.first().copied().unwrap_or(0.0);
-            let flow_breaks = docx_layout::measure_blocks::float_flow_breaks(
-                (0..blocks.len()).map(|index| blocks.get(index).expect("body block")),
-            );
             let mut start = 0;
             while start < blocks.len() {
                 let end = (start + 1..blocks.len())
-                    .find(|&index| flow_breaks[index])
+                    .find(|&index| {
+                        docx_layout::measure_blocks::resets_float_flow(
+                            blocks.get(index).expect("body block"),
+                        )
+                    })
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
                     let mut segment: Vec<_> = (start..end)
@@ -10070,13 +10071,14 @@ impl EngineSession {
                 })
                 .collect();
             let default_width = widths.first().copied().unwrap_or(0.0);
-            let flow_breaks = docx_layout::measure_blocks::float_flow_breaks(
-                (0..blocks.len()).map(|index| blocks.get(index).expect("body block")),
-            );
             let mut start = 0;
             while start < blocks.len() {
                 let end = (start + 1..blocks.len())
-                    .find(|&index| flow_breaks[index])
+                    .find(|&index| {
+                        docx_layout::measure_blocks::resets_float_flow(
+                            blocks.get(index).expect("body block"),
+                        )
+                    })
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
                     let mut segment: Vec<_> = (start..end)
@@ -15082,6 +15084,114 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 serde_json::to_vec(&expected).unwrap()
             );
             assert_eq!(actual_blocks, expected_blocks);
+        }
+    }
+
+    #[test]
+    fn expanded_inline_shape_prefix_keeps_font_dependencies_and_refreshes_inner_measurements() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let first = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let second = docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap();
+        let engine = paragraphs_engine(9389, 90);
+        let mut prepared = engine
+            .prepare_region_layout(
+                &small_page_request(first),
+                None,
+                RelayoutTrigger::Interactive,
+            )
+            .unwrap();
+        let mut blocks = prepared.body.take().unwrap().blocks;
+        let LayoutBlock::Paragraph(paragraph) = &mut blocks[0] else {
+            panic!("paragraph");
+        };
+        paragraph.runs = serde_json::from_value(json!([{
+            "kind": "image", "src": "", "width": 80, "height": 60,
+            "wrapType": "inline", "inlineShape": {
+                "id": "box", "shapeType": "rect", "width": 80, "height": 60,
+                "geometryPath": [], "children": [], "innerText": [{
+                    "id": "box-text", "runs": [{
+                        "kind": "text", "text": "iiiiiiiiii ".repeat(20),
+                        "fontFamily": "Box Font", "fontSize": 12
+                    }]
+                }]
+            }
+        }]))
+        .unwrap();
+        assert!(anchors_objects(&blocks));
+        let (widths, frames) =
+            region_measurement_frames(blocks.iter(), &prepared.input, &prepared.regions);
+        let geometry = initial_float_page_geometry(&prepared.input, &prepared.regions);
+        let through =
+            |last: usize| options_through_section(&prepared.input.options, &prepared.regions, last);
+        let inner_measures = |blocks: &[LayoutBlock]| {
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("paragraph");
+            };
+            let Run::Image(image) = &paragraph.runs[0] else {
+                panic!("inline shape");
+            };
+            image.inline_shape.as_ref().unwrap().inner_measures.clone()
+        };
+        for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
+            let mut measurement = prepared.measurement.clone();
+            measurement
+                .font_chains
+                .insert("box font|0|0".to_owned(), vec![first]);
+            let mut measured = blocks.clone();
+            let (extents, dependencies) = measure_page_prefix(
+                &mut measured,
+                &widths,
+                &frames,
+                &measurement,
+                &geometry,
+                &through,
+                100,
+                true,
+                trigger,
+            )
+            .unwrap();
+            assert_eq!(extents.len(), 90);
+            let original = inner_measures(&measured);
+            assert!(
+                original
+                    .as_ref()
+                    .is_some_and(|measures| !measures.is_empty())
+            );
+            assert!(dependencies[0].matches(FontChains::BTree(&measurement.font_chains)));
+            measurement
+                .font_chains
+                .insert("box font|0|0".to_owned(), vec![second]);
+            assert!(!dependencies[0].matches(FontChains::BTree(&measurement.font_chains)));
+            let (warm, dependencies) = measure_page_prefix(
+                &mut measured,
+                &widths,
+                &frames,
+                &measurement,
+                &geometry,
+                &through,
+                100,
+                true,
+                trigger,
+            )
+            .unwrap();
+            assert!(dependencies[0].matches(FontChains::BTree(&measurement.font_chains)));
+            assert_ne!(inner_measures(&measured), original);
+            let mut fresh = blocks.clone();
+            let (cold, _) = measure_page_prefix(
+                &mut fresh,
+                &widths,
+                &frames,
+                &measurement,
+                &geometry,
+                &through,
+                100,
+                true,
+                trigger,
+            )
+            .unwrap();
+            assert_eq!(warm, cold);
+            assert_eq!(measured, fresh);
         }
     }
 

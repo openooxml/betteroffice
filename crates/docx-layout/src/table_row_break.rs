@@ -105,16 +105,6 @@ fn cell_unbreakable_ranges(
         {
             continue;
         }
-        if let Some(LayoutBlock::Chart(chart)) = block
-            && crate::anchor::chart_floats(
-                chart.position.as_ref(),
-                chart.wrap_type.as_deref(),
-                chart.behind_doc,
-            )
-        {
-            keep_next_top = preceding_keep_top;
-            continue;
-        }
         if let Some(height) = height {
             y += previous_after;
             if let Some(LayoutBlock::Table(table)) = block
@@ -931,56 +921,6 @@ mod tests {
         }))
         .unwrap();
         (block, measure)
-    }
-
-    #[test]
-    fn floating_chart_preserves_every_text_line_break() {
-        let chart = json!({
-            "kind": "chart", "id": "chart", "chart": {}, "width": 50, "height": 101,
-            "position": {}, "wrapType": "none"
-        });
-        let chart_measure = json!({"kind": "chart", "width": 50, "height": 101});
-        let (block, measure) = single_cell_table(
-            vec![chart, para()],
-            vec![chart_measure, para_measure(6)],
-            120.0,
-        );
-        let info = build_table_row_break_info(&block, &measure);
-        assert_eq!(
-            info.break_offsets[0],
-            [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
-        );
-        assert_eq!(snap_row_break(&info, 0, 0.0, 75.0), 60.0);
-        assert_eq!(snap_row_break(&info, 0, 60.0, 60.0), 60.0);
-    }
-
-    #[test]
-    fn wrapped_and_behind_doc_charts_keep_main_cell_break_offsets() {
-        for (wrap, behind_doc) in [
-            ("topAndBottom", false),
-            ("square", false),
-            ("tight", false),
-            ("through", false),
-            ("none", true),
-        ] {
-            let chart = json!({
-                "kind":"chart","id":"chart","chart":{},"width":50,"height":101,
-                "position":{},"wrapType":wrap,"behindDoc":behind_doc
-            });
-            let chart_measure = json!({"kind":"chart","width":50,"height":101});
-            let (block, measure) = single_cell_table(
-                vec![chart, para()],
-                vec![chart_measure, para_measure(6)],
-                221.0,
-            );
-            let info = build_table_row_break_info(&block, &measure);
-            assert_eq!(
-                info.break_offsets[0],
-                [101.0, 121.0, 141.0, 161.0, 181.0, 201.0, 221.0],
-                "{wrap}, behindDoc={behind_doc}"
-            );
-            assert_eq!(snap_row_break(&info, 0, 0.0, 176.0), 161.0);
-        }
     }
 
     #[test]

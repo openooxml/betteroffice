@@ -506,81 +506,6 @@ fn chart_block_fragments(layout: &Value) -> Vec<&Value> {
         .collect()
 }
 
-#[test]
-fn anchored_charts_in_one_paragraph_keep_the_block_layout() {
-    let body = paragraph(
-        "20000004",
-        &format!(
-            "{}{}",
-            run(&anchored_chart_drawing()),
-            run(&anchored_chart_drawing())
-        ),
-    );
-    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78211);
-    assert_eq!(page_count(&layout), 1);
-    let charts = chart_block_fragments(&layout);
-    assert_eq!(
-        charts.len(),
-        2,
-        "two chart blocks, not inline carriers: {layout}"
-    );
-    for chart in &charts {
-        assert_eq!(
-            chart["isAnchored"], true,
-            "the floating chart paints at its anchor, not in flow: {layout}"
-        );
-    }
-    near(
-        num(charts[0], "x"),
-        num(charts[1], "x"),
-        1.5,
-        "same anchor x",
-    );
-    near(
-        num(charts[0], "y"),
-        num(charts[1], "y"),
-        1.5,
-        "same anchor y",
-    );
-    if let Some(fragment) = paragraph_fragment(&layout, "20000004") {
-        assert!(
-            num(fragment, "height") < 60.0,
-            "no paragraph fragment holds the floating charts: {layout}"
-        );
-    }
-}
-
-#[test]
-fn an_anchored_chart_next_to_text_keeps_the_block_layout() {
-    let body = paragraph(
-        "20000005",
-        &format!(
-            "{}{}",
-            text_run("Before the chart"),
-            run(&anchored_chart_drawing())
-        ),
-    );
-    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78212);
-    assert_eq!(page_count(&layout), 1);
-    let charts = chart_block_fragments(&layout);
-    assert_eq!(
-        charts.len(),
-        1,
-        "one chart block, not an inline carrier: {layout}"
-    );
-    assert_eq!(
-        charts[0]["isAnchored"], true,
-        "the floating chart paints at its anchor, not in flow: {layout}"
-    );
-    let text =
-        paragraph_fragment(&layout, "20000005").expect("the text stays its own paragraph fragment");
-    assert!(
-        num(text, "height") < 60.0,
-        "text fragment holds only its line, got height {}: {layout}",
-        num(text, "height")
-    );
-}
-
 /// A narrow label box beside a wide box (144 and 466 px in 624 px of
 /// content): the label text wraps inside its own box and never reaches
 /// into the wide box. The label's AlternateContent fallback is a VML
@@ -643,56 +568,6 @@ fn a_converted_label_box_paints_one_representation() {
     );
 }
 
-#[test]
-fn wrap_none_anchored_chart_pair_adds_no_flow_height() {
-    let with_charts = format!(
-        "{}{}",
-        paragraph(
-            "30000001",
-            &format!(
-                "{}{}",
-                run(&anchored_chart_drawing()),
-                run(&anchored_chart_drawing())
-            ),
-        ),
-        paragraph("30000002", &text_run("After the floating charts")),
-    );
-    let without_charts = format!(
-        "{}{}",
-        paragraph("30000001", ""),
-        paragraph("30000002", &text_run("After the floating charts")),
-    );
-    let (layout, _) = render(&document(&with_charts, 20160, 12240, 1080), 78214);
-    let (plain, _) = render(&document(&without_charts, 20160, 12240, 1080), 78215);
-    let charts = chart_block_fragments(&layout);
-    assert_eq!(charts.len(), 2, "both floating charts paint: {layout}");
-    for chart in &charts {
-        assert_eq!(chart["isAnchored"], true, "anchored chart: {layout}");
-        near(num(chart, "x"), 72.0, 2.0, "chart at its margin offset");
-        near(num(chart, "y"), 72.0, 3.0, "chart at its paragraph offset");
-    }
-    near(
-        num(charts[0], "x"),
-        num(charts[1], "x"),
-        1.5,
-        "same anchor x",
-    );
-    near(
-        num(charts[0], "y"),
-        num(charts[1], "y"),
-        1.5,
-        "same anchor y",
-    );
-    let after = paragraph_fragment(&layout, "30000002").expect("text after the charts");
-    let after_plain = paragraph_fragment(&plain, "30000002").expect("text without the charts");
-    near(
-        num(after, "y"),
-        num(after_plain, "y"),
-        1.5,
-        "text after a wrapNone pair is not displaced",
-    );
-}
-
 fn assert_chart_uses_main_block_layout(drawing: &str, client_id: u64) {
     let body = paragraph(
         "90000001",
@@ -732,6 +607,58 @@ fn assert_chart_uses_main_block_layout(drawing: &str, client_id: u64) {
     assert!(before < num(chart, "y"), "source block order: {display}");
     assert!(after >= num(chart, "y") + num(chart, "height"));
     near(after_x, 72.0, 0.01, "text after the block");
+}
+
+#[test]
+fn front_wrap_none_anchored_chart_keeps_main_block_layout() {
+    assert_chart_uses_main_block_layout(&anchored_chart_drawing(), 78211);
+}
+
+#[test]
+fn anchored_chart_pairs_stack_as_main_blocks() {
+    for (wrap, behind) in [
+        ("<wp:wrapNone/>", false),
+        ("<wp:wrapNone/>", true),
+        ("<wp:wrapTopAndBottom/>", false),
+        (r#"<wp:wrapSquare wrapText="bothSides"/>"#, false),
+    ] {
+        let mut drawing = anchored_chart_drawing_with(wrap, EXTENT, 0);
+        if behind {
+            drawing = drawing.replace("behindDoc=\"0\"", "behindDoc=\"1\"");
+        }
+        let body = paragraph("20000004", &format!("{}{}", run(&drawing), run(&drawing)));
+        let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78212);
+        assert_eq!(
+            page_count(&layout),
+            1,
+            "{wrap}, behindDoc={behind}: {layout}"
+        );
+        let charts = chart_block_fragments(&layout);
+        assert_eq!(charts.len(), 2, "{wrap}, behindDoc={behind}: {layout}");
+        for chart in &charts {
+            assert!(chart["isAnchored"].is_null(), "{layout}");
+            assert!(chart["zIndex"].is_null(), "{layout}");
+        }
+        near(
+            num(charts[1], "y"),
+            num(charts[0], "y") + num(charts[0], "height"),
+            0.01,
+            "main block stacking",
+        );
+        let blocks = layout["measured"].as_array().unwrap();
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|entry| entry["block"]["kind"] == "chart")
+                .count(),
+            2
+        );
+        assert!(blocks.iter().all(|entry| {
+            entry["block"]["runs"]
+                .as_array()
+                .is_none_or(|runs| runs.iter().all(|run| run["inlineChart"].is_null()))
+        }));
+    }
 }
 
 #[test]
@@ -1096,43 +1023,19 @@ fn shared_text_box_requests_its_unique_font_and_script() {
 }
 
 #[test]
-fn page_break_before_moves_the_paragraph_and_its_trailing_anchored_chart() {
-    let body = format!(
-        r#"{}<w:p w14:paraId="40000005"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}</w:p>"#,
-        paragraph("40000004", &text_run("Previous page")),
-        text_run("Chart owner"),
-        run(&anchored_chart_drawing()),
-    );
-    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78223);
-    let pages = layout["layout"]["pages"].as_array().unwrap();
-    assert_eq!(pages.len(), 2, "one authored page break: {layout}");
-    assert!(
-        !pages[0]["fragments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|fragment| fragment["kind"] == "chart"),
-        "chart leaves the preceding page: {layout}"
-    );
-    let chart = pages[1]["fragments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|fragment| fragment["kind"] == "chart")
-        .expect("chart on its owner's page");
-    let owner = paragraph_fragment(&layout, "40000005").unwrap();
-    near(num(chart, "y"), num(owner, "y"), 2.0, "chart owner origin");
-}
-
-#[test]
-fn page_break_before_keeps_wrapped_charts_in_main_block_order() {
-    for wrap in [
-        "<wp:wrapTopAndBottom/>",
-        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
-        r#"<wp:wrapTight wrapText="bothSides"/>"#,
-        r#"<wp:wrapThrough wrapText="bothSides"/>"#,
+fn page_break_before_keeps_anchored_charts_in_main_block_order() {
+    for (wrap, behind) in [
+        ("<wp:wrapNone/>", false),
+        ("<wp:wrapNone/>", true),
+        ("<wp:wrapTopAndBottom/>", false),
+        (r#"<wp:wrapSquare wrapText="bothSides"/>"#, false),
+        (r#"<wp:wrapTight wrapText="bothSides"/>"#, false),
+        (r#"<wp:wrapThrough wrapText="bothSides"/>"#, false),
     ] {
-        let drawing = anchored_chart_drawing_with(wrap, r#"cx="2857500" cy="1905000""#, 0);
+        let mut drawing = anchored_chart_drawing_with(wrap, r#"cx="2857500" cy="1905000""#, 0);
+        if behind {
+            drawing = drawing.replace("behindDoc=\"0\"", "behindDoc=\"1\"");
+        }
         let body = format!(
             r#"{}<w:p w14:paraId="80000003"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}</w:p>"#,
             paragraph("80000002", &text_run("Previous page")),
@@ -1156,87 +1059,5 @@ fn page_break_before_keeps_wrapped_charts_in_main_block_order() {
             "text precedes the chart block: {display}"
         );
         near(x, 72.0, 0.01, "full-width text before the block");
-    }
-}
-
-#[test]
-fn split_paragraph_page_break_moves_its_trailing_anchored_chart() {
-    let body = format!(
-        r#"{}<w:p w14:paraId="60000003"><w:pPr><w:pageBreakBefore/></w:pPr>{}{}{}</w:p>"#,
-        paragraph("60000002", &text_run("Previous page")),
-        text_run("Before the inline box"),
-        run(&text_box_drawing()),
-        run(&anchored_chart_drawing()),
-    );
-    let (layout, _) = render(&document(&body, 20160, 12240, 1080), 78229);
-    let pages = layout["layout"]["pages"].as_array().unwrap();
-    assert_eq!(pages.len(), 2, "one paragraph page break: {layout}");
-    assert!(
-        pages[0]["fragments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|fragment| fragment["kind"] != "chart"),
-        "the chart leaves the previous page: {layout}"
-    );
-    let fragments = pages[1]["fragments"].as_array().unwrap();
-    let chart = fragments
-        .iter()
-        .find(|fragment| fragment["kind"] == "chart")
-        .expect("chart on the owning paragraph's page");
-    let text = paragraph_fragment(&layout, "60000003").unwrap();
-    let boxed = fragments
-        .iter()
-        .find(|fragment| fragment["kind"] == "shape")
-        .expect("the inline text box keeps its block path");
-    near(
-        num(chart, "y"),
-        num(text, "y"),
-        2.0,
-        "original paragraph origin",
-    );
-    assert!(num(boxed, "y") >= num(text, "y") + num(text, "height") - 1.0);
-}
-
-#[test]
-fn floating_chart_in_a_cell_preserves_text_height_and_paint_offsets() {
-    let extent = r#"cx="952500" cy="962025""#;
-    let chart = anchored_chart_drawing_with("<wp:wrapNone/>", extent, 0);
-    let table = |drawing: &str| {
-        let lines: String = (0..6)
-            .map(|index| {
-                format!(
-                    r#"<w:p w14:paraId="5000000{index}"><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/><w:widowControl w:val="0"/></w:pPr>{}</w:p>"#,
-                    text_run(&format!("Cell line {index}")),
-                )
-            })
-            .collect();
-        format!(
-            r#"<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="6000" w:type="dxa"/></w:tcPr><w:p>{drawing}</w:p>{lines}</w:tc></w:tr></w:tbl>"#
-        )
-    };
-    let (layout, display) = render(&document(&table(&run(&chart)), 12240, 15840, 1440), 78224);
-    let (plain, plain_display) = render(&document(&table(""), 12240, 15840, 1440), 78225);
-    let table_height = |layout: &Value| {
-        layout["measured"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["block"]["kind"] == "table")
-            .unwrap()["measure"]["rows"][0]["height"]
-            .as_f64()
-            .unwrap()
-    };
-    near(
-        table_height(&layout),
-        table_height(&plain),
-        0.01,
-        "row height",
-    );
-    for index in 0..6 {
-        let needle = format!("Cell line {index}");
-        let (_, baseline) = text_origin(&display, &needle);
-        let (_, plain_baseline) = text_origin(&plain_display, &needle);
-        near(baseline, plain_baseline, 0.01, "cell text baseline");
     }
 }
