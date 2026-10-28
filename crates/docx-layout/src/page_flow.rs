@@ -328,6 +328,7 @@ pub struct Paginator {
     section_index: usize,
     region_section_indices: Vec<usize>,
     section_page_margins: Vec<SectionPageMargins>,
+    physical_section_page_margins: Vec<SectionPageMargins>,
     section_page_float_bands: SharedPageFloatBands,
     column_capacities: Vec<Option<f64>>,
     /// Whether the section in force has opened a page yet.
@@ -392,6 +393,7 @@ impl Paginator {
             section_index: 0,
             region_section_indices: Vec::new(),
             section_page_margins: Vec::new(),
+            physical_section_page_margins: Vec::new(),
             section_page_float_bands: SharedPageFloatBands::default(),
             column_capacities: Vec::new(),
             section_started: false,
@@ -407,6 +409,10 @@ impl Paginator {
     /// per section; see [`SectionPageMargins`].
     pub fn set_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
         self.section_page_margins = margins;
+    }
+
+    pub(crate) fn set_physical_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
+        self.physical_section_page_margins = margins;
     }
 
     pub(crate) fn set_region_section_indices(&mut self, indices: Vec<usize>) {
@@ -649,10 +655,14 @@ impl Paginator {
             .section_page_margins
             .get(self.region_section_index())
             .and_then(|variants| {
+                let physical = self
+                    .physical_section_page_margins
+                    .get(self.section_index)
+                    .unwrap_or(variants);
                 if opens_section && variants.first.is_some() {
-                    variants.first.as_ref()
+                    physical.first.as_ref()
                 } else if (page_number % 2 == 0) != self.displayed_parity_offset {
-                    variants.even.as_ref()
+                    physical.even.as_ref()
                 } else {
                     None
                 }
@@ -1647,6 +1657,44 @@ mod tests {
         assert_eq!(page.region_section_index, 0);
         assert!(!paginator.opens_section[following]);
         assert_eq!(paginator.displayed_parity_offset, parity);
+    }
+
+    #[test]
+    fn shared_caller_variants_use_each_physical_sections_margins() {
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            margins(60.0, 80.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: Some(margins(180.0, 80.0)),
+            restart: Some(1),
+        }]);
+        paginator.set_physical_section_page_margins(vec![
+            SectionPageMargins {
+                first: Some(margins(100.0, 80.0)),
+                even: Some(margins(120.0, 80.0)),
+                restart: None,
+            },
+            SectionPageMargins {
+                first: Some(margins(240.0, 80.0)),
+                even: Some(margins(220.0, 80.0)),
+                restart: None,
+            },
+        ]);
+        let first = paginator.get_current();
+        assert_eq!(paginator.state(first).content_top, 100.0);
+        paginator.set_pen_y(first, 200.0);
+        let even = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.state(even).content_top, 120.0);
+        paginator.set_section_index(1);
+        assert_eq!(paginator.state(even).content_top, 220.0);
+        assert_eq!(paginator.pages[even].region_section_index, 0);
+        assert!(!paginator.opens_section[even]);
     }
 
     #[test]

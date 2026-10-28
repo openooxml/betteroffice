@@ -1824,6 +1824,10 @@ fn extend_input_for_header_footer(
     let caller_float_bands = physical_float_bands
         .as_ref()
         .and_then(|_| input.options.section_page_float_bands.clone());
+    let mut physical_page_margins = physical_float_bands.as_ref().map(|_| Vec::new());
+    let caller_page_margins = physical_page_margins
+        .as_ref()
+        .and_then(|_| input.options.section_page_margins.clone());
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
@@ -1891,22 +1895,37 @@ fn extend_input_for_header_footer(
                     anchor_margins: Some(margins.clone()),
                 });
             }
-            let variant_height = |kind| {
-                variants
-                    .iter()
-                    .rfind(|variant| {
-                        variant.section_index == section_index
-                            && variant.kind == kind
-                            && variant.hf_type == HeaderFooterType::Default
-                    })
-                    .map_or(0.0, |variant| variant.flow_height)
+            let extend = |hf_type| {
+                let height = |kind| {
+                    variants
+                        .iter()
+                        .rfind(|variant| {
+                            variant.section_index == section_index
+                                && variant.kind == kind
+                                && variant.hf_type == hf_type
+                        })
+                        .map_or(0.0, |variant| variant.flow_height)
+                };
+                extend_body_margins(
+                    &section_size,
+                    &margins,
+                    height(HeaderFooterKind::Header),
+                    height(HeaderFooterKind::Footer),
+                )
             };
-            let extended_margins = extend_body_margins(
-                &section_size,
-                &margins,
-                variant_height(HeaderFooterKind::Header),
-                variant_height(HeaderFooterKind::Footer),
-            );
+            if let Some(physical_page_margins) = &mut physical_page_margins {
+                physical_page_margins.push(SectionPageMargins {
+                    first: section
+                        .is_some_and(|section| section.title_pg)
+                        .then(|| extend(HeaderFooterType::First)),
+                    even: (regions.even_and_odd_headers
+                        || section
+                            .is_some_and(|section| section.even_and_odd_headers == Some(true)))
+                    .then(|| extend(HeaderFooterType::Even)),
+                    restart: None,
+                });
+            }
+            let extended_margins = extend(HeaderFooterType::Default);
             section_break.margins = Some(extended_margins.clone());
             if ends_first_section {
                 input.options.margins = Some(extended_margins);
@@ -1921,6 +1940,15 @@ fn extend_input_for_header_footer(
                 caller_float_bands
                     .as_ref()
                     .and_then(|bands| bands.get(section_index))
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(physical_page_margins) = &mut physical_page_margins {
+            physical_page_margins.push(
+                caller_page_margins
+                    .as_ref()
+                    .and_then(|margins| margins.get(section_index))
                     .cloned()
                     .unwrap_or_default(),
             );
@@ -1943,6 +1971,19 @@ fn extend_input_for_header_footer(
                     || bands.even.as_ref().is_some_and(|bands| !bands.is_empty())
             })
             .then_some(physical_float_bands);
+    }
+    if let Some(mut physical_page_margins) = physical_page_margins {
+        physical_page_margins.push(
+            caller_page_margins
+                .as_ref()
+                .and_then(|margins| margins.get(section_index))
+                .cloned()
+                .unwrap_or_default(),
+        );
+        input.options.physical_section_page_margins = physical_page_margins
+            .iter()
+            .any(|margins| margins.first.is_some() || margins.even.is_some())
+            .then_some(physical_page_margins);
     }
 }
 
@@ -7258,7 +7299,7 @@ impl EngineSession {
                                     |sections| sections.through(last),
                                 ),
                             };
-                            let (measures, dependencies) = measure_page_prefix(
+                            let (mut measures, mut dependencies) = measure_page_prefix(
                                 &mut blocks,
                                 &widths,
                                 float_width_policy,
@@ -7270,6 +7311,30 @@ impl EngineSession {
                                 anchored,
                                 trigger,
                             )?;
+                            let cut_is_wrapped = blocks[measures.len()..]
+                                .iter()
+                                .find_map(|block| match block {
+                                    LayoutBlock::SectionBreak(section) => {
+                                        Some(section.is_self_describing())
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(false);
+                            if cut_is_wrapped {
+                                let mut flow =
+                                    docx_layout::measure_blocks::FloatFlow::with_width_policy(
+                                        &blocks,
+                                        &widths,
+                                        float_width_policy,
+                                        &table_wrap_frames,
+                                        &measurement,
+                                        Some(&geometry),
+                                    )?;
+                                let end = blocks.len();
+                                flow.measure_until(&mut blocks, &widths, &measurement, end)?;
+                                dependencies = flow.font_dependencies().to_vec();
+                                measures = flow.into_extents();
+                            }
                             measured_font_dependencies = dependencies;
                             #[cfg(test)]
                             BODY_MEASUREMENT_WORK.with(|work| {

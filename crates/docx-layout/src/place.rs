@@ -486,6 +486,12 @@ fn origin_paginator(
         paginator.set_region_section_indices(indices.clone());
     }
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator.set_physical_section_page_margins(
+        options
+            .physical_section_page_margins
+            .clone()
+            .unwrap_or_default(),
+    );
     paginator
         .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
@@ -756,6 +762,12 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                 }
                 paginator.set_section_page_margins(
                     options.section_page_margins.clone().unwrap_or_default(),
+                );
+                paginator.set_physical_section_page_margins(
+                    options
+                        .physical_section_page_margins
+                        .clone()
+                        .unwrap_or_default(),
                 );
                 paginator.set_section_page_float_bands(
                     options.section_page_float_bands.clone().unwrap_or_default(),

@@ -912,3 +912,173 @@ fn wrapped_cover_body_float_wrapping_survives_incremental_text_edits() {
         assert_wrapped_float_edit_matches_fresh(624, 690, relative_to);
     }
 }
+
+fn wrapped_cover_header_document(paragraphs: u32, page_variants: bool) -> Vec<u8> {
+    let cover = (0..paragraphs)
+        .map(|index| {
+            let properties = if index + 1 == paragraphs {
+                section(7200, 9000, 900, 1200, "")
+            } else {
+                String::new()
+            };
+            p(
+                &format!("{:08X}", 0x2000_0000 + index),
+                &format!(
+                    concat!(
+                        "<w:pPr><w:spacing w:before=\"0\" w:after=\"0\" ",
+                        "w:line=\"300\" w:lineRule=\"exact\"/>{properties}</w:pPr>{text}"
+                    ),
+                    properties = properties,
+                    text = r("Cover line"),
+                ),
+            )
+        })
+        .collect::<String>();
+    let refs = if page_variants {
+        concat!(
+            "<w:headerReference w:type=\"first\" r:id=\"rIdHeader2\"/>",
+            "<w:headerReference w:type=\"even\" r:id=\"rIdHeader1\"/><w:titlePg/>"
+        )
+    } else {
+        "<w:headerReference w:type=\"default\" r:id=\"rIdHeader2\"/>"
+    };
+    let body = format!(
+        concat!(
+            "<w:sdt><w:sdtPr><w:id w:val=\"7\"/></w:sdtPr><w:sdtContent>",
+            "{cover}</w:sdtContent></w:sdt>{last}{section}"
+        ),
+        cover = cover,
+        last = p("00000001", &r("Last")),
+        section = section(12000, 8400, 2700, 1200, refs),
+    );
+    let header = |height| {
+        format!(
+            concat!(
+                "<w:hdr xmlns:w=\"",
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+                "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" ",
+                "w:line=\"{height}\" w:lineRule=\"exact\"/></w:pPr>",
+                "<w:r><w:t>Shared header</w:t></w:r></w:p></w:hdr>"
+            ),
+            height = height,
+        )
+    };
+    let mut parts = fixture::page_parts(false);
+    for (name, bytes) in &mut parts {
+        let replacement = match name.as_str() {
+            "word/document.xml" => Some(format!(
+                concat!(
+                    "<w:document ",
+                    "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+                    "xmlns:r=\"",
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+                    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\">",
+                    "<w:body>{body}</w:body></w:document>"
+                ),
+                body = body,
+            )),
+            "word/header1.xml" => Some(header(1500)),
+            "word/header2.xml" => Some(header(1200)),
+            "word/footnotes.xml" => Some(
+                concat!(
+                    "<w:footnotes xmlns:w=\"",
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"
+                )
+                .to_owned(),
+            ),
+            "word/endnotes.xml" => Some(
+                concat!(
+                    "<w:endnotes xmlns:w=\"",
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"
+                )
+                .to_owned(),
+            ),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *bytes = replacement.into_bytes();
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn wrapped_cover_header_request(engine: &EngineSession, bytes: &[u8], font: u32) -> String {
+    let mut request = region_request(engine, bytes, font);
+    let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let properties = json!(package.document.final_section_properties);
+    let sections = request["regions"]["sections"].as_array_mut().unwrap();
+    assert_eq!(sections.len(), 2);
+    for section in sections {
+        section["properties"] = properties.clone();
+    }
+    request["regions"]["evenAndOddHeaders"] = json!(true);
+    request.to_string()
+}
+
+#[test]
+fn wrapped_cover_first_and_even_headers_reserve_its_own_margins() {
+    let bytes = wrapped_cover_header_document(50, true);
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let engine = EngineSession::new(75230);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let request = wrapped_cover_header_request(&engine, &bytes, font);
+    let output: Value = serde_json::from_str(
+        &engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap(),
+    )
+    .unwrap();
+    let pages = output["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 4);
+    for (index, top) in [100.0, 120.0, 60.0].into_iter().enumerate() {
+        let page = &pages[index];
+        assert_eq!(page["size"], json!({"w": 480.0, "h": 600.0}));
+        assert_eq!(page["margins"]["top"], top);
+        assert_eq!(page["fragments"][0]["y"], top);
+        assert_eq!(page["sectionIndex"], 0);
+        assert_eq!(page["sectionPageIndex"], index);
+    }
+    assert_eq!(pages[3]["size"], json!({"w": 800.0, "h": 560.0}));
+    assert_eq!(pages[3]["margins"]["top"], 180.0);
+}
+
+#[test]
+fn a_prefix_inside_a_wrapped_cover_with_a_shared_header_matches_full_layout() {
+    let bytes = wrapped_cover_header_document(256, false);
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let full = EngineSession::new(75231);
+    seed_from_docx(full.doc(), &bytes).unwrap();
+    let request = wrapped_cover_header_request(&full, &bytes, font);
+    let expected = full
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    let expected_value: Value = serde_json::from_str(&expected).unwrap();
+    let pages = expected_value["layout"]["pages"].as_array().unwrap();
+    assert!(pages.len() > 10);
+    assert_eq!(pages[0]["size"], json!({"w": 480.0, "h": 600.0}));
+    assert_eq!(pages[0]["fragments"][0]["y"], 100.0);
+    for exact in [false, true] {
+        let prefix = EngineSession::new(75232);
+        seed_from_docx(prefix.doc(), &bytes).unwrap();
+        if exact {
+            let result = prefix
+                .layout_document_with_regions_exact_prefix_retained(&request, 1)
+                .unwrap();
+            assert!(!result.provisional);
+            assert_eq!(result.pages, pages.len());
+        } else {
+            let result = prefix
+                .layout_document_with_regions_prefix_retained_json(&request, 1)
+                .unwrap();
+            assert_eq!(result, expected);
+        }
+        assert_eq!(prefix.retained_layout_json().unwrap(), expected);
+        assert_eq!(
+            prefix.retained_kernel_inputs_json().unwrap(),
+            full.retained_kernel_inputs_json().unwrap()
+        );
+    }
+}
