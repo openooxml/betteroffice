@@ -271,6 +271,8 @@ export interface InlineSdtWidgetAttrs {
 
 export interface ChartA11yAttrs {
   label: string;
+  /** The placed chart box every primitive of the chart paints inside. */
+  frame?: { x?: number; y?: number; w?: number; h?: number };
 }
 
 // attributes shared by primitives that map back to document content; replaces

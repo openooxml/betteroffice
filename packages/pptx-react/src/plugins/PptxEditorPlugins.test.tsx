@@ -1624,6 +1624,12 @@ test('in_thread_plugin_reads_preserve_engine_facts', async () => {
       date: null,
     },
   });
+  expect(result.slides[0]!.shapes[0]).toMatchObject({
+    name: 'Heading',
+    title: 'Heading title',
+    description: 'Heading description',
+    decorative: true,
+  });
   expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },

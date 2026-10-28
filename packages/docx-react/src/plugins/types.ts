@@ -195,6 +195,7 @@ export type DocxGeometryTarget =
       occurrence?: DocxOccurrence;
     }
   | { kind: 'range'; version: string; range: DocxTextRange }
+  | { kind: 'drawing'; paragraph: DocxParagraphAnchor; offset: number }
   /** This plugin's reservation: its box, or a hidden range's boundary. */
   | { kind: 'reservation'; id: string };
 
@@ -238,7 +239,9 @@ export interface DocxPluginGeometry {
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
    * A header or footer target has fragments on every built page that paints it and anchors on
    * the first; one that no laid-out page paints, built or not, is `missing-target` once the
-   * layout is complete and `layout-unavailable` before. Refuses stale or unrendered layouts.
+   * layout is complete and `layout-unavailable` before. A `drawing` target answers with the
+   * drawn frame box of the drawing atom at its `offset`, on every page that paints it; an
+   * offset that is not on a drawing atom is `missing-target`. Refuses stale or unrendered layouts.
    * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
    * whose read failed is `read-failed`; overlays render again once either read settles.
    */

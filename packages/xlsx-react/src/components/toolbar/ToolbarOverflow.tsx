@@ -345,6 +345,7 @@ export function ToolbarLegacyContent({ children }: { children: ReactNode }) {
         popupHost &&
         createPortal(
           <div
+            dir="ltr"
             ref={panelRef}
             role="dialog"
             aria-label={label}

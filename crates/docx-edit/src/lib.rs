@@ -179,10 +179,10 @@ pub use stories::{
     AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
 };
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
-    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
-    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
-    TextTarget,
+    AtomKind, DrawingProperties, EditTextView, FindTextRequest, FindTextResponse, ParagraphList,
+    ParagraphTarget, ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse,
+    ReadStoriesRequest, ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch,
+    TextPosition, TextRange, TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 

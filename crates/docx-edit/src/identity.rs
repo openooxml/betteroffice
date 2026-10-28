@@ -38,6 +38,7 @@ use yrs::{
     TextRef, Transact, Transaction, TransactionMut,
 };
 
+use crate::bridge::run_size_provenance::ParagraphSizes;
 use crate::{
     EditCtx, EditResult, EditingDoc, KIND_KEY, PARA_ID, ParagraphId, STORIES, StoryId, map_string,
     pilcrows, story_ref,
@@ -431,7 +432,15 @@ pub(crate) struct SourceIndex {
     own_digest: OnceLock<bool>,
     #[serde(skip)]
     group_pictures: OnceLock<crate::bridge::GroupPictureSources>,
+    #[serde(skip)]
+    run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
+    #[serde(skip)]
+    run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
+    #[serde(skip)]
+    run_size_seeded: OnceLock<SeededUnitDigests>,
 }
+
+type SeededUnitDigests = BTreeMap<String, Option<(String, [u8; 32])>>;
 
 #[derive(Default)]
 struct SeedStates {
@@ -519,6 +528,83 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    pub(crate) fn run_size_source(&self, key: &str, story: &str) -> Option<Arc<ParagraphSizes>> {
+        if self.seeded.get(key)?.root != crate::structured::source::story_root(story) {
+            return None;
+        }
+        self.view_of(key)?;
+        let seeded = self.run_size_seeded.get_or_init(|| {
+            #[cfg(test)]
+            RUN_SIZE_SEEDED_SNAPSHOTS.with(|count| count.set(count.get() + 1));
+            let mut units = BTreeMap::new();
+            for (story, state) in self.seed_states() {
+                for unit in &state.units {
+                    if let Some(key) = &unit.key {
+                        match units.entry(key.clone()) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(Some((story.clone(), unit.digest)));
+                            }
+                            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                entry.insert(None);
+                            }
+                        }
+                    }
+                }
+            }
+            units
+        });
+        let (seed_story, fingerprint) = seeded.get(key)?.as_ref()?;
+        if seed_story != story {
+            return None;
+        }
+        let mut cache = self.run_size_sources.lock().unwrap();
+        cache
+            .entry(key.to_owned())
+            .or_insert_with(|| self.collect_run_sizes(key, *fingerprint).map(Arc::new))
+            .clone()
+    }
+
+    fn collect_run_sizes(&self, key: &str, fingerprint: [u8; 32]) -> Option<ParagraphSizes> {
+        use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
+
+        fn paragraphs(node: &XmlElement, output: &mut BTreeMap<u32, XmlElement>) {
+            if node.local_name() == "p"
+                && let Some(ordinal) = node.paragraph_ordinal
+            {
+                output.insert(ordinal, node.clone());
+            }
+            for child in node.child_elements() {
+                paragraphs(child, output);
+            }
+        }
+
+        let ((part_index, ordinal), _) = self.view_of(key)?;
+        let path = self.parts.get(part_index)?.path();
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.record_source_ordinals();
+        let mut cache = self.run_size_paragraphs.lock().unwrap();
+        let nodes = cache.entry(part_index).or_insert_with(|| {
+            #[cfg(test)]
+            RUN_SIZE_SOURCE_PARTS.with(|count| count.set(count.get() + 1));
+            let mut nodes = BTreeMap::new();
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(self.bytes()) else {
+                return nodes;
+            };
+            let Some(index) = package.parts().position(|(name, _)| name == path) else {
+                return nodes;
+            };
+            if let Ok(bytes) = package.read(index)
+                && let Ok(document) = parse_xml(&bytes, path, &mut budget)
+                && let Some(root) = document.root()
+            {
+                paragraphs(root, &mut nodes);
+            }
+            nodes
+        });
+        crate::bridge::run_size_provenance::paragraph_sizes(nodes.get(&ordinal)?, fingerprint)
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: PackageBytes,
@@ -588,6 +674,9 @@ impl SourceIndex {
             seed_states: OnceLock::new(),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
+            run_size_sources: Mutex::new(BTreeMap::new()),
+            run_size_paragraphs: Mutex::new(BTreeMap::new()),
+            run_size_seeded: OnceLock::new(),
         }
     }
 
@@ -1061,6 +1150,96 @@ fn story_fingerprint(
     story_fingerprint_in(doc, &txn, story, comments)
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STORY_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_SOURCE_PARTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    pub(crate) static RUN_SIZE_SEEDED_SNAPSHOTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[derive(Default)]
+struct UnitDigest(sha2::Sha256);
+
+impl UnitDigest {
+    fn segment(&mut self, bytes: &[u8]) {
+        use sha2::Digest;
+        self.0.update(bytes);
+        self.0.update(b"\n");
+    }
+
+    fn marker(&mut self, relative: u32, key: &str, end: bool) -> Option<Vec<u8>> {
+        use sha2::Digest;
+        let bytes = serde_json::to_vec(&(relative, key, end)).ok()?;
+        self.0.update(&bytes);
+        Some(bytes)
+    }
+
+    fn finish(self) -> [u8; 32] {
+        use sha2::Digest;
+        self.0.finalize().into()
+    }
+}
+
+fn run_size_media(value: &Any) -> bool {
+    match value {
+        Any::String(value) => value.contains("media:"),
+        Any::Array(values) => values.iter().any(run_size_media),
+        Any::Map(values) => values.values().any(run_size_media),
+        _ => false,
+    }
+}
+
+pub(crate) fn run_size_fingerprint<'a>(
+    segments: impl Iterator<Item = crate::StorySegment>,
+    markers: impl Iterator<Item = (u32, &'a str, bool)>,
+) -> Option<[u8; 32]> {
+    #[cfg(test)]
+    RUN_SIZE_FINGERPRINTS.with(|count| count.set(count.get() + 1));
+    let mut segments: Vec<_> = segments.collect();
+    strip_display_only_keys(&mut segments);
+    let mut digest = UnitDigest::default();
+    let mut bytes = Vec::new();
+    let mut section = Vec::new();
+    let mut closed = false;
+    for segment in segments {
+        if closed || segment.attributes.values().any(run_size_media) {
+            return None;
+        }
+        match &segment.content {
+            crate::SegmentContent::Pilcrow(properties) => {
+                if properties.values.values().any(run_size_media) {
+                    return None;
+                }
+                closed = true;
+            }
+            crate::SegmentContent::OtherEmbed { kind, payload } => {
+                if kind != "field" || payload.values().any(run_size_media) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        segment_canonical(&segment, &mut bytes, &mut section);
+        digest.segment(&bytes);
+    }
+    if !closed {
+        return None;
+    }
+    for (relative, key, end) in markers {
+        digest.marker(relative, key, end)?;
+    }
+    Some(digest.finish())
+}
+
 fn story_fingerprint_in(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
@@ -1068,6 +1247,8 @@ fn story_fingerprint_in(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
+    #[cfg(test)]
+    STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {
@@ -1084,7 +1265,7 @@ fn story_fingerprint_in(
     boundaries.sort_unstable();
     let mut boundaries = boundaries.into_iter().peekable();
     let mut units = Vec::new();
-    let mut unit = Sha256::new();
+    let mut unit = UnitDigest::default();
     let mut blocks = Sha256::new();
     let mut block_content = Vec::new();
     let mut inline_content = Sha256::new();
@@ -1099,8 +1280,7 @@ fn story_fingerprint_in(
     let mut section_bytes = Vec::new();
     for segment in segments {
         segment_canonical(&segment, &mut bytes, &mut section_bytes);
-        unit.update(&bytes);
-        unit.update(b"\n");
+        unit.segment(&bytes);
         section_content.update(&section_bytes);
         section_content.update(b"\n");
         let block = matches!(&segment.content, crate::SegmentContent::OtherEmbed { kind, .. }
@@ -1121,11 +1301,10 @@ fn story_fingerprint_in(
         match &segment.content {
             crate::SegmentContent::Pilcrow(properties) => {
                 while let Some((at, key, end)) = boundaries.next_if(|(at, ..)| *at < position) {
-                    let marker = serde_json::to_vec(&(at - start, key, end)).ok()?;
+                    let marker = unit.marker(at - start, key, end)?;
                     let relative = at - start;
                     let excluded = block_positions.partition_point(|&at| at < relative) as u32;
                     markers.push((relative - excluded, key.to_owned(), end));
-                    unit.update(&marker);
                     section_content.update(&marker);
                     inline_content.update(&marker);
                 }
@@ -1133,7 +1312,7 @@ fn story_fingerprint_in(
                 block_positions.clear();
                 units.push(UnitState {
                     key: Some(properties.para_id.clone()),
-                    digest: std::mem::take(&mut unit).finalize().into(),
+                    digest: std::mem::take(&mut unit).finish(),
                     blocks: std::mem::take(&mut blocks).finalize().into(),
                     block_content: std::mem::take(&mut block_content),
                     content_digest: std::mem::take(&mut inline_content).finalize().into(),
@@ -1154,15 +1333,14 @@ fn story_fingerprint_in(
         }
     }
     for (at, key, end) in boundaries {
-        let marker = serde_json::to_vec(&(at.saturating_sub(start), key, end)).ok()?;
+        let marker = unit.marker(at.saturating_sub(start), key, end)?;
         let relative = at.saturating_sub(start);
         let excluded = block_positions.partition_point(|&at| at < relative) as u32;
         markers.push((relative.saturating_sub(excluded), key.to_owned(), end));
-        unit.update(&marker);
         section_content.update(&marker);
         inline_content.update(&marker);
     }
-    let trailing = unit.finalize().into();
+    let trailing = unit.finish();
     let empty: [u8; 32] = Sha256::new().finalize().into();
     if trailing != empty {
         units.push(UnitState {
@@ -3783,6 +3961,31 @@ mod tests {
                 .unwrap();
             assert_eq!(anchor.origin, ParagraphOrigin::Authored);
             assert!(anchor.ooxml_para_id.is_some());
+        }
+    }
+
+    #[test]
+    fn candidate_unit_digest_matches_save_with_comment_boundaries() {
+        let doc = EditingDoc::new(77114);
+        doc.create_story("body", "A😀B", "Normal", "left").unwrap();
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        let comments = BTreeMap::from([
+            ("alpha".to_owned(), vec![(0, 2), (3, 3)]),
+            ("beta".to_owned(), vec![(4, 5)]),
+        ]);
+        let (_, units) = story_fingerprint(&doc, "body", &comments).unwrap();
+        assert_eq!(units.len(), 2);
+        for unit in units {
+            assert_eq!(
+                run_size_fingerprint(
+                    unit.segments.into_iter(),
+                    unit.markers
+                        .iter()
+                        .map(|(at, key, end)| (*at, key.as_str(), *end)),
+                ),
+                Some(unit.digest),
+            );
         }
     }
 

@@ -16,7 +16,7 @@ import { createFramePresentation, type PeerlessFramePresentation } from '../peer
 import { coalesceInputDrafts, holdInputForCoalescing } from '../peerless/inputCoalescing';
 import type { Document } from '@betteroffice/docx/types/document';
 import { createInputAdmission, type PeerlessInputAdmission } from '../peerless/inputAdmission';
-import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessViewStore } from '../peerless/viewStore';
+import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessProvisionalCaret, type PeerlessViewStore } from '../peerless/viewStore';
 
 /** @internal Opens worker authority without creating a main-thread document. */
 export type PeerlessDocumentSource = Uint8Array | Document;
@@ -152,7 +152,22 @@ export function usePeerlessEditSession(
             if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
           });
         };
-        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame, onPaint: () => viewStore.setProvisionalCaret(null) });
+        let echoCaret: PeerlessProvisionalCaret | undefined;
+        const clearEchoCaret = () => {
+          if (echoCaret && viewStore.getSnapshot().provisionalCaret === echoCaret) viewStore.setProvisionalCaret(null);
+          echoCaret = undefined;
+        };
+        const echoPainter = createEchoPainter({ canvasForPage, requestFullFrame, onPaint: (predicted) => {
+          if (!predicted) { clearEchoCaret(); return; }
+          const bounds = viewStore.getSnapshot().geometry?.pages.find((item) => item.page.pageIndex === predicted.pageIndex)?.bounds;
+          if (!bounds) { clearEchoCaret(); return; }
+          const caret: PeerlessProvisionalCaret = { source: 'echo', get throughSeq() { return predicted.throughSeq; },
+            pageIndex: predicted.pageIndex,
+            rect: { x: predicted.rect.x + bounds.x, y: predicted.rect.y + bounds.y, width: predicted.rect.width, height: predicted.rect.height } };
+          viewStore.setProvisionalCaret(caret);
+          const shown = viewStore.getSnapshot().provisionalCaret;
+          echoCaret = shown === caret ? caret : shown === echoCaret ? echoCaret : undefined;
+        } });
         cleanups.push(() => echoPainter.dispose());
         const presentation = createFramePresentation({
           viewStore, echoPainter, canvasForPage, prepareGeometry: (frame) => callbacks.current.prepareGeometry(frame),

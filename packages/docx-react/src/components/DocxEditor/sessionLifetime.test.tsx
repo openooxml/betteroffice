@@ -159,6 +159,24 @@ test('loading another document never calls into the session it replaced', async 
   view.unmount();
 }, 30_000);
 
+test('pins the editor root to ltr', async () => {
+  const view = render(<DocxEditor experimentalWorkerOpen={false} documentBuffer={await commentedDocx(1)} />);
+  await settle(500);
+  expect(view.container.querySelector('[data-testid="docx-editor"]')?.getAttribute('dir')).toBe('ltr');
+  view.unmount();
+}, 30_000);
+
+test('pins the empty and failed editor roots to ltr', async () => {
+  const empty = render(<DocxEditor experimentalWorkerOpen={false} />);
+  await settle(100);
+  expect(empty.container.querySelector('[data-testid="docx-editor"]')?.getAttribute('dir')).toBe('ltr');
+  empty.unmount();
+  const failed = render(<DocxEditor experimentalWorkerOpen={false} documentBuffer={new Uint8Array([1, 2, 3]).buffer} />);
+  await settle(1500);
+  expect(failed.container.querySelector('.docx-editor-error')?.getAttribute('dir')).toBe('ltr');
+  failed.unmount();
+}, 30_000);
+
 test('a load that fails frees the document it replaced', async () => {
   afterDestroy.length = 0;
   const view = render(<DocxEditor experimentalWorkerOpen={false} documentBuffer={await commentedDocx(2)} />);

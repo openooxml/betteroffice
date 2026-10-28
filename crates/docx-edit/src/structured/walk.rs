@@ -109,6 +109,53 @@ fn any_flag(value: Option<&Any>) -> bool {
     }
 }
 
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
+fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::DrawingProperties> {
+    let properties = any_map(payload.get("docPr"))?;
+    let text = |key: &str| match properties.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let live = |key: &str| match payload.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if image {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
+    };
+    let wrap = if image {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
+    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
+    Some(crate::DrawingProperties {
+        doc_pr_id: text("docPrId"),
+        name: text("name"),
+        title,
+        descr,
+        hidden: flag("hidden"),
+        decorative: flag("decorative"),
+        placement: match (wrap.as_deref(), text("placement").as_deref()) {
+            (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+            (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
+            _ => docx_parse::image::DrawingPlacement::Inline,
+        },
+        drawing_type: match text("type").as_deref() {
+            Some("picture") => docx_parse::image::DrawingType::Picture,
+            Some("shape") => docx_parse::image::DrawingType::Shape,
+            Some("textBox") => docx_parse::image::DrawingType::TextBox,
+            Some("group") => docx_parse::image::DrawingType::Group,
+            Some("chart") => docx_parse::image::DrawingType::Chart,
+            Some("diagram") => docx_parse::image::DrawingType::Diagram,
+            _ => docx_parse::image::DrawingType::Other,
+        },
+    })
+}
+
 fn any_map(value: Option<&Any>) -> Option<&HashMap<String, Any>> {
     match present(value)? {
         Any::Map(map) => Some(map),
@@ -3179,6 +3226,7 @@ impl<'a> Exporter<'a> {
             content: InlineKind::Unsupported {
                 element,
                 alt_text: None,
+                drawing: None,
             },
         }
     }
@@ -3249,7 +3297,7 @@ impl<'a> Exporter<'a> {
                 }
             }
             "field" => self.field(ctx, payload, &base, depth),
-            "image" => self.image(ctx, payload, &anchor),
+            "image" => self.image(ctx, payload, &anchor, drawing_from_payload(payload, true)),
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
@@ -3270,10 +3318,13 @@ impl<'a> Exporter<'a> {
                     },
                 );
                 match preview {
-                    Some(preview) => self.image(ctx, preview, &anchor),
+                    Some(preview) => {
+                        self.image(ctx, preview, &anchor, drawing_from_payload(payload, false))
+                    }
                     None => InlineKind::Unsupported {
                         element,
                         alt_text: None,
+                        drawing: drawing_from_payload(payload, false),
                     },
                 }
             }
@@ -3322,6 +3373,7 @@ impl<'a> Exporter<'a> {
                 InlineKind::Unsupported {
                     element: element.to_owned(),
                     alt_text,
+                    drawing: drawing_from_payload(payload, false),
                 }
             }
         };
@@ -3336,7 +3388,13 @@ impl<'a> Exporter<'a> {
     }
 
     /// An image, its relationship resolved against the part that owns the story it is in.
-    fn image(&mut self, ctx: &StoryCtx, payload: &Payload, anchor: &Anchor) -> InlineKind {
+    fn image(
+        &mut self,
+        ctx: &StoryCtx,
+        payload: &Payload,
+        anchor: &Anchor,
+        drawing: Option<crate::DrawingProperties>,
+    ) -> InlineKind {
         let relationship_id = any_text(payload.get("rId"));
         let mut target = None;
         if let (Some(id), Some(read), Some(part)) =
@@ -3377,6 +3435,7 @@ impl<'a> Exporter<'a> {
                 Some(RelationshipTarget::External(url)) => Some(url),
                 _ => None,
             },
+            drawing,
         }
     }
 
