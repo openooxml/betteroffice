@@ -276,29 +276,21 @@ export class PptxAgentPresentation extends PrototypeDocument<SlideTextChange, Pp
       if (found.some(hit => hit.paragraph.fields.length || !hit.paragraph.editable)) throw new DocumentToolError('UNSUPPORTED_TARGET', 'find_replace cannot change soft line breaks in a paragraph with text fields.');
       const snapshotStories = new Map(handle.snapshot().slides.flatMap(slide => this.flatten(slide.shapes)).flatMap(node => node.shape.textStories.map(story => [story.id, story] as const)));
       const styleOf = (run: StorySnapshot['paragraphs'][number]['runs'][number]) => Object.fromEntries(Object.entries(run.style).filter(([, value]) => value !== null)) as TextStyle;
-      let changedAny = false;
-      const byStory = new Map<string, typeof found>();
-      for (const hit of found) { const hits = byStory.get(hit.story.storyId) ?? []; hits.push(hit); byStory.set(hit.story.storyId, hits); }
-      for (const [storyId, hits] of byStory) {
-        const story = snapshotStories.get(storyId);
-        if (!story) throw new DocumentToolError('UNKNOWN_STORY', 'Copy a story ID from pptx_read_slide.');
-        const paragraphs = story.paragraphs.map(paragraph => {
-          const local = hits.filter(hit => hit.paragraph.paragraphId === paragraph.id);
-          if (!local.length) return { runs: paragraph.runs.map(run => ({ text: run.text, style: styleOf(run) })) };
-          const runs: Array<{ text: string; style: TextStyle }> = [];
-          const push = (text: string, style: TextStyle) => { if (!text) return; const last = runs.at(-1); if (last && JSON.stringify(last.style) === JSON.stringify(style)) last.text += text; else runs.push({ text, style }); };
-          const copy = (from: number, to: number) => { let position = 0; for (const run of paragraph.runs) { const next = position + run.text.length; const start = Math.max(from, position), end = Math.min(to, next); if (start < end) push(run.text.slice(start - position, end - position), styleOf(run)); position = next; } };
-          const styleAt = (offset: number) => { let position = 0; for (const run of paragraph.runs) { if (offset < position + run.text.length) return styleOf(run); position += run.text.length; } return styleOf(paragraph.runs.at(-1)!); };
-          let cursor = 0;
-          for (const hit of local) { copy(cursor, hit.start); push(replacement, styleAt(hit.start)); cursor = hit.end; }
-          copy(cursor, paragraph.runs.reduce((sum, run) => sum + run.text.length, 0));
-          return { runs };
-        });
-        const before = story.paragraphs.map(paragraph => paragraph.runs.map(run => run.text).join('')).join('\n');
-        const after = paragraphs.map(paragraph => paragraph.runs.map(run => run.text).join('')).join('\n');
-        if (after !== before) { changedAny = true; handle.setStoryParagraphs(storyId, paragraphs); }
+      const edits = found.filter(hit => hit.text !== replacement).map(hit => {
+        const paragraph = snapshotStories.get(hit.story.storyId)?.paragraphs.find(paragraph => paragraph.id === hit.paragraph.paragraphId);
+        if (!paragraph) throw new DocumentToolError('UNKNOWN_REF', 'Copy a paragraph ID from pptx_read_slide.');
+        let position = 0;
+        const run = paragraph.runs.find(run => { position += run.text.length; return hit.start < position; });
+        if (!run) throw new DocumentToolError('INVALID_EDIT', 'Match is outside its paragraph. Read fresh text and retry.');
+        return { type: 'replaceText' as const, storyId: hit.story.storyId, start: hit.paragraph.start + hit.start, end: hit.paragraph.start + hit.end, text: replacement, style: styleOf(run) };
+      }).reverse();
+      let applied = false;
+      if (edits.length) {
+        const proposal = handle.propose('agent', null, edits);
+        try { applied = handle.acceptProposal(proposal.id).applied; }
+        finally { handle.rejectProposal(proposal.id); }
       }
-      return { changed: changedAny, replacements: found.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
+      return { changed: applied, replacements: found.length, changedShapes: changes.size, changes: changed, changesTruncated: changed.length < changes.size };
     }
     if (edit.op === 'insert_table_row' || edit.op === 'delete_table_row' || edit.op === 'insert_table_column' || edit.op === 'delete_table_column') {
       if (handle.isCollaborative()) throw new DocumentToolError('UNSUPPORTED', 'Table row and column edits are unavailable while the deck is in a collaborative session. Edit cell text instead.');

@@ -79,11 +79,13 @@ test('tracked acceptance defaults its date to now and still rejects an invalid e
   } finally { other.close(); }
 });
 
-async function softBreakFixture() {
+async function softBreakFixture(extraParagraphs = '', secondShape?: string) {
   const zip = await JSZip.loadAsync(await presentationFixture());
   const path = 'ppt/slides/slide1.xml';
   const paragraphs = '<a:p><a:r><a:rPr b="0" sz="1800"/><a:t>(Label)</a:t></a:r><a:br/><a:r><a:rPr b="1" sz="2400"/><a:t>Next text</a:t></a:r></a:p>';
-  zip.file(path, (await zip.file(path)!.async('string')).replace(/<a:p>[\s\S]*<\/a:p>/u, paragraphs));
+  let slide = (await zip.file(path)!.async('string')).replace(/<a:p>[\s\S]*<\/a:p>/u, paragraphs + extraParagraphs);
+  if (secondShape) slide = slide.replace('</p:spTree>', `<p:sp><p:nvSpPr><p:cNvPr id="9" name="Second"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>${secondShape}</p:txBody></p:sp></p:spTree>`);
+  zip.file(path, slide);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -132,6 +134,89 @@ test('PPTX find_replace can remove a soft line break and still rejects a paragra
     const xml = await saved.file('ppt/slides/slide1.xml')!.async('string');
     expect(xml).not.toContain('<a:br');
     expect(xml).toContain('Next text');
+  } finally { deck.close(); }
+});
+
+for (const [name, extraParagraphs] of [
+  ['more than 100 paragraphs', Array.from({ length: 100 }, (_, index) => `<a:p><a:pPr algn="ctr" lvl="1" marL="342900"><a:buChar char="*"/></a:pPr><a:r><a:rPr i="1" lang="de-DE"/><a:t>Keep ${index} 😀</a:t></a:r><a:endParaRPr sz="1800"/></a:p>`).join('')],
+  ['more than 16000 UTF-16 units', `<a:p><a:pPr algn="r"/><a:r><a:rPr i="1"/><a:t>${'😀'.repeat(8001)}</a:t></a:r></a:p>`],
+  ['more than 64 runs in an untouched paragraph', `<a:p><a:pPr algn="ctr"/><a:r><a:t>Keep </a:t></a:r>${Array.from({ length: 65 }, (_, index) => `<a:r><a:rPr b="${index % 2}"/><a:t>${index}😀</a:t></a:r>`).join('')}</a:p>`],
+]) test(`PPTX soft-break find_replace preserves unrelated text with ${name}`, async () => {
+  const bytes = await softBreakFixture(extraParagraphs);
+  const deck = await openPptx(bytes);
+  let saved: Uint8Array;
+  try {
+    const target = firstShape(deck);
+    const edited = deck.edit({ version: deck.overview().version, edits: [{ op: 'find_replace', shape: target.shape, query: '(Label)\v', replacement: '(Label) \v' }] });
+    expect(edited.results[0]).toMatchObject({ changed: true, replacements: 1, changedShapes: 1 });
+    const story = deck.readSlide(target).shapes[0].stories[0];
+    expect(story.text).toStartWith('(Label) \vNext text\n');
+    expect(story.paragraphs[0].runs[0].formatting.bold).toBe(false);
+    expect(story.paragraphs[0].runs.find(run => run.text === 'Next text')?.formatting.bold).toBe(true);
+    saved = await deck.export();
+    const source = await JSZip.loadAsync(bytes);
+    const zip = await JSZip.loadAsync(saved);
+    const original = (await source.file('ppt/slides/slide1.xml')!.async('string')).match(/<a:p>[\s\S]*?<\/a:p>/gu)!;
+    const paragraphs = (await zip.file('ppt/slides/slide1.xml')!.async('string')).match(/<a:p>[\s\S]*?<\/a:p>/gu)!;
+    expect(paragraphs).toHaveLength(original.length);
+    expect(paragraphs.slice(1)).toEqual(original.slice(1));
+  } finally { deck.close(); }
+  const reopened = await openPptx(saved!);
+  try { expect(reopened.readSlide(firstShape(reopened)).shapes[0].stories[0].text).toStartWith('(Label) \vNext text\n'); }
+  finally { reopened.close(); }
+});
+
+test('PPTX find_replace inserts a soft break in a paragraph with more than 64 runs', async () => {
+  const zip = await JSZip.loadAsync(await softBreakFixture());
+  const path = 'ppt/slides/slide1.xml';
+  const runs = Array.from({ length: 65 }, (_, index) => `<a:r><a:rPr i="${index % 2}"/><a:t>${index}😀</a:t></a:r>`).join('');
+  zip.file(path, (await zip.file(path)!.async('string')).replace('</a:p>', `${runs}</a:p>`));
+  const deck = await openPptx(await zip.generateAsync({ type: 'uint8array' }));
+  try {
+    const target = firstShape(deck);
+    const edited = deck.edit({ version: deck.overview().version, edits: [{ op: 'find_replace', shape: target.shape, query: 'Next text', replacement: 'Next\vtext' }] });
+    expect(edited.results[0]).toMatchObject({ changed: true, replacements: 1 });
+    const story = deck.readSlide(target).shapes[0].stories[0];
+    expect(story.text).toBe(`(Label)\vNext\vtext${Array.from({ length: 65 }, (_, index) => `${index}😀`).join('')}`);
+    expect(story.paragraphs[0].runs.find(run => run.text === 'Next\vtext')?.formatting.bold).toBe(true);
+    const formatted = Array.from({ length: Math.ceil(story.paragraphs[0].runCount / 8) }, (_, page) => deck.readSlide({ ...target, runOffset: page * 8 }).shapes[0].stories[0].paragraphs[0].runs).flat();
+    expect(formatted.filter(run => /^\d+😀$/u.test(run.text)).map(run => ({ text: run.text, italic: run.formatting.italic }))).toEqual(Array.from({ length: 65 }, (_, index) => ({ text: `${index}😀`, italic: Boolean(index % 2) })));
+    const saved = await JSZip.loadAsync(await deck.export());
+    const xml = await saved.file(path)!.async('string');
+    expect(xml.match(/<a:br\b/gu)).toHaveLength(2);
+  } finally { deck.close(); }
+});
+
+test('PPTX soft-break find_replace updates multiple shapes and matches without shifting offsets', async () => {
+  const paragraph = '<a:p><a:pPr algn="ctr" lvl="1"/><a:r><a:rPr i="1"/><a:t>😀(Label)</a:t></a:r><a:br/><a:r><a:rPr b="1"/><a:t>Next text (Label)</a:t></a:r><a:br/><a:r><a:rPr i="1"/><a:t>Tail</a:t></a:r></a:p>';
+  const deck = await openPptx(await softBreakFixture('', paragraph));
+  try {
+    const edited = deck.edit({ version: deck.overview().version, edits: [{ op: 'find_replace', query: '(Label)\v', replacement: '(Label) \v' }] });
+    expect(edited.results[0]).toMatchObject({ changed: true, replacements: 3, changedShapes: 2 });
+    const shapes = deck.readSlide({ slide: firstShape(deck).slide }).shapes;
+    expect(shapes[0].stories[0].text).toBe('(Label) \vNext text');
+    const story = shapes[1].stories[0];
+    expect(story.text).toBe('😀(Label) \vNext text (Label) \vTail');
+    expect(story.paragraphs[0]).toMatchObject({ alignment: 'ctr', level: 1 });
+    expect(story.paragraphs[0].runs[0].formatting.italic).toBe(true);
+    expect(story.paragraphs[0].runs.find(run => run.text === 'Tail')?.formatting.italic).toBe(true);
+  } finally { deck.close(); }
+});
+
+for (const [name, paragraph, code] of [
+  ['a later match contains a field', '<a:p><a:r><a:t>(Label)</a:t></a:r><a:br/><a:fld id="{AE409839-2DAE-4A29-9CE6-CAEC912BBF6D}" type="slidenum"><a:t>1</a:t></a:fld></a:p>', 'UNSUPPORTED_TARGET'],
+  ['a later match has unwritable formatting', '<a:p><a:r><a:rPr sz="50"/><a:t>(Label)</a:t></a:r><a:br/><a:r><a:t>Next text</a:t></a:r></a:p><a:p><a:r><a:t>(Label)</a:t></a:r><a:br/><a:r><a:t>Valid tail</a:t></a:r></a:p>', 'INVALID_EDIT'],
+]) test(`PPTX soft-break find_replace stays atomic when ${name}`, async () => {
+  const deck = await openPptx(await softBreakFixture('', paragraph));
+  try {
+    const version = deck.overview().version;
+    const before = await deck.export();
+    const rejected = failure(() => deck.edit({ version, edits: [{ op: 'set_notes', slide: firstShape(deck).slide, text: 'Roll back' }, { op: 'find_replace', query: '(Label)\v', replacement: '(Label) \v' }] }));
+    expect(rejected.code).toBe(code);
+    expect(rejected.message).toContain('No batch edits were applied.');
+    expect(deck.overview().version).toBe(version);
+    expect(await deck.export()).toEqual(before);
+    expect(deck.readSlide(firstShape(deck)).shapes[0].stories[0].text).toBe('(Label)\vNext text');
   } finally { deck.close(); }
 });
 
