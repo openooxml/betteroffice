@@ -727,8 +727,35 @@ fn assert_seed_format_replace(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatch
     }
 }
 
+fn assert_seed_format_splice(bytes: &[u8], inspect: impl FnOnce(&ParagraphPatchV1)) {
+    let request = seed_format_request(bytes);
+    let part = &request.paragraph_ids.as_ref().unwrap().spliced_parts[0];
+    inspect(&part.paragraph_patches[0]);
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    for (name, original) in ooxml_opc::unzip_parts(bytes).unwrap() {
+        let output = &saved_parts
+            .iter()
+            .find(|(path, _)| path == &name)
+            .unwrap()
+            .1;
+        if name == "word/document.xml" {
+            let original = std::str::from_utf8(&original).unwrap();
+            let output = std::str::from_utf8(output).unwrap();
+            assert_eq!(
+                output,
+                original.replace("<w:t>x</w:t>", "<w:t>y</w:t>"),
+                "{output}"
+            );
+        } else {
+            assert_eq!(output, &original, "{name}");
+        }
+    }
+}
+
 #[test]
-fn seed_format_inherited_color_with_direct_auto_uses_counted_replace() {
+fn seed_format_inherited_color_with_direct_auto_splices_the_text_edit() {
     let (_, bytes, _) = restyle_source(
         concat!(
             "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr>",
@@ -737,7 +764,7 @@ fn seed_format_inherited_color_with_direct_auto_uses_counted_replace() {
         "<w:rPr><w:color w:val=\"FF0000\"/></w:rPr>",
         "",
     );
-    assert_seed_format_replace(&bytes, |patch| {
+    assert_seed_format_splice(&bytes, |patch| {
         let UnitV1::Text { attrs, .. } = &patch.seed.units[0] else {
             panic!("expected text seed");
         };
@@ -997,6 +1024,60 @@ fn run_style_only_change_replaces() {
     assert_restyle_replace(&doc, &bytes, |paragraph| {
         paragraph["content"][0]["formatting"] = json!({"styleId": "C"});
     });
+}
+
+#[test]
+fn numbered_restyle_after_repeated_prefix_insertion_keeps_run_xml() {
+    for direct in [false, true] {
+        let formatting = if direct {
+            r#"<w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#
+        } else {
+            ""
+        };
+        let content = format!(
+            r#"<w:pPr><w:pStyle w:val="Normal"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr><w:rPr><w:rFonts w:cstheme="minorHAnsi"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:pPr><w:r w:rsidRPr="0092171E">{formatting}<w:t>Some heading</w:t></w:r>"#
+        );
+        let doc = open(&content);
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "Some ",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        doc.apply_edits(
+            &EditRequest {
+                expect_version: doc.version(),
+                source: EditSource::Host,
+                history: EditHistory::Separate,
+                steps: vec![EditStep::new(EditOperation::SetParagraphStyle {
+                    target: ParagraphTarget {
+                        story: "body".to_owned(),
+                        para_id: "00000001".to_owned(),
+                    },
+                    style_id: "Strong".to_owned(),
+                })],
+            },
+            &UndoSession::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let plan = patch(&doc);
+        assert_eq!(plan.text_edits.len(), 1);
+        assert_eq!((plan.text_edits[0].from, plan.text_edits[0].to), (0, 0));
+        let (xml, warnings) = save_paragraph(&doc, &content, |paragraph| {
+            paragraph["formatting"]["styleId"] = json!("Strong");
+            paragraph["content"][0]["content"][0]["text"] = json!("Some Some heading");
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            xml.contains(
+                &content
+                    .replace("Some heading", "Some Some heading")
+                    .replace("w:val=\"Normal\"", "w:val=\"Strong\"")
+            )
+        );
+    }
 }
 
 #[test]

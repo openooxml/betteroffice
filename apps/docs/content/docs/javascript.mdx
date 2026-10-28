@@ -221,6 +221,9 @@ larger than the limits on its own reports `limit-exceeded` (page it with
 `readParagraphs` and `readStories` include style-resolved `outlineLevel` and `list`
 facts for accepted and original views, with rendered markers and counters from
 the start of the root story, including for cell and `paraIds` reads.
+Reads project pending paragraph-mark revisions as if accepted in the accepted
+view or rejected in the original view. Joined paragraphs keep the following
+paragraph's id. Edits still refuse pending paragraph-mark revisions.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. An overlay may render during a pending layout with that and
@@ -427,6 +430,8 @@ and a refused edit batch returned as-is reaches the caller unchanged.
 `readContent` includes effective `list` facts on story paragraphs, including inherited
 bullets and numbered markers. Slides include `title`, `hidden` and `layout` (name and
 type); unavailable facts are `null`. These fields are optional for older engines.
+Slides also include `headerFooter` with visible slide footer, slide number and date
+placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
@@ -516,6 +521,8 @@ rails move groups into an accessible More menu; wrap other host content in
 `ToolbarOverflow` to give it an entry there.
 
 ## Host XLSX editor plugins
+
+`readCells` sheet entries expose `headerFooter` with printable left, center and right sections using Excel dialog field tokens. Inactive even and first variants are null; `headerFooter` is null when absent or empty and omitted when source facts are unknown.
 
 `XlsxEditor` installs host-owned tools through the same `plugins`,
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin

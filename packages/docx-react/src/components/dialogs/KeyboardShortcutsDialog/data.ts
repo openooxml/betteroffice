@@ -271,6 +271,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Delete selected text',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.deleteDescription',
     keys: 'Del',
+    keysKey: 'dialogs.keyboardShortcuts.keys.del',
     altKeys: 'Backspace',
     category: 'editing',
   },
@@ -417,6 +418,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Scroll up one page',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.pageUpDescription',
     keys: 'Page Up',
+    keysKey: 'dialogs.keyboardShortcuts.keys.pageUp',
     category: 'navigation',
   },
   {
@@ -426,6 +428,7 @@ const INPUT_SHORTCUTS: KeyboardShortcut[] = [
     description: 'Scroll down one page',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.pageDownDescription',
     keys: 'Page Down',
+    keysKey: 'dialogs.keyboardShortcuts.keys.pageDown',
     category: 'navigation',
   },
 

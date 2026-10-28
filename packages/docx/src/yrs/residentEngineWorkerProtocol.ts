@@ -415,6 +415,8 @@ export type DocxEngineWorkerResponse = (
       commandAck?: DocxCommandAck;
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
       fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
+      /** An applied edit may need fonts the host's last font requirements lacked; sent once until the host asks again. */
+      fontRequirementsHint?: { session: string; incarnation: number; epoch: number };
       fontEnvironment?: DocxFontEnvironmentSnapshot;
       checkpoint?: Checkpoint;
       frame?: ArrayBuffer;

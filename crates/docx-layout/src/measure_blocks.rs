@@ -3214,10 +3214,7 @@ fn cell_content_widths(
     Some((minimum + padding, maximum + padding))
 }
 
-/// Whether painting places the paragraph's lines where intrinsic sizing does:
-/// painting clamps negative indents and moves a hanging paragraph's text by
-/// the hang when its leading indent (the right one when right-to-left) doesn't
-/// cover it.
+/// Whether painting and intrinsic sizing agree for the paragraph's indents.
 fn painted_indent_matches(paragraph: &crate::types::ParagraphBlock) -> bool {
     let Some(attrs) = paragraph.attrs.as_ref() else {
         return true;
@@ -3698,6 +3695,11 @@ fn measure_table_with_compat_shift(
     config: &MeasurementConfig,
     apply_compat_shift: bool,
 ) -> Result<TableExtent, String> {
+    for row in &mut table.rows {
+        for cell in &mut row.cells {
+            crate::paragraph_spacing::apply_list_auto_spacing_blocks(&mut cell.blocks);
+        }
+    }
     let percentage_basis = if apply_compat_shift {
         table_percentage_basis(table, content_width)
     } else {

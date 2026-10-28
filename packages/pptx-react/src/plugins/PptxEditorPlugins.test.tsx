@@ -1610,7 +1610,20 @@ test('in_thread_plugin_reads_preserve_engine_facts', async () => {
   expect(result).toEqual(await value.api().readContent());
   expect(result.ok).toBe(true);
   if (!result.ok) throw new Error('Read refused');
-  expect(result.slides[0]).toMatchObject({ title: 'Heading\nNext', hidden: true, layout: { name: 'Heading layout', type: 'title' } });
+  expect(result.slides[0]).toMatchObject({
+    title: 'Heading\nNext',
+    hidden: true,
+    layout: {
+      name: 'Heading layout',
+      type: 'title',
+      headerFooter: { slideNumber: true, footer: true, date: true, header: false },
+    },
+    headerFooter: {
+      footer: { shapeId: result.slides[0]!.shapes[1]!.id, text: 'Footer' },
+      slideNumber: { shapeId: result.slides[0]!.shapes[2]!.id, text: 'Seite 1' },
+      date: null,
+    },
+  });
   expect(result.stories[0]!.paragraphs.map((paragraph) => paragraph.list)).toEqual([
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },

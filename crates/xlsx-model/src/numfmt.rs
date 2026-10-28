@@ -699,6 +699,22 @@ pub fn format_is_approximate(value: &CellValue, code: &str) -> bool {
         && (degrades_to_general(section) || fraction_falls_back(section, value.abs()))
 }
 
+/// whether formatting `value` with `code` would render the number itself
+/// (or a date/time) rather than echoing text: the section selected for
+/// `value` carries digit placeholders, date/time tokens or a fraction
+/// pattern, and is neither a `General` section nor a text (`@`) section.
+pub fn format_renders_number(code: &str, value: f64) -> bool {
+    if code.trim().is_empty() {
+        return false;
+    }
+    let parsed = parsed_sections(code);
+    let sec = &parsed[select(&parsed, value).0];
+    if sec.has(|t| matches!(t, Tok::General | Tok::At)) {
+        return false;
+    }
+    sec.has_date() || sec.fraction.is_some() || sec.has(|t| matches!(t, Tok::Digit(_)))
+}
+
 fn fraction_falls_back(sec: &Section, mag: f64) -> bool {
     let Some(pattern) = sec.fraction else {
         return false;

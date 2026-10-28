@@ -5,23 +5,25 @@ import { openDocx, type DocxAgentDocument } from './document';
 import { openXlsx, type XlsxAgentWorkbook } from './xlsx';
 import { openPptx, type PptxAgentPresentation } from './pptx';
 import { DocumentToolError, type DocumentRenderer } from './types';
+import type { OfficeFormat } from './tool-filter';
 
 export class FileWorkspace {
   private readonly documents = new Map<string, { path: string; document: DocxAgentDocument | XlsxAgentWorkbook | PptxAgentPresentation }>();
   private nextId = 1;
 
-  private constructor(readonly root: string, private readonly renderer?: DocumentRenderer) {}
+  private constructor(readonly root: string, private readonly renderer?: DocumentRenderer, private readonly formats?: readonly OfficeFormat[]) {}
 
-  static async create(root: string, renderer?: DocumentRenderer) {
+  static async create(root: string, renderer?: DocumentRenderer, formats?: readonly OfficeFormat[]) {
     const canonical = await realpath(root);
     if (!(await stat(canonical)).isDirectory()) throw new DocumentToolError('INVALID_ROOT', 'Workspace root must be a directory.');
-    return new FileWorkspace(canonical, renderer);
+    return new FileWorkspace(canonical, renderer, formats);
   }
 
   async files(directory = '.', offset = 0) {
     const folder = await this.path(directory);
+    const allowed = this.formats ? this.formats.map(format => `.${format}`) : ['.docx', '.xlsx', '.pptx'];
     const entries = (await readdir(folder, { withFileTypes: true }))
-      .filter(entry => entry.isDirectory() || entry.isFile() && ['.docx', '.xlsx', '.pptx'].includes(extname(entry.name).toLowerCase()))
+      .filter(entry => entry.isDirectory() || entry.isFile() && allowed.includes(extname(entry.name).toLowerCase()))
       .sort((a, b) => a.name.localeCompare(b.name));
     return {
       files: entries.slice(offset, offset + 100).map(entry => ({ path: relative(this.root, resolve(folder, entry.name)), kind: entry.isDirectory() ? 'directory' : extname(entry.name).slice(1).toLowerCase() })),
@@ -34,6 +36,7 @@ export class FileWorkspace {
     const file = await this.path(path);
     const format = extname(file).toLowerCase();
     if (!['.docx', '.xlsx', '.pptx'].includes(format)) throw new DocumentToolError('UNSUPPORTED_FORMAT', 'Open a DOCX, XLSX, or PPTX file.');
+    if (this.formats && !(this.formats as readonly string[]).includes(format.slice(1))) throw new DocumentToolError('UNSUPPORTED_FORMAT', `Format ${format.slice(1)} is not enabled. Enabled formats: ${this.formats.join(', ')}.`);
     for (const [id, entry] of this.documents) if (entry.path === file) return { document: id, ...entry.document.overview() };
     if (this.documents.size >= 10) throw new DocumentToolError('DOCUMENT_LIMIT', 'Close a document before opening more than 10.');
     const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));

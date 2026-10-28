@@ -361,7 +361,8 @@ pub fn paragraph_occurrences(xml: &str) -> Option<Vec<ParagraphOccurrence>> {
     Some(occurrences)
 }
 
-/// Unnested rectangular tables outside drawings, textboxes and content controls.
+/// Unnested tables outside drawings, textboxes and content controls, merged and
+/// offset cells included: their rows are patched by position, not by grid shape.
 pub fn simple_table_spans(xml: &str) -> Option<Vec<Range<usize>>> {
     let mut result = Vec::new();
     let mut ancestors = Vec::new();
@@ -373,10 +374,7 @@ pub fn simple_table_spans(xml: &str) -> Option<Vec<Range<usize>>> {
             }
             if tag.name == "w:tbl" {
                 let (start, simple, rows) = tables.pop()?;
-                if simple
-                    && rows.first().is_some_and(|cells| *cells > 0)
-                    && rows.iter().all(|cells| *cells == rows[0])
-                {
+                if simple && rows.iter().all(|cells| *cells > 0) {
                     result.push(start..tag.range.end);
                 }
             }
@@ -396,15 +394,8 @@ pub fn simple_table_spans(xml: &str) -> Option<Vec<Range<usize>>> {
             if !tag.empty {
                 tables.push((tag.range.start, simple, Vec::new()));
             }
-        } else if let Some((_, simple, rows)) = tables.last_mut() {
+        } else if let Some((_, _, rows)) = tables.last_mut() {
             match tag.name {
-                "w:vMerge" | "w:gridBefore" | "w:gridAfter" => *simple = false,
-                "w:gridSpan" => {
-                    *simple &= attribute(&tag, "w:val")
-                        .and_then(|range| unescaped(xml, range))
-                        .and_then(|value| value.parse::<u32>().ok())
-                        == Some(1);
-                }
                 "w:tr" if ancestors.last() == Some(&"w:tbl") => rows.push(0),
                 "w:tc" if ancestors.last() == Some(&"w:tr") => {
                     *rows.last_mut()? += 1;
@@ -594,8 +585,16 @@ mod tests {
                 "<w:tr>",
                 "<w:tr><w:trPr><w:gridAfter w:val=\"1\"/></w:trPr>",
             ),
-            table.replace("<w:p/>", &format!("{table}<w:p/>")),
             table.replace("</w:tbl>", &format!("<w:tr>{cell}</w:tr></w:tbl>")),
+        ] {
+            assert_eq!(
+                simple_table_spans(&xml),
+                Some(std::iter::once(0..xml.len()).collect()),
+                "{xml}"
+            );
+        }
+        for xml in [
+            table.replace("<w:p/>", &format!("{table}<w:p/>")),
             format!("<w:drawing><w:txbxContent>{table}</w:txbxContent></w:drawing>"),
             format!("<w:pict><w:txbxContent>{table}</w:txbxContent></w:pict>"),
             format!("<w:sdt><w:sdtContent>{table}</w:sdtContent></w:sdt>"),

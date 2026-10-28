@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
-import { createRoomTransport } from '../../demo/app/collab/createRoomTransport';
+import { createRoomTransport } from '../../../shared/editor-host/collaboration/createRoomTransport';
 import { CollaborationProvider } from '../../../packages/docx/src/collaboration/provider';
 import type { PresentationHandle } from '../../../packages/pptx/src';
 import type { YrsSession } from '../../../packages/docx/src/yrs';
