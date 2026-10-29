@@ -1,6 +1,6 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { StrictMode } from 'react';
@@ -2659,6 +2659,8 @@ describe('peerless caret blink', () => {
 });
 
 describe('peerless stage fit', () => {
+  beforeAll(async () => { await pptxPeerlessEditorLoader.load(); });
+
   let stageSize: { width: number; height: number };
   let beforeChromeWidth: number | undefined;
   const observers = new Map<ResizeObserver, { callback: ResizeObserverCallback; target: Element }>();
