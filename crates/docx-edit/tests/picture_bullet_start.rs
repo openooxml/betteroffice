@@ -188,7 +188,10 @@ fn bidi_picture_bullet_reserves_the_right_edge_and_keeps_the_left_margin() {
     let line = &layout["measured"][0]["measure"]["lines"][0];
     near(line["leftOffset"].as_f64().unwrap_or(0.0), 0.0);
     near(line["rightOffset"].as_f64().unwrap() * 0.75, 72.0);
-    assert_eq!(page["margins"], base_layout["layout"]["pages"][0]["margins"]);
+    assert_eq!(
+        page["margins"],
+        base_layout["layout"]["pages"][0]["margins"]
+    );
     near(
         origin(&display, "Second").0,
         page["margins"]["left"].as_f64().unwrap(),
