@@ -7,6 +7,11 @@ export function setHostedFontFamilies(source: object, fonts: ReadonlyArray<FontD
   Object.assign(source, { [hostedFamiliesKey]: new Set((fonts ?? []).map(font => font.family.trim().toLowerCase())) });
 }
 
+export function hostedFontKey(source: object | undefined): string {
+  const families = (source as { [hostedFamiliesKey]?: ReadonlySet<string> } | undefined)?.[hostedFamiliesKey];
+  return families ? [...families].sort().join('\n') : '';
+}
+
 export function hostedFontProvider(
   provider: BundledFontProvider | undefined,
   fonts: ReadonlyArray<FontDefinition> | undefined

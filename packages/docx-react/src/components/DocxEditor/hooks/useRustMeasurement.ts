@@ -10,6 +10,7 @@ import {
   type RustMeasureSource,
   type RustTextEngine,
 } from '@betteroffice/docx/layout';
+import { hostedFontKey } from '../../../hooks/hostedFonts';
 import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 
 export type RustFontChainsProvider = () => Record<string, number[]> | undefined;
@@ -63,7 +64,8 @@ export function useRustMeasurement(
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
-  const sourceProviderRef = useRef(fontProvider);
+  const hostedKey = hostedFontKey(fontProvider);
+  const sourceHostedKeyRef = useRef(hostedKey);
   const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
   // The latest font requirement for each key a layout of this document asked
@@ -86,12 +88,12 @@ export function useRustMeasurement(
         const engine = textEngine ?? (await getRustTextEngine());
         if (cancelled) return;
         let source = sourceRef.current;
-        if (sourceEngineRef.current !== engine || sourceProviderRef.current !== fontProvider) {
+        if (sourceEngineRef.current !== engine || sourceHostedKeyRef.current !== hostedKey) {
           releaseSourceRef.current?.();
           source = null;
           sourceRef.current = null;
           sourceEngineRef.current = engine;
-          sourceProviderRef.current = fontProvider;
+          sourceHostedKeyRef.current = hostedKey;
           fedFontSourceRef.current = null;
           latestFontChainsRef.current = {};
           requiredRef.current = new Map();
@@ -131,7 +133,7 @@ export function useRustMeasurement(
     return () => {
       cancelled = true;
     };
-  }, [document, textEngine, fontProvider]);
+  }, [document, textEngine, hostedKey]);
 
   // A replaced or unmounted editor may free the session behind `textEngine`: font loads and
   // layout passes its source still has pending end with it.

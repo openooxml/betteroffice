@@ -870,9 +870,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   ref
 ) {
   const props = useDocxFileAliases(aliasedProps);
+  const hostedFamilies = props.fonts?.map(font => font.family.trim().toLowerCase()).sort().join('\n') ?? '';
   const measurementFontProvider = useMemo(
-    () => hostedFontProvider(props.measurementFontProvider, props.fonts),
-    [props.measurementFontProvider, props.fonts]
+    () => hostedFontProvider(props.measurementFontProvider, hostedFamilies ? props.fonts : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.measurementFontProvider, hostedFamilies]
   );
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
