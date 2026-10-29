@@ -15,6 +15,7 @@ ooxml-opc = { package = "betteroffice-opc", path = "../crates/ooxml-opc" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "../crates/pptx-parse" }
 pptx-raster = { package = "betteroffice-pptx-raster", path = "../crates/pptx-raster", features = ["fuzzing"] }
 pptx-render = { package = "betteroffice-pptx-render", path = "../crates/pptx-render", features = ["fuzzing"] }
+serde = "1"
 serde_json = "1"
 xlsx-ops = { package = "betteroffice-xlsx-ops", path = "../crates/xlsx-ops", features = ["fuzzing"] }
 

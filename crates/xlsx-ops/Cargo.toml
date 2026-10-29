@@ -20,7 +20,7 @@ fuzzing = []
 [dependencies]
 quick-xml = "0.41"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 xlsx-model.workspace = true
 xlsx-calc.workspace = true
 

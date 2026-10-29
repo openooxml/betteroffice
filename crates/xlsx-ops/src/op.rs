@@ -450,9 +450,120 @@ impl<'de, M: serde::de::MapAccess<'de>> serde::Deserializer<'de> for TaggedDeser
     }
 }
 
+enum Captured {
+    Null,
+    Bool(bool),
+    U64(u64),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Seq(Vec<Captured>),
+    Map(Vec<(String, Captured)>),
+}
+
+impl<'de> Deserialize<'de> for Captured {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Captured;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Captured::Null)
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(Captured::Null)
+            }
+
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                Captured::deserialize(deserializer)
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(Captured::Bool(value))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(Captured::U64(value))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(Captured::I64(value))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(Captured::F64(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Captured::String(value.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(Captured::String(value))
+            }
+
+            fn visit_seq<S: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: S,
+            ) -> Result<Self::Value, S::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element::<Captured>()? {
+                    values.push(value);
+                }
+                Ok(Captured::Seq(values))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut values = Vec::new();
+                while let Some(entry) = map.next_entry::<String, Captured>()? {
+                    values.push(entry);
+                }
+                Ok(Captured::Map(values))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl Serialize for Captured {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Null => serializer.serialize_unit(),
+            Self::Bool(value) => serializer.serialize_bool(*value),
+            Self::U64(value) => serializer.serialize_u64(*value),
+            Self::I64(value) => serializer.serialize_i64(*value),
+            Self::F64(value) => serializer.serialize_f64(*value),
+            Self::String(value) => serializer.serialize_str(value),
+            Self::Seq(values) => values.serialize(serializer),
+            Self::Map(values) => {
+                use serde::ser::SerializeMap;
+
+                let mut map = serializer.serialize_map(Some(values.len()))?;
+                for (key, value) in values {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
 enum Body<'de> {
-    Map(Vec<(std::borrow::Cow<'de, str>, Box<serde_json::value::RawValue>)>),
-    Seq(Vec<Box<serde_json::value::RawValue>>),
+    Map(Vec<(std::borrow::Cow<'de, str>, Captured)>),
+    Seq(Vec<Captured>),
 }
 
 struct OpVisitor;
@@ -478,7 +589,7 @@ impl<'de> serde::de::Visitor<'de> for OpVisitor {
         }
 
         let mut tag = None;
-        let value = map.next_value::<Box<serde_json::value::RawValue>>()?;
+        let value = map.next_value::<Captured>()?;
         let mut fields = vec![(first, value)];
         while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
             if key == "type" {
@@ -487,7 +598,7 @@ impl<'de> serde::de::Visitor<'de> for OpVisitor {
                 }
                 tag = Some(map.next_value::<Tag>()?);
             } else {
-                let value = map.next_value::<Box<serde_json::value::RawValue>>()?;
+                let value = map.next_value::<Captured>()?;
                 fields.push((key, value));
             }
         }
@@ -500,7 +611,7 @@ impl<'de> serde::de::Visitor<'de> for OpVisitor {
             .next_element::<Tag>()?
             .ok_or_else(|| S::Error::missing_field("type"))?;
         let mut fields = Vec::new();
-        while let Some(value) = seq.next_element::<Box<serde_json::value::RawValue>>()? {
+        while let Some(value) = seq.next_element::<Captured>()? {
             fields.push(value);
         }
         decode_body(tag, Body::Seq(fields))
@@ -521,7 +632,7 @@ fn decode_body<E: serde::de::Error>(tag: Tag, body: Body<'_>) -> Result<Op, E> {
                 text.push(',');
                 text.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
                 text.push(':');
-                text.push_str(value.get());
+                text.push_str(&serde_json::to_string(&value).map_err(E::custom)?);
             }
         }
         Body::Seq(fields) => {
@@ -537,7 +648,7 @@ fn decode_body<E: serde::de::Error>(tag: Tag, body: Body<'_>) -> Result<Op, E> {
                 text.push(',');
                 text.push_str(&serde_json::to_string(key).map_err(E::custom)?);
                 text.push(':');
-                text.push_str(value.get());
+                text.push_str(&serde_json::to_string(&value).map_err(E::custom)?);
             }
         }
     }

@@ -91,6 +91,7 @@ dependencies = [
  "betteroffice-pptx-render",
  "betteroffice-xlsx-ops",
  "libfuzzer-sys",
+ "serde",
  "serde_json",
 ]
 

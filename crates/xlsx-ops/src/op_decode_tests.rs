@@ -664,6 +664,31 @@ struct Outer<T> {
     marker: String,
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Untagged<T> {
+    Operation(T),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "wrapper", rename_all = "camelCase")]
+enum Tagged<T> {
+    Operation { op: T },
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Flattened<T> {
+    #[serde(flatten)]
+    payload: Outer<T>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct FlatOp<T> {
+    marker: String,
+    #[serde(flatten)]
+    op: T,
+}
+
 mod oracle_context {
     use super::*;
 
@@ -815,6 +840,36 @@ fn assert_well_formed(input: &str) {
     }
 }
 
+fn assert_replayed(input: &str) {
+    assert_success::<Untagged<Op>, Untagged<OracleOp>>(input, |parent| match parent {
+        Untagged::Operation(op) => Untagged::Operation(op.into()),
+    });
+    assert_success::<Tagged<Op>, Tagged<OracleOp>>(
+        &format!("{{\"wrapper\":\"operation\",\"op\":{input}}}"),
+        |parent| match parent {
+            Tagged::Operation { op } => Tagged::Operation { op: op.into() },
+        },
+    );
+    assert_success::<Flattened<Op>, Flattened<OracleOp>>(
+        &format!("{{\"marker\":\"outer\",\"op\":{input}}}"),
+        |parent| Flattened {
+            payload: Outer {
+                op: parent.payload.op.into(),
+                marker: parent.payload.marker,
+            },
+        },
+    );
+    if input.starts_with('{') {
+        assert_success::<FlatOp<Op>, FlatOp<OracleOp>>(
+            &format!("{{\"marker\":\"outer\",{}}}", &input[1..input.len() - 1]),
+            |parent| FlatOp {
+                op: parent.op.into(),
+                marker: parent.marker,
+            },
+        );
+    }
+}
+
 fn assert_malformed(input: &str) {
     assert_both_err::<Op, OracleOp>(input, Op::from);
     assert_both_err::<Vec<Op>, Vec<OracleOp>>(&format!("[{input}]"), |ops| {
@@ -912,6 +967,7 @@ mod well_formed {
                 assert_well_formed(input);
                 for ordered in tag_orders(input) {
                     assert_well_formed(&ordered);
+                    assert_replayed(&ordered);
                 }
             }
         }
@@ -929,7 +985,9 @@ mod well_formed {
                         .iter()
                         .map(|name| value.get(*name).cloned().unwrap_or(Value::Null)),
                 );
-                assert_well_formed(&serde_json::to_string(&fields).unwrap());
+                let input = serde_json::to_string(&fields).unwrap();
+                assert_well_formed(&input);
+                assert_replayed(&input);
             }
         }
     }
@@ -1279,12 +1337,13 @@ mod pinned {
     }
 
     fn assert_ignored(junk: &str) {
-        for input in [
-            format!("{{\"type\":\"removeSheet\",\"index\":0,\"unknown\":{junk}}}"),
+        let direct = format!("{{\"type\":\"removeSheet\",\"index\":0,\"unknown\":{junk}}}");
+        assert_ignored_op(&direct, &Op::RemoveSheet { index: 0 });
+        for fallback in [
             format!("{{\"index\":0,\"type\":\"removeSheet\",\"unknown\":{junk}}}"),
             format!("{{\"unknown\":{junk},\"index\":0,\"type\":\"removeSheet\"}}"),
         ] {
-            assert_ignored_op(&input, &Op::RemoveSheet { index: 0 });
+            assert_malformed(&fallback);
         }
         for input in [
             format!(
@@ -1297,16 +1356,18 @@ mod pinned {
             ),
         ] {
             assert_ignored_op(&input, &cell(CellValue::Empty));
+            let fields = &input[r##"{"type":"setCell","##.len()..input.len() - 1];
+            assert_malformed(&format!("{{{fields},\"type\":\"setCell\"}}"));
         }
     }
 
     #[test]
-    fn overflowing_numbers_in_ignored_fields_are_accepted() {
+    fn overflowing_ignored_numbers_are_accepted_directly_and_rejected_in_fallback() {
         assert_ignored("1e309");
     }
 
     #[test]
-    fn lone_surrogates_in_ignored_fields_are_accepted() {
+    fn ignored_surrogates_are_accepted_directly_and_rejected_in_fallback() {
         assert_ignored(r##""\ud800""##);
         assert_ignored(r##""\udc00""##);
     }
@@ -1318,10 +1379,13 @@ mod pinned {
         assert_eq!(serde_json::from_slice::<Op>(input).unwrap(), expected);
         assert!(serde_json::from_slice::<OracleOp>(input).is_err());
         assert_canonical::<Op, OracleOp>(&expected, &Op::from);
+        let fallback = b"{\"index\":0,\"type\":\"removeSheet\",\"unknown\":\"\xff\"}";
+        assert!(serde_json::from_slice::<Op>(fallback).is_err());
+        assert!(serde_json::from_slice::<OracleOp>(fallback).is_err());
     }
 
     #[test]
-    fn excessive_nesting_in_ignored_fields_is_accepted() {
+    fn ignored_excessive_nesting_is_accepted_directly_and_rejected_in_fallback() {
         for depth in [128, 256, 512] {
             let nested = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
             assert_ignored(&nested);
@@ -1354,6 +1418,22 @@ mod malformed {
                     assert_malformed(&input);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_nested_duplicate_fields() {
+        for input in [
+            concat!(
+                r##"{"at":{"row":0,"row":1,"col":0},"type":"setCell","##,
+                r##""sheet":0,"cell":{}}"##,
+            ),
+            concat!(
+                r##"{"sheet":0,"type":"setCell","at":{"row":0,"col":0},"##,
+                r##""cell":{"value":{"kind":"empty","kind":"number","value":3.5}}}"##,
+            ),
+        ] {
+            assert_malformed(input);
         }
     }
 
@@ -1438,6 +1518,27 @@ mod malformed {
             125,
         );
 
+        let fallback = |depth| {
+            let nested = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            format!("{{\"index\":0,\"type\":\"removeSheet\",\"unknown\":{nested}}}")
+        };
+        assert_boundary::<Op>(fallback, 126);
+        assert_boundary::<Vec<Op>>(|depth| format!("[{}]", fallback(depth)), 125);
+        assert_boundary::<Ops>(|depth| format!("{{\"ops\":[{}]}}", fallback(depth)), 124);
+        assert_boundary::<Transaction>(
+            |depth| {
+                format!(
+                    "{{\"ops\":[{}],\"author\":{{\"kind\":\"user\"}}}}",
+                    fallback(depth)
+                )
+            },
+            124,
+        );
+        assert_boundary::<Outer<Op>>(
+            |depth| format!("{{\"op\":{},\"marker\":\"outer\"}}", fallback(depth)),
+            125,
+        );
+
         let cell = |depth, tag_first| {
             let nested = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
             let fields = format!(
@@ -1471,13 +1572,10 @@ mod malformed {
                 123,
             );
             assert_boundary::<Op>(|depth| cell(depth, tag_first), 124);
-            assert_boundary::<Vec<Op>>(
-                |depth| format!("[{}]", cell(depth, tag_first)),
-                if tag_first { 123 } else { 124 },
-            );
+            assert_boundary::<Vec<Op>>(|depth| format!("[{}]", cell(depth, tag_first)), 123);
             assert_boundary::<Ops>(
                 |depth| format!("{{\"ops\":[{}]}}", cell(depth, tag_first)),
-                if tag_first { 122 } else { 124 },
+                122,
             );
             assert_boundary::<Transaction>(
                 |depth| {
@@ -1486,11 +1584,11 @@ mod malformed {
                         cell(depth, tag_first)
                     )
                 },
-                if tag_first { 122 } else { 124 },
+                122,
             );
             assert_boundary::<Outer<Op>>(
                 |depth| format!("{{\"op\":{},\"marker\":\"outer\"}}", cell(depth, tag_first)),
-                if tag_first { 123 } else { 124 },
+                123,
             );
         }
         let positional = |depth| {
@@ -1501,8 +1599,8 @@ mod malformed {
             )
         };
         assert_boundary::<Op>(positional, 124);
-        assert_boundary::<Vec<Op>>(|depth| format!("[{}]", positional(depth)), 124);
-        assert_boundary::<Ops>(|depth| format!("{{\"ops\":[{}]}}", positional(depth)), 124);
+        assert_boundary::<Vec<Op>>(|depth| format!("[{}]", positional(depth)), 123);
+        assert_boundary::<Ops>(|depth| format!("{{\"ops\":[{}]}}", positional(depth)), 122);
         assert_boundary::<Transaction>(
             |depth| {
                 format!(
@@ -1510,11 +1608,11 @@ mod malformed {
                     positional(depth)
                 )
             },
-            124,
+            122,
         );
         assert_boundary::<Outer<Op>>(
             |depth| format!("{{\"op\":{},\"marker\":\"outer\"}}", positional(depth)),
-            124,
+            123,
         );
     }
 

@@ -2,4 +2,4 @@
 '@betteroffice/xlsx': patch
 ---
 
-Decodes spreadsheet operations directly for a smaller WebAssembly core. Error messages for malformed operation JSON may differ in wording or position.
+Smaller WebAssembly core and faster `applyOps`. Operation JSON whose `type` key is not first decodes more slowly. Malformed operation JSON may report different errors. Apps sending their own operation JSON across package versions should send operations as this package serializes them.
