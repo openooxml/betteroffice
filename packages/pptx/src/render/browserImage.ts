@@ -322,7 +322,7 @@ function dibBitmap(
   ) return;
   const pixelBytes = Math.ceil(width * bits / 32) * 4 * Math.abs(height);
   if (40 + pixelBytes !== bytes.length || ![0, pixelBytes].includes(data.getUint32(20, true))) return;
-  if (check) return new Uint8Array();
+  if (check) return bytes as Uint8Array<ArrayBuffer>;
   const bitmap = new Uint8Array(14 + bytes.length);
   const header = new DataView(bitmap.buffer);
   header.setUint16(0, 0x4d42, true);
