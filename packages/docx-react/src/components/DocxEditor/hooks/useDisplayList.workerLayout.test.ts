@@ -664,7 +664,7 @@ test('a retained worker query facade forwards within a document load but never t
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -768,7 +768,7 @@ test('releasing ends forwarding from a superseded worker query facade', async ()
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -865,7 +865,7 @@ test("a snapshot rebuilt after the next document starts loading keeps its own do
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -971,7 +971,7 @@ test('a new layout of the shown document after the next one starts loading keeps
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1100,7 +1100,7 @@ test('input that answers after the next document replaced its worker publishes n
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1241,7 +1241,7 @@ test('input a replaced worker rejects publishes nothing of its document', async 
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );
@@ -1347,7 +1347,7 @@ test('a failed worker input replays on the host and rejoins its query line', asy
     await preloadLayoutWasm(
       new Uint8Array(
         readFileSync(
-          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm')
+          resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
         )
       )
     );

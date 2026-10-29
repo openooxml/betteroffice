@@ -27,6 +27,10 @@ export const docxEditSchema = z.discriminatedUnion('op', [
     text: text.min(1), date: dateSchema.optional(),
   }).strict(),
   z.object({ op: z.literal('resolve_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'."), done: z.boolean().optional().describe('Defaults to true; false reopens the thread.') }).strict(),
+  z.object({
+    op: z.literal('replace_comment_text'), comment: ref.describe("Comment ID from office_outline story 'comments'."),
+    find: z.string().min(1).max(16000).describe('Literal text in that comment, case-sensitive; every occurrence is replaced.'), replace: text,
+  }).strict(),
   z.object({ op: z.literal('delete_comment'), comment: ref.describe("Comment ID from office_outline story 'comments'.") }).strict(),
   z.object({ op: z.literal('insert_paragraphs'), after: ref.optional().describe('Insert after this paragraph.'), before: ref.optional().describe('Insert before this paragraph instead, copying its paragraph style and formatting like pressing Enter at its start in Word.'), paragraphs: z.array(z.object({ text, style: style.optional() }).strict()).min(1).max(100), runFormat: z.enum(['style', 'anchor']).optional().describe("Text formatting: style (default), or anchor copies the after/before paragraph's first plain run; incompatible with list."), list: z.enum(['continue']).optional().describe('continue: after a list item, the new paragraphs join its list at its level with its style and paragraph formatting.') }).strict(),
   z.object({ op: z.literal('delete_paragraph'), paragraph: ref }).strict(),
@@ -55,6 +59,7 @@ export interface DocxEditOutcome {
   parentId?: string | null;
   done?: boolean;
   deleted?: string[];
+  replacements?: number;
   refs?: Array<string | null>;
   deletedTable?: boolean;
   rowSpan?: number;

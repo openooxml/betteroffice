@@ -457,19 +457,35 @@ test('delete_comment refuses mixed comment batches before planning any edit', as
 });
 
 for (const deleteFirst of [false, true]) {
-  test(`delete_comment refuses raw replace_comment_text input ${deleteFirst ? 'after' : 'before'} deletion`, async () => {
+  test(`delete_comment refuses replace_comment_text ${deleteFirst ? 'after' : 'before'} it in one batch`, async () => {
     const doc = await open(await fixture());
     const version = doc.list().version;
     const state = doc.session.encodeState();
     const edits: DocxAgentEdit[] = [
       { op: 'delete_comment', comment: '0' },
-      { op: 'replace_comment_text', comment: '0', text: 'Changed note.' } as unknown as DocxAgentEdit,
+      { op: 'replace_comment_text', comment: '0', find: 'Keep', replace: 'Changed' },
     ];
     const error = await refusal(doc.edit({ version, edits: deleteFirst ? edits : edits.reverse() }));
     expect(error.code).toBe('INVALID_ARGUMENT');
     expect(error.message).toContain('run it in its own docx_edit call');
     expect(doc.session.encodeState()).toEqual(state);
     expect(doc.list().version).toBe(version);
+  });
+}
+
+for (const deleteFirst of [false, true]) {
+  test(`replace_comment_text and delete_comment keep both changes in consecutive batches, ${deleteFirst ? 'deletion' : 'text edit'} first`, async () => {
+    const source = await fixture();
+    const doc = await open(source);
+    const replace: DocxAgentEdit = { op: 'replace_comment_text', comment: '2', find: 'Other', replace: 'Edited' };
+    const remove: DocxAgentEdit = { op: 'delete_comment', comment: '0' };
+    const first = await doc.edit({ version: doc.list().version, edits: [deleteFirst ? remove : replace] });
+    await doc.edit({ version: first.version, edits: [deleteFirst ? replace : remove] });
+    const bytes = await doc.export();
+    expect(await part(bytes, 'word/comments.xml')).toBe((await part(source, 'word/comments.xml'))
+      .replace(/<w:comment\b[^>]*w:id="[01]"[^>]*>[\s\S]*?<\/w:comment>/g, '').replace('Other note.', 'Edited note.'));
+    expect(await part(bytes, 'word/document.xml')).toBe(withoutComments(await part(source, 'word/document.xml'), ['0', '1']));
+    expect((await open(bytes)).list({ story: 'comments' }).items).toMatchObject([{ id: '2', text: 'Edited note.' }]);
   });
 }
 

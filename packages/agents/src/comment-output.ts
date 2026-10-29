@@ -546,20 +546,50 @@ function lastParagraph(comment: XmlElement): XmlElement | undefined {
   return comment.children.filter(element => element.name === expanded(W, 'p')).at(-1);
 }
 
-function preservesComment(saved: XmlPart, element: XmlElement, original: CommentSource['comments'][number], allowParagraphId: boolean): boolean {
+const XML_SPACE = '{http://www.w3.org/XML/1998/namespace}space';
+
+function sameExceptCommentText(left: XmlElement, right: XmlElement, paragraphIdTarget?: XmlElement): boolean {
+  const attributes = new Map(left.attributes);
+  if (left.name === expanded(W, 't') && right.name === left.name) {
+    const sourceText = right.content.join('');
+    if (attributes.get(XML_SPACE) === 'preserve' && sourceText === sourceText.trim()) {
+      if (!right.attributes.has(XML_SPACE)) attributes.delete(XML_SPACE);
+      else if (right.attributes.get(XML_SPACE) === 'default') attributes.set(XML_SPACE, 'default');
+    }
+    if (attributes.size !== right.attributes.size
+      || ![...attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
+    return ![...left.content, ...right.content].some(node => typeof node !== 'string');
+  }
+  if (left === paragraphIdTarget) attributes.delete(expanded(W14, 'paraId'));
+  if (left.name !== right.name || attributes.size !== right.attributes.size
+    || ![...attributes].every(([key, value]) => right.attributes.get(key) === value)) return false;
+  const significant = (element: XmlElement) => element.content.filter(node => typeof node !== 'string' || !/^[\t\r\n ]*$/.test(node));
+  const content = significant(left);
+  const other = significant(right);
+  return content.length === other.length && content.every((node, index) => {
+    const kept = other[index];
+    if (typeof node === 'string' || typeof kept === 'string') return node === kept;
+    if ('markup' in node || 'markup' in kept) return 'markup' in node && 'markup' in kept && node.markup === kept.markup;
+    return sameExceptCommentText(node, kept, paragraphIdTarget);
+  });
+}
+
+function preservesComment(saved: XmlPart, element: XmlElement, original: CommentSource['comments'][number], allowParagraphId: boolean, allowText = false): boolean {
   const fragment = saved.xml.slice(element.start, element.end);
   if (fragment === original.xml) return true;
+  if (allowText && sameExceptCommentText(element, original.element)) return true;
   if (!allowParagraphId) return false;
   const before = lastParagraph(original.element);
   const after = lastParagraph(element);
   const paraId = after?.attributes.get(expanded(W14, 'paraId'));
   if (!before || before.attributes.has(expanded(W14, 'paraId')) || !paraId) return false;
+  if (allowText && sameExceptCommentText(element, original.element, after)) return true;
   const end = before.contentStart - original.element.start;
   const at = end - (original.xml[end - 2] === '/' ? 2 : 1);
   return fragment === `${original.xml.slice(0, at)} w14:paraId="${paraId}"${original.xml.slice(at)}`;
 }
 
-export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], baseline?: Uint8Array, deleted: ReadonlySet<string> = new Set(), previous?: readonly CommentOutput[], identities: ReadonlyMap<string, DocxCommentSaveIdentity> = new Map()): Promise<void> {
+export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], textEdited: ReadonlySet<string> = new Set(), baseline?: Uint8Array, deleted: ReadonlySet<string> = new Set(), previous?: readonly CommentOutput[], identities: ReadonlyMap<string, DocxCommentSaveIdentity> = new Map()): Promise<void> {
   const zip = await JSZip.loadAsync(bytes);
   const rels = await relationships(zip, DOCUMENT_RELS);
   requireOutput(new Set(rels.map(rel => rel.id)).size === rels.length, 'Saving comments would create duplicate relationship ids.');
@@ -601,9 +631,9 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   for (const original of source.comments) {
     const id = original.element.attributes.get(expanded(W, 'id'))!;
     if (deleted.has(id)) continue;
-    const index = fresh.findIndex(element => preservesComment(saved, element, original, paragraphIds.has(original.element.attributes.get(expanded(W, 'id')))));
+    const index = fresh.findIndex(element => preservesComment(saved, element, original, paragraphIds.has(id), textEdited.has(id)));
     requireOutput(index !== -1, 'Saving comments would rewrite an existing comment.');
-    if (paragraphIds.has(id)) { changedOriginal.push(original.element); changedSaved.push(fresh[index]); }
+    if (paragraphIds.has(id) || textEdited.has(id)) { changedOriginal.push(original.element); changedSaved.push(fresh[index]); }
     fresh.splice(index, 1);
   }
   if (removed.length) {

@@ -1,6 +1,6 @@
 # BetterOffice native viewer
 
-This experimental macOS-first app paints BetterOffice DOCX, XLSX, and PPTX display lists with Vello.
+This macOS-first app paints BetterOffice DOCX, XLSX, and PPTX display lists with Vello.
 
 From this directory, render and compare the first DOCX page:
 

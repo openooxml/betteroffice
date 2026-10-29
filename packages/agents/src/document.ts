@@ -1,9 +1,10 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveBaseline, type DocxCommentSaveIdentity, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
+  unknownMatchError,
   type DocumentOptions,
   type ExactTextEdit,
   type GrepMatch,
@@ -155,6 +156,7 @@ export class DocxAgentDocument {
   private commentSaveIdentities = new Map<string, DocxCommentSaveIdentity>();
   private commentSaveBaseline?: DocxCommentSaveBaseline;
   private commentSaveBaselineVersion?: number;
+  private readonly textEditedComments = new Set<string>();
 
   constructor(
     readonly session: YrsSession,
@@ -352,7 +354,7 @@ export class DocxAgentDocument {
       if ('oldText' in inputEdit) edit = inputEdit;
       else {
         const target = this.matches.get(inputEdit.match);
-        if (!target) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+        if (!target) throw unknownMatchError(inputEdit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
         edit = { ...target, newText: inputEdit.newText };
       }
       const p = this.get(edit.ref);
@@ -405,14 +407,14 @@ export class DocxAgentDocument {
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     const held = this.pending(id);
-    if (options.tracked && (!options.date || !Number.isFinite(Date.parse(options.date)))) {
+    if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const draft = await this.fork();
     try {
       this.checkPending(held);
       const vector = draft.encodeStateVector();
-      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date! } : undefined);
+      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined);
       this.checkPending(held);
       this.session.addUndoBoundary();
       try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
@@ -657,8 +659,8 @@ export class DocxAgentDocument {
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
-        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment')) {
-          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment');
+        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text' || edit.op === 'delete_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text' || edit.op === 'delete_comment');
           try {
             const deletingComments = edits.some(edit => edit.op === 'delete_comment');
             const source = await this.checkCommentPart(deletingComments);
@@ -695,7 +697,8 @@ export class DocxAgentDocument {
               resetCommentBaseline = true;
             }
             await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline, deleted, deletingComments ? previous : undefined, identities);
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })),
+              new Set([...this.textEditedComments, ...edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])]), baseline, deleted, deletingComments ? previous : undefined, identities);
             if (identities) commentIdentities = await readSavedCommentIdentities(source, saved, comments, identities);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
@@ -708,6 +711,7 @@ export class DocxAgentDocument {
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
+        for (const edit of edits) if (edit.op === 'replace_comment_text') this.textEditedComments.add(edit.comment);
         if (deleted) this.deletedComments = deleted;
         if (commentIdentities) this.commentSaveIdentities = commentIdentities;
         if (commentBaseline) {
@@ -769,6 +773,10 @@ export class DocxAgentDocument {
         return { result: { ref: target.ref } };
       };
     }
+    if (edit.op === 'replace_comment_text') {
+      await this.checkCommentPart();
+      return draft => ({ result: { comment: edit.comment, replacements: replaceCommentText(draft, edit.comment, edit.find, edit.replace) } });
+    }
     if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
       const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
       const date = edit.op === 'reply_comment' ? edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') : undefined;
@@ -787,7 +795,7 @@ export class DocxAgentDocument {
     }
     if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
-      if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+      if (!held) throw unknownMatchError(edit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const start = held.start ?? 0;
