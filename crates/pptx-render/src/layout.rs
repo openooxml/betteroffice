@@ -10047,13 +10047,13 @@ mod tests {
             ..TextBody::default()
         };
         let (small_elapsed, _) =
-            best_of_three(|| text_columns_slide(make_body("x".repeat(25_000))));
+            best_of_three(|| text_columns_slide(make_body("x".repeat(12_500))));
         let (large_elapsed, rendered) =
             best_of_three(|| text_columns_slide(make_body("x".repeat(50_000))));
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 2.8,
-            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         let text = "x".repeat(50_000);
         let lines = text_columns_lines(&rendered);
@@ -10090,13 +10090,13 @@ mod tests {
             ..TextBody::default()
         };
         let (small_elapsed, _) =
-            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(12_500))));
+            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(6_250))));
         let (large_elapsed, rendered) =
             best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(25_000))));
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 2.8,
-            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         let text = "a\u{5d0}".repeat(25_000);
         let lines = text_columns_lines(&rendered);
@@ -11042,7 +11042,7 @@ mod tests {
                 });
             (current, baseline)
         };
-        let (small_current, small_baseline) = make_shapes(15_000);
+        let (small_current, small_baseline) = make_shapes(7_500);
         let (small_elapsed, _) = best_of_three(|| {
             autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default())
         });
@@ -11052,8 +11052,8 @@ mod tests {
         });
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 2.8,
-            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         assert!(edited.is_empty());
     }
@@ -11369,7 +11369,7 @@ mod tests {
             let graphics = autofit_custom_graphics(path_count, stop_count);
             edited_autofit_session_with_graphics("Untouched", false, false, &graphics, "!")
         };
-        let (small_session, _) = build(750, 25_000);
+        let (small_session, _) = build(375, 12_500);
         let (session, story) = build(1_500, 50_000);
         assert_eq!(session.story(&story.id).unwrap().length, story.length + 1);
         let ShapeNode::Shape(shape) = find_node(&session.package().slides[0].shapes, 2).unwrap()
@@ -11395,8 +11395,8 @@ mod tests {
         let (large_elapsed, saved) = best_of_three(|| renderer.save(&session).unwrap());
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 2.8,
-            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         let reopened = pptx_parse::parse_pptx(&saved).unwrap();
         let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
