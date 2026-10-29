@@ -3,9 +3,9 @@ use std::ops::Bound::{Excluded, Unbounded};
 
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
-    Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DateSystem, DefinedName,
-    Fill, Font, FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart,
-    SheetFormat, SheetId, Table, Theme, VAlign, Workbook, Xf,
+    Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DefinedName, Fill, Font,
+    FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart, SheetFormat,
+    SheetId, Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
@@ -13,8 +13,9 @@ use super::growth::Growth;
 use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 use crate::authority::snapshot::{
-    Codec, ConditionalFormatSnapshot, LegacyConditionalFormatSnapshot, Released, released,
-    released_conditional_formats, sets_italic, write_released_conditional_formats,
+    CalculationSettings, Codec, ConditionalFormatSnapshot, LegacyConditionalFormatSnapshot,
+    Released, released, released_conditional_formats, sets_italic,
+    write_released_conditional_formats,
 };
 
 const HEADER: u8 = 0;
@@ -180,6 +181,7 @@ fn global_counts(model: &Workbook) -> [usize; 10] {
     let Workbook {
         sheets,
         date_system: _,
+        full_precision: _,
         defined_names,
         shared_strings,
         styles,
@@ -239,6 +241,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
     let Workbook {
         sheets,
         date_system,
+        full_precision,
         defined_names: _,
         shared_strings: _,
         styles: _,
@@ -274,10 +277,7 @@ fn write_header(w: &mut Writer, model: &Workbook) -> SnapshotResult<()> {
     } else {
         HEADER
     });
-    w.u8(match date_system {
-        DateSystem::V1900 => 0,
-        DateSystem::V1904 => 1,
-    });
+    CalculationSettings(*date_system, Some(*full_precision)).write(w);
     w.var_usize(records);
     w.var_usize(cells);
     for count in counts {
@@ -558,6 +558,7 @@ impl MetadataCursor {
 
 pub(crate) struct ModelSnapshotBuilder {
     model: Workbook,
+    full_precision: Option<bool>,
     conditional_formats: std::vec::IntoIter<Vec<xlsx_model::ConditionalFormatting>>,
     auto_filters: std::vec::IntoIter<Option<xlsx_model::AutoFilter>>,
     ordinal: u64,
@@ -579,6 +580,10 @@ pub(crate) struct ModelSnapshotBuilder {
 }
 
 impl ModelSnapshotBuilder {
+    pub(crate) fn full_precision_setting(&self) -> Option<bool> {
+        self.full_precision
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_string_record(&self) -> Option<(u64, usize)> {
         self.decode
@@ -589,6 +594,7 @@ impl ModelSnapshotBuilder {
     pub(crate) fn new() -> Self {
         Self {
             model: Workbook::default(),
+            full_precision: None,
             conditional_formats: Vec::new().into_iter(),
             auto_filters: Vec::new().into_iter(),
             ordinal: 0,
@@ -1115,11 +1121,10 @@ impl ModelSnapshotBuilder {
         conditional: bool,
         auto_filters: bool,
     ) -> SnapshotResult<()> {
-        self.model.date_system = match r.u8()? {
-            0 => DateSystem::V1900,
-            1 => DateSystem::V1904,
-            _ => return Err(SnapshotError::new("invalid snapshot date system")),
-        };
+        let CalculationSettings(date, precision) = CalculationSettings::read(r)?;
+        self.model.date_system = date;
+        self.model.full_precision = precision.unwrap_or(true);
+        self.full_precision = precision;
         self.remaining_records = r
             .var_usize()?
             .checked_sub(1)
@@ -2197,6 +2202,7 @@ fn read_chart_ref(r: &mut Reader<'_>) -> SnapshotResult<ChartRef> {
 
 #[cfg(test)]
 mod tests {
+    use xlsx_model::DateSystem;
     use xlsx_model::{CellRange, CellValue, ErrorValue, Stylesheet};
 
     use super::*;
@@ -2494,6 +2500,23 @@ mod tests {
             chunks.push(chunk);
         }
         chunks
+    }
+
+    #[test]
+    fn precision_as_displayed_survives_model_snapshots() {
+        for date_system in [DateSystem::V1900, DateSystem::V1904] {
+            for full_precision in [true, false] {
+                let model = Workbook {
+                    date_system,
+                    full_precision,
+                    ..Workbook::default()
+                };
+                let budget = SnapshotBudget::new(3, 1024).unwrap();
+                let chunks = encode(&model, budget);
+                assert_eq!(decode(&chunks), model);
+                assert_eq!(advance_all(&chunks, budget).unwrap(), model);
+            }
+        }
     }
 
     fn decode(chunks: &[Vec<u8>]) -> Workbook {
@@ -3370,6 +3393,7 @@ mod tests {
         Workbook {
             sheets: vec![sheet, Sheet::new(""), Sheet::new("Last")],
             date_system: DateSystem::V1904,
+            full_precision: true,
             defined_names: vec![
                 DefinedName {
                     name: String::new(),
@@ -3467,6 +3491,7 @@ mod tests {
         let model = Workbook {
             sheets: vec![Sheet::new("Empty"), sheet, Sheet::new("Tail")],
             date_system: DateSystem::V1900,
+            full_precision: true,
             defined_names: Vec::new(),
             shared_strings: Vec::new(),
             styles: Stylesheet::default(),
@@ -3540,6 +3565,7 @@ mod tests {
         let model = Workbook {
             sheets: vec![Sheet::new("Empty"), sheet, Sheet::new("Gap"), tail],
             date_system: DateSystem::V1900,
+            full_precision: true,
             defined_names: Vec::new(),
             shared_strings: Vec::new(),
             styles: Stylesheet::default(),
@@ -3738,6 +3764,7 @@ mod tests {
         let model = Workbook {
             sheets: Vec::new(),
             date_system: DateSystem::V1900,
+            full_precision: true,
             defined_names: Vec::new(),
             shared_strings: vec!["x".repeat(400)],
             styles: Stylesheet::default(),

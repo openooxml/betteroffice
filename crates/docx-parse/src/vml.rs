@@ -1324,7 +1324,7 @@ fn direct_image_data(shape: &XmlElement) -> Option<&XmlElement> {
         .find(|child| child.local_name() == "imagedata")
 }
 
-fn css_length_to_px(raw: Option<&str>) -> Option<f64> {
+pub(crate) fn css_length_to_px(raw: Option<&str>) -> Option<f64> {
     parse_length(raw, false)
 }
 

@@ -236,4 +236,5 @@ export interface NumberingDefinitions {
   abstractNums: AbstractNumbering[];
   /** Numbering instances */
   nums: NumberingInstance[];
+  firstPictureBullet?: { width: number; height: number };
 }
