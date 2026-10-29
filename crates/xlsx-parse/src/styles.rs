@@ -21,6 +21,14 @@ pub fn legacy_style_reads() -> u64 {
     LEGACY_STYLE_READS.get()
 }
 
+#[doc(hidden)]
+pub fn source_style_xml_markers(styles_xml: &[u8]) -> Result<Vec<u32>, ParseError> {
+    let (styles, _) = parse_stylesheet(Some(styles_xml), None)?;
+    Ok((0..styles.cell_xfs.len() as u32)
+        .filter(|&index| styles.xf_has_extra_xml(index))
+        .collect())
+}
+
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
 pub(crate) fn parse_stylesheet(
@@ -36,6 +44,7 @@ pub(crate) fn parse_stylesheet(
         None => (Stylesheet::default(), Vec::new()),
     };
     sheet.theme = theme;
+    sheet.inherit_xf_xml_markers(&Stylesheet::default());
     let legacy = (legacy_xfs != sheet.cell_xfs).then(|| {
         let mut legacy = sheet.clone();
         legacy.cell_xfs = legacy_xfs;
@@ -163,6 +172,11 @@ fn parse_style_pools(
                         taken: false,
                     });
                     if !read || transparent {
+                        if let Some(open) = markup.as_mut()
+                            && matches!(open.entry, Entry::Xf)
+                        {
+                            open.extra_xml = true;
+                        }
                         continue;
                     }
                     depth
@@ -177,8 +191,22 @@ fn parse_style_pools(
                 _ => scopes.last().map_or(0, |scope| scope.depth),
             }
         };
-        if let (Event::Start(e), Some(open)) = (&event, markup.as_mut()) {
-            open.child(e, depth)?;
+        if let Some(open) = markup.as_mut() {
+            match &event {
+                Event::Start(e) => open.child(e, depth)?,
+                Event::Comment(_) | Event::CData(_) | Event::PI(_) | Event::GeneralRef(_)
+                    if matches!(open.entry, Entry::Xf) =>
+                {
+                    open.extra_xml = true;
+                }
+                Event::Text(text)
+                    if matches!(open.entry, Entry::Xf)
+                        && !text.as_ref().iter().all(u8::is_ascii_whitespace) =>
+                {
+                    open.extra_xml = true;
+                }
+                _ => {}
+            }
         }
         match event {
             Event::Start(e) => match local_name(&e).as_slice() {
@@ -396,8 +424,14 @@ fn parse_style_pools(
                         cap(ss.cell_xfs.len())?;
                         legacy_cell_xfs.push(held_back(&x, explicit));
                         ss.cell_xfs.push(x);
-                        if let Some(open) = markup.take().filter(|open| open.plain) {
-                            plain_xfs.push((ss.cell_xfs.len() as u32 - 1, open.ids));
+                        if let Some(open) = markup.take() {
+                            let index = ss.cell_xfs.len() as u32 - 1;
+                            if open.plain {
+                                plain_xfs.push((index, open.ids));
+                            }
+                            if open.extra_xml {
+                                ss.mark_xf_extra_xml(index);
+                            }
                         }
                     }
                 }
@@ -444,6 +478,8 @@ struct Markup {
     entry: Entry,
     depth: usize,
     plain: bool,
+    extra_xml: bool,
+    xf_children: u8,
     ids: [u32; 3],
 }
 
@@ -457,6 +493,8 @@ impl Markup {
             entry,
             depth,
             plain: ids.is_some(),
+            extra_xml: matches!(entry, Entry::Xf) && !attributes_within(e, MODELED_XF_ATTRIBUTES)?,
+            xf_children: 0,
             ids: ids.unwrap_or_default(),
         })
     }
@@ -464,6 +502,22 @@ impl Markup {
     /// A descendant keeps the entry plain only as a child a save writes for a default fill or
     /// border, or a modeled alignment.
     fn child(&mut self, e: &BytesStart, depth: usize) -> Result<(), ParseError> {
+        if matches!(self.entry, Entry::Xf) && depth > self.depth {
+            let child = match local_name(e).as_slice() {
+                b"alignment" => 1,
+                b"protection" => 2,
+                _ => 0,
+            };
+            let modeled = depth == self.depth + 1
+                && self.xf_children & child == 0
+                && match local_name(e).as_slice() {
+                    b"alignment" => attributes_within(e, XF_ALIGNMENT_ATTRIBUTES)?,
+                    b"protection" => attributes_within(e, &["locked", "hidden"])?,
+                    _ => false,
+                };
+            self.xf_children |= child;
+            self.extra_xml |= !modeled;
+        }
         if !self.plain || depth <= self.depth {
             return Ok(());
         }
@@ -491,6 +545,34 @@ impl Markup {
 const DEFAULT_BORDER_EDGES: &[&[u8]] = &[b"left", b"right", b"top", b"bottom", b"diagonal"];
 
 const MODELED_ALIGNMENT: &[&str] = &["horizontal", "vertical", "wrapText", "shrinkToFit"];
+
+const XF_ALIGNMENT_ATTRIBUTES: &[&str] = &[
+    "horizontal",
+    "vertical",
+    "wrapText",
+    "shrinkToFit",
+    "textRotation",
+    "indent",
+    "relativeIndent",
+    "justifyLastLine",
+    "readingOrder",
+];
+
+const MODELED_XF_ATTRIBUTES: &[&str] = &[
+    "numFmtId",
+    "fontId",
+    "fillId",
+    "borderId",
+    "xfId",
+    "applyNumberFormat",
+    "applyFont",
+    "applyFill",
+    "applyBorder",
+    "applyAlignment",
+    "applyProtection",
+    "quotePrefix",
+    "pivotButton",
+];
 
 const PLAIN_XF_ATTRIBUTES: &[&str] = &[
     "numFmtId",
