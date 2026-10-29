@@ -1,0 +1,21 @@
+[package]
+name = "betteroffice-ooxml-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Shared tiny-skia helpers for OOXML raster backends."
+readme = "README.md"
+keywords = ["ooxml", "raster", "rendering", "png"]
+categories = ["rendering", "graphics"]
+
+[lib]
+name = "ooxml_raster"
+
+[dependencies]
+tiny-skia = "0.12"
+png = "0.18"
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true

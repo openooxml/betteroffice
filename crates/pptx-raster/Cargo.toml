@@ -18,6 +18,7 @@ name = "pptx_raster"
 fuzzing = []
 
 [dependencies]
+ooxml-raster.workspace = true
 image = { version = "0.25", default-features = false, features = [
   "bmp",
   "gif",
@@ -28,7 +29,6 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 ooxml-drawingml.workspace = true
 ooxml-text.workspace = true
-png = "0.18"
 pptx-render.workspace = true
 resvg = { version = "0.48", default-features = false }
 simplecss = "=0.2.2"

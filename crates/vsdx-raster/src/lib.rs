@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_text::{FontId, FontStore, PathCmd};
+use ooxml_raster::{encode_png, outline_path as glyph_path};
+use ooxml_text::{FontId, FontStore};
 use rustybuzz::ttf_parser;
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, IntSize, LinearGradient, Paint, Path,
@@ -194,13 +195,8 @@ fn shadow_color(value: &str) -> Option<Color> {
         8 => (&hex[..6], u8::from_str_radix(&hex[6..], 16).ok()?),
         _ => return None,
     };
-    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(digits.get(range)?, 16).ok();
-    Some(Color::from_rgba8(
-        channel(0..2)?,
-        channel(2..4)?,
-        channel(4..6)?,
-        alpha,
-    ))
+    let [red, green, blue, _] = ooxml_raster::parse_hex_rgba(digits)?;
+    Some(Color::from_rgba8(red, green, blue, alpha))
 }
 
 fn parse_color(value: &str) -> Option<Color> {
@@ -208,13 +204,7 @@ fn parse_color(value: &str) -> Option<Color> {
     if hex.len() != 6 {
         return None;
     }
-    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(hex.get(range)?, 16).ok();
-    Some(Color::from_rgba8(
-        channel(0..2)?,
-        channel(2..4)?,
-        channel(4..6)?,
-        255,
-    ))
+    ooxml_raster::parse_hex_color(hex)
 }
 
 struct Painter<'a, 'b> {
@@ -556,11 +546,7 @@ impl<'b> Painter<'_, 'b> {
         let (width, height) = (decoded.width(), decoded.height());
         let size = IntSize::from_wh(width, height)?;
         let mut data = decoded.into_raw();
-        for pixel in data.as_chunks_mut::<4>().0 {
-            let color =
-                tiny_skia::ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         Pixmap::from_vec(data, size).map(|pixmap| (pixmap, (width as f32, height as f32)))
     }
 }
@@ -594,33 +580,7 @@ fn underline_metrics(face: &Face<'_>) -> (f32, f32) {
 }
 
 fn build_path(path: &[GeometryPathCommand]) -> Option<Path> {
-    let mut builder = PathBuilder::new();
-    for command in path {
-        match command {
-            GeometryPathCommand::Move { x, y } => builder.move_to(*x as f32, *y as f32),
-            GeometryPathCommand::Line { x, y } => builder.line_to(*x as f32, *y as f32),
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(*cpx as f32, *cpy as f32, *x as f32, *y as f32);
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => builder.cubic_to(
-                *cp1x as f32,
-                *cp1y as f32,
-                *cp2x as f32,
-                *cp2y as f32,
-                *x as f32,
-                *y as f32,
-            ),
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder.finish()
+    ooxml_raster::path_from_commands(path, |x, y| (x as f32, y as f32))
 }
 
 fn solid_paint(color: Color) -> Paint<'static> {
@@ -681,43 +641,6 @@ fn stroke_paint(stroke: &Option<VsStroke>) -> Option<(Paint<'_>, Stroke)> {
             ..Stroke::default()
         },
     ))
-}
-
-fn glyph_path(cmds: &[PathCmd]) -> Option<Path> {
-    let mut builder = PathBuilder::new();
-    for cmd in cmds {
-        match *cmd {
-            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
-            PathCmd::LineTo { x, y } => builder.line_to(x, y),
-            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
-            PathCmd::Close => builder.close(),
-        }
-    }
-    builder.finish()
-}
-
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(data)
 }
 
 #[cfg(test)]
@@ -1036,5 +959,32 @@ mod tests {
             "the registered face must reach the glyph painter"
         );
         ink_bounds(&registered);
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn colors_keep_separate_shadow_alpha_grammar() {
+        assert!(parse_color("#abcdef").is_some());
+        assert!(shadow_color("#abcdef").is_some());
+        assert_eq!(
+            shadow_color("#abcdef01"),
+            Some(Color::from_rgba8(171, 205, 239, 1))
+        );
+        for value in [
+            "#abc",
+            "#abcd",
+            "transparent",
+            "rgb(1,2,3)",
+            "abcdef",
+            "#gggggg",
+        ] {
+            assert!(parse_color(value).is_none());
+            assert!(shadow_color(value).is_none());
+        }
+        assert!(parse_color("#abcdef01").is_none());
     }
 }
