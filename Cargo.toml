@@ -11,6 +11,9 @@ homepage = "https://betteroffice.dev"
 repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
+quick-xml = "0.41"
+wasm-bindgen = "0.2"
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "crates/ooxml-font-preflight", version = "0.5.1" }
 libm = "=0.2.15"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
@@ -61,6 +64,9 @@ opt-level = 3
 
 [profile.release.package.betteroffice-docx-parse]
 opt-level = 3
+
+[profile.release.package.betteroffice-ooxml-font-preflight]
+opt-level = "z"
 
 # The per-keystroke hot path lives in docx-edit (engine session, frame
 # encoding), ooxml-text (shaping/measurement), and yrs (text CRDT ops); the

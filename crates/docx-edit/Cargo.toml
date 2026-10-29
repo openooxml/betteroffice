@@ -54,4 +54,5 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
+ooxml-font-preflight.workspace = true
 docx-layout = { workspace = true, features = ["test-support"] }

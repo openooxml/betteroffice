@@ -63,6 +63,8 @@ export interface FontFace {
   italic?: boolean
 }
 
+export declare function fontPreflight(bytes: Buffer): string
+
 export interface ImageResource {
   relationshipId: string
   data: Buffer

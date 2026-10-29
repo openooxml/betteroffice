@@ -25,6 +25,10 @@ const assets: Asset[] = [
     from: 'src/wasm/generated/parse/docx_parse_bg.wasm',
     to: 'dist/generated/parse/docx_parse_bg.wasm',
   },
+  {
+    from: 'src/wasm/generated/preflight/docx_preflight_bg.wasm',
+    to: 'dist/generated/preflight/docx_preflight_bg.wasm',
+  },
 ];
 
 for (const { from, to } of assets) {

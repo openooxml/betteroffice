@@ -11,6 +11,13 @@ fn error(reason: impl ToString) -> Error {
     Error::from_reason(reason.to_string())
 }
 
+#[napi(js_name = "fontPreflight")]
+pub fn font_preflight(bytes: Buffer) -> napi::Result<String> {
+    ooxml_font_preflight::docx_font_preflight(&bytes)
+        .map(|result| result.to_json())
+        .map_err(error)
+}
+
 fn origin(value: &str) -> Result<EditOrigin> {
     match value {
         "local" => Ok(EditOrigin::Local),

@@ -104,6 +104,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-ooxml-diff",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash",
@@ -203,6 +204,16 @@ dependencies = [
  "quick-xml",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "quick-xml",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

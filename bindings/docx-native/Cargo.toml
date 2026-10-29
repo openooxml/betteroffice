@@ -12,6 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+ooxml-font-preflight = { package = "betteroffice-ooxml-font-preflight", path = "../../crates/ooxml-font-preflight" }
 betteroffice-docx = { path = "../../crates/betteroffice-docx", features = ["raster"] }
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
