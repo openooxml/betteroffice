@@ -291,7 +291,6 @@ export interface PresentationCommandReadResult extends PresentationCommandAck {
 }
 
 export type PresentationCommandMethods = FontDecoderMethods & {
-  fontFamilies(bytes: ArrayBuffer, wasm?: ArrayBuffer | WebAssembly.Module): string[];
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -329,7 +328,6 @@ export interface PresentationCommandClient {
 
 export const PRESENTATION_COMMAND_METHODS = {
   decodeFontFace: true,
-  fontFamilies: true,
   openCommandEditor: true,
   command: true,
   thumbnailFrame: true,

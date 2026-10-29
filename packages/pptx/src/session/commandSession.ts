@@ -4,7 +4,6 @@ import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
 import { wasmAssetUrl } from '../wasm/asset';
-import { presentationFontPreparations } from './fontPreparation';
 import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
@@ -144,8 +143,7 @@ export function createPptxWorkerSession(
       transport.close();
     },
   };
-  const opening = createSharedPresentationCommandClient(bytes, input, monitored,
-    preparedWorker ? undefined : presentationFontPreparations.get(options), ended).then((opened) => {
+  const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
     if (disposed) offClientFailure();

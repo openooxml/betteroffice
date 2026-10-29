@@ -1,5 +1,4 @@
 import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
-import { presentationFontFamilies } from '../fontFamilies';
 import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
@@ -14,7 +13,7 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, decodeFontFace, initWasm, inspectPresentation, openPresentation, presentationMetadata, presentationStoryFormatting,
+  decodeTiffImage, decodeFontFace, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
@@ -1313,12 +1312,6 @@ export function registerPresentationCommandHandlers(
   }
 
   const handlers = {
-    async fontFamilies(_, bytes, wasm) {
-      if (disposed) throw new Error('Presentation command session is disposed');
-      await (options.initWasm ?? initWasm)(wasm);
-      if (disposed) throw new Error('Presentation command session is disposed');
-      return presentationFontFamilies(inspectPresentation(new Uint8Array(bytes), { includeMedia: false }));
-    },
     async decodeFontFace(_, bytes, input, wasm) {
       if (disposed) throw new Error('Presentation command session is disposed');
       await (options.initWasm ?? initWasm)(wasm);
@@ -1596,7 +1589,6 @@ export function registerPresentationCommandHandlers(
   }
 
   return { handlers, policies: {
-    fontFamilies: { lane: 'interactive' },
     decodeFontFace: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',

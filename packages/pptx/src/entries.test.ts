@@ -5,13 +5,13 @@ import * as collaboration from './collaboration';
 
 const SHIPPED_ROOT_VALUES = [
   'CollaborationError', 'CollaborationProvider', 'PRESENCE_LABEL_DURATION_MS', 'PptxExportError', 'StaleProposalError',
-  'decodePresentationImage', 'exportPptxMarkdown', 'exportPptxStructured', 'initWasm', 'inspectPresentation',
+  'decodeFontFace', 'decodePresentationImage', 'exportPptxMarkdown', 'exportPptxStructured', 'initWasm', 'inspectPresentation',
   'isProposalsAvailable', 'isWasmAvailable', 'needsElementDecode', 'openPresentation', 'paintSlide',
   'presenceColorForClientId', 'presentationImageBlob', 'renderPptxMarkdown', 'sizeCanvasForSlide', 'slideToPng', 'wasmVersion',
 ];
 
 const STATIC_EDITOR_INTERNALS = ['PptxPeerNotReadyError', 'PptxWorkerEditorDisposedError', 'openPresentationSession',
-  'createPptxWorkerEditorSession', 'bindPresentationFontPreparation', 'presentationFontFamilies'];
+  'createPptxWorkerEditorSession'];
 
 test('root keeps every shipped handle export', () => {
   for (const name of SHIPPED_ROOT_VALUES) expect(pptx).toHaveProperty(name);

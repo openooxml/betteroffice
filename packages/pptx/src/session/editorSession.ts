@@ -10,7 +10,6 @@ import {
 import { presentationEditPeerInternals } from './editPeerInternals';
 import { peerHydrationError } from './editorPeerHydrationError';
 import type { PresentationSessionState } from './methods';
-import { presentationFontPreparations, type PresentationFontPreparation } from './fontPreparation';
 import {
   PptxPeerHydrationError, PptxPeerNotReadyError, PptxWorkerEditorCollaborationError,
   PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
@@ -55,12 +54,12 @@ export interface PptxWorkerEditorSession {
 }
 
 export function createPptxWorkerEditorSession(
-  bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions = {},
+  bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions = {}
 ): PptxWorkerEditorSession {
   preflight(options);
   const transport = createWorkerTransport(options.worker ? options.worker() :
     new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
-  return createPresentationEditorSession(bytes, options, transport, presentationFontPreparations.get(options));
+  return createPresentationEditorSession(bytes, options, transport);
 }
 
 function preflight(options: PptxWorkerEditorOptions): void {
@@ -75,8 +74,7 @@ function ownFonts(faces: PptxWorkerEditorOptions['fonts']) {
 }
 
 export function createPresentationEditorSession(
-  bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions, transport: SessionTransport,
-  prepareFonts?: PresentationFontPreparation,
+  bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions, transport: SessionTransport
 ): PptxWorkerEditorSession {
   preflight(options);
   let connection: ReturnType<typeof createPresentationEditorClient>;
@@ -88,12 +86,7 @@ export function createPresentationEditorSession(
       : new Uint8Array(bytes).slice();
     peerOptions = { fonts: ownFonts(options.fonts), fallbackFonts: ownFonts(options.fallbackFonts),
       initialUpdate: options.initialUpdate?.slice() };
-    connection = createPresentationEditorClient(source, { ...options, ...peerOptions }, transport,
-      prepareFonts && (async (runtime, families) => {
-        const fonts = await prepareFonts(runtime, families);
-        if (fonts !== undefined) peerOptions = { ...peerOptions, fonts: ownFonts(fonts) };
-        return fonts;
-      }));
+    connection = createPresentationEditorClient(source, { ...options, ...peerOptions }, transport);
   } catch (cause) {
     try { transport.close(); } catch {}
     throw cause;

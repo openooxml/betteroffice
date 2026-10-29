@@ -44,12 +44,10 @@
     "@betteroffice/pptx-i18n": "workspace:*"
   },
   "peerDependencies": {
-    "@betteroffice/fonts": "workspace:^0",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
-    "@betteroffice/fonts": "workspace:*",
     "@happy-dom/global-registrator": "^21.0.4",
     "@testing-library/react": "^16.0.0",
     "@types/bun": "^1.4.2",
@@ -61,9 +59,6 @@
     "typescript": "^6.0.3"
   },
   "license": "Apache-2.0",
-  "peerDependenciesMeta": {
-    "@betteroffice/fonts": { "optional": true }
-  },
   "homepage": "https://betteroffice.dev/",
   "repository": {
     "type": "git",

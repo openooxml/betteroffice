@@ -1,12 +1,8 @@
 ---
 "@betteroffice/fonts": patch
-"@betteroffice/docx": patch
 "@betteroffice/docx-react": patch
-"@betteroffice/pptx": patch
 "@betteroffice/pptx-react": patch
-"@betteroffice/xlsx": patch
 "@betteroffice/xlsx-react": patch
-"@betteroffice/vsdx": patch
 "@betteroffice/demo": patch
 ---
 

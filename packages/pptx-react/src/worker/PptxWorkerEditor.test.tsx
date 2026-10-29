@@ -4,7 +4,6 @@ import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:
 import { StrictMode } from 'react';
 import * as pptx from '@betteroffice/pptx';
 import * as pptxWorker from '@betteroffice/pptx/worker';
-import * as defaultFonts from '../defaultFonts';
 import type { DeckSnapshot, SlideDisplayList, StorySnapshot } from '@betteroffice/pptx';
 import type {
   PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorSession,
@@ -149,10 +148,9 @@ test('dispatches_worker_sessions_and_explicit_local_fallbacks', async () => {
   const worker = open(value);
   const viewer = spyOn(presentationSessionOpener, 'open').mockRejectedValue(new Error('viewer sentinel'));
   const main = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
-  const fonts = spyOn(defaultFonts, 'prepareDefaultFonts').mockResolvedValue([]);
   const error = new Error('local sentinel');
   const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw error; });
-  restorers.push(() => viewer.mockRestore(), () => main.mockRestore(), () => fonts.mockRestore(), () => local.mockRestore());
+  restorers.push(() => viewer.mockRestore(), () => main.mockRestore(), () => local.mockRestore());
   const view = render(<PptxEditor legacySyncApi fonts={[]} file={file} clientId={42} experimentalWorkerOpen />);
   await waitFor(() => expect(worker).toHaveBeenCalledTimes(1));
   expect(main).not.toHaveBeenCalled();

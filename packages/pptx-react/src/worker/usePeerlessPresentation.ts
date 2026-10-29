@@ -1,6 +1,5 @@
 import {
   createPptxWorkerSession, presentationSharedInputs, PRESENTATION_COMMAND_ADMISSION, PptxWorkerEditorDisposedError,
-  bindPresentationFontPreparation,
   PptxWorkerEditorFailedError,
 } from '@betteroffice/pptx/worker';
 import { sizeCanvasForSlide } from '@betteroffice/pptx';
@@ -15,7 +14,6 @@ import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
 import { installFonts, useStableFonts } from './peerlessFonts';
-import { prepareDefaultFonts } from '../defaultFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
@@ -380,19 +378,12 @@ export function usePeerlessPresentation(
       if (dirty.get(slideId) === generation) dirty.delete(slideId);
     }
 
-    let preparedFonts = fonts;
     try {
-      session = peerlessSessionOpener.open(props.file, bindPresentationFontPreparation({
+      session = peerlessSessionOpener.open(props.file, {
         fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      }, async (runtime, families) => {
-        if (fonts.length) { await fontsReady; return undefined; }
-        const prepared = await prepareDefaultFonts(runtime, families, warnFonts);
-        await installFonts(prepared, installedFonts, current, warnFonts);
-        preparedFonts = prepared;
-        return prepared;
-      }));
+      });
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
@@ -569,7 +560,7 @@ export function usePeerlessPresentation(
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            const recovering = peerlessSessionOpener.open(source, { fonts: preparedFonts,
+            const recovering = peerlessSessionOpener.open(source, { fonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {

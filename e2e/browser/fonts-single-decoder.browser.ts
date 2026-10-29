@@ -43,22 +43,22 @@ async function painted(canvas: Locator): Promise<boolean> {
   });
 }
 
-for (const { format, editorFonts } of [
-  { format: 'docx', editorFonts: false },
-  { format: 'pptx', editorFonts: false },
-  { format: 'pptx', editorFonts: true },
-] as const) {
-  test(`${format}${editorFonts ? ' with editor font preparation' : ''} paints packed Latin and Devanagari with only its engine decoder`, async ({ page }) => {
-    test.setTimeout(60_000);
+for (const format of ['docx', 'pptx'] as const) {
+  test(`${format} paints with packed fonts and only its engine decoder`, async ({ page }) => {
+    test.setTimeout(90_000);
     const requests: string[] = [];
     const errors: string[] = [];
     const warnings: string[] = [];
-    page.on('request', request => requests.push(request.url()));
+    let lastRequestStarted = Date.now();
+    page.on('request', request => {
+      lastRequestStarted = Date.now();
+      requests.push(request.url());
+    });
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => {
       if (message.type() === 'warning' && /font.*fail|fontRegistry.*falling back/i.test(message.text())) warnings.push(message.text());
     });
-    await page.goto(`/?format=${format}${editorFonts ? '&testPptxEditorFonts=1' : ''}`);
+    await page.goto(`/?format=${format}`);
     await page.locator('input[type=file]').last().setInputFiles({
       name: `single-decoder.${format}`, mimeType: 'application/octet-stream',
       buffer: format === 'docx' ? await documentBytes() : await presentationBytes(),
@@ -74,8 +74,12 @@ for (const { format, editorFonts } of [
         .toHaveCount(1, { timeout: 45_000 });
     }
     await expect.poll(() => painted(canvas), { timeout: 30_000 }).toBe(true);
+    const paintedAt = Date.now();
+    await expect.poll(() => Date.now() - Math.max(paintedAt, lastRequestStarted), { timeout: 30_000 }).toBeGreaterThanOrEqual(3_000);
     expect(requests.some(url => new URL(url).pathname.endsWith('.zst'))).toBe(true);
-    for (const face of ['Carlito-Regular', 'Carlito-Bold', 'NotoSansDevanagari-Regular']) {
+    const faces = format === 'docx'
+      ? ['Carlito-Regular', 'Carlito-Bold', 'NotoSansDevanagari-Regular'] : ['LiberationSans-Regular'];
+    for (const face of faces) {
       const asset = new RegExp(`/${face}\\.ttf(-[\\w-]+)?\\.zst$`);
       expect(requests.some(url => asset.test(new URL(url).pathname)), face).toBe(true);
     }

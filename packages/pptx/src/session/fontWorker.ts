@@ -1,13 +1,12 @@
-import { createSessionClient } from '../../../../shared/office-session/client';
+import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import type { PresentationCommandMethods } from './commandProtocol';
 
-type Methods = Pick<PresentationCommandMethods, 'decodeFontFace' | 'fontFamilies'>;
+type Methods = Pick<PresentationCommandMethods, 'decodeFontFace'>;
 
 interface PreparedFontWorker {
   decoder: FontDecoder;
-  families: Promise<string[]>;
   release(): void;
   take(): Worker;
 }
@@ -24,14 +23,13 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker {
   const existing = preparedWorkers.get(source);
   if (existing && !existing.retired()) return existing.prepared;
-  const bytes = (source instanceof Uint8Array ? source : new Uint8Array(source)).slice().buffer;
-  const owner = createPreparedFontWorker(bytes);
+  const owner = createPreparedFontWorker();
   preparedWorkers.set(source, owner);
   abandonedWorkers?.register(owner.prepared.decoder, owner.abandon, owner.token);
   return owner.prepared;
 }
 
-function createPreparedFontWorker(bytes: ArrayBuffer) {
+function createPreparedFontWorker() {
   const worker = new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' });
   const transport = createWorkerTransport(worker);
   const subscriptions = new Set<() => void>();
@@ -56,8 +54,9 @@ function createPreparedFontWorker(bytes: ArrayBuffer) {
     close() { if (!retired) { detach(); transport.close(); } },
   };
   const rpc = createSessionClient<Methods, {}>(connection, {
-    methods: { decodeFontFace: true, fontFamilies: true },
+    methods: { decodeFontFace: true },
   });
+  requestWasmCompile(connection);
   function release(): void {
     if (!retired) { detach(); void rpc.dispose(); transport.close(); }
   }
@@ -66,8 +65,6 @@ function createPreparedFontWorker(bytes: ArrayBuffer) {
     try { return await pending; }
     finally { if (--active === 0 && abandoned) release(); }
   }
-  const families = track(rpc.callWithTransfer('fontFamilies', [bytes], [bytes]));
-  void families.catch(() => {});
   const decode = rpcFontDecoder((bytes, options, transfer) => rpc.callWithTransfer('decodeFontFace', [bytes, options], transfer));
   return {
     token,
@@ -76,7 +73,6 @@ function createPreparedFontWorker(bytes: ArrayBuffer) {
     prepared: {
       decoder: (bytes, options) => retired
         ? Promise.reject(new Error('Presentation font decoder was released')) : track(decode(bytes, options)),
-      families,
       release,
       take() {
         if (retired) throw new Error('Presentation font decoder was released');

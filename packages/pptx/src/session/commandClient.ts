@@ -8,8 +8,6 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
-import { rpcFontDecoder } from '../../../../shared/office-session/fontDecoder';
-import type { PresentationFontPreparation } from './fontPreparation';
 import { createPresentationSharedAdapter,
   type PresentationSharedAck, type PresentationSharedMethods, type PresentationSharedOpenResult } from './commandSharedAdapter';
 import { presentationSharedInputs, type PresentationSharedInput } from './commandSharedInput';
@@ -48,20 +46,16 @@ export async function createPresentationCommandClient(
 export async function createSharedPresentationCommandClient(
   bytes: Uint8Array | ArrayBuffer,
   options: CommandOpenInput,
-  transport: SessionTransport,
-  prepareFonts?: PresentationFontPreparation,
-  ended?: Promise<never>,
+  transport: SessionTransport
 ): Promise<PresentationCommandClient> {
-  return createCommandClient(bytes, options, transport, true, prepareFonts, ended);
+  return createCommandClient(bytes, options, transport, true);
 }
 
 async function createCommandClient(
   bytes: Uint8Array | ArrayBuffer,
   options: CommandOpenInput,
   transport: SessionTransport,
-  shared: boolean,
-  prepareFonts?: PresentationFontPreparation,
-  ended?: Promise<never>,
+  shared: boolean
 ): Promise<PresentationCommandClient> {
   const pipe = createPresentationCollaborationPipe();
   type PendingPipeOutput = { batches: PipeOutputBatch<PptxPresencePeer>[]; ready: boolean };
@@ -153,23 +147,6 @@ async function createCommandClient(
     if (options.wasm instanceof ArrayBuffer) {
       input.wasm = options.wasm.slice(0);
       transfer.push(input.wasm);
-    }
-    if (prepareFonts) {
-      const wasm = input.wasm instanceof ArrayBuffer ? input.wasm.slice(0) : input.wasm;
-      const decoder = rpcFontDecoder((encoded, input, transfer) => rpc.callWithTransfer('decodeFontFace',
-        [encoded, input, wasm instanceof ArrayBuffer ? wasm.slice(0) : wasm], transfer));
-      const preparation = prepareFonts({ decoder }, () => {
-        const source = document.slice(0);
-        return rpc.callWithTransfer('fontFamilies', [source, wasm instanceof ArrayBuffer ? wasm.slice(0) : wasm], [source]);
-      });
-      const fonts = await (ended ? Promise.race([preparation, ended]) : preparation);
-      if (fonts !== undefined) {
-        input.fonts = fonts.map(face => {
-          const bytes = copyBytes(face.bytes);
-          transfer.push(bytes);
-          return { ...face, bytes };
-        });
-      }
     }
     state = await rpc.callWithTransfer('openCommandEditor', [document, input], transfer);
     if (rpc.failure) throw rpc.failure;

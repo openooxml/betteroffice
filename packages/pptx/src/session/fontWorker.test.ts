@@ -16,7 +16,6 @@ test('preparation decodes before open and hands the same worker to its editor', 
   const prepared = h.client.preparePresentationFontDecoder(source);
   expect(h.client.preparePresentationFontDecoder(source)).toBe(prepared);
   try {
-    expect(await prepared.families).toEqual(['Arial']);
     const backing = new Uint8Array([99, 0, 1, 0, 0, 99]);
     const result = await prepared.decoder(backing.subarray(1, 5), { codec: 'zstd' });
     expect(new Uint8Array(result.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
@@ -37,10 +36,27 @@ test('abandoned preparation releases its worker', async () => {
   const h = factory();
   const source = new Uint8Array([1]);
   const prepared = h.client.preparePresentationFontDecoder(source);
-  await prepared.families;
   prepared.release();
   expect(h.workers[0]!.terminated).toBe(true);
   expect(h.client.takePresentationFontWorker(source)).toBeUndefined();
+});
+
+test('releasing during a pending decode rejects it and terminates the worker', async () => {
+  const h = factory();
+  const releaseCompile = h.holdCompile();
+  const source = new Uint8Array([1]);
+  const prepared = h.client.preparePresentationFontDecoder(source);
+  const decoding = prepared.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+  const rejected = decoding.catch((error: unknown) => error);
+  try {
+    await Promise.resolve();
+    expect(h.compiles).toBe(1);
+    prepared.release();
+    expect(await rejected).toMatchObject({ name: 'SessionFailure', code: 'disposed' });
+    expect(h.workers[0]!.terminated).toBe(true);
+    expect(h.client.takePresentationFontWorker(source)).toBeUndefined();
+    await expect(prepared.decoder(new Uint8Array([0]), { codec: 'zstd' })).rejects.toThrow('released');
+  } finally { prepared.release(); releaseCompile(); }
 });
 
 test('font preparation can load past 60 seconds and still decode on the retained worker', async () => {
@@ -71,7 +87,6 @@ test('font preparation can load past 60 seconds and still decode on the retained
   const source = new Uint8Array([1]);
   const prepared = h.client.preparePresentationFontDecoder(source);
   try {
-    await prepared.families;
     const loading = new Promise<void>(resolve => setTimeout(resolve, 61_000)).then(() =>
       prepared.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' }));
     await advance(60_001);

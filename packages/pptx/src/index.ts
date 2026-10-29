@@ -188,14 +188,10 @@ export type {
   TableReceipt,
   UpdateEvent,
 } from './types';
-// Static editor paths import these here so bundlers keep the command core out of the default editor's static chunk.
+// Static editor paths import these four here so bundlers keep the command core out of the default editor's static chunk.
 /** @internal */
 export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/peerHydrationError';
 /** @internal */
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
-/** @internal */
-export { bindPresentationFontPreparation } from './session/fontPreparation';
-/** @internal */
-export { presentationFontFamilies } from './fontFamilies';

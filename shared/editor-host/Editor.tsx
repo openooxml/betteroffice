@@ -108,29 +108,21 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  if (typeof location !== "undefined" && new URLSearchParams(location.search).get("testPptxEditorFonts") === "1") {
-    return { bytes, format, fonts: [] };
-  }
   const workerFonts = typeof Worker === "function" && typeof OffscreenCanvas === "function";
   const decoder = workerFonts
     ? import("@betteroffice/pptx/worker").then(module => module.preparePresentationFontDecoder(bytes))
     : import("@betteroffice/pptx").then(async module => {
       await module.initWasm();
-      return { decoder: module.decodeFontFace,
-        families: Promise.resolve(["Arial"]), release() {} };
+      return { decoder: module.decodeFontFace, release() {} };
     });
   void decoder.catch(() => {});
   const runtime: { decoder: FontDecoder } = {
     decoder: async (encoded, options) => (await decoder).decoder(encoded, options),
   };
-  const load = (family: string) => [false, true].flatMap(bold => [false, true].map(async italic => {
-    const face = resolveMetricCompatFace(family, bold, italic) ?? resolveLastResortFace(family, bold, italic);
-    return { family, bold, italic, bytes: new Uint8Array(await loadBundledFontBytes(face, undefined, runtime)) };
-  }));
-  const primary = Promise.allSettled(load("Arial"));
-  const families = await decoder.then(prepared => prepared.families).catch(() => []);
-  const additional = [...new Set(families)].filter(family => family !== "Arial").flatMap(load);
-  const results = [...await primary, ...await Promise.allSettled(additional)];
+  const results = await Promise.allSettled([false, true].flatMap(bold => [false, true].map(async italic => {
+    const face = resolveMetricCompatFace("Arial", bold, italic) ?? resolveLastResortFace("Arial", bold, italic);
+    return { family: "Arial", bold, italic, bytes: new Uint8Array(await loadBundledFontBytes(face, undefined, runtime)) };
+  })));
   const fonts = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
   const failed = results.length - fonts.length;
   if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);

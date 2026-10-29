@@ -205,26 +205,6 @@ test('font decoder RPC works before document open and preserves payload and deco
   } finally { decoded.mockRestore(); await rpc.dispose(); host.dispose(); }
 });
 
-test('font preparation can decode through the command channel before open finishes', async () => {
-  const host = await engineHost();
-  let calls = 0;
-  try {
-    const client = await createSharedPresentationCommandClient(await deck(), host.options, host.transport,
-      async (runtime) => {
-        calls += 1;
-        expect(host.documents).toHaveLength(0);
-        const source = new Uint8Array([99, 0, 1, 0, 0, 99]);
-        expect(new Uint8Array((await runtime.decoder(source.subarray(1, 5), { codec: 'zstd' })).font))
-          .toEqual(new Uint8Array([0, 1, 0, 0]));
-        expect(source.byteLength).toBe(6);
-        return undefined;
-      });
-    expect(calls).toBe(1);
-    expect(host.documents).toHaveLength(1);
-    await client.dispose();
-  } finally { host.dispose(); }
-});
-
 test('pipe_commands_use_collab_lane_without_user_input', () => {
   const registration = registerPresentationCommandHandlers();
   try {
