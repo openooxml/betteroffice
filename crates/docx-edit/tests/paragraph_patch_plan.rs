@@ -1207,7 +1207,7 @@ fn ambiguous_replacements_keep_identical_source_run_properties() {
 #[test]
 fn ambiguous_replacements_within_one_source_run_keep_other_run_properties() {
     let content = concat!(
-        r#"<w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t>Caption </w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t xml:space="preserve">Caption </w:t></w:r>"#,
         r#"<w:r><w:rPr><w:lang w:val="de-DE"/></w:rPr><w:t>tail</w:t></w:r>"#,
     );
     let doc = open(content);

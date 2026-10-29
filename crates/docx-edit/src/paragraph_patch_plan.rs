@@ -1656,7 +1656,7 @@ mod tests {
                     ""
                 };
                 Some(format!(
-                    "<w:p><w:r><w:t>Caption </w:t></w:r>{drawing}</w:p>"
+                    "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
                 ))
             };
             let patch = diff_paragraph_v1(
