@@ -193,8 +193,9 @@ describe('CI runner routing', () => {
       'ci.yml route': ['kyora-4x8'],
       'e2e.yml route': ['kyora-4x8'],
       'e2e.yml scenarios (Corpus scenarios)': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (1/2))': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (2/2))': ['kyora-8x8'],
+      'e2e.yml scenarios (Browser editors (1/3))': ['kyora-8x8'],
+      'e2e.yml scenarios (Browser editors (2/3))': ['kyora-8x8'],
+      'e2e.yml scenarios (Browser editors (3/3))': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
     expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);

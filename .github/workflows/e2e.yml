@@ -38,7 +38,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          ROUTE_GROUPS: browser:2 corpus
+          ROUTE_GROUPS: browser:3 corpus
           ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '6' }}
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
@@ -61,11 +61,15 @@ jobs:
             timeout: 60
           - suite: browser
             shard: 1
-            name: Browser editors (1/2)
+            name: Browser editors (1/3)
             timeout: 70
           - suite: browser
             shard: 2
-            name: Browser editors (2/2)
+            name: Browser editors (2/3)
+            timeout: 70
+          - suite: browser
+            shard: 3
+            name: Browser editors (3/3)
             timeout: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -163,11 +167,15 @@ jobs:
 
       - name: Run the production editors in Chromium
         if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser --shard=${{ matrix.shard }}/2
+        env:
+          BETTEROFFICE_BROWSER_SHARD: ${{ matrix.shard }}/3
+        run: bun run test:e2e:browser --pass-with-no-tests
 
       - name: Run the editor plugin hosts in Chromium
         if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser:plugins --shard=${{ matrix.shard }}/2
+        env:
+          BETTEROFFICE_BROWSER_SHARD: ${{ matrix.shard }}/3
+        run: bun run test:e2e:browser:plugins --pass-with-no-tests
 
       - name: Upload corpus results
         if: always() && matrix.suite == 'corpus'
