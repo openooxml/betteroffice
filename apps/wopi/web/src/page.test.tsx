@@ -381,12 +381,18 @@ test.each(["remount", "teardown"])("%s cancels composition waiting and clears th
       await outcome;
     });
     expect(await outcome).toBe(action === "remount" ? "rejoinRequired" : "editorDisposed");
-    oldInput.dispatchEvent(new Event("compositionstart", { bubbles: true }));
     if (action === "remount") {
+      expect(mounts).toHaveLength(1);
+      await act(async () => { oldInput.dispatchEvent(new Event("compositionend", { bubbles: true })); });
+      for (let i = 0; i < 40 && mounts.length < 2; i += 1) {
+        await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+      }
       expect(mounts).toHaveLength(2);
+      oldInput.dispatchEvent(new Event("compositionstart", { bubbles: true }));
       await act(async () => { sockets[1]!.open(); await h.loaded.actions.save!(); });
       expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
     } else {
+      oldInput.dispatchEvent(new Event("compositionstart", { bubbles: true }));
       expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
     }
   } finally { warning.mockRestore(); }
