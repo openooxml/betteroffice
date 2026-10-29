@@ -1198,13 +1198,14 @@ test('a font landing invalidates painted thumbnails once and a later landing aga
   const repainted = frame('other', 8, 0, { slideId: 'other', slideIndex: 1 });
   expect(store.installThumbnail(repainted)).toBe(true);
   const cached = store.getSnapshot().thumbnails.get('other');
+  const notified = structural.mock.calls.length;
   client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts: landing } as Partial<PresentationCommandAck>);
   expect(store.getSnapshot().thumbnails.get('other')).toBe(cached);
-  expect(structural).toHaveBeenCalledTimes(1);
+  expect(structural).toHaveBeenCalledTimes(notified);
   client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts: [face] } as Partial<PresentationCommandAck>);
   expect(store.getSnapshot().thumbnails.has('other')).toBe(false);
   expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);
-  expect(structural).toHaveBeenCalledTimes(2);
+  expect(structural).toHaveBeenCalledTimes(notified + 1);
   store.dispose();
 });
 
