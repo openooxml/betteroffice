@@ -309,6 +309,14 @@ export function createPeerlessViewStore(
   function receiveAck(ack: PresentationCommandAck): void {
     if (disposed || failure || !matches(ack) || ack.throughSeq < view.appliedThroughSeq) return;
     if (ack.throughSeq === view.appliedThroughSeq) {
+      if (!ack.outcomes.length &&
+        ack.dirtySlideIds.some((id) => !view.dirtyThumbnailIds.has(id) || view.thumbnails.has(id))) {
+        const dirtyThumbnailIds = new Set(view.dirtyThumbnailIds);
+        const thumbnails = new Map(view.thumbnails);
+        for (const id of ack.dirtySlideIds) { dirtyThumbnailIds.add(id); thumbnails.delete(id); }
+        view = { ...view, thumbnails, dirtyThumbnailIds };
+        notify(structure);
+      }
       if (ack.frame) install(ack.frame);
       return;
     }

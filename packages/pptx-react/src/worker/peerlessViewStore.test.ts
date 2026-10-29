@@ -1157,6 +1157,18 @@ test('terminal_notification_settles_input_without_a_transport_reply', async () =
   store.dispose();
 });
 
+test('background font acknowledgements invalidate thumbnails without a document edit', () => {
+  const { client, store } = setup();
+  expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);
+  const structural = mock(() => {});
+  store.subscribeStructure(structural);
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [] });
+  expect(store.getSnapshot().thumbnails.has('other')).toBe(false);
+  expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);
+  expect(structural).toHaveBeenCalledTimes(1);
+  store.dispose();
+});
+
 test('p2_unchanged_thumbnail_survives_text_ack', async () => {
   const { client, store } = setup();
   expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);

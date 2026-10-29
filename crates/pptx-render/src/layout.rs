@@ -100,6 +100,31 @@ struct FontFace {
     line_id: FontId,
 }
 
+fn needs_visible_glyph(character: char) -> bool {
+    !character.is_control()
+        && !character.is_whitespace()
+        && !matches!(
+            character as u32,
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFF8
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+        )
+}
+
 /// A font family the deck asked for that is not registered, the family drawn
 /// instead, and the first shape that asked for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +304,7 @@ impl SlideRenderer {
         character: char,
         bold: bool,
         italic: bool,
+        browser_fallback: bool,
     ) -> Option<FontFace> {
         let covering = || {
             self.coverage_faces.iter().filter(|(_, _, candidate)| {
@@ -294,6 +320,12 @@ impl SlideRenderer {
                 line_id: face.line_id,
                 ..candidate.clone()
             })
+            .or_else(|| {
+                (browser_fallback && needs_visible_glyph(character)).then(|| FontFace {
+                    id: FontId::from_u32(BROWSER_FONT_ID),
+                    ..face.clone()
+                })
+            })
     }
 
     /// Where `text` in `face` needs a fallback: each piece's byte start and the
@@ -305,9 +337,10 @@ impl SlideRenderer {
         text: &str,
         bold: bool,
         italic: bool,
+        browser_fallback: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
-        if self.coverage_faces.is_empty()
+        if self.coverage_faces.is_empty() && !browser_fallback
             || text
                 .chars()
                 .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
@@ -325,7 +358,7 @@ impl SlideRenderer {
                     Some(current.clone())
                 }
                 _ if own => None,
-                _ => self.coverage_face(face, character, bold, italic),
+                _ => self.coverage_face(face, character, bold, italic, browser_fallback),
             };
             let same = pieces.last().is_some_and(|(_, last)| {
                 last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
@@ -340,8 +373,13 @@ impl SlideRenderer {
     /// Splits `run` where its face has no glyph and a fallback does, so each
     /// part is shaped, measured and drawn in a face that can draw it.
     fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
-        let pieces =
-            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic);
+        let pieces = self.coverage_pieces(
+            &run.style.face,
+            &run.text,
+            run.style.bold,
+            run.style.italic,
+            cfg!(target_arch = "wasm32"),
+        );
         if let [(0, None)] = pieces.as_slice() {
             out.push(run);
             return;
@@ -3994,7 +4032,8 @@ fn chart_text_primitive(
             .map_err(|error| RenderError::Font(error.to_string()))?;
         single_line_box(metrics, size_px, &CompatFlags::default())
     };
-    let pieces = renderer.coverage_pieces(&face, text.text, bold, italic);
+    let pieces =
+        renderer.coverage_pieces(&face, text.text, bold, italic, cfg!(target_arch = "wasm32"));
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
@@ -7318,6 +7357,142 @@ mod tests {
     }
 
     #[test]
+    fn browser_coverage_keeps_controls_and_ignorables_in_the_original_face() {
+        for registered_fallback in [false, true] {
+            let mut renderer = renderer();
+            if registered_fallback {
+                renderer
+                    .register_fallback_font("Liberation Sans", false, false, FONT)
+                    .unwrap();
+            }
+            let run = paragraph(
+                &renderer,
+                "l",
+                "\n\t\u{200B}\u{FE0F}Latin\u{FE0F}\u{200B}\t\n",
+            )
+            .runs
+            .remove(0);
+            let pieces = renderer.coverage_pieces(&run.style.face, &run.text, false, false, true);
+            assert_eq!(pieces.len(), 1);
+            assert_eq!(pieces[0].0, 0);
+            assert!(pieces[0].1.is_none());
+
+            for character in (0..=0x1F)
+                .chain(0x7F..=0x9F)
+                .filter_map(char::from_u32)
+                .chain([
+                    '\u{00A0}',
+                    '\u{00AD}',
+                    '\u{034F}',
+                    '\u{061C}',
+                    '\u{115F}',
+                    '\u{1160}',
+                    '\u{17B4}',
+                    '\u{17B5}',
+                    '\u{180B}',
+                    '\u{180F}',
+                    '\u{200B}',
+                    '\u{200C}',
+                    '\u{200D}',
+                    '\u{200F}',
+                    '\u{2028}',
+                    '\u{2029}',
+                    '\u{202A}',
+                    '\u{202E}',
+                    '\u{2060}',
+                    '\u{206F}',
+                    '\u{3164}',
+                    '\u{FE00}',
+                    '\u{FE0F}',
+                    '\u{FEFF}',
+                    '\u{FFA0}',
+                    '\u{FFF0}',
+                    '\u{FFF8}',
+                    '\u{1BCA0}',
+                    '\u{1BCA3}',
+                    '\u{1D173}',
+                    '\u{1D17A}',
+                    '\u{E0000}',
+                    '\u{E0100}',
+                    '\u{E01EF}',
+                    '\u{E0FFF}',
+                ])
+            {
+                let text = format!("{character}Latin{character}");
+                let pieces = renderer.coverage_pieces(&run.style.face, &text, false, false, true);
+                assert_eq!(pieces.len(), 1, "{character:?}");
+                assert_eq!(pieces[0].0, 0);
+                assert!(pieces[0].1.is_none(), "{character:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn browser_coverage_still_splits_an_uncovered_visible_character() {
+        for registered_fallback in [false, true] {
+            let mut renderer = renderer();
+            if registered_fallback {
+                renderer
+                    .register_fallback_font("Liberation Sans", false, false, FONT)
+                    .unwrap();
+            }
+            let run = paragraph(&renderer, "l", "A\u{0939}B").runs.remove(0);
+            assert_eq!(
+                renderer.fonts.covers(run.style.face.id, '\u{0939}'),
+                Ok(false)
+            );
+            for browser_fallback in [false, true] {
+                let pieces = renderer.coverage_pieces(
+                    &run.style.face,
+                    &run.text,
+                    false,
+                    false,
+                    browser_fallback,
+                );
+                let pieces: Vec<_> = pieces
+                    .iter()
+                    .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))
+                    .collect();
+                if browser_fallback {
+                    assert_eq!(pieces, [(0, None), (1, Some(BROWSER_FONT_ID)), (4, None)]);
+                } else {
+                    assert_eq!(pieces, [(0, None)]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn browser_coverage_keeps_registered_fallback_nonbreaking_spaces() {
+        let mut renderer = renderer();
+        let arabic = renderer
+            .register_fallback_font(
+                "Noto Sans Arabic",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf"),
+            )
+            .unwrap();
+        let run = paragraph(&renderer, "l", "A\u{0645}\u{00A0}B")
+            .runs
+            .remove(0);
+        for browser_fallback in [false, true] {
+            let pieces = renderer.coverage_pieces(
+                &run.style.face,
+                &run.text,
+                false,
+                false,
+                browser_fallback,
+            );
+            let pieces: Vec<_> = pieces
+                .iter()
+                .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))
+                .collect();
+            assert_eq!(pieces, [(0, None), (1, Some(arabic)), (5, None)]);
+        }
+    }
+
+    #[test]
     fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
         let arabic: &[u8] =
             include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
@@ -7338,7 +7513,13 @@ mod tests {
             },
             &mut unchanged,
         );
-        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+        if cfg!(target_arch = "wasm32") {
+            assert_eq!(unchanged.len(), 3);
+            assert_eq!(unchanged[1].style.face.id.to_u32(), BROWSER_FONT_ID);
+            assert_eq!(unchanged[1].style.family, "Arial");
+        } else {
+            assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+        }
 
         renderer
             .register_fallback_font("Noto Sans Arabic", false, false, arabic)

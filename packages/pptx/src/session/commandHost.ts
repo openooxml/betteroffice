@@ -18,6 +18,9 @@ import {
 } from '../wasm/loader';
 import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
+import type { createCommandDefaultFonts } from './commandDefaultFonts';
+import { presentationRequestedFontFaces } from '../wasm/fontRequests';
+import type { DefaultFontFace, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
 import { findLine, hitGeometry, indexHitGeometry, navigateGeometry, transformedRect,
@@ -55,6 +58,7 @@ function normalizeFontSize(size: number): number {
 export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
+  onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
 }
 
 export interface PresentationCommandRegistration {
@@ -110,6 +114,13 @@ export function registerPresentationCommandHandlers(
   const slideIndices = new Map<string, number>();
   let disposed = false;
   let opening = false;
+  let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
+  let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts>> | undefined;
+  let requestedFonts: ((slideId?: string) => Omit<DefaultFontFace, 'bytes'>[]) | undefined;
+  const suppliedFonts: { family: string }[] = [];
+  let fontTimer: ReturnType<typeof setTimeout> | undefined;
+  const fontSlides = new Set<string>();
+  let collectDeckFonts = false;
   let throughSeq = 0;
   let version = '';
   const documentEpoch = 1;
@@ -149,6 +160,60 @@ export function registerPresentationCommandHandlers(
 
   const layouts = new Map<string, { slideIndex: number; revision: number;
     list: SlideDisplayList; geometry: CommandHitGeometryIndex }>();
+
+  function hasDefaultFonts(slideId?: string): boolean {
+    if (disposed || !requestedFonts) return false;
+    if (defaultFonts) return defaultFonts.hasPending(slideId);
+    try {
+      return requestedFonts(slideId).some((face) => !suppliedFonts.some((font) =>
+        font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
+    } catch { return false; }
+  }
+
+  function requestDefaultFonts(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
+    if (!hasDefaultFonts(slideId)) return [];
+    if (defaultFonts) return defaultFonts.load(slideId);
+    creatingDefaultFonts ??= import('./commandDefaultFonts').then(({ createCommandDefaultFonts }) => {
+      defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts!,
+        (face) => presentation().registerFont({ ...face, bytes: new Uint8Array(face.bytes) }),
+        (faces) => {
+          if (!faces.length || disposed) return;
+          layouts.clear();
+          for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
+          for (const [id, revision] of revisions) revisions.set(id, revision + 1);
+          if (!opening && options.onDefaultFonts) {
+            const result = ack([], [...revisions.keys()]);
+            options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
+              [...result.transfer, ...faces.map((face) => face.bytes)]));
+          }
+        });
+      if (disposed) defaultFonts.dispose();
+      return defaultFonts;
+    });
+    return creatingDefaultFonts.then((fonts) => fonts.load(slideId), () => {
+      requestedFonts = undefined;
+      return [];
+    });
+  }
+
+  function loadDefaultFonts(slideIds?: readonly string[]): void {
+    if (!requestedFonts || disposed) return;
+    if (slideIds) {
+      for (const id of slideIds) if (hasDefaultFonts(id)) fontSlides.add(id);
+    } else if (hasDefaultFonts()) collectDeckFonts = true;
+    if (!collectDeckFonts && !fontSlides.size) return;
+    if (fontTimer !== undefined) return;
+    fontTimer = setTimeout(() => {
+      fontTimer = undefined;
+      const slides = collectDeckFonts ? [undefined] : [...fontSlides];
+      collectDeckFonts = false;
+      fontSlides.clear();
+      for (const slide of slides) {
+        const loading = requestDefaultFonts(slide);
+        if (loading instanceof Promise) void loading.catch(() => {});
+      }
+    }, 0);
+  }
 
   function clearMarks(): void {
     for (const key of Object.keys(storedMarks) as (keyof TextStyle)[]) delete storedMarks[key];
@@ -1178,6 +1243,8 @@ export function registerPresentationCommandHandlers(
     if (admitted.kind === 'font') {
       const font = { ...admitted.font, bytes: new Uint8Array(admitted.font.bytes) };
       admitted.fontId = admitted.fallback ? opened.registerFallbackFont(font) : opened.registerFont(font);
+      if (requestedFonts) suppliedFonts.push({ family: font.family });
+      defaultFonts?.supply(font.family);
       layouts.clear();
       for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
       return false;
@@ -1306,6 +1373,97 @@ export function registerPresentationCommandHandlers(
     return start !== end || text.length > 0;
   }
 
+  function runCommand(command: PresentationCommandEnvelope): TransferResult<PresentationCommandAck> {
+    presentation();
+    if (command.kind !== 'activateSlide') refreshTopology();
+    if (!matches(command) || !Number.isSafeInteger(command.seq) || command.seq < 1) return ack();
+    const cached = outcomes.get(command.seq);
+    if (cached) return ack([{ ...cached }]);
+    if (command.seq <= throughSeq) return ack([{ seq: command.seq, status: 'refused',
+      reason: 'stale-basis', committed: false }]);
+    if (command.seq !== throughSeq + 1) return ack();
+    const admitted = admit(command);
+    if (typeof admitted === 'string') {
+      if (command.kind === 'compositionCommit' && composition &&
+        composition.id === command.payload?.compositionId) composition = undefined;
+      const outcome: PresentationCommandOutcome = { seq: command.seq,
+        status: admitted === 'dependency-refused' ? 'cancelled' : 'refused',
+        reason: admitted, committed: false };
+      throughSeq = command.seq;
+      outcomes.set(command.seq, outcome);
+      trim();
+      return ack([outcome]);
+    }
+    const previous = { version, selection, objectSelection, activeSlideId, editState: lastEditState };
+    const changedSlideId = 'selection' in admitted ? admitted.selection?.slideId
+      : 'object' in admitted ? admitted.object.slideId : undefined;
+    const previousRevision = changedSlideId === undefined ? undefined : revisions.get(changedSlideId);
+    try {
+      const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
+      const committed = apply(command, admitted);
+      const historyDirtySlideIds = committed && admitted.kind === 'history'
+        ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+      if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
+      if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
+        const cached = stories.get(storyKey(admitted.selection))!;
+        cached.snapshot = presentation().story(admitted.selection.storyId);
+        cached.formatting = undefined;
+        cached.echoRanges = [];
+      }
+      throughSeq = command.seq;
+      version = presentation().version();
+      metadataVersion = version;
+      if (committed) projection.commit(version);
+      if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
+      const outcome: PresentationCommandOutcome = { seq: command.seq,
+        status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
+          : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
+          admitted.kind === 'format' || admitted.kind === 'alignment' ||
+          admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
+          command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
+        committed };
+      outcomes.set(command.seq, outcome);
+      if (committed && admitted.kind === 'text') {
+        const story = storyKey(admitted.selection);
+        const mutation: Mutation = { seq: command.seq, story, start: admitted.start,
+          deleted: admitted.end - admitted.start, inserted: admitted.text.length, version, beforeText };
+        mutations.set(command.seq, mutation);
+        const records = storyMutations.get(story) ?? new Map<number, Mutation>();
+        records.set(command.seq, mutation);
+        storyMutations.set(story, records);
+      }
+      selections.set(command.seq, selection ? anchor(selection) : null);
+      trim();
+      const dirtySlideIds = admitted.kind === 'font' ? [...revisions.keys()] : admitted.kind === 'batch' && admitted.result?.ok
+        ? admitted.result.changedSlides : historyDirtySlideIds ?? (committed && activeSlideId !== null ? [activeSlideId] : []);
+      for (const slideId of dirtySlideIds) {
+        const revision = revisions.get(slideId);
+        if (revision !== undefined) revisions.set(slideId, revision + 1);
+      }
+      if (committed && requestedFonts) loadDefaultFonts(admitted.kind === 'remote' || admitted.kind === 'history' || admitted.kind === 'invoke'
+        ? undefined : dirtySlideIds);
+      const result = ack([outcome], dirtySlideIds, admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
+        admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
+      if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
+      return result;
+    } catch (error) {
+      if (version !== previous.version) versions.delete(version);
+      version = previous.version;
+      selection = previous.selection;
+      objectSelection = previous.objectSelection;
+      activeSlideId = previous.activeSlideId;
+      lastEditState = previous.editState;
+      if (changedSlideId !== undefined && previousRevision !== undefined) revisions.set(changedSlideId, previousRevision);
+      failedSeq = command.seq;
+      throughSeq = command.seq;
+      readOnly = true;
+      outcomes.set(command.seq, { seq: command.seq, status: 'refused',
+        reason: 'unknown-outcome', committed: false });
+      throw new CommandOutcomeUnknown(command.seq,
+        `Command ${command.seq} has an unknown outcome: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   const handlers = {
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
@@ -1323,6 +1481,7 @@ export function registerPresentationCommandHandlers(
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           fallbackFonts: input.fallbackFonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
           initialUpdate: input.initialUpdate, retainSource: false });
+        if (!input.fonts?.length) requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
         });
@@ -1346,105 +1505,35 @@ export function registerPresentationCommandHandlers(
           `Presentation command open refused: ${content.failure.message}`, content.failure.code);
         cacheStories(content);
         for (const slide of openedMetadata.slides) revisions.set(slide.id, 0);
+        const loading = !requestedFonts || activeSlideId === null ? [] : requestDefaultFonts(activeSlideId);
+        const fonts = loading instanceof Promise ? await loading : undefined;
+        if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
         const recoveryUpdate = ownedBuffer(handle.encodeStateAsUpdate());
+        if (requestedFonts) loadDefaultFonts();
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate }, [...result.transfer, recoveryUpdate]);
+          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate,
+          ...(fonts ? { defaultFonts: fonts } : {}) },
+        [...result.transfer, recoveryUpdate, ...(fonts ?? []).map((face) => face.bytes)]);
       } catch (error) {
         dispose();
         throw error;
       } finally { opening = false; }
     },
-    command(_, command) {
-      presentation();
-      if (command.kind !== 'activateSlide') refreshTopology();
-      if (!matches(command) || !Number.isSafeInteger(command.seq) || command.seq < 1) return ack();
-      const cached = outcomes.get(command.seq);
-      if (cached) return ack([{ ...cached }]);
-      if (command.seq <= throughSeq) return ack([{ seq: command.seq, status: 'refused',
-        reason: 'stale-basis', committed: false }]);
-      if (command.seq !== throughSeq + 1) return ack();
-      const admitted = admit(command);
-      if (typeof admitted === 'string') {
-        if (command.kind === 'compositionCommit' && composition &&
-          composition.id === command.payload?.compositionId) composition = undefined;
-        const outcome: PresentationCommandOutcome = { seq: command.seq,
-          status: admitted === 'dependency-refused' ? 'cancelled' : 'refused',
-          reason: admitted, committed: false };
-        throughSeq = command.seq;
-        outcomes.set(command.seq, outcome);
-        trim();
-        return ack([outcome]);
+    command(_: null, command: PresentationCommandEnvelope):
+      TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
+      if (requestedFonts && (fontTimer !== undefined || (!defaultFonts && creatingDefaultFonts !== undefined) || defaultFonts?.isLoading())) {
+        const slideId = command.kind === 'activateSlide' ? command.payload?.slideId
+          : command.kind === 'setSelection' ? command.payload?.selection?.slideId : undefined;
+        if (slideId !== undefined && matches(command) && slideIndices.has(slideId)) {
+          const loading = requestDefaultFonts(slideId);
+          if (loading instanceof Promise) return loading.then(() => runCommand(command));
+        }
       }
-      const previous = { version, selection, objectSelection, activeSlideId, editState: lastEditState };
-      const changedSlideId = 'selection' in admitted ? admitted.selection?.slideId
-        : 'object' in admitted ? admitted.object.slideId : undefined;
-      const previousRevision = changedSlideId === undefined ? undefined : revisions.get(changedSlideId);
-      try {
-        const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
-        const committed = apply(command, admitted);
-        const historyDirtySlideIds = committed && admitted.kind === 'history'
-          ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
-        if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
-        if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
-          const cached = stories.get(storyKey(admitted.selection))!;
-          cached.snapshot = presentation().story(admitted.selection.storyId);
-          cached.formatting = undefined;
-          cached.echoRanges = [];
-        }
-        throughSeq = command.seq;
-        version = presentation().version();
-        metadataVersion = version;
-        if (committed) projection.commit(version);
-        if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
-        const outcome: PresentationCommandOutcome = { seq: command.seq,
-          status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
-            : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
-            admitted.kind === 'format' || admitted.kind === 'alignment' ||
-            admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
-            command.kind === 'compositionStart' || command.kind === 'compositionEnd' ? 'applied' : 'noop',
-          committed };
-        outcomes.set(command.seq, outcome);
-        if (committed && admitted.kind === 'text') {
-          const story = storyKey(admitted.selection);
-          const mutation: Mutation = { seq: command.seq, story, start: admitted.start,
-            deleted: admitted.end - admitted.start, inserted: admitted.text.length, version, beforeText };
-          mutations.set(command.seq, mutation);
-          const records = storyMutations.get(story) ?? new Map<number, Mutation>();
-          records.set(command.seq, mutation);
-          storyMutations.set(story, records);
-        }
-        selections.set(command.seq, selection ? anchor(selection) : null);
-        trim();
-        const dirtySlideIds = admitted.kind === 'font' ? [...revisions.keys()] : admitted.kind === 'batch' && admitted.result?.ok
-          ? admitted.result.changedSlides : historyDirtySlideIds ?? (committed && activeSlideId !== null ? [activeSlideId] : []);
-        for (const slideId of dirtySlideIds) {
-          const revision = revisions.get(slideId);
-          if (revision !== undefined) revisions.set(slideId, revision + 1);
-        }
-        const result = ack([outcome], dirtySlideIds, admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
-          admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
-        if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
-        return result;
-      } catch (error) {
-        if (version !== previous.version) versions.delete(version);
-        version = previous.version;
-        selection = previous.selection;
-        objectSelection = previous.objectSelection;
-        activeSlideId = previous.activeSlideId;
-        lastEditState = previous.editState;
-        if (changedSlideId !== undefined && previousRevision !== undefined) revisions.set(changedSlideId, previousRevision);
-        failedSeq = command.seq;
-        throughSeq = command.seq;
-        readOnly = true;
-        outcomes.set(command.seq, { seq: command.seq, status: 'refused',
-          reason: 'unknown-outcome', committed: false });
-        throw new CommandOutcomeUnknown(command.seq,
-          `Command ${command.seq} has an unknown outcome: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      return runCommand(command);
     },
-    edit(_, command): TransferResult<PresentationSharedAck> {
+    edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
       presentation();
       if (!isCommandEnvelope(command as unknown)) {
         if (!Number.isSafeInteger(command?.seq) || command.seq < 1) {
@@ -1467,7 +1556,8 @@ export function registerPresentationCommandHandlers(
           envelope.basis.version = '';
         }
       }
-      return sharedAck(handlers.command(null, envelope));
+      const result = handlers.command(null, envelope);
+      return result instanceof Promise ? result.then(sharedAck) : sharedAck(result);
     },
     checkpoint() {
       throw new Error('Presentation command checkpoints are unavailable');
@@ -1545,6 +1635,11 @@ export function registerPresentationCommandHandlers(
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (fontTimer !== undefined) clearTimeout(fontTimer);
+    defaultFonts?.dispose(); defaultFonts = undefined;
+    requestedFonts = undefined;
+    suppliedFonts.length = 0;
+    fontSlides.clear();
     const opened = handle;
     pipe?.dispose(); pipe = undefined;
     offUpdates?.(); offUpdates = undefined; pendingUpdates.length = 0;

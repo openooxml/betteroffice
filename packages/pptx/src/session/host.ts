@@ -16,6 +16,7 @@ import { frameAssetIds } from './frame';
 import { registerPresentationCommandHandlers } from './commandHost';
 import type { PresentationCommandEvents, PresentationCommandMethods } from './commandProtocol';
 import type { PresentationSharedMethods } from './commandSharedAdapter';
+import type { DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { peerHydrationError } from './editorPeerHydrationError';
 import { PptxPeerHydrationError } from './peerHydrationError';
 import {
@@ -29,7 +30,9 @@ import {
   type PresentationWireFrame,
 } from './methods';
 
-type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] } & PresentationCommandEvents;
+type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] } & PresentationCommandEvents & {
+  defaultFonts: PresentationCommandEvents['ack'] & DefaultFontPayload;
+};
 
 function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | undefined {
   return faces?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) }));
@@ -258,7 +261,8 @@ export function createPresentationSessionHost(
   };
 
   let pipeOutputTimer: ReturnType<typeof setTimeout> | undefined;
-  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm, onPipeOutput() {
+  const commands = registerPresentationCommandHandlers({ initWasm: options.initWasm,
+    onDefaultFonts: (result) => host.emit('defaultFonts', result.value, result.transfer), onPipeOutput() {
     if (disposed || pipeOutputTimer !== undefined) return;
     pipeOutputTimer = setTimeout(() => {
       pipeOutputTimer = undefined;

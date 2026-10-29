@@ -13,7 +13,7 @@ import { flushSync } from 'react-dom';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installFonts, useStableFonts } from './peerlessFonts';
+import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
@@ -372,11 +372,12 @@ export function usePeerlessPresentation(
     }
 
     try {
-      session = peerlessSessionOpener.open(props.file, {
+      session = peerlessSessionOpener.open(props.file, Object.assign({
         fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      });
+      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0]) =>
+        installDefaultFonts(faces, installedFonts, current, warnFonts) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
