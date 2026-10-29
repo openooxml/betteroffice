@@ -408,7 +408,7 @@ export class FileSession {
       accessTokenTtl: input.accessTokenTtl,
       userId: info.UserId,
       friendlyName: info.UserFriendlyName ?? info.UserId,
-      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "journalBroken"),
+      canWrite: wantsWrite && this.#canUseSaveCredentials(),
       joinedAt: now,
     });
     this.#users.set(user.id, user);
@@ -481,7 +481,7 @@ export class FileSession {
   }
 
   #setViewOnly(reason: ViewOnlyReason): void {
-    if (this.#viewOnlyReason === reason) return;
+    if (this.#viewOnlyReason === reason || this.#viewOnlyReason === "externalChange") return;
     this.#viewOnlyReason = reason;
     this.#emit("viewOnly", { reason });
   }
@@ -852,7 +852,12 @@ export class FileSession {
     this.#refreshFailures += 1;
   }
 
+  #canUseSaveCredentials(): boolean {
+    return this.#viewOnlyReason !== "lockedElsewhere" || this.#lockNeedsRecovery;
+  }
+
   #pickToken(preferred: UserSession[], excluded?: Set<string>): UserSession | null {
+    if (!this.#canUseSaveCredentials()) return null;
     const now = this.#now();
     const seen = new Set<string>();
     const candidates: UserSession[] = [];
@@ -869,7 +874,7 @@ export class FileSession {
   }
 
   #isConnectedEditor(user: UserSession): boolean {
-    return user.connected && user.canWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "journalBroken") && user.isTokenValidAt(this.#now());
+    return user.connected && user.canWrite && this.#canUseSaveCredentials() && user.isTokenValidAt(this.#now());
   }
 
   #connectedEditors(): UserSession[] {
