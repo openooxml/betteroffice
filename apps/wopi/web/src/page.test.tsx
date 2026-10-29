@@ -58,6 +58,7 @@ mock.module("../../../../shared/editor-host/Editor", () => ({
     return <div data-testid="editor" data-readonly={String(props.readOnly ?? false)} />;
   },
 }));
+mock.module("@betteroffice/docx/layout", () => ({ configureDefaultFonts: () => {} }));
 
 const { act, cleanup, render } = await import("@testing-library/react");
 const { default: WopiApp } = await import("./page");
