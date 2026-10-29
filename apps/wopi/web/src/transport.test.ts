@@ -268,7 +268,7 @@ describe("createWopiTransport", () => {
     }
   });
 
-  test.each([1006, 4401])("close code %i keeps the existing reconnect behavior", async (code) => {
+  test.each([1006, 4401])("close code %i preserves the session termination policy", async (code) => {
     const sockets: FakeSocket[] = [];
     const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => {
       const socket = new FakeSocket();
@@ -283,7 +283,17 @@ describe("createWopiTransport", () => {
       const barrier = transport.captureSaveBarrier()!;
       first.readyState = 3;
       first.onclose?.({ code });
+      expect(transport.captureSaveBarrier()).toBeNull();
       await new Promise((resolve) => setTimeout(resolve, 300));
+      if (code === 4401) {
+        expect(sockets).toHaveLength(1);
+        transport.connect();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(sockets).toHaveLength(1);
+        expect(transport.send(Uint8Array.of(1))).toBe(false);
+        expect(transport.captureSaveBarrier()).toBeNull();
+        return;
+      }
       expect(sockets).toHaveLength(2);
       const second = sockets[1]!;
       second.readyState = 1;

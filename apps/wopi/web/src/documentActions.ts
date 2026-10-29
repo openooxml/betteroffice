@@ -29,7 +29,7 @@ interface CloseDocumentOptions extends SaveDocumentOptions {
   onFailure?(error: unknown): void;
 }
 
-async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason: string, signal?: AbortSignal): Promise<T> {
+async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason: string | Error, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
@@ -40,7 +40,7 @@ async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason
         return operation();
       }),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(reason)), timeoutMs);
+        timer = setTimeout(() => reject(typeof reason === "string" ? new Error(reason) : reason), timeoutMs);
       }),
       new Promise<never>((_resolve, reject) => {
         onAbort = () => reject(signal?.reason);
@@ -117,6 +117,7 @@ export async function closeDocument(
 ): Promise<void> {
   options.setInputBlocked(true);
   const controller = new AbortController();
+  const timeout = new Error("closeTimeout");
   let saved = options.finalSaved ?? false;
   try {
     if (!saved) {
@@ -128,16 +129,19 @@ export async function closeDocument(
     await bounded(() => {
       const request = api.close(controller.signal);
       return options.whenClosed ? Promise.race([request, options.whenClosed]) : request;
-    }, options.closeTimeoutMs ?? 10_000, "closeTimeout", options.signal);
-    controller.abort();
+    }, options.closeTimeoutMs ?? 10_000, timeout, options.signal);
     options.signal?.throwIfAborted();
-    finish();
   } catch (error) {
-    controller.abort();
     if (!saved) options.setInputBlocked(false);
-    options.onFailure?.(error);
-    throw error;
+    const aborted = options.signal?.aborted || (error instanceof Error && error.name === "AbortError");
+    if (!saved || (error !== timeout && !aborted)) {
+      options.onFailure?.(error);
+      throw error;
+    }
+  } finally {
+    controller.abort();
   }
+  finish();
 }
 
 export function finishClose(

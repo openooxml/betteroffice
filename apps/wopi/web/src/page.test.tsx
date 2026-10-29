@@ -19,7 +19,7 @@ const mounts: EditorProps[] = [];
 const lifecycle: string[] = [];
 let flush = async () => {};
 let hasPendingUpdates = () => false;
-let serialize = async () => Uint8Array.of(1);
+let serialize: EditorApi["serialize"] = async () => Uint8Array.of(1);
 let publish = (_update: Uint8Array) => false;
 let serverDoc: Doc;
 let attachGeneration: number | null = null;
@@ -307,7 +307,7 @@ test("deleting while disconnected then Close reports notSynced and keeps the edi
   } finally { doc.destroy(); warning.mockRestore(); }
 });
 
-test("a stalled Close keeps input blocked and a second Close skips the successful final save", async () => {
+test("a stalled Close completes after timeout and a second Close is a no-op", async () => {
   const h = await mount();
   const signals: Array<AbortSignal | null | undefined> = [];
   h.setCloseRequest((signal) => {
@@ -331,19 +331,21 @@ test("a stalled Close keeps input blocked and a second Close skips the successfu
     let first!: Promise<void>;
     await act(async () => { first = h.loaded.actions.close!(); });
     expect(h.loaded.actions.close!()).toBe(first);
-    expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    const container = h.view.container.querySelector("main")!;
+    expect(container.inert).toBe(true);
     expect(deadlines.size).toBe(1);
-    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); await first; });
     expect(signals).toHaveLength(1);
     expect(signals[0]?.aborted).toBe(true);
-    expect(h.view.container.querySelector("main")!.inert).toBe(true);
-    expect(h.view.getByRole("alert").textContent).toBe("closeTimeout");
-    expect(h.view.getByTestId("editor")).toBeDefined();
+    expect(container.inert).toBe(true);
+    expect(h.view.queryByRole("alert")).toBeNull();
+    expect(h.view.queryByTestId("editor")).toBeNull();
+    expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
     await act(async () => { await h.loaded.actions.close!(); });
-    expect(signals).toHaveLength(2);
-    expect(signals[1]).not.toBe(signals[0]);
+    expect(signals).toHaveLength(1);
     expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
     expect(h.view.queryByTestId("editor")).toBeNull();
+    expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
   } finally {
     for (const timer of deadlines.keys()) cancel(timer);
     timers.mockRestore();

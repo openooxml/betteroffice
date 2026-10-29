@@ -156,9 +156,11 @@ test("close saves an edit committed by the final flush before closing", async ()
 
 test("failed final saves leave the session and host open", async () => {
   const h = setup();
+  const blocked: boolean[] = [];
   await expect(closeDocument(h.editor, {
     async save() { h.calls.push("save"); throw new Error("notSynced"); }, close: () => h.api.close(),
-  }, h.closeOptions, () => { h.calls.push("host-close"); })).rejects.toThrow("notSynced");
+  }, { ...h.closeOptions, setInputBlocked: (value) => { blocked.push(value); } }, () => { h.calls.push("host-close"); })).rejects.toThrow("notSynced");
+  expect(blocked).toEqual([true, false]);
   expect(h.calls).toEqual(["flush", "sequence", "save"]);
 });
 
@@ -199,14 +201,16 @@ test("close selects UI_Close only when requested and otherwise navigates the top
 
 test("a failed close request leaves the host open", async () => {
   const h = setup();
+  const blocked: boolean[] = [];
   await expect(closeDocument(h.editor, {
     save: h.api.save,
     async close() { h.calls.push("close"); throw new Error("Close failed"); },
-  }, h.closeOptions, () => { h.calls.push("host-close"); })).rejects.toThrow("Close failed");
+  }, { ...h.closeOptions, setInputBlocked: (value) => { blocked.push(value); } }, () => { h.calls.push("host-close"); })).rejects.toThrow("Close failed");
+  expect(blocked).toEqual([true]);
   expect(h.calls).toEqual(["flush", "sequence", "save", "close"]);
 });
 
-test.each(["timeout", "abort"])("a stalled close request keeps input blocked after %s and a retry starts a new request", async (reason) => {
+test.each(["timeout", "abort"])("a stalled close request completes Close after %s when the final save succeeded", async (reason) => {
   const h = setup();
   const signals: AbortSignal[] = [];
   const blocked: boolean[] = [];
@@ -219,7 +223,7 @@ test.each(["timeout", "abort"])("a stalled close request keeps input blocked aft
     close(signal?: AbortSignal) {
       signals.push(signal!);
       started();
-      return signals.length === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+      return new Promise<void>(() => {});
     },
   };
   const options = {
@@ -236,17 +240,46 @@ test.each(["timeout", "abort"])("a stalled close request keeps input blocked aft
     expect(await Promise.race([
       outcome,
       new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still pending"), 50); }),
-    ])).toBe(reason === "timeout" ? "closeTimeout" : "rejoinRequired");
+    ])).toBe("closed");
+    expect(signals).toHaveLength(1);
     expect(signals[0]?.aborted).toBe(true);
     expect(blocked).toEqual([true]);
-    expect(failures).toHaveLength(1);
-    expect(h.calls).not.toContain("host-close");
-    await closeDocument(h.editor, api, options, () => { h.calls.push("host-close"); });
-    expect(signals).toHaveLength(2);
-    expect(signals[1]).not.toBe(signals[0]);
-    expect(signals[1]!.aborted).toBe(false);
-    expect(h.calls.at(-1)).toBe("host-close");
+    expect(failures).toEqual([]);
+    expect(h.calls).toEqual(["flush", "sequence", "save", "host-close"]);
   } finally { clearTimeout(timer); }
+});
+
+test("an aborted close request completes Close after the final save succeeded", async () => {
+  const h = setup();
+  const blocked: boolean[] = [];
+  const failures: unknown[] = [];
+  await closeDocument(h.editor, {
+    save: h.api.save,
+    async close() { h.calls.push("close"); throw new DOMException("Request aborted", "AbortError"); },
+  }, {
+    ...h.closeOptions,
+    setInputBlocked: (value) => { blocked.push(value); },
+    onFailure: (error) => { failures.push(error); },
+  }, () => { h.calls.push("host-close"); });
+  expect(blocked).toEqual([true]);
+  expect(failures).toEqual([]);
+  expect(h.calls).toEqual(["flush", "sequence", "save", "close", "host-close"]);
+});
+
+test("an aborted final save restores input and leaves Close incomplete", async () => {
+  const h = setup();
+  const blocked: boolean[] = [];
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(closeDocument(h.editor, {
+      async save() { h.calls.push("save"); throw new DOMException("Request aborted", "AbortError"); },
+      close: h.api.close,
+    }, {
+      ...h.closeOptions, setInputBlocked: (value) => { blocked.push(value); },
+    }, () => { h.calls.push("host-close"); })).rejects.toThrow("Request aborted");
+    expect(blocked).toEqual([true, false]);
+    expect(h.calls).toEqual(["flush", "sequence", "save"]);
+  } finally { warning.mockRestore(); }
 });
 
 test("save captures the socket barrier immediately after input flush", async () => {
