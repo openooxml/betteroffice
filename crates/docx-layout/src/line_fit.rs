@@ -10,6 +10,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
     let mut tabs = None;
     if let Some(attrs) = &block.attrs {
         let ParagraphAttrs {
+            leading_inline_box: None,
             justification_mode: _,
             has_source_content: _,
             horizontal_rules,
