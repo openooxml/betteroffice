@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { version as fontsVersion } from '../../packages/fonts/package.json';
 import { version as fontsCjkVersion } from '../../packages/fonts-cjk/package.json';
+import { version as fontsIntlVersion } from '../../packages/fonts-intl/package.json';
 import { isAllowedFontRequest } from './network-policy.mjs';
 
 const latin = (version = fontsVersion, file = 'Carlito-Regular.ttf') =>
   `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${version}/assets/${file}`;
 const cjk = (version = fontsCjkVersion) =>
   `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${version}/assets/NotoSansJP-Regular.otf`;
+const intl = (version = fontsIntlVersion) =>
+  `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${version}/assets/NotoSansThai-Regular.ttf.zst`;
 const next = (version: string) => version.replace(/\d+$/, (patch) => String(Number(patch) + 1));
 
 function request(url, overrides = {}) {
@@ -24,6 +27,7 @@ describe('font network policy', () => {
   test('allows the font package versions the capture harness requests', () => {
     expect(isAllowedFontRequest(request(latin()))).toBe(true);
     expect(isAllowedFontRequest(request(cjk()))).toBe(true);
+    expect(isAllowedFontRequest(request(intl()))).toBe(true);
   });
 
   test('blocks other versions and query strings', () => {
@@ -33,6 +37,8 @@ describe('font network policy', () => {
       latin('latest'),
       latin(fontsVersion.replaceAll('.', 'x')),
       cjk(next(fontsCjkVersion)),
+      intl(next(fontsIntlVersion)),
+      `${intl()}?v=1`,
       `${latin()}?v=1`,
       `${latin()}?foo=bar`,
     ];
@@ -44,6 +50,7 @@ describe('font network policy', () => {
       latin().replace('cdn.jsdelivr.net/npm', 'unpkg.com'),
       latin().replace('assets/Carlito-Regular.ttf', 'dist/cdn.js'),
       latin(fontsVersion, 'Carlito-Regular.woff2'),
+      intl().replace('.ttf.zst', '.ttf'),
       `${latin()}/extra`,
       'https://fonts.googleapis.com/css2?family=Carlito',
       latin().replace('https:', 'http:'),

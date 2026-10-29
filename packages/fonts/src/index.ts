@@ -3,12 +3,13 @@ export type { BundledFontLoader, BundledFontSource } from './provider';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
+import { loadPackedFontBytes } from './packed';
 
 // Per-file LITERAL asset URLs. Bundlers only statically resolve `new URL()`
 // when the specifier is a string literal — a template expression works under
 // Vite's directory glob but collapses to a single (wrong) asset under
 // webpack/Turbopack. Every face this package ships must have a row here; the
-// CJK faces resolve through `@betteroffice/fonts-cjk` instead.
+// Optional add-on faces resolve through their own packages.
 const FONT_ASSET_URLS: Record<string, () => URL> = {
   'Caladea-Bold.ttf': () =>
     new URL('../assets/Caladea-Bold.ttf', import.meta.url),
@@ -162,8 +163,47 @@ export interface FontAssetOptions {
 }
 
 let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
+let intlAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
 class MissingCjkAddonError extends Error {}
+
+const UNRESOLVED_INTL_ADDON =
+  /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-intl["'”]/;
+
+async function importIntlAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  let addon: typeof import('@betteroffice/fonts-intl');
+  try {
+    addon = await import('@betteroffice/fonts-intl');
+  } catch (error) {
+    const message = (error as { message?: unknown } | null)?.message;
+    if (typeof message !== 'string' || !UNRESOLVED_INTL_ADDON.test(message)) {
+      throw error;
+    }
+    return undefined;
+  }
+  const urls = addon.INTL_FONT_ASSET_URLS;
+  if (urls === null || typeof urls !== 'object') {
+    throw new TypeError('Invalid INTL_FONT_ASSET_URLS export from @betteroffice/fonts-intl');
+  }
+  return urls;
+}
+
+function loadIntlAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  if (intlAssetUrls === undefined) {
+    const promise = importIntlAssetUrls();
+    promise.then(
+      (urls) => {
+        if (urls === undefined && intlAssetUrls === promise)
+          intlAssetUrls = undefined;
+      },
+      () => {
+        if (intlAssetUrls === promise) intlAssetUrls = undefined;
+      },
+    );
+    intlAssetUrls = promise;
+  }
+  return intlAssetUrls;
+}
 
 const UNRESOLVED_CJK_ADDON =
   /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-cjk["'”]/;
@@ -232,6 +272,10 @@ const CJK_FILES = new Set(
   BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-')).map((face) => face.file),
 );
 
+const INTL_FILES = new Set(
+  BUNDLED_FONTS.filter((face) => face.file.endsWith('.ttf.zst')).map((face) => face.file),
+);
+
 async function assetUrl(
   { file, script }: BundledFontFace,
   baseUrl: URL | undefined,
@@ -239,6 +283,16 @@ async function assetUrl(
   if (baseUrl !== undefined) return new URL(file, baseUrl);
   const local = FONT_ASSET_URLS[file];
   if (local) return local();
+  if (INTL_FILES.has(file)) {
+    const intl = await loadIntlAssetUrls();
+    const resolveIntl = intl?.[file];
+    if (resolveIntl) return resolveIntl();
+    if (!intl) {
+      throw new Error(
+        `Bundled font ${file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
+      );
+    }
+  }
   if (script?.startsWith('cjk-') || CJK_FILES.has(file)) {
     const cjk = await loadCjkAssetUrls();
     const resolveCjk = cjk?.[file];
@@ -261,6 +315,9 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
+  if (INTL_FILES.has(face.file)) {
+    return loadPackedFontBytes(face, (dependency) => assetUrl(dependency, baseUrl));
+  }
   const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
   return bytes.catch((error) => {

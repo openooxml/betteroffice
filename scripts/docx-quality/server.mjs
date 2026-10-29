@@ -26,6 +26,7 @@ for (const [name, override] of [
 // Fonts this checkout has not published yet cannot come from the pinned CDN,
 // so an explicit assets directory is served from the viewer's own origin.
 const fontAssets = process.env.QUALITY_FONT_ASSETS?.trim();
+const intlAssets = resolve(process.env.QUALITY_FONT_ASSETS_INTL ?? 'packages/fonts-intl/assets');
 const server = await createServer({
   configFile: false,
   define: {
@@ -38,7 +39,22 @@ const server = await createServer({
         : null
     ),
   },
-  plugins: format === 'docx' ? [] : [qualityRendererPlugin(format)],
+  plugins: [
+    ...(fontAssets ? [{
+      name: 'quality-intl-font-assets',
+      configureServer(server) {
+        const prefix = `/@fs${resolve(fontAssets)}/`;
+        server.middlewares.use((request, _response, next) => {
+          const file = request.url?.startsWith(prefix) ? request.url.slice(prefix.length) : '';
+          if (/^[A-Za-z0-9-]+\.ttf\.zst$/.test(file)) {
+            request.url = `/@fs${intlAssets}/${file}`;
+          }
+          next();
+        });
+      },
+    }] : []),
+    ...(format === 'docx' ? [] : [qualityRendererPlugin(format)]),
+  ],
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`
   ),

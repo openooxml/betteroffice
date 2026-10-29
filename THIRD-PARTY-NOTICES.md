@@ -45,10 +45,10 @@ License: SIL Open Font License, Version 1.1
 
 ---
 
-## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
+## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`, `packages/fonts-intl`)
 
-Seventy-five font binaries are vendored unmodified and redistributed in the published
-`@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
+Font binaries are vendored and redistributed in the published
+`@betteroffice/fonts`, `@betteroffice/fonts-cjk`, and `@betteroffice/fonts-intl` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
@@ -111,6 +111,11 @@ directory; those files are the authoritative copies for redistribution.
 
 Both are static `SubsetOTF` Regulars from
 https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
+
+`packages/fonts-intl/assets` contains hinted static Noto coverage faces for
+international scripts, stored with lossless Zstandard compression. Sources:
+https://github.com/notofonts/notofonts.github.io. The decoded fonts retain
+their copyright notices. `LICENSES/OFL-Noto.txt` contains the OFL 1.1 text.
 
 ---
 

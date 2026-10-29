@@ -5,6 +5,7 @@ the Microsoft core fonts, common presentation families, and Hebrew and Arabic co
 engine loads them through `configureDefaultFonts`; for the PPTX editor's `fonts` prop,
 `loadBundledFontBytes` returns the bytes of any bundled face. The CJK faces
 ship separately in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
+Additional international scripts ship in [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl).
 
 The substitutes share the advance widths of Calibri, Cambria, Arial, Times New Roman and Courier
 New, so line breaks and pagination match Word. Across 813 real-world documents, configuring this
@@ -16,6 +17,8 @@ package raised exact page-count agreement with Word from 46.5% to 61.9%.
 bun add @betteroffice/fonts
 # for Chinese, Japanese or Korean text:
 bun add @betteroffice/fonts-cjk
+# for additional international scripts:
+bun add @betteroffice/fonts-intl
 ```
 
 ## Usage
@@ -44,7 +47,7 @@ the module.
 
 ## Serving the faces from a CDN
 
-The `@betteroffice/fonts/cdn` entry keeps the font binaries and the CJK add-on out of your bundle. It
+The `@betteroffice/fonts/cdn` entry keeps the font binaries and the optional add-ons out of your bundle. It
 fetches faces from jsDelivr URLs pinned to the installed package versions:
 
 ```ts
@@ -75,12 +78,13 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
 
 - Serve the original filenames from the packages' `assets/` directories, with CORS enabled and the
   origin allowed in your `connect-src` policy.
-- With a single `baseUrl`, every face, CJK included, loads from that directory. Copy the `assets/`
-  of both packages into it; the filenames do not collide.
+- With a single `baseUrl`, every face, including optional add-on faces, loads from that directory. Copy the `assets/`
+  of the installed font packages into it; the filenames do not collide.
 - A relative `baseUrl` resolves against the current page; outside a browser it must be absolute.
-- Each download is checked against the manifest's byte length, which detects truncation but not
+- Each decoded face is checked against the manifest's byte length, which detects truncation but not
   tampering, so use an origin you trust. A CDN can see which faces a document requests.
-- Serve the files with `br` or `gzip` encoding. The faces are raw TTF/OTF, because the browser and
+- Intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
+- Serve the raw TTF/OTF files with `br` or `gzip` encoding. The base and CJK faces are raw TTF/OTF, because the browser and
   the WebAssembly engine must measure the same bytes; compression brings the 65 faces from 14,527 KB to
   7,156 KB.
 
@@ -90,13 +94,13 @@ With rollup, esbuild or a Vite build that inlines the package, mark the font pac
 so their asset URLs survive, or configure a `baseUrl`:
 
 ```bash
-esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk
+esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk --external:@betteroffice/fonts-intl
 ```
 
 ```js
 // rollup.config.js
 export default {
-  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk'],
+  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
 };
 ```
 
@@ -149,6 +153,7 @@ sources and other consumers:
 
 - [Packages and fonts](https://docs.betteroffice.dev/docs/packages#fonts)
 - [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk)
+- [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl)
 - [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx)
 
 ## Licensing
@@ -162,5 +167,7 @@ The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed un
 - `LICENSES/OFL-NotoSansHebrew.txt`: Copyright 2022 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
 - `LICENSES/OFL-NotoArabic.txt`: Copyright 2022 The Noto Project Authors; covers Noto Sans Arabic and Noto Naskh Arabic. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansArabic/hinted/ttf/`, `fonts/NotoNaskhArabic/hinted/ttf/`); upstream project [notofonts/arabic](https://github.com/notofonts/arabic).
 - `LICENSES/OFL-Gelasio.txt`, `OFL-ComicRelief.txt`, `OFL-Inter.txt`, `OFL-Roboto.txt`, `OFL-SourceSans3.txt`, `OFL-DMSans.txt`, `OFL-DMSerifDisplay.txt`, `OFL-OpenSans.txt`, `OFL-Montserrat.txt`, `OFL-Poppins.txt`, `OFL-Oswald.txt`, `OFL-Heebo.txt`: one per family, each with that family's copyright notice.
+
+International binaries and their OFL license text ship in [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl).
 
 The CJK binaries and their `OFL-NotoCJK.txt` license text ship in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).

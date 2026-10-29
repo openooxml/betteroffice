@@ -31,12 +31,13 @@ Rust crates are not yet published.
 ## Fonts
 
 The font packages provide open, metric-compatible alternatives to common
-Microsoft fonts, plus Hebrew, Arabic, and CJK coverage.
+Microsoft fonts, plus Hebrew, Arabic, CJK, and international script coverage.
 
 | Package | Contents |
 | --- | --- |
 | `@betteroffice/fonts` | Carlito, Caladea, Liberation Sans/Serif/Mono, Gelasio, Comic Relief, Inter, Roboto, Source Sans 3, DM Sans, DM Serif Display, Open Sans, Montserrat, Poppins, Oswald, Heebo, Noto Hebrew/Arabic |
 | `@betteroffice/fonts-cjk` | Noto Sans SC/TC/JP/KR, Noto Serif SC |
+| `@betteroffice/fonts-intl` | Noto coverage for South and Southeast Asian, Armenian, Georgian, Ethiopic, Tibetan, Mongolian, Syriac, Thaana, Cherokee, and Tifinagh scripts |
 
 For the DOCX editor, install `@betteroffice/fonts` and configure it before
 mounting the editor:
@@ -51,7 +52,8 @@ configureDefaultFonts({ fonts });
 To host the font files on your own CDN, pass `baseUrl` alongside `fonts`. The
 module provides the font manifest and is required with either asset location.
 Install `@betteroffice/fonts-cjk` when you need Chinese, Japanese, or Korean text.
-Both packages are optional and must be installed explicitly.
+Install `@betteroffice/fonts-intl` for additional international script coverage.
+All font packages are optional and must be installed explicitly.
 
 Missing font bytes can cause fallback measurements and different pagination.
 See the language guides for font setup in other formats and runtimes.

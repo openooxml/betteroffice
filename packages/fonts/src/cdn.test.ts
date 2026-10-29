@@ -111,7 +111,7 @@ describe('CDN font provider', () => {
     );
   });
 
-  test('browser entry bundles without binary asset or CJK package imports', async () => {
+  test('browser entry bundles without binary asset or add-on package imports', async () => {
     const build = await Bun.build({
       entrypoints: [new URL('./cdn.ts', import.meta.url).pathname],
       target: 'browser',
@@ -121,7 +121,7 @@ describe('CDN font provider', () => {
           name: 'reject-font-assets',
           setup(builder) {
             builder.onResolve(
-              { filter: /\.(ttf|otf)$|^@betteroffice\/fonts-cjk/ },
+              { filter: /\.(ttf|otf)(\.zst)?$|^@betteroffice\/fonts-(cjk|intl)/ },
               (args) => {
                 throw new Error(`CDN entry imported ${args.path}`);
               },
@@ -132,6 +132,6 @@ describe('CDN font provider', () => {
     });
     expect(build.success).toBe(true);
     expect(build.outputs).toHaveLength(1);
-    expect(build.outputs[0]!.size).toBeLessThan(20_000);
+    expect(build.outputs[0]!.size).toBeLessThan(30_000);
   });
 });
