@@ -4,16 +4,36 @@ mod coverage_regressions {
     fn split(renderer: &SlideRenderer, text: &str) -> Vec<ResolvedRun> {
         let mut run = paragraph(renderer, "l", text).runs.remove(0);
         run.start = 7;
-        let pieces = renderer.coverage_pieces(&run.style.face, &run.text, false, false, true);
         let mut result = Vec::new();
-        split_coverage_pieces(run, pieces, &mut result);
+        renderer.split_by_coverage(run, &mut result);
         result
+    }
+
+    #[test]
+    fn browser_coverage_is_off_by_default() {
+        for registered_fallback in [false, true] {
+            let mut renderer = renderer();
+            if registered_fallback {
+                renderer
+                    .register_fallback_font("Liberation Sans", false, false, FONT)
+                    .unwrap();
+            }
+            let own = renderer.fallback_font().unwrap();
+            for text in ["AहB", "A👩‍💻B", "A1️⃣B", "A\u{E000}B"] {
+                let pieces = split(&renderer, text);
+                assert_eq!(pieces.len(), 1, "{text:?}");
+                assert_eq!(pieces[0].text, text);
+                assert_eq!(pieces[0].start, 7);
+                assert_eq!(pieces[0].style.face.id, own);
+            }
+        }
     }
 
     #[test]
     fn browser_coverage_keeps_grapheme_clusters_whole() {
         for registered_fallback in [false, true] {
             let mut renderer = renderer();
+            renderer.set_browser_coverage_fallback(true);
             if registered_fallback {
                 renderer
                     .register_fallback_font("Liberation Sans", false, false, FONT)
@@ -69,6 +89,7 @@ mod coverage_regressions {
     fn browser_coverage_keeps_invisible_only_runs_unchanged() {
         for registered_fallback in [false, true] {
             let mut renderer = renderer();
+            renderer.set_browser_coverage_fallback(true);
             if registered_fallback {
                 renderer
                     .register_fallback_font("Liberation Sans", false, false, FONT)
@@ -90,7 +111,8 @@ mod coverage_regressions {
 
     #[test]
     fn alternating_browser_coverage_splitting_scales_linearly() {
-        let renderer = renderer();
+        let mut renderer = renderer();
+        renderer.set_browser_coverage_fallback(true);
         let measure = |count| {
             let text = "Aह".repeat(count);
             (0..3)
@@ -115,7 +137,8 @@ mod coverage_regressions {
 
     #[test]
     fn coverage_offsets_keep_supplementary_characters_and_run_origins() {
-        let renderer = renderer();
+        let mut renderer = renderer();
+        renderer.set_browser_coverage_fallback(true);
         let pieces = split(&renderer, "A😀हA");
         let pieces: Vec<_> = pieces
             .iter()
@@ -126,7 +149,14 @@ mod coverage_regressions {
 
     #[test]
     fn chart_coverage_offsets_keep_supplementary_characters() {
+        for enabled in [false, true] {
+            chart_coverage_offsets(enabled);
+        }
+    }
+
+    fn chart_coverage_offsets(enabled: bool) {
         let mut renderer = renderer();
+        renderer.set_browser_coverage_fallback(enabled);
         renderer
             .register_fallback_font(
                 "Noto Sans Arabic",
@@ -167,10 +197,12 @@ mod coverage_regressions {
             .iter()
             .map(|run| (run.text.as_str(), run.start, run.end))
             .collect();
-        if cfg!(target_arch = "wasm32") {
+        if enabled {
             assert_eq!(runs, [("A", 0, 1), ("😀", 1, 3), ("م", 3, 4), ("A", 4, 5)]);
+            assert_eq!(lines[0].runs[1].font_id, BROWSER_FONT_ID);
         } else {
             assert_eq!(runs, [("A😀", 0, 3), ("م", 3, 4), ("A", 4, 5)]);
+            assert!(lines[0].runs.iter().all(|run| run.font_id != BROWSER_FONT_ID));
         }
         let arabic = lines[0].runs.iter().find(|run| run.text == "م").unwrap();
         assert_eq!(arabic.glyphs[0].cluster, 3);

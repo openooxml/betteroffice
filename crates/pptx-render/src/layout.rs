@@ -180,6 +180,7 @@ pub struct SlideRenderer {
     /// Normalized fallback family.
     fallback_family: Option<String>,
     font_count: usize,
+    browser_coverage_fallback: bool,
     /// Laid-out text reused across display-list builds and slides.
     text_layouts: Mutex<TextLayoutCache>,
     baseline_stories: Mutex<HashMap<String, CachedBaselineStory>>,
@@ -200,9 +201,21 @@ impl SlideRenderer {
             fallback: None,
             fallback_family: None,
             font_count: 0,
+            browser_coverage_fallback: false,
             text_layouts: Mutex::new(TextLayoutCache::default()),
             baseline_stories: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) -> bool {
+        if self.browser_coverage_fallback == enabled {
+            return false;
+        }
+        self.browser_coverage_fallback = enabled;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        true
     }
 
     pub fn register_font(
@@ -391,7 +404,7 @@ impl SlideRenderer {
             &run.text,
             run.style.bold,
             run.style.italic,
-            cfg!(target_arch = "wasm32"),
+            self.browser_coverage_fallback,
         );
         split_coverage_pieces(run, pieces, out);
     }
@@ -4022,8 +4035,13 @@ fn chart_text_primitive(
             .map_err(|error| RenderError::Font(error.to_string()))?;
         single_line_box(metrics, size_px, &CompatFlags::default())
     };
-    let pieces =
-        renderer.coverage_pieces(&face, text.text, bold, italic, cfg!(target_arch = "wasm32"));
+    let pieces = renderer.coverage_pieces(
+        &face,
+        text.text,
+        bold,
+        italic,
+        renderer.browser_coverage_fallback,
+    );
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
@@ -7559,13 +7577,8 @@ mod tests {
             },
             &mut unchanged,
         );
-        if cfg!(target_arch = "wasm32") {
-            assert_eq!(unchanged.len(), 3);
-            assert_eq!(unchanged[1].style.face.id.to_u32(), BROWSER_FONT_ID);
-            assert_eq!(unchanged[1].style.family, "Arial");
-        } else {
-            assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
-        }
+        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+        assert_eq!(unchanged[0].style.face.id, run.style.face.id);
 
         renderer
             .register_fallback_font("Noto Sans Arabic", false, false, arabic)

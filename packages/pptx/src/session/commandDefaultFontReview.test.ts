@@ -59,6 +59,7 @@ function connection(initial = ['active', 'target']) {
   const layout = spyOn(wasm, 'presentationDisplayListJson').mockImplementation(() => JSON.stringify({
     width: 100, height: 80, primitives: [], families: [...registered],
   }));
+  const coverage = spyOn(requests, 'presentationEnableBrowserCoverageFallback').mockImplementation(() => {});
   const collect = spyOn(requests, 'presentationRequestedFontFaces').mockImplementation((_, id) =>
     id === 'active' ? [] : [{ ...regular, family: 'Cambria' }]);
   const provider = spyOn(fontModule.commandFontProvider, 'load').mockResolvedValue({
@@ -66,14 +67,14 @@ function connection(initial = ['active', 'target']) {
     resolveLastResort: () => { throw new Error('Unexpected substitution'); },
   });
   const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
-  restorers.push(() => { open.mockRestore(); metadata.mockRestore(); layout.mockRestore(); collect.mockRestore(); provider.mockRestore(); fetch.mockRestore(); });
+  restorers.push(() => { open.mockRestore(); metadata.mockRestore(); layout.mockRestore(); coverage.mockRestore(); collect.mockRestore(); provider.mockRestore(); fetch.mockRestore(); });
   const pair = createInProcessPair();
   const messages: unknown[] = [];
   createPresentationSessionHost({ ...pair.host, post(message, transfer) {
     messages.push(message); pair.host.post(message, transfer);
   } }, { initWasm: async () => {} });
   restorers.push(() => pair.client.close());
-  return { transport: pair.client, messages, registered, changed: changed.promise, collect, layout,
+  return { transport: pair.client, messages, registered, changed: changed.promise, collect, layout, coverage,
     replace(value: string[]) { next = value; } };
 }
 
@@ -97,6 +98,7 @@ for (const failure of ['reject', 'timeout'] as const) test(`browser ${failure} p
   const opening = createPresentationCommandClient(Uint8Array.of(0), installation, wire.transport);
   await installing.promise;
   expect(wire.registered).toEqual([]);
+  expect(wire.coverage).not.toHaveBeenCalled();
   expect(wire.layout).not.toHaveBeenCalled();
   if (failure === 'timeout') expire();
   const client = await opening;
@@ -106,6 +108,7 @@ for (const failure of ['reject', 'timeout'] as const) test(`browser ${failure} p
   completed.resolve();
   await client.flush();
   expect(wire.registered).toEqual([]);
+  expect(wire.coverage).not.toHaveBeenCalled();
 });
 
 test('only successful browser faces enter worker layout through the private handshake', async () => {
@@ -127,6 +130,7 @@ test('only successful browser faces enter worker layout through the private hand
   const client = await opening;
   clients.push(client);
   expect(wire.registered).toEqual(['Calibri']);
+  expect(wire.coverage).toHaveBeenCalledTimes(1);
   expect(JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)).families).toEqual(['Calibri']);
   expect(bytes.byteLength).toBe(3);
 });
@@ -150,6 +154,7 @@ test('app registration overtakes a pending browser default without blocking its 
   installed.resolve();
   await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'target' } });
   expect(wire.registered).toEqual(['Cambria']);
+  expect(wire.coverage).not.toHaveBeenCalled();
 });
 
 test('expired module imports acknowledge open and cannot create a late manager', async () => {
@@ -221,6 +226,7 @@ test('app supplied opens and synchronous replies have no default font protocol t
   clients.push(client);
   await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'target' } });
   expect(importing).not.toHaveBeenCalled();
+  expect(wire.coverage).not.toHaveBeenCalled();
   expect(wire.collect).not.toHaveBeenCalled();
   expect(sent.every((message) => isClientMessage(message))).toBe(true);
   expect(wire.messages.every((message) => !isHostMessage(message) || message.kind !== 'event')).toBe(true);

@@ -21,11 +21,43 @@ afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore()
 test('app families exclude all styles without importing the manager', async () => {
   const source = provider(() => async () => bytes);
   const register = mock(() => {});
-  const fonts = createCommandDefaultFonts([{ family: ' calibri ' }], () => [regular, { ...regular, bold: true }], register, () => {});
+  const beforeRegister = mock(() => {});
+  const fonts = createCommandDefaultFonts([{ family: ' calibri ' }], () => [regular, { ...regular, bold: true }],
+    register, () => {}, undefined, beforeRegister);
   try {
     expect(await fonts.load()).toEqual([]);
     expect(source.imported).not.toHaveBeenCalled();
     expect(register).not.toHaveBeenCalled();
+    expect(beforeRegister).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
+});
+
+test('defaults prepare once before the first registration across loads', async () => {
+  provider(() => async () => bytes);
+  const calls: string[] = [];
+  let wanted = [regular];
+  const fonts = createCommandDefaultFonts([], () => wanted, (face) => { calls.push(face.family); }, () => {},
+    undefined, () => { calls.push('prepare'); });
+  try {
+    expect(calls).toEqual([]);
+    await fonts.load();
+    wanted = [{ ...regular, family: 'Cambria' }];
+    await fonts.load();
+    await fonts.load();
+    expect(calls).toEqual(['prepare', 'Calibri', 'Cambria']);
+  } finally { fonts.dispose(); }
+});
+
+test('unavailable and rejected defaults never prepare registration', async () => {
+  provider((family) => family === 'Calibri' ? async () => bytes : undefined);
+  const beforeRegister = mock(() => {});
+  const register = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular, { ...regular, family: 'Unknown Family' }],
+    register, () => {}, async () => [], beforeRegister);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    expect(beforeRegister).not.toHaveBeenCalled();
   } finally { fonts.dispose(); }
 });
 
@@ -81,6 +113,6 @@ test('disposing an in-flight load settles without registering', async () => {
 test('default font plumbing stays out of all package entries', async () => {
   for (const entry of ['../index.ts', '../worker.ts', '../collaboration/index.ts', '../../../pptx-react/src/index.ts']) {
     const source = await readFile(new URL(entry, import.meta.url), 'utf8');
-    expect(source).not.toMatch(/commandDefaultFonts|pptxDefaultFonts|presentationRequestedFontFaces|defaultFontInstaller|installDefaultFonts/);
+    expect(source).not.toMatch(/commandDefaultFonts|pptxDefaultFonts|presentationRequestedFontFaces|presentationEnableBrowserCoverageFallback|defaultFontInstaller|installDefaultFonts/);
   }
 });

@@ -116,6 +116,16 @@ impl Renderer {
             .0)
     }
 
+    /// Enables browser metrics for uncovered characters. Off by default.
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
+        if self.renderer.set_browser_coverage_fallback(enabled) {
+            self.font_epoch += 1;
+            self.layout_keys.clear();
+            self.rendered.clear();
+            self.last_slide = None;
+        }
+    }
+
     /// returns a superset of layout's requested faces as JSON, including faces
     /// skipped by shape or operation budgets or chart labels with no room.
     pub fn requested_font_faces_json(
@@ -999,6 +1009,43 @@ mod tests {
             .layout_scoped_slide(session.package(), &negative)
             .unwrap();
         assert_eq!(frame, serde_json::to_string(&fresh.display_list).unwrap());
+    }
+
+    #[test]
+    fn browser_coverage_changes_invalidate_layouts_once() {
+        let document = pptx_edit::DeckSession::open(DECK, 925).unwrap();
+        let slide_id = document.slide_ids().unwrap().remove(0);
+        let mut renderer = Renderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        for (enabled, changed) in [(false, false), (true, true), (false, true)] {
+            let frame = renderer.layout_slide_json(&document, 0).unwrap();
+            let old = renderer.slide_layout_key(&document, 0).unwrap();
+            assert!(renderer.set_active_slide(&document, &slide_id, &old));
+            let epoch = renderer.font_epoch;
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            if changed {
+                assert_eq!(renderer.font_epoch, epoch + 1);
+                assert!(renderer.layout_keys.is_empty());
+                assert!(renderer.rendered.is_empty());
+                assert!(renderer.last_slide.is_none());
+                assert!(!renderer.set_active_slide(&document, &slide_id, &old));
+                assert_ne!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                renderer.layout_slide_json(&document, 0).unwrap();
+                assert_eq!(renderer.layout_count, layouts + 1);
+            } else {
+                assert_eq!(renderer.font_epoch, epoch);
+                assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), old);
+                assert_eq!(renderer.layout_slide_json(&document, 0).unwrap(), frame);
+                assert_eq!(renderer.layout_count, layouts);
+            }
+            let current = renderer.slide_layout_key(&document, 0).unwrap();
+            let layouts = renderer.layout_count;
+            renderer.set_browser_coverage_fallback(enabled);
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), current);
+            renderer.layout_slide_json(&document, 0).unwrap();
+            assert_eq!(renderer.layout_count, layouts);
+        }
     }
 
     #[test]

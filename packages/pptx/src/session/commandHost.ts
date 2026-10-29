@@ -20,7 +20,7 @@ import {
 import { buildCommandFrame } from './commandFrame';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
-import { presentationRequestedFontFaces } from '../wasm/fontRequests';
+import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
 import type { DefaultFontFace, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
   type PresentationSharedAck, type PresentationSharedMethods } from './commandSharedAdapter';
@@ -217,7 +217,7 @@ export function registerPresentationCommandHandlers(
               options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
                 [...result.transfer, ...faces.map((face) => face.bytes)]));
             }
-          }, options.installDefaultFonts);
+          }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()));
         finish(defaultFonts);
       }).catch(() => finish());
     });

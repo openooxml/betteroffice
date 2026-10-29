@@ -5,6 +5,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { initWasm } from '../wasm/loader';
+import { PptxRenderer } from '../wasm/generated/pptx_wasm.js';
 import type { SlideDisplayList } from '../types';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
@@ -143,15 +144,50 @@ for (const shared of [false, true]) test(`navigation waits only for target pendi
   expect(ack.outcomes[0].status).toBe('applied');
 });
 
-test('a supplied family excludes defaults and all-covered decks never import the manager', async () => {
+test('app supplied fonts keep uncovered text in registered faces without defaults', async () => {
   const manager = source({ Calibri: async () => font });
+  const coverage = spyOn(PptxRenderer.prototype, 'setBrowserCoverageFallback');
+  restorers.push(() => coverage.mockRestore());
   const wire = connection();
-  const client = await createPresentationCommandClient(await deck(['Calibri']), {
+  const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha 👩‍💻 नमस्ते \uE000 ✓'), {
     ...options, fonts: [{ family: ' calibri ', bold: true, bytes: font.slice(0) }],
   }, wire.transport);
   clients.push(client);
   expect(manager.imported).not.toHaveBeenCalled();
   expect(manager.fetch).not.toHaveBeenCalled();
+  expect(coverage).not.toHaveBeenCalled();
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const boxes = list.primitives.filter((primitive) => primitive.kind === 'textBox');
+  const runs = boxes.flatMap((box) => box.lines.flatMap((line) => line.runs));
+  expect(runs.some((run) => run.text.includes('👩‍💻'))).toBe(true);
+  expect(runs.every((run) => run.fontId !== 0xffffffff)).toBe(true);
+});
+
+test('default sessions enable browser coverage once before registering faces', async () => {
+  source({ Calibri: async () => font, Cambria: async () => font });
+  const calls: string[] = [];
+  const enable = PptxRenderer.prototype.setBrowserCoverageFallback;
+  const coverage = spyOn(PptxRenderer.prototype, 'setBrowserCoverageFallback').mockImplementation(function (
+    this: PptxRenderer, enabled: boolean,
+  ) {
+    calls.push(`coverage:${enabled}`);
+    enable.call(this, enabled);
+  });
+  const original = PptxRenderer.prototype.registerFont;
+  const register = spyOn(PptxRenderer.prototype, 'registerFont').mockImplementation(function (
+    this: PptxRenderer, family: string, bold: boolean, italic: boolean, bytes: Uint8Array,
+  ) {
+    calls.push(family);
+    return original.call(this, family, bold, italic, bytes);
+  });
+  restorers.push(() => { register.mockRestore(); coverage.mockRestore(); });
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(), options, wire.transport);
+  clients.push(client);
+  await client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.slides[1].id } });
+  expect(register.mock.calls.map(([family]) => family)).toEqual(['Calibri', 'Cambria']);
+  expect(coverage).toHaveBeenCalledTimes(1);
+  expect(calls).toEqual(['coverage:true', 'Calibri', 'Cambria']);
 });
 
 test('failed and stalled defaults still acknowledge an open', async () => {

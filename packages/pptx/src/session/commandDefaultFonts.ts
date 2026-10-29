@@ -12,6 +12,7 @@ export function createCommandDefaultFonts(
   register: (face: DefaultFontFace) => void,
   settled: (faces: DefaultFontFace[]) => void,
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
+  beforeRegister?: () => void,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
@@ -19,6 +20,7 @@ export function createCommandDefaultFonts(
   const registered = new Set<string>();
   let provider: ReturnType<typeof commandFontProvider.load> | undefined;
   let disposed = false;
+  let prepared = false;
   const cancellations = new Set<() => void>();
   const key = (face: RequestedFace) => JSON.stringify([face.family.trim().toLowerCase(), face.bold, face.italic]);
 
@@ -78,6 +80,10 @@ export function createCommandDefaultFonts(
           pending.delete(key(wanted[index]));
           if (!face || registered.has(key(face)) || families.has(face.family.trim().toLowerCase())) continue;
           try {
+            if (!prepared) {
+              beforeRegister?.();
+              prepared = true;
+            }
             register(face);
             registered.add(key(face));
             additions.push({ ...face, bytes: face.bytes.slice(0) });
