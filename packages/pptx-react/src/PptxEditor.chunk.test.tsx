@@ -2,7 +2,8 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { Profiler, StrictMode } from 'react';
 import * as React from 'react';
-import { PptxEditor, PptxWorkerEditorChunkLoadError, pptxPeerlessEditorLoader } from './PptxEditor';
+import { PptxEditor, PptxWorkerEditorChunkLoadError, pptxLegacyEditorLoader, pptxPeerlessEditorLoader } from './PptxEditor';
+import { LEGACY_SYNC_API } from './runtimeOptions';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -20,6 +21,7 @@ globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 globalThis.setTimeout = realSetTimeout;
 const originalLoad = pptxPeerlessEditorLoader.load;
+const originalLegacyLoad = pptxLegacyEditorLoader.load;
 const capabilities = new Map<string, PropertyDescriptor | undefined>();
 const props = { file: new Uint8Array([1]), fonts: [], i18n: { worker: { preparing: 'Preparing test editor' } } };
 type SurfaceModule = Awaited<ReturnType<typeof pptxPeerlessEditorLoader.load>>;
@@ -36,6 +38,7 @@ afterEach(() => {
   cleanup();
   mock.restore();
   pptxPeerlessEditorLoader.load = originalLoad;
+  pptxLegacyEditorLoader.load = originalLegacyLoad;
   for (const [name, descriptor] of capabilities) {
     if (descriptor) Object.defineProperty(globalThis, name, descriptor);
     else Reflect.deleteProperty(globalThis, name);
@@ -56,6 +59,33 @@ function chunk() {
   const promise = new Promise<SurfaceModule>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+
+test('legacy sync API renders the preparing fallback until its session chunk loads', async () => {
+  type SessionModule = Awaited<ReturnType<typeof pptxLegacyEditorLoader.load>>;
+  let resolve!: (value: SessionModule) => void;
+  const pending = new Promise<SessionModule>((yes) => { resolve = yes; });
+  const load = spyOn(pptxLegacyEditorLoader, 'load').mockReturnValue(pending);
+  const view = render(<PptxEditor {...props} {...{ [LEGACY_SYNC_API]: true as const }} className="legacy-editor" />);
+  expect(view.getByRole('status').outerHTML).toBe('<div dir="ltr" class="legacy-editor" role="status">Preparing test editor</div>');
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => { resolve({ PptxEditorSession: () => <div data-testid="legacy-session" /> }); });
+  expect(view.queryByRole('status')).toBeNull();
+  expect(view.getByTestId('legacy-session')).toBeDefined();
+});
+
+test('a failed legacy session chunk reports a chunk-load error and offers reload', async () => {
+  const cause = new TypeError('Legacy chunk fetch failed');
+  spyOn(pptxLegacyEditorLoader, 'load').mockRejectedValue(cause);
+  const onError = mock((_error: Error) => {});
+  spyOn(console, 'error').mockImplementation(() => {});
+  const view = render(<PptxEditor {...props} {...{ [LEGACY_SYNC_API]: true as const }} onError={onError} />);
+  await waitFor(() => expect(view.queryByRole('alert')).not.toBeNull());
+  expect(view.getByTestId('pptx-error').dataset.failure).toBe('load');
+  expect(view.getByRole('button', { name: 'Reload page' })).toBeDefined();
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError.mock.calls[0]![0]).toBeInstanceOf(PptxWorkerEditorChunkLoadError);
+  expect(onError.mock.calls[0]![0]).toMatchObject({ cause, code: 'chunk-load-failed' });
+});
 
 test('a cold chunk commits the surface without advancing reveal timers', async () => {
   const pending = chunk();
