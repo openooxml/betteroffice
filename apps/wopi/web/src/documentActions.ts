@@ -6,11 +6,15 @@ interface InputEditor {
   hasPendingUpdates(): boolean;
 }
 
-interface RecoveryOptions {
+interface InputFlushOptions {
   signal?: AbortSignal;
   hasActiveComposition?(): boolean;
   blockInput?(): void;
+}
+
+interface RecoveryOptions extends InputFlushOptions {
   onFlushed?(): void;
+  hasUnsavedLocalChanges?(): boolean;
   hasUnacknowledgedUpdates(): boolean;
   upload?(bytes: Uint8Array, signal: AbortSignal): Promise<{ copyName: string }>;
 }
@@ -78,6 +82,23 @@ async function waitForComposition(
   }
 }
 
+export async function flushDocumentInput(
+  editor: InputEditor | null,
+  options: InputFlushOptions,
+  compositionError = "compositionActive",
+  flushError = "flushPendingInputTimeout",
+): Promise<void> {
+  if (!editor) throw new Error("The editor is not ready to preserve local work.");
+  const deadline = Date.now() + 3000;
+  do {
+    await waitForComposition(options.hasActiveComposition, deadline, compositionError, options.signal);
+    options.signal?.throwIfAborted();
+    options.blockInput?.();
+    await bounded(() => editor.flushPendingInput(), Math.max(0, deadline - Date.now()), flushError, options.signal);
+    options.signal?.throwIfAborted();
+  } while (options.hasActiveComposition?.());
+}
+
 export async function recoverDocument(
   editor: (InputEditor & { serialize(): Promise<Uint8Array> }) | null,
   options: RecoveryOptions,
@@ -85,16 +106,9 @@ export async function recoverDocument(
   const controller = new AbortController();
   try {
     if (!editor) throw new Error("The editor is not ready to preserve local work.");
-    const flushDeadline = Date.now() + 3000;
-    do {
-      await waitForComposition(options.hasActiveComposition, flushDeadline, "Recovery composition timed out. Finish typing, then retry recovery.", options.signal);
-      options.signal?.throwIfAborted();
-      options.blockInput?.();
-      await bounded(() => editor.flushPendingInput(), Math.max(0, flushDeadline - Date.now()), "Recovery input flush timed out.", options.signal);
-      options.signal?.throwIfAborted();
-    } while (options.hasActiveComposition?.());
+    await flushDocumentInput(editor, options, "Recovery composition timed out. Finish typing, then retry recovery.", "Recovery input flush timed out.");
     options.onFlushed?.();
-    if (!editor.hasPendingUpdates() && !options.hasUnacknowledgedUpdates()) return null;
+    if (!options.hasUnsavedLocalChanges?.() && !editor.hasPendingUpdates() && !options.hasUnacknowledgedUpdates()) return null;
     const bytes = await bounded(() => editor.serialize(), 10_000, "Recovery serialization timed out.", options.signal);
     options.signal?.throwIfAborted();
     if (!options.upload) return { bytes };
