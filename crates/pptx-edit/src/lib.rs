@@ -55,11 +55,15 @@ pub use search::TextSearchMatch;
 #[doc(hidden)]
 pub use story::{baseline_story, style_from_run_properties};
 pub use table::{TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt};
+#[cfg(any(feature = "engine", test))]
+pub use target::{CommandParagraphSource, CommandReadResponse, CommandStorySource};
 pub use target::{
     FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
     ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
     TextTarget,
 };
+#[cfg(any(feature = "engine", test))]
+pub use undo::HistoryReceipt;
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "engine")]

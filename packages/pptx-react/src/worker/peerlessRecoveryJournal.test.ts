@@ -1,9 +1,18 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 
 const checkpoint = (throughSeq: number, recoveryUpdate?: ArrayBuffer) => ({
   session: 'session', incarnation: 'worker', epoch: 1, throughSeq, version: String(throughSeq),
   bytes: new ArrayBuffer(8), ...(recoveryUpdate ? { recoveryUpdate } : {}),
+});
+
+for (const blob of [false, true]) test(`recovery retains no source Uint8Array with Blob source ${blob}`, () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const recovery = peerlessRecoveryFactory.create(blob ? new Blob([bytes]) : bytes);
+  expect(recovery.saved).toEqual({ throughSeq: 0, version: '' });
+  recovery.open(undefined, 0, '0', 'source', 'engine');
+  expect(recovery.validate()).toEqual({ kind: 'source', throughSeq: 0, engine: 'engine' });
+  expect(recovery.saved.bytes).toBeUndefined();
 });
 
 test('recovery adopts baseline and checkpoint buffers without copying', () => {
@@ -14,7 +23,7 @@ test('recovery adopts baseline and checkpoint buffers without copying', () => {
   expect(recovery.baseline?.throughSeq).toBe(4);
   const saved = checkpoint(5);
   recovery.checkpoint(saved);
-  expect(recovery.saved.bytes.buffer).toBe(saved.bytes);
+  expect(recovery.saved.bytes?.buffer).toBe(saved.bytes);
   expect(recovery.baseline?.kind === 'update' ? recovery.baseline.update.buffer : undefined).toBe(update);
 });
 
@@ -72,14 +81,20 @@ test('source baseline retains local and remote acknowledgements across ordinary 
 
 test('source rebase bound uses the original compressed source byte length', () => {
   for (const sourceBytes of [2, 40 * 1024 * 1024]) {
-    const recovery = peerlessRecoveryFactory.create(new Uint8Array(sourceBytes));
-    recovery.open(undefined, 0, '0', 'source', 'engine');
-    const limit = Math.max(16 * 1024 * 1024, sourceBytes / 2);
-    recovery.append(1, '1', [{ bytes: new ArrayBuffer(limit), origin: 'local' }]);
-    recovery.checkpoint(checkpoint(1));
-    expect(recovery.needsRebase()).toBe(false);
-    recovery.append(2, '2', [{ bytes: new ArrayBuffer(1), origin: 'remote' }]);
-    expect(recovery.needsRebase()).toBe(true);
+    const source = new Blob([new Uint8Array(sourceBytes)]);
+    const read = spyOn(source, 'arrayBuffer');
+    try {
+      const recovery = peerlessRecoveryFactory.create(source);
+      recovery.open(undefined, 0, '0', 'source', 'engine');
+      expect(recovery.validate().kind).toBe('source');
+      const limit = Math.max(16 * 1024 * 1024, sourceBytes / 2);
+      recovery.append(1, '1', [{ bytes: new ArrayBuffer(limit), origin: 'local' }]);
+      recovery.checkpoint(checkpoint(1));
+      expect(recovery.needsRebase()).toBe(false);
+      recovery.append(2, '2', [{ bytes: new ArrayBuffer(1), origin: 'remote' }]);
+      expect(recovery.needsRebase()).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); }
   }
 });
 
@@ -88,7 +103,7 @@ test('source recovery refuses missing baseline identity, bytes and lost journal 
   unknown.open(undefined, 0, '0');
   expect(() => unknown.validate()).toThrow('Recovery baseline is unavailable');
   for (const [bytes, engine, throughSeq] of [[0, 'engine', 0], [1, '', 0], [1, 'engine', 1]] as const) {
-    const recovery = peerlessRecoveryFactory.create(new Uint8Array(bytes));
+    const recovery = peerlessRecoveryFactory.create(new Blob([new Uint8Array(bytes)]));
     recovery.open(undefined, throughSeq, '0', 'source', engine);
     expect(() => recovery.validate()).toThrow('Recovery baseline is unavailable');
   }

@@ -116,6 +116,55 @@ impl Renderer {
             .0)
     }
 
+    /// returns a superset of layout's requested faces as JSON, including faces
+    /// skipped by shape or operation budgets or chart labels with no room.
+    pub fn requested_font_faces_json(
+        &self,
+        session: &pptx_edit::DeckSession,
+        slide_id: Option<&str>,
+    ) -> Result<String, EngineError> {
+        let ids = session.slide_ids().map_err(engine_error)?;
+        let indices = match slide_id {
+            Some(id) => vec![
+                ids.iter()
+                    .position(|candidate| candidate == id)
+                    .ok_or_else(|| {
+                        engine_error(pptx_edit::EditError::SlideNotFound(id.to_owned()))
+                    })?,
+            ],
+            None => (0..ids.len()).collect(),
+        };
+        let scopes = indices
+            .into_iter()
+            .map(|index| slide_scope(session, index as u32))
+            .collect::<Result<Vec<_>, _>>()?;
+        let faces = self
+            .renderer
+            .requested_font_faces(session.package(), &scopes)
+            .map_err(engine_error)?;
+        #[derive(Serialize)]
+        struct Face {
+            family: String,
+            bold: bool,
+            italic: bool,
+        }
+        #[derive(Serialize)]
+        struct RequestedFaces {
+            faces: Vec<Face>,
+        }
+        serde_json::to_string(&RequestedFaces {
+            faces: faces
+                .into_iter()
+                .map(|(family, bold, italic)| Face {
+                    family,
+                    bold,
+                    italic,
+                })
+                .collect(),
+        })
+        .map_err(engine_error)
+    }
+
     /// `layoutSlideJson` with its stages timed, returned as
     /// `{"layout": ..., "profile": {"scopeMs", "layoutMs", "serializeMs"}}`.
     pub fn layout_slide_profiled_json(
@@ -671,6 +720,9 @@ fn slide_scope(
             error => engine_error(error),
         })
 }
+
+#[cfg(test)]
+mod requested_fonts_tests;
 
 #[cfg(test)]
 mod tests {

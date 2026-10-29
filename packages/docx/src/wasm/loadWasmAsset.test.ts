@@ -194,7 +194,9 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => ASSET, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       state.ensure();
+      expect(state.status()).toBe('ready');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([]);
       expect(fetch).not.toHaveBeenCalled();
@@ -219,7 +221,9 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       const loading = state.preload(WASM_BYTES);
+      expect(state.status()).toBe('loading');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([WASM_BYTES]);
       expect(fetch).not.toHaveBeenCalled();
@@ -229,6 +233,7 @@ describe('shared module', () => {
 
       resolve(module);
       await loading;
+      expect(state.status()).toBe('ready');
       expect(await state.sharedModule()).toBeNull();
       expect(seen).toEqual([WASM_BYTES]);
       expect(fetch).not.toHaveBeenCalled();
@@ -246,12 +251,17 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     try {
+      expect(state.status()).toBe('idle');
       const compiling = state.sharedModule();
+      expect(state.status()).toBe('loading');
+      await compiling;
+      expect(state.status()).toBe('loading');
       expect(state.sharedModule()).toBe(compiling);
       expect(fetch).toHaveBeenCalledTimes(1);
       const loading = state.preload();
       expect(state.module()).toBe(compiling as Promise<WebAssembly.Module>);
       await loading;
+      expect(state.status()).toBe('ready');
       const module = await compiling;
       if (!module) throw new Error('Expected a shared module');
       expect(module).toBeInstanceOf(WebAssembly.Module);
@@ -298,9 +308,12 @@ describe('shared module', () => {
     const loading = state.preload();
     const failed = state.module();
     await expect(loading).rejects.toThrow();
+    expect(state.status()).toBe('idle');
     const retried = state.module();
+    expect(state.status()).toBe('loading');
     expect(retried).not.toBe(failed);
     await state.preload();
+    expect(state.status()).toBe('ready');
     expect(seen).toEqual([await retried]);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
@@ -326,6 +339,7 @@ describe('shared module', () => {
       const loading = state.preload();
       const compiling = state.module();
       await expect(loading).rejects.toBe(error);
+      expect(state.status()).toBe('idle');
       const first = await compiling;
       expect(seen).toEqual([first]);
       expect(fetch).toHaveBeenCalledTimes(1);
@@ -351,9 +365,11 @@ describe('shared module', () => {
     const seen: WasmAsyncInput[] = [];
     const state = stateFor(() => remote, seen, true);
     const loading = state.preloadFrom(Promise.resolve(module));
+    expect(state.status()).toBe('loading');
     expect(state.preload()).toBe(loading);
     expect(state.preloadFrom(Promise.resolve(null))).toBe(loading);
     await loading;
+    expect(state.status()).toBe('ready');
     expect(seen).toEqual([module]);
     expect(await state.module()).toBe(module);
     await state.preloadFrom(Promise.resolve(null));
