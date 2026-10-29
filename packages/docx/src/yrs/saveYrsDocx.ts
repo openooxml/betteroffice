@@ -102,6 +102,12 @@ function savedComments(
   resolveCommentMedia(listed, (token) => session.mediaDataUrl(token));
   const ids = savedCommentIds(source.map((comment) => comment.id), listed);
   const held = new Map(listed.map((comment) => [comment.id, comment]));
+  let retained: Set<string> | undefined;
+  if (source.some(comment => !held.has(String(comment.id)))) {
+    const read = session.exportStructured({ revisionView: 'markup', stories: ['comments'], maxBlocks: 1_000_000, maxBytes: 67_108_864 });
+    if (!read.ok || read.content.truncated) throw new Error('The remaining source comments could not be read for saving');
+    retained = new Set(read.content.stories.flatMap(story => story.comment ? [story.comment.id] : []));
+  }
   let changed = false;
   const parentOf = (parentId: string | null) => {
     if (parentId === null) return undefined;
@@ -110,7 +116,11 @@ function savedComments(
     const numeric = Number(parentId);
     return Number.isFinite(numeric) && String(numeric) === parentId ? numeric : undefined;
   };
-  const comments = source.map((comment) => {
+  const comments = source.filter(comment => {
+    if (!retained || retained.has(String(comment.id))) return true;
+    changed = true;
+    return false;
+  }).map((comment) => {
     const entry = held.get(String(comment.id));
     held.delete(String(comment.id));
     if (!entry || (!entry.author && !entry.date && entry.body == null &&

@@ -148,9 +148,10 @@ export class DocxAgentDocument {
   private nextMatch = 1;
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
-  private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
+  private commentPartCheck?: { source: ArrayBuffer; allowLegacy: boolean; check: Promise<CommentSource> };
   private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
+  private deletedComments = new Set<string>();
 
   constructor(
     readonly session: YrsSession,
@@ -579,9 +580,9 @@ export class DocxAgentDocument {
     throw new DocumentToolError('STALE_TARGET', 'Target text or formatting changed. Read these refs and propose again.', { refs });
   }
 
-  private async fork(): Promise<YrsSession> {
+  private async fork(clientId?: number): Promise<YrsSession> {
     this.index();
-    const draft = await createYrsSession();
+    const draft = await createYrsSession({ clientId });
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
       const state = this.session.encodeState();
@@ -617,13 +618,14 @@ export class DocxAgentDocument {
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
         let resolved: Map<string, boolean> | undefined;
+        let deleted: Set<string> | undefined;
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
-        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
-          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment');
+        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment');
           try {
-            const source = await this.checkCommentPart();
+            const source = await this.checkCommentPart(!edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment'));
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
             const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
             const comments = draft.listComments();
@@ -631,9 +633,20 @@ export class DocxAgentDocument {
             resolved = new Map(this.resolvedComments);
             for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
             const earlier = this.resolvedComments;
-            const baseline = await this.commentBaselineBytes(version);
+            const remaining = new Set(comments.map(comment => comment.id));
+            deleted = new Set([...this.deletedComments, ...outcomes.flatMap(outcome => outcome.result.deleted ?? [])].filter(id => !remaining.has(id)));
+            let baseline: Uint8Array;
+            let previous: typeof comments | undefined;
+            if (edits.some(edit => edit.op === 'delete_comment')) {
+              const kept = await this.fork(draft.clientId);
+              try {
+                for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
+                previous = kept.listComments();
+                baseline = (await saveYrsDocx(kept)).bytes;
+              } finally { kept.destroy(); }
+            } else baseline = await this.commentBaselineBytes(version);
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline);
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline, deleted, previous);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -645,6 +658,7 @@ export class DocxAgentDocument {
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
+        if (deleted) this.deletedComments = deleted;
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {
@@ -654,6 +668,24 @@ export class DocxAgentDocument {
   }
 
   private async plan(edit: DocxAgentEdit): Promise<EditStep> {
+    if (edit.op === 'delete_comment') {
+      await this.checkCommentPart(true);
+      return draft => {
+        const comments = draft.listComments();
+        const target = comments.find(comment => comment.id === edit.comment);
+        if (!target) throw new DocumentToolError('UNKNOWN_REF', "Unknown comment ID. List office_outline with story 'comments'.");
+        const deleted = new Set([target.id]);
+        if (target.parentId === null) {
+          let size: number;
+          do {
+            size = deleted.size;
+            for (const comment of comments) if (comment.parentId !== null && deleted.has(comment.parentId)) deleted.add(comment.id);
+          } while (deleted.size !== size);
+        }
+        draft.applyRawOps('body', [...deleted].map(id => ({ op: 'removeComment', id })));
+        return { result: { comment: target.id, deleted: [...deleted] } };
+      };
+    }
     if (edit.op === 'set_section') {
       const section = this.session.listSections()[edit.section - 1];
       if (!section) throw new DocumentToolError('INVALID_ARGUMENT', 'Section missing. Read office_outline and use its section numbers.');
@@ -805,10 +837,10 @@ export class DocxAgentDocument {
     }
   }
 
-  private async checkCommentPart(): Promise<CommentSource | undefined> {
+  private async checkCommentPart(allowLegacy = false): Promise<CommentSource | undefined> {
     const source = this.session.materializeDocx()?.originalBuffer;
     if (!source) return;
-    if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
+    if (!this.commentPartCheck || this.commentPartCheck.source !== source || this.commentPartCheck.allowLegacy !== allowLegacy) this.commentPartCheck = { source, allowLegacy, check: readCommentPart(source, allowLegacy) };
     return this.commentPartCheck.check;
   }
 

@@ -29,6 +29,23 @@ pub(super) struct SplicedComments {
     pub(super) companions: Option<Vec<(String, String)>>,
 }
 
+pub(super) fn removed_comment_ids(
+    source: &[u8],
+    comments: &[Comment],
+) -> Result<HashSet<String>, ParseError> {
+    let source = std::str::from_utf8(source).map_err(|error| error_xml(error.to_string()))?;
+    let kept: HashSet<_> = comments
+        .iter()
+        .map(|comment| js_number(comment.id))
+        .collect();
+    Ok(comment_spans(source)?
+        .0
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| !kept.contains(id))
+        .collect())
+}
+
 pub(super) fn splice_comments(
     source: &[u8],
     parts: &[(String, Vec<u8>)],
@@ -59,24 +76,34 @@ pub(super) fn splice_comments(
     {
         return Err(error_xml("duplicate comment ids"));
     }
-    if comments.len() < original.len()
-        || comments
-            .iter()
-            .zip(&original)
-            .any(|(comment, original)| js_number(comment.id) != js_number(original.id))
+    let kept_original: Vec<_> = original
+        .iter()
+        .filter(|comment| model_ids.contains(&js_number(comment.id)))
+        .cloned()
+        .collect();
+    let removed: Vec<_> = original
+        .iter()
+        .filter(|comment| !model_ids.contains(&js_number(comment.id)))
+        .collect();
+    if comments
+        .iter()
+        .take(kept_original.len())
+        .zip(&kept_original)
+        .any(|(comment, original)| js_number(comment.id) != js_number(original.id))
     {
         return Err(error_xml("comment ids or order changed"));
     }
-    let (kept, added) = comments.split_at(original.len());
-    let thread_changed = added.iter().any(|comment| comment.parent_id.is_some())
-        || kept.iter().zip(&original).any(|(comment, source)| {
+    let (kept, added) = comments.split_at(kept_original.len());
+    let thread_changed = !removed.is_empty()
+        || added.iter().any(|comment| comment.parent_id.is_some())
+        || kept.iter().zip(&kept_original).any(|(comment, source)| {
             comment.done != source.done || comment.parent_id != source.parent_id
         });
     let mut parent_ids: HashSet<_> = added
         .iter()
         .chain(
             kept.iter()
-                .zip(&original)
+                .zip(&kept_original)
                 .filter(|(comment, source)| source_metadata_changed(source, comment))
                 .map(|(comment, _)| comment),
         )
@@ -92,7 +119,7 @@ pub(super) fn splice_comments(
         .iter()
         .map(|(id, span)| (id.as_str(), &source[span.clone()]))
         .collect();
-    for (comment, original) in kept.iter().zip(&original) {
+    for (comment, original) in kept.iter().zip(&kept_original) {
         let id = js_number(comment.id);
         let fragment = fragments
             .get(id.as_str())
@@ -122,7 +149,7 @@ pub(super) fn splice_comments(
         }
     }
     let (source_xml, source_infos) =
-        serialize_comments_with_info(&original, &mut source_context.clone());
+        serialize_comments_with_info(&kept_original, &mut source_context.clone());
     let (kept_xml, kept_infos) = serialize_comments_with_info(kept, &mut source_context);
     let infos_changed = if thread_changed {
         source_infos.iter().zip(&kept_infos).any(|(source, kept)| {
@@ -143,7 +170,7 @@ pub(super) fn splice_comments(
     let added_ids: HashSet<_> = added.iter().map(|comment| js_number(comment.id)).collect();
     let needed_ids: HashSet<_> = kept
         .iter()
-        .zip(&original)
+        .zip(&kept_original)
         .filter(|(comment, source)| source_metadata_changed(source, comment))
         .map(|(comment, _)| js_number(comment.id))
         .chain(parent_ids)
@@ -158,6 +185,7 @@ pub(super) fn splice_comments(
         }
     });
     if infos.is_empty()
+        && removed.is_empty()
         && [
             "word/commentsExtended.xml",
             "word/commentsIds.xml",
@@ -170,6 +198,10 @@ pub(super) fn splice_comments(
     }
     let mut patches = Vec::new();
     for (id, span) in &spans {
+        if !model_ids.contains(id) {
+            patches.push((span.clone(), String::new()));
+            continue;
+        }
         if original_para_ids.get(id).is_some_and(|id| id.is_none()) && needed_ids.contains(id) {
             let fragment = &source[span.clone()];
             let fragment_tags = tags(fragment).ok_or_else(|| error_xml("invalid parent"))?;
@@ -324,11 +356,26 @@ fn splice_companions(
     infos: &[CommentParaInfo],
     added_ids: &HashSet<String>,
 ) -> Result<Vec<(String, String)>, ParseError> {
+    let source_by_id: HashMap<_, _> = original
+        .iter()
+        .map(|comment| (js_number(comment.id), comment))
+        .collect();
+    let ids: HashSet<_> = comments
+        .iter()
+        .map(|comment| js_number(comment.id))
+        .collect();
+    let removed: Vec<_> = original
+        .iter()
+        .filter(|comment| !ids.contains(&js_number(comment.id)))
+        .collect();
     let changed: HashSet<_> = comments
         .iter()
-        .zip(original)
-        .filter(|(comment, source)| source_metadata_changed(source, comment))
-        .map(|(comment, _)| js_number(comment.id))
+        .filter(|comment| {
+            source_by_id
+                .get(&js_number(comment.id))
+                .is_some_and(|source| source_metadata_changed(source, comment))
+        })
+        .map(|comment| js_number(comment.id))
         .collect();
     let added_infos: Vec<_> = infos
         .iter()
@@ -365,7 +412,10 @@ fn splice_companions(
             }
             continue;
         };
-        if added_ids.is_empty() && (row_name != "commentEx" || changed.is_empty()) {
+        if removed.is_empty()
+            && added_ids.is_empty()
+            && (row_name != "commentEx" || changed.is_empty())
+        {
             continue;
         }
         if !crate::xml::reads_as_written(source) {
@@ -399,7 +449,23 @@ fn splice_companions(
                 return Err(error_xml("duplicate companion rows"));
             }
         }
+        let removed_keys: HashSet<_> = removed
+            .iter()
+            .filter_map(|comment| {
+                if key == "durableId" {
+                    comment.durable_id.as_ref()
+                } else {
+                    comment.para_id.as_ref()
+                }
+            })
+            .map(|id| id.to_ascii_uppercase())
+            .collect();
         let mut patches = Vec::new();
+        for (id, span) in &by_id {
+            if removed_keys.contains(id) {
+                patches.push(((*span).clone(), String::new()));
+            }
+        }
         let mut appended = String::new();
         for span in written_rows {
             let id = row_id(&serialized, &span)?;

@@ -1060,6 +1060,71 @@ fn comment_metadata_splices_resolution_and_rewrites_identity() {
 }
 
 #[test]
+fn deleting_comments_splices_only_their_entries() {
+    let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w15:commentEx w15:paraId=\"10000006\" w15:done='0'/><w15:commentEx w15:paraId=\"10000004\" w15:done='0'/></w15:commentsEx>";
+    let ids = "<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\"><w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\"/><w16cid:commentId w16cid:paraId=\"10000004\" w16cid:durableId=\"20000002\"/></w16cid:commentsIds>";
+    let extensible = "<w16cex:commentsExtensible xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\"><w16cex:commentExtensible w16cex:durableId=\"20000001\"/><w16cex:commentExtensible w16cex:durableId=\"20000002\"/></w16cex:commentsExtensible>";
+    let source = fixture_with_comment_parts(
+        &format!("{RICH_COMMENT}\n{PLAIN_COMMENT}"),
+        &[
+            ("word/commentsExtended.xml", extended),
+            ("word/commentsIds.xml", ids),
+            ("word/commentsExtensible.xml", extensible),
+        ],
+    );
+    for remove_all in [false, true] {
+        let mut request = save_request(&source);
+        request
+            .document
+            .comments
+            .as_mut()
+            .unwrap()
+            .retain(|comment| !remove_all && comment.id == 1.0);
+        let saved = write_docx_s13(request, &source).unwrap();
+        let original = String::from_utf8(part(&source, "word/comments.xml")).unwrap();
+        let expected = original.replace(RICH_COMMENT, "");
+        let expected = if remove_all {
+            expected.replace(PLAIN_COMMENT, "")
+        } else {
+            expected
+        };
+        assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
+        for (path, xml, first, second) in [
+            (
+                "word/commentsExtended.xml",
+                extended,
+                "<w15:commentEx w15:paraId=\"10000006\" w15:done='0'/>",
+                "<w15:commentEx w15:paraId=\"10000004\" w15:done='0'/>",
+            ),
+            (
+                "word/commentsIds.xml",
+                ids,
+                "<w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\"/>",
+                "<w16cid:commentId w16cid:paraId=\"10000004\" w16cid:durableId=\"20000002\"/>",
+            ),
+            (
+                "word/commentsExtensible.xml",
+                extensible,
+                "<w16cex:commentExtensible w16cex:durableId=\"20000001\"/>",
+                "<w16cex:commentExtensible w16cex:durableId=\"20000002\"/>",
+            ),
+        ] {
+            let expected = xml.replace(first, "");
+            let expected = if remove_all {
+                expected.replace(second, "")
+            } else {
+                expected
+            };
+            assert_eq!(part(&saved, path), expected.as_bytes(), "{path}");
+        }
+        assert_eq!(
+            part(&saved, "word/_rels/comments.xml.rels"),
+            part(&source, "word/_rels/comments.xml.rels")
+        );
+    }
+}
+
+#[test]
 fn reply_and_resolution_splice_companions_without_changing_unrelated_rows() {
     let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" xmlns:x=\"urn:extra\">\n<w15:commentEx x:keep='root' w15:paraId=\"10000006\" w15:done='0'><x:extra/></w15:commentEx>\n<w15:commentEx w15:paraId=\"10000004\" x:keep='other'/>\n<x:tail/></w15:commentsEx>";
     let ids = "<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" xmlns:x=\"urn:extra\"><w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\" x:keep='yes'/><x:tail/></w16cid:commentsIds>";
