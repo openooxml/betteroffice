@@ -36,6 +36,7 @@ use pptx_parse::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::fmath;
@@ -297,19 +298,22 @@ impl SlideRenderer {
         Ok(id.to_u32())
     }
 
-    /// The fallback face that draws `character` for a run in `face`: one of the
+    /// The fallback face that draws `cluster` for a run in `face`: one of the
     /// same weight and slant where there is one, sized on the run's own line.
     fn coverage_face(
         &self,
         face: &FontFace,
-        character: char,
+        cluster: &str,
         bold: bool,
         italic: bool,
         browser_fallback: bool,
     ) -> Option<FontFace> {
         let covering = || {
             self.coverage_faces.iter().filter(|(_, _, candidate)| {
-                self.fonts.covers(candidate.id, character).unwrap_or(false)
+                cluster
+                    .chars()
+                    .filter(|character| needs_visible_glyph(*character))
+                    .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
             })
         };
         covering()
@@ -322,7 +326,7 @@ impl SlideRenderer {
                 ..candidate.clone()
             })
             .or_else(|| {
-                (browser_fallback && needs_visible_glyph(character)).then(|| FontFace {
+                (browser_fallback && cluster.chars().any(needs_visible_glyph)).then(|| FontFace {
                     id: FontId::from_u32(BROWSER_FONT_ID),
                     ..face.clone()
                 })
@@ -348,18 +352,26 @@ impl SlideRenderer {
         {
             return vec![(0, None)];
         }
-        for (index, character) in text.char_indices() {
+        for (index, cluster) in text.grapheme_indices(true) {
             let current = pieces.last().and_then(|(_, face)| face.as_ref());
-            let own = self.fonts.covers(face.id, character).unwrap_or(true);
-            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let own = cluster
+                .chars()
+                .filter(|character| needs_visible_glyph(*character))
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true));
+            let neutral = cluster
+                .chars()
+                .all(|character| character.is_whitespace() || character.is_ascii_punctuation());
             let chosen = match current {
                 Some(current)
-                    if neutral && self.fonts.covers(current.id, character).unwrap_or(false) =>
+                    if neutral
+                        && cluster.chars().all(|character| {
+                            self.fonts.covers(current.id, character).unwrap_or(false)
+                        }) =>
                 {
                     Some(current.clone())
                 }
                 _ if own => None,
-                _ => self.coverage_face(face, character, bold, italic, browser_fallback),
+                _ => self.coverage_face(face, cluster, bold, italic, browser_fallback),
             };
             let same = pieces.last().is_some_and(|(_, last)| {
                 last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
