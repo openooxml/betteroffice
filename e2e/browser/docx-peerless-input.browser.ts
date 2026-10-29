@@ -1231,7 +1231,13 @@ test('d2d_composition_event_orders_commit_once', async ({ page }) => {
     const commands = await commandsSince(page, start);
     expect(commands.map((command) => command.kind)).toEqual(['insertText', 'replaceSelection']);
     expect(commands[1]!.payload).toEqual({ text: '漢字' });
-    expect(commands[1]!.afterSeq).toBe(commands[0]!.seq);
+    const sent = await page.evaluate((start) => window.__docxPeerlessInput.commands.slice(start), start);
+    const insert = sent.findIndex((command) => command.seq === commands[0]!.seq);
+    const commit = sent.findIndex((command) => command.seq === commands[1]!.seq);
+    expect(sent.slice(insert + 1, commit).map((command) => command.kind)).toEqual(
+      Array(commit - insert - 1).fill('setFontEnvironment')
+    );
+    expect(commands[1]!.afterSeq).toBe(sent[commit - 1]!.seq);
   }
   expect(await savedText(page)).toBe('P漢字'.repeat(3) + 'abcd');
 });
