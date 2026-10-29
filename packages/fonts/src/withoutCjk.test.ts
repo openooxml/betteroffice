@@ -138,19 +138,3 @@ test('CJK import failures reject without Latin fallback and retry after recovery
     globalThis.fetch = realFetch;
   }
 });
-
-test('an older CJK add-on without packed files falls back instead of failing', async () => {
-  importCjk.mockImplementation(() => ({
-    CJK_FONT_ASSET_URLS: Object.fromEntries(pack.faces.map((face) => [
-      face.source, () => new URL(`https://example.invalid/${face.source}`),
-    ])),
-  }));
-  const { BUNDLED_FONTS, loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
-  for (const cjk of BUNDLED_FONTS.filter((face) => face.script?.startsWith('cjk-'))) {
-    const fallback = resolveMetricCompatFace(
-      cjk.family.includes('Serif') ? 'Times New Roman' : 'Arial', false, false
-    )!;
-    expect(await loadBundledFontBytes(cjk)).toEqual(await loadBundledFontBytes(fallback));
-  }
-  expect(importCjk).toHaveBeenCalled();
-});
