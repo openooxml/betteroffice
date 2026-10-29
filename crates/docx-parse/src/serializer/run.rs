@@ -7,7 +7,7 @@ use crate::image::{Image, ImagePosition, ImageWrap};
 use crate::inline::{Run, RunContent, RunPropertyChange};
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::shape::Shape;
-use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, XmlNode, parse_xml};
+use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
 
 use super::context::SerializerContext;
 use super::raw::{validate_raw_subtree, validate_replayed_fragment};
@@ -268,31 +268,6 @@ fn replay_run_properties(
         .collect();
     let mut output = source.to_owned();
     if !changed.is_empty() {
-        let mut properties = root
-            .child_by_local_name("rPr")
-            .cloned()
-            .unwrap_or(XmlElement {
-                name: "w:rPr".to_owned(),
-                attributes: Default::default(),
-                children: Vec::new(),
-                paragraph_ordinal: None,
-                para_id_attribute: None,
-                bookmark_xml: None,
-            });
-        properties.children.retain(|child| !matches!(child, XmlNode::Element(child) if changed.contains(child.local_name())));
-        let rank = |local: &str| {
-            "rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath rPrChange"
-                .split_whitespace().position(|name| name == local).unwrap_or(usize::MAX)
-        };
-        for child in after.into_iter().flat_map(XmlElement::child_elements) {
-            if changed.contains(child.local_name()) {
-                let at = properties.children.iter().position(|node| matches!(node, XmlNode::Element(node) if rank(node.local_name()) > rank(child.local_name()))).unwrap_or(properties.children.len());
-                properties
-                    .children
-                    .insert(at, XmlNode::Element(child.clone()));
-            }
-        }
-        let replacement = properties.to_raw_inline_xml();
         if let Some(at) = root
             .child_elements()
             .position(|child| child.local_name() == "rPr")
@@ -300,11 +275,17 @@ fn replay_run_properties(
             let span = super::s13::element_span(source, &[at as u32]).ok_or_else(|| {
                 ParseError::Canonical("drawing run properties have no source span".to_owned())
             })?;
+            let replacement = patch_run_properties(
+                &source[span.clone()],
+                root.child_by_local_name("rPr").expect("source properties"),
+                after,
+                &changed,
+            )?;
             output.replace_range(span, &replacement);
-        } else {
+        } else if let Some(after) = after {
             let root = super::splice::root_tag(source)
                 .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
-            output.insert_str(root.range.end, &replacement);
+            output.insert_str(root.range.end, &after.to_raw_inline_xml());
         }
     }
     let saved = parse_xml(
@@ -334,6 +315,75 @@ fn replay_run_properties(
         ) {
             context.warn(format!("Drawing run {field} changes cannot be represented exactly; preserving unsupported source properties and saving supported run changes."));
         }
+    }
+    Ok(output)
+}
+
+fn patch_run_properties(
+    source: &str,
+    properties: &XmlElement,
+    after: Option<&XmlElement>,
+    changed: &std::collections::BTreeSet<String>,
+) -> Result<String, ParseError> {
+    let root = super::splice::root_tag(source)
+        .ok_or_else(|| ParseError::Canonical("drawing run properties have no root".to_owned()))?;
+    let children = properties
+        .child_elements()
+        .enumerate()
+        .map(|(at, child)| {
+            super::s13::element_span(source, &[at as u32])
+                .map(|span| (child, span))
+                .ok_or_else(|| {
+                    ParseError::Canonical("drawing run property has no source span".to_owned())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let additions: Vec<_> = after
+        .into_iter()
+        .flat_map(XmlElement::child_elements)
+        .filter(|child| changed.contains(child.local_name()))
+        .collect();
+    if root.empty {
+        if additions.is_empty() {
+            return Ok(source.to_owned());
+        }
+        let mut output = source[..root.range.end - 2].to_owned();
+        output.push('>');
+        for child in additions {
+            output.push_str(&child.to_raw_inline_xml());
+        }
+        output.push_str(&format!("</{}>", root.name));
+        output.push_str(&source[root.range.end..]);
+        return Ok(output);
+    }
+    let end = source.rfind("</").ok_or_else(|| {
+        ParseError::Canonical("drawing run properties have no closing tag".to_owned())
+    })?;
+    let rank = |local: &str| {
+        "rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath rPrChange"
+            .split_whitespace().position(|name| name == local).unwrap_or(usize::MAX)
+    };
+    let mut edits: Vec<_> = children
+        .iter()
+        .filter(|(child, _)| changed.contains(child.local_name()))
+        .map(|(_, span)| (span.clone(), String::new()))
+        .collect();
+    let mut insertions = std::collections::BTreeMap::<usize, String>::new();
+    for child in additions {
+        let at = children
+            .iter()
+            .find(|(source, _)| rank(source.local_name()) > rank(child.local_name()))
+            .map_or(end, |(_, span)| span.start);
+        insertions
+            .entry(at)
+            .or_default()
+            .push_str(&child.to_raw_inline_xml());
+    }
+    edits.extend(insertions.into_iter().map(|(at, xml)| (at..at, xml)));
+    edits.sort_by_key(|(span, _)| (span.start, span.end));
+    let mut output = source.to_owned();
+    for (span, replacement) in edits.into_iter().rev() {
+        output.replace_range(span, &replacement);
     }
     Ok(output)
 }
@@ -1582,6 +1632,26 @@ mod tests {
                 "Drawing run formatting changes cannot be represented exactly; preserving unsupported source properties and saving supported run changes."
             ]
         );
+    }
+
+    #[test]
+    fn smart_art_run_edits_splice_only_changed_properties() {
+        let properties = "<w:rPr keep:attribute = 'source'>\n<w:noProof /> <w:position w:val = '20'></w:position><!--keep--><keep:metadata value = 'raw' />\n</w:rPr>";
+        let source = format!(r#"<w:r xmlns:keep="urn:keep">{properties}<w:drawing/></w:r>"#);
+        for opaque in [false, true] {
+            let run = smart_art_run(&source, opaque);
+            assert_eq!(serialize_run(&run, &mut context()).unwrap(), source);
+            let mut hidden = run.clone();
+            hidden.formatting.as_mut().unwrap().hidden = Some(true);
+            let saved = serialize_run(&hidden, &mut context()).unwrap();
+            assert_eq!(
+                saved,
+                source.replace("<w:position", "<w:vanish/><w:position")
+            );
+            let mut visible = smart_art_run(&saved, opaque);
+            visible.formatting.as_mut().unwrap().hidden = None;
+            assert_eq!(serialize_run(&visible, &mut context()).unwrap(), source);
+        }
     }
 
     #[test]

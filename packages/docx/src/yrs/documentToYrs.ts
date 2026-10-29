@@ -872,7 +872,20 @@ function runToUnits(
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, opaqueSequences));
+  return run.content.flatMap((content) => {
+    const units = runContentToUnits(content, marks, opaqueSequences);
+    if ((content.type === 'shape' && content.shape.drawingRunXml) ||
+      (content.type === 'opaqueDrawing' && content.kind === 'drawingRun')) {
+      for (const unit of units) {
+        if (unit.kind === 'embed') unit.payload.sourceRun = {
+          formatting: run.formatting ?? {},
+          attributes: { ...unit.attrs },
+          propertyChanges: run.propertyChanges ?? null,
+        };
+      }
+    }
+    return units;
+  });
 }
 
 function hyperlinkToUnits(

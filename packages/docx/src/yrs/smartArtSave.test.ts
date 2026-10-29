@@ -15,6 +15,11 @@ beforeAll(async () => {
   await preloadOpcWasm();
 });
 
+function makeOpaque(source: ReturnType<typeof smartArtFixture>): void {
+  source.parts.set('word/diagrams/drawing1.xml', '<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"/>');
+  source.parts.set('word/diagrams/layout1.xml', '<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:unsupported"/>');
+}
+
 for (const [anchored, opaque] of [[false, false], [true, false], [false, true], [true, true]] as const) {
   for (const seeder of ['native', 'projected'] as const) {
     for (const edit of ['preserve hidden', 'show', 'hide'] as const) {
@@ -24,8 +29,7 @@ for (const [anchored, opaque] of [[false, false], [true, false], [false, true], 
           const drawingRun = source.drawingRun.replace('<w:noProof/>', '').replace('<w:lang w:val="en-US"/>', '');
           source.parts.set('word/document.xml', source.parts.get('word/document.xml')!.replace(source.drawingRun, drawingRun));
           source.drawingRun = drawingRun;
-          source.parts.set('word/diagrams/drawing1.xml', '<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"/>');
-          source.parts.set('word/diagrams/layout1.xml', '<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:unsupported"/>');
+          makeOpaque(source);
         }
         const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
           [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
@@ -68,6 +72,55 @@ for (const [anchored, opaque] of [[false, false], [true, false], [false, true], 
           expect(savedSegment?.attributes.hidden === true).toBe(edit !== 'show');
         } finally {
           reopened.destroy();
+          session.destroy();
+        }
+      }, 30_000);
+    }
+  }
+}
+
+for (const opaque of [false, true]) {
+  for (const seeder of ['native', 'projected'] as const) {
+    for (const edit of ['none', 'adjacent', 'hide'] as const) {
+      it(`${seeder} ${opaque ? 'opaque ' : ''}SmartArt keeps source position after ${edit}`, async () => {
+        const source = smartArtFixture(false);
+        const properties = '<w:rPr><w:position w:val="20"/></w:rPr>';
+        const drawingRun = source.drawingRun.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, properties);
+        source.parts.set('word/document.xml', source.parts.get('word/document.xml')!.replace(source.drawingRun, drawingRun));
+        source.drawingRun = drawingRun;
+        if (opaque) makeOpaque(source);
+        const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
+          [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
+        )));
+        const host = await parseDocx(bytes.buffer, { preloadFonts: false });
+        const session = await createYrsSession();
+        try {
+          if (seeder === 'native') session.seedFromDocx(bytes);
+          else documentToYrs(session, host);
+          const segment = session.storySegments('body').find(segment => segment.kind === 'embed' &&
+            segment.embedKind === (opaque ? 'opaqueDrawing' : 'shape'));
+          if (segment?.kind !== 'embed') throw new Error('expected SmartArt');
+          if (opaque) expect(segment.payload.kind).toBe('drawingRun');
+          expect(segment.attributes.characterSpacing).toBeUndefined();
+          const { paraId } = session.paragraphs('body')[0]!;
+          if (edit === 'hide') session.formatRange({
+            story: 'body', start: { paraId, offset: 24 }, end: { paraId, offset: 25 },
+          }, { other: { hidden: true } });
+          if (edit !== 'none') session.insertText({ story: 'body', paraId, offset: 0 }, 'Edited ');
+          const projected = yrsToDocument(session, host);
+          const paragraph = projected.package.document.content[0]!;
+          if (paragraph.type !== 'paragraph') throw new Error('expected SmartArt paragraph');
+          const run = paragraph.content.find(child => child.type === 'run' && child.content.some(content =>
+            content.type === 'shape' || content.type === 'opaqueDrawing'));
+          expect(run?.type === 'run' && run.formatting?.position).toBe(20);
+          const result = await repackDocxWithWarnings(projected);
+          const parts = unzipContainer(new Uint8Array(result.buffer));
+          const savedRun = smartArtDrawingRun(new TextDecoder().decode(parts['word/document.xml']))!;
+          expect(savedRun).toBe(edit === 'hide'
+            ? source.drawingRun.replace('<w:position', '<w:vanish/><w:position')
+            : source.drawingRun);
+          expect(result.warnings.filter(warning => warning.startsWith('Drawing run'))).toEqual([]);
+        } finally {
           session.destroy();
         }
       }, 30_000);

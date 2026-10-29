@@ -875,8 +875,8 @@ function imageFromPayload(payload: Attrs): Image {
   return image;
 }
 
-function imageRunFromPayload(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
-  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }], formatting: format(attributes) };
+function imageRunFromPayload(payload: Attrs): Run {
+  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }] };
 }
 
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
@@ -922,6 +922,25 @@ function chartRunFromPayload(payload: Attrs, recovery: ChartRecovery): Run | nul
   }
 }
 
+function replayedRunProperties(payload: Attrs, attributes: Attrs, format: RunFormatter): Pick<Run, 'formatting' | 'propertyChanges'> {
+  const source = asObject(payload.sourceRun);
+  const seeded = asObject(source?.attributes);
+  if (!source || !seeded) return {};
+  const before = directFormatting(seeded);
+  const current = directFormatting(attributes);
+  const projected: Attrs = { ...format(attributes) };
+  const formatting: Attrs = { ...asObject(source.formatting) };
+  for (const key of new Set([...Object.keys(before), ...Object.keys(current)])) {
+    if (sameJson(before[key as keyof TextFormatting], current[key as keyof TextFormatting])) continue;
+    if (projected[key] === undefined) delete formatting[key];
+    else formatting[key] = projected[key];
+  }
+  return {
+    formatting: formatting as TextFormatting,
+    ...(Array.isArray(source.propertyChanges) ? { propertyChanges: source.propertyChanges as Run['propertyChanges'] } : {}),
+  };
+}
+
 function opaqueDrawingRunFromPayload(
   payload: Attrs,
   attributes: Attrs,
@@ -943,7 +962,7 @@ function opaqueDrawingRunFromPayload(
       ...(previews.length ? { previews } : {}),
       ...(textBox ? { textBox } : {}),
     }],
-    formatting: format(attributes),
+    ...(kind === 'drawingRun' ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
   };
 }
 
@@ -1026,7 +1045,10 @@ function shapeRunFromPayload(payload: Attrs, attributes: Attrs, format: RunForma
     transform.flipV = true;
   if (transform.rotation || transform.flipH || transform.flipV) shape.transform = transform;
 
-  return { type: 'run', content: [{ type: 'shape', shape }], formatting: format(attributes) };
+  return {
+    type: 'run', content: [{ type: 'shape', shape }],
+    ...(shape.drawingRunXml ? replayedRunProperties(payload, attributes, format) : { formatting: format(attributes) }),
+  };
 }
 
 function inlineSdtFromPayload(
@@ -1144,7 +1166,7 @@ function ordinaryContentForItem(
     case 'tab':
       return tabRun(item.attributes, format);
     case 'image':
-      return imageRunFromPayload(item.payload, item.attributes, format);
+      return imageRunFromPayload(item.payload);
     case 'horizontalRule':
       return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
@@ -1194,7 +1216,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
     const ordinary = ordinaryContentForItem(item, recovery, format);
     child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
   } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
-  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload, item.attributes, format);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -1244,7 +1266,7 @@ function addToHyperlink(
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
-  } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload, item.attributes, format);
+  } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
   else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;

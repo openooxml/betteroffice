@@ -409,7 +409,6 @@ pub(super) fn replay(
     if whole_run && root.local_name() != "r" {
         return Ok(None);
     }
-    let original = root.to_raw_inline_xml();
     let Some(drawing) = drawing_mut(root) else {
         return Err(ParseError::Canonical(
             "SmartArt source has no drawing".to_owned(),
@@ -455,11 +454,19 @@ pub(super) fn replay(
     if !whole_run {
         return Ok(Some(drawing.to_raw_inline_xml()));
     }
-    Ok(Some(if changed {
-        root.to_raw_inline_xml()
-    } else {
-        original
-    }))
+    let mut output = source.to_owned();
+    if changed {
+        let at = root
+            .child_elements()
+            .position(|child| child.local_name() == "drawing")
+            .expect("source drawing");
+        let span = super::s13::element_span(source, &[at as u32]).ok_or_else(|| {
+            ParseError::Canonical("SmartArt drawing has no source span".to_owned())
+        })?;
+        let drawing = root.child_by_local_name("drawing").expect("source drawing");
+        output.replace_range(span, &drawing.to_raw_inline_xml());
+    }
+    Ok(Some(output))
 }
 
 #[cfg(test)]
@@ -512,6 +519,19 @@ mod tests {
         shape.drawing_model =
             Some(json!({"frame": frame_model(&shape), "otherSha256": other_model_sha256(&shape)}));
         (shape, xml)
+    }
+
+    #[test]
+    fn smart_art_frame_edits_keep_source_run_property_bytes() {
+        let (_, xml) = source(false);
+        let properties = "<w:rPr keep:attribute = 'source' xmlns:keep='urn:keep'>\n<w:noProof /> <w:position w:val = '20'></w:position><!--keep--><keep:metadata />\n</w:rPr>";
+        let xml = xml.replace("<w:rPr><w:noProof/></w:rPr>", properties);
+        let (mut shape, _) = capture(xml.clone());
+        assert_eq!(replay(&shape, &mut context(), true).unwrap().unwrap(), xml);
+        shape.size.width /= 2.0;
+        let saved = replay(&shape, &mut context(), true).unwrap().unwrap();
+        assert!(saved.contains(properties));
+        assert!(saved.contains("cx=\"2743200\""));
     }
 
     #[test]
