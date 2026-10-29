@@ -7,7 +7,8 @@ import { build } from 'esbuild';
 import ts from 'typescript';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 75_500;
+// 74,976 B measured; the native engine selector (packages/xlsx/src/wasm/engine.ts) adds ~0.9 KB to the static path (75,880 B).
+const STATIC_GZIP_BUDGET = 76_000;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
   'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx',
