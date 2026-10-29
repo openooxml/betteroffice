@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_raster::{encode_png, outline_path as glyph_path};
+use ooxml_raster::{GlyphCache, encode_png};
 use ooxml_text::{FontId, FontStore};
 use rustybuzz::ttf_parser;
 use tiny_skia::{
@@ -138,6 +138,7 @@ pub fn render_list(
             images,
             fonts,
             fallback: fallback.as_ref(),
+            glyphs: HashMap::new(),
             skipped_images: 0,
         };
         let mut top: Vec<&Primitive> = list.primitives.iter().collect();
@@ -212,6 +213,7 @@ struct Painter<'a, 'b> {
     images: &'b HashMap<&'b str, &'b [u8]>,
     fonts: Option<&'b Renderer>,
     fallback: Option<&'b (FontStore, FontId)>,
+    glyphs: HashMap<u64, GlyphCache>,
     skipped_images: usize,
 }
 
@@ -424,15 +426,21 @@ impl<'b> Painter<'_, 'b> {
             return;
         };
         let mut pen = anchor_x;
+        let cache = self.glyphs.entry(face.store.id()).or_default();
         for glyph in &shaped {
-            let outline = face
-                .store
-                .outline_glyph(face.id, glyph.glyph_id as u16)
+            let cached = cache
+                .lookup(
+                    face.store,
+                    face.id,
+                    glyph.glyph_id,
+                    || Ok(glyph.glyph_id as u16),
+                    |commands| Ok(ooxml_raster::outline_path(commands)),
+                )
                 .ok()
-                .filter(|outline| outline.upem > 0);
-            if let Some(outline) = outline {
-                let scale = size_in / f32::from(outline.upem);
-                if let Some(path) = glyph_path(&outline.cmds) {
+                .filter(|cached| cached.upem > 0.0);
+            if let Some(cached) = cached {
+                let scale = size_in / cached.upem;
+                if let Some(path) = &cached.path {
                     let placed = Affine {
                         a: scale,
                         b: 0.0,
@@ -442,7 +450,7 @@ impl<'b> Painter<'_, 'b> {
                         f: baseline - glyph.y_offset,
                     };
                     self.pixmap.fill_path(
-                        &path,
+                        path,
                         paint,
                         FillRule::Winding,
                         tiny(space.compose(placed)),
