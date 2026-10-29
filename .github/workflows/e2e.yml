@@ -252,6 +252,7 @@ jobs:
           BETTEROFFICE_BROWSER_SHARD: ''
           BETTEROFFICE_BROWSER_OUTPUT: ${{ runner.temp }}/browser-results/harness
         run: |
+          bun run --filter @betteroffice/docx-react build
           bun run --filter @betteroffice/desktop build
           bunx playwright test --config e2e/browser/playwright.config.ts --grep @harness
 

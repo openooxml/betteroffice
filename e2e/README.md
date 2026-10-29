@@ -27,9 +27,11 @@ retries. Failure screenshots, traces, reports, and saved files go under
 just the browser tests.
 
 A few docx tests drive the editor through a browser harness that only a
-`DOCX_PEERLESS_HARNESS=1` build exposes. They are tagged `@harness` and skip
-unless the variable is set; with it set, a preview built without it fails them
-at once. Build the desktop app and run them with the variable both times:
+`DOCX_PEERLESS_HARNESS=1` build of `@betteroffice/docx-react` and the desktop
+app exposes. They are tagged `@harness` and skip unless the variable is set;
+with it set, a preview built without it fails them at once. Build both and run
+them with the variable set each time:
+`DOCX_PEERLESS_HARNESS=1 bun run --filter @betteroffice/docx-react build`,
 `DOCX_PEERLESS_HARNESS=1 bun run --filter @betteroffice/desktop build`, then
 `DOCX_PEERLESS_HARNESS=1 bunx playwright test --config e2e/browser/playwright.config.ts --grep @harness`.
 CI runs them in the third browser shard.
