@@ -808,7 +808,7 @@ pub fn displayed_precision(value: f64, code: &str) -> Option<i32> {
         if integer_digits != 1 || value == 0.0 {
             return None;
         }
-        let magnitude = value.abs().log10() + f64::from(percent) * 2.0;
+        let magnitude = fmath::log10(value.abs()) + f64::from(percent) * 2.0;
         let exponent = magnitude.floor() as i32;
         Some(decimals + 2 * percent - exponent)
     } else {
