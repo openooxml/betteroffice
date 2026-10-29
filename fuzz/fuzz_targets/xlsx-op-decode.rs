@@ -1,7 +1,8 @@
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 
 use std::ops::Range;
 
+#[cfg(not(test))]
 use libfuzzer_sys::fuzz_target;
 use serde::ser::{SerializeMap, SerializeStruct, SerializeStructVariant};
 use serde::{Serialize, Serializer};
@@ -342,6 +343,39 @@ fn members(input: &[u8], span: Range<usize>) -> Option<Vec<Member>> {
     Some(fields)
 }
 
+fn normalize_nested(
+    input: &[u8],
+    span: Range<usize>,
+    canonical: &serde_json::Value,
+    replacements: &mut Vec<(Range<usize>, Vec<u8>)>,
+) {
+    if input[span.start] == b'[' && canonical.is_object() {
+        replacements.push((span, serde_json::to_vec(canonical).unwrap()));
+        return;
+    }
+    let Some(fields) = members(input, span) else {
+        return;
+    };
+    for (index, field) in fields.into_iter().enumerate() {
+        let value = match field.name.as_deref() {
+            Some(name) => canonical.get(name),
+            None => canonical.get(index),
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        if matches!(field.name.as_deref(), Some("kind" | "type"))
+            && value.is_string()
+            && serde_json::from_slice::<serde_json::Value>(&input[field.value.clone()])
+                .is_ok_and(|value| value.is_number())
+        {
+            replacements.push((field.value, serde_json::to_vec(value).unwrap()));
+        } else {
+            normalize_nested(input, field.value, value, replacements);
+        }
+    }
+}
+
 fn normalized_fields(
     input: &[u8],
     span: Range<usize>,
@@ -351,25 +385,24 @@ fn normalized_fields(
     let Shape::Map(schema) = oracle.serialize(ShapeSerializer).unwrap() else {
         panic!("operation fields");
     };
-    members(input, span)
+    let mut replacements = Vec::new();
+    for (index, field) in members(input, span)
         .expect("accepted operation container")
         .into_iter()
         .enumerate()
-        .filter_map(|(index, field)| {
-            let name = field
-                .name
-                .as_deref()
-                .or_else(|| schema.get(index).map(|field| field.0.as_str()));
-            if name == Some("type") {
-                return None;
-            }
-            let value = name.and_then(|name| canonical.get(name));
-            Some((
-                field.value,
-                serde_json::to_vec(value.unwrap_or(&serde_json::Value::Null)).unwrap(),
-            ))
-        })
-        .collect()
+    {
+        let name = field
+            .name
+            .as_deref()
+            .or_else(|| schema.get(index).map(|field| field.0.as_str()));
+        if name == Some("type") {
+            continue;
+        }
+        if let Some(value) = name.and_then(|name| canonical.get(name)) {
+            normalize_nested(input, field.value, value, &mut replacements);
+        }
+    }
+    replacements
 }
 
 fn replace_fields(input: &[u8], replacements: Vec<(Range<usize>, Vec<u8>)>) -> Vec<u8> {
@@ -440,6 +473,10 @@ fn check_op(input: &[u8], direct: serde_json::Result<Op>, oracle: serde_json::Re
             let rebuilt = replace_fields(input, fields);
             assert_eq!(serde_json::from_slice::<Op>(&rebuilt).unwrap(), Op::from(oracle.clone()));
             assert_eq!(
+                serde_json::from_str::<Op>(std::str::from_utf8(&rebuilt).unwrap()).unwrap(),
+                Op::from(oracle.clone())
+            );
+            assert_eq!(
                 serde_json::from_value::<Op>(serde_json::from_slice(&rebuilt).unwrap()).unwrap(),
                 Op::from(oracle.clone())
             );
@@ -489,6 +526,10 @@ fn check_ops(
         let expected = oracle.iter().cloned().map(Op::from).collect::<Vec<_>>();
         assert_eq!(serde_json::from_slice::<Vec<Op>>(&rebuilt).unwrap(), expected);
         assert_eq!(
+            serde_json::from_str::<Vec<Op>>(std::str::from_utf8(&rebuilt).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
             serde_json::from_value::<Vec<Op>>(serde_json::from_slice(&rebuilt).unwrap()).unwrap(),
             expected
         );
@@ -528,6 +569,7 @@ fn check_ops(
     }
 }
 
+#[cfg(not(test))]
 fuzz_target!(|data: &[u8]| {
     check_op(data, serde_json::from_slice(data), serde_json::from_slice(data));
     check_ops(data, serde_json::from_slice(data), serde_json::from_slice(data));
@@ -549,3 +591,69 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalize(input: &str) -> Vec<u8> {
+        let oracle = serde_json::from_str::<OracleOp>(input).unwrap();
+        let input = input.as_bytes();
+        replace_fields(input, normalized_fields(input, root(input), &oracle))
+    }
+
+    #[test]
+    fn numeric_nested_tag_is_substituted() {
+        let input = concat!(
+            r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+            r##""cell":{"value":{"kind":1,"value":3.50}}}"##,
+        );
+        let expected = concat!(
+            r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+            r##""cell":{"value":{"kind":"number","value":3.50}}}"##,
+        );
+        assert_eq!(normalize(input), expected.as_bytes());
+    }
+
+    #[test]
+    fn ordinary_float_spelling_is_untouched() {
+        let input = r##"{"type":"setColWidth","sheet":0,"col":0,"width":0.10}"##;
+        let oracle = serde_json::from_str::<OracleOp>(input).unwrap();
+        assert!(normalized_fields(input.as_bytes(), root(input.as_bytes()), &oracle).is_empty());
+        assert_eq!(normalize(input), input.as_bytes());
+    }
+
+    #[test]
+    fn positional_nested_enum_is_substituted() {
+        let input = concat!(
+            r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+            r##""cell":{"value":[1,3.50]}}"##,
+        );
+        let expected = concat!(
+            r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+            r##""cell":{"value":{"kind":"number","value":3.5}}}"##,
+        );
+        assert_eq!(normalize(input), expected.as_bytes());
+    }
+
+    #[test]
+    fn untouched_fields_keep_their_raw_text() {
+        for input in [
+            r##"{
+  "s\u0068eet": 0,
+  "t\u0079pe": "setCell",
+  "at": { "row": 0, "col": 0 },
+  "unknown": {"same":0.10,"same":"a\u0062"},
+  "unknown": true,
+  "cell": {"formula":"\u0031","value":{"kind":1,"value":0.10}}
+}"##,
+            concat!(
+                r##"["setCell", 0, {"row":0,"col":0}, "##,
+                r##"{"formula":"\u0031","value":{"kind":1,"value":0.10}}]"##,
+            ),
+        ] {
+            let expected = input.replace(r##""kind":1"##, r##""kind":"number""##);
+            assert_eq!(normalize(input), expected.as_bytes());
+        }
+    }
+}
