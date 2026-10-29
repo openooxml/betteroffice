@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * One yrs replica of the DOCX editing model, held for a JS host.
@@ -1436,6 +1438,13 @@ export function clear_measure_fonts(): void;
 export function close_display_list(handle: number): void;
 
 /**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
+/**
  * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
  */
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
@@ -1730,6 +1739,9 @@ export function write_docx_s13_wasm_with_warnings(request_json: string, original
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
+    readonly FONTPACK_calloc: (a: number, b: number) => number;
+    readonly FONTPACK_free: (a: number) => void;
+    readonly FONTPACK_malloc: (a: number) => number;
     readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
@@ -1745,6 +1757,7 @@ export interface InitOutput {
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => [number, number];
     readonly close_display_list: (a: number) => void;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

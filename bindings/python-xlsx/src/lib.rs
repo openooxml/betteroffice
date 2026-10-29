@@ -1021,6 +1021,7 @@ fn render_xlsx_markdown_json(py: Python<'_>, content: &str, options: &str) -> Py
 
 #[pymodule]
 fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
     let py = module.py();
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyWorkbook>()?;

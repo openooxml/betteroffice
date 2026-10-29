@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/pptx/src/wasm/generated/pptx_wasm.js';
 import { expectSavedPartsEqual } from '../native-parity';
+import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 type Engine = Pick<typeof wasm,
   | 'PptxDocument'
@@ -14,6 +15,7 @@ type Engine = Pick<typeof wasm,
   | 'compileSlideJson'
   | 'rendererVersion'
   | 'decodeTiffPng'
+  | 'decodeFontFace'
 >;
 
 const native = require('./index.js') as Engine & { engineVersion(): string };
@@ -71,6 +73,34 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
   }
   return actual;
 }
+
+test('linked font decoder returns known answers and matching native and wasm errors', () => {
+  expect(typeof wasm.decodeFontFace).toBe('function');
+  expect(typeof native.decodeFontFace).toBe('function');
+  for (const entry of fontCases()) {
+    const expected = wasm.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+    const actual = native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+    expectFontFace(expected, entry);
+    expectFontFace(actual, entry);
+    expectPlainBytes(expected.font);
+    expectPlainBytes(actual.font);
+    expect(actual.font).toEqual(expected.font);
+    expect(actual.payload).toEqual(expected.payload);
+    expect('payload' in expected).toBe(entry.payload !== undefined);
+    if (expected.payload && actual.payload) {
+      expectPlainBytes(expected.payload);
+      expectPlainBytes(actual.payload);
+    }
+  }
+  for (const entry of fontErrorCases()) {
+    const expected = caughtValue(() => wasm.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput));
+    const actual = caughtValue(() => native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput));
+    expect(expected).toBeInstanceOf(Error);
+    expect(actual).toBeInstanceOf(Error);
+    expect(expected).toMatchObject({ name: 'Error', message: entry.message });
+    expect(actual).toMatchObject({ name: 'Error', message: entry.message });
+  }
+});
 
 function runScript(engine: Engine) {
   const doc = engine.PptxDocument.openCollaborative(bytes(), 7);

@@ -6,7 +6,8 @@
   ],
   "main": "betteroffice-xlsx-native.win32-x64-msvc.node",
   "files": [
-    "betteroffice-xlsx-native.win32-x64-msvc.node"
+    "betteroffice-xlsx-native.win32-x64-msvc.node",
+    "BSD-3-Clause-Zstandard.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.",
   "keywords": [

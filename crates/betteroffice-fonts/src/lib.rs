@@ -14,24 +14,23 @@ use alloc::borrow::Cow;
 use alloc::vec::Vec;
 #[cfg(not(target_arch = "wasm32"))]
 use core::ffi::{c_uint, c_void};
+use core::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use core::ptr::{self, NonNull};
 
-#[cfg(any(
-    not(target_arch = "wasm32"),
-    not(feature = "wasm"),
-    feature = "build",
-    test
-))]
-use core::fmt;
-
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod allocator;
+mod face;
 #[cfg(any(target_arch = "wasm32", test))]
 mod rust_zstd;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 mod woff2t;
+
+pub use face::{
+    DEFAULT_MAX_OUTPUT, FaceError, MAX_OUTPUT_LIMIT, decode_font_face, decode_font_face_js,
+    max_output_from_f64,
+};
 
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 
@@ -83,12 +82,6 @@ pub enum DecodeError {
     Woff2Reconstruction,
 }
 
-#[cfg(any(
-    not(target_arch = "wasm32"),
-    not(feature = "wasm"),
-    feature = "build",
-    test
-))]
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

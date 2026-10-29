@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fontpack::Codec;
+use betteroffice_fonts::Codec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -426,7 +426,7 @@ fn write_pack(
             dict.unwrap_or_default(),
             encoded.as_slice(),
         ]);
-        let decoded = fontpack::decode_face(&encoded, dict, source.codec, limit)?;
+        let decoded = betteroffice_fonts::decode_face(&encoded, dict, source.codec, limit)?;
         if decoded.font != expected {
             return Err(
                 io::Error::other(format!("round-trip mismatch for {}", source.file)).into(),
@@ -477,7 +477,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{Manifest, Source, dictionary_payload, verify_limit};
-    use fontpack::Codec;
+    use betteroffice_fonts::Codec;
 
     fn source(codec: Codec) -> Source {
         Source {

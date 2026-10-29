@@ -178,21 +178,24 @@ It is used only by tests.
 
 ## Zstandard decoder
 
-`vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
+`crates/betteroffice-fonts/vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
 `facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
-It is compiled into the internal `fontpack` crate for native targets; wasm builds
-decode zstd with `ruzstd` instead.
+It is compiled into the `betteroffice-fonts` crate for native targets, so the
+native engines, the native npm bindings and the Python wheels link it; wasm
+builds decode zstd with `ruzstd` instead.
 
 Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
-License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
-included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt`.
+License: BSD-3-Clause (`crates/betteroffice-fonts/vendor/zstd/LICENSE`). The same
+upstream notice is included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt`,
+in each native platform package and in each Python wheel.
 
 ---
 
 ## ruzstd and twox-hash
 
-Wasm builds of the font decoder link `ruzstd` 0.9.1, a zstd decoder in Rust,
+Wasm builds of the font decoder, the standalone `fontpack.wasm` and the docx,
+pptx, xlsx and vsdx wasm engines, link `ruzstd` 0.9.1, a zstd decoder in Rust,
 https://github.com/KillingSpark/zstd-rs, and `twox-hash` 2 for its frame
 checksums, https://github.com/shepmaster/twox-hash.
 
@@ -201,7 +204,8 @@ Copyright (c) 2015 Jake Goulding
 
 License: MIT. The unmodified upstream licences are included under
 `packages/fonts/LICENSES/MIT-ruzstd.txt` and
-`packages/fonts/LICENSES/MIT-twox-hash.txt` for decoder redistribution.
+`packages/fonts/LICENSES/MIT-twox-hash.txt`, and in the docx, pptx, xlsx and vsdx
+packages, for decoder redistribution.
 
 ---
 

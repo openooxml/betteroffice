@@ -1,5 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
+export const FONTPACK_calloc: (a: number, b: number) => number;
+export const FONTPACK_free: (a: number) => void;
+export const FONTPACK_malloc: (a: number) => number;
 export const __externref_drop_slice: (a: number, b: number) => void;
 export const __externref_table_alloc: () => number;
 export const __externref_table_dealloc: (a: number) => void;
@@ -15,6 +18,7 @@ export const __wbindgen_start: () => void;
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const clear_measure_fonts: () => [number, number];
 export const close_display_list: (a: number) => void;
+export const decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const decodeTiffPng: (a: number, b: number) => [number, number, number, number];
 export const editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

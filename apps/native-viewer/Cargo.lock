@@ -240,6 +240,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "wuff",
+]
+
+[[package]]
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
@@ -314,6 +322,7 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
@@ -383,6 +392,7 @@ name = "betteroffice-xlsx"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",

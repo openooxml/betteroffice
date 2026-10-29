@@ -206,6 +206,14 @@ export interface CommentReplyInput {
 
 export declare function compileSlideJson(slideJson: string): string
 
+export interface DecodedFontFace {
+  font: Uint8Array
+  payload?: Uint8Array
+}
+
+/** Decodes one font pack face using this engine's linked decoder. */
+export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
+
 export declare function decodeTiffPng(data: Uint8Array): Uint8Array
 
 export declare function engineVersion(): string

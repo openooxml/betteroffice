@@ -2,8 +2,8 @@ mod common;
 
 use std::borrow::Cow;
 
+use betteroffice_fonts::{DecodeError, ZSTD_MAGIC, decode, decode_or_passthrough, is_zstd};
 use common::{compress, synthetic};
-use fontpack::{DecodeError, ZSTD_MAGIC, decode, decode_or_passthrough, is_zstd};
 
 #[test]
 fn round_trip_without_dictionary() {

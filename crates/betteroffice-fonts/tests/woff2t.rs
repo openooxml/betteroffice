@@ -1,6 +1,6 @@
 mod common;
 
-use fontpack::{Codec, DecodeError, decode_face};
+use betteroffice_fonts::{Codec, DecodeError, decode_face};
 
 const REGULAR: &[u8] = include_bytes!("fixtures/Synthetic-Regular.uw2");
 const BOLD: &[u8] = include_bytes!("fixtures/Synthetic-Bold.uw2");

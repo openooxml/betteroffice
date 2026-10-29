@@ -6,7 +6,8 @@
   ],
   "main": "betteroffice-pptx-native.linux-arm64-gnu.node",
   "files": [
-    "betteroffice-pptx-native.linux-arm64-gnu.node"
+    "betteroffice-pptx-native.linux-arm64-gnu.node",
+    "BSD-3-Clause-Zstandard.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js, Bun and Deno.",
   "keywords": [

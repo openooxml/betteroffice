@@ -51,12 +51,12 @@ fn builder_emits_a_sorted_manifest_and_verified_faces() {
         let encoded = fs::read(out.join(&file)).unwrap();
         let dict = dictionary.map(|_| regular.as_slice());
         assert_eq!(
-            fontpack::decode(&encoded, dict, bytes.len()).unwrap(),
+            betteroffice_fonts::decode(&encoded, dict, bytes.len()).unwrap(),
             *bytes
         );
         if dictionary.is_some() {
             assert!(encoded.len() < common::compress(bytes, None).len());
-            assert!(fontpack::decode(&encoded, None, bytes.len()).is_err());
+            assert!(betteroffice_fonts::decode(&encoded, None, bytes.len()).is_err());
         }
         expected.push(json!({
             "file": file,
@@ -120,8 +120,13 @@ fn builder_verifies_woff2t_and_hashes_reconstructed_fonts() {
         serde_json::from_slice(&fs::read(out.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["format"], 1);
     let regular_frame = fs::read(out.join("Synthetic-Regular.ttf.zst")).unwrap();
-    let regular =
-        fontpack::decode_face(&regular_frame, None, fontpack::Codec::Woff2tZstd, 65536).unwrap();
+    let regular = betteroffice_fonts::decode_face(
+        &regular_frame,
+        None,
+        betteroffice_fonts::Codec::Woff2tZstd,
+        65536,
+    )
+    .unwrap();
     assert_eq!(
         regular.payload.as_deref().unwrap(),
         fs::read(src.join("Synthetic-Regular.uw2")).unwrap()
@@ -134,10 +139,10 @@ fn builder_verifies_woff2t_and_hashes_reconstructed_fonts() {
         } else {
             None
         };
-        let decoded = fontpack::decode_face(
+        let decoded = betteroffice_fonts::decode_face(
             &fs::read(out.join(file)).unwrap(),
             dict,
-            fontpack::Codec::Woff2tZstd,
+            betteroffice_fonts::Codec::Woff2tZstd,
             65536,
         )
         .unwrap();

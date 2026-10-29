@@ -275,7 +275,7 @@ jobs:
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
-          cargo clippy -p fontpack --all-targets --features build -- -D warnings
+          cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -306,7 +306,7 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm
-          cargo test -p fontpack --features build
+          cargo test -p betteroffice-fonts --features build
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
@@ -479,7 +479,7 @@ jobs:
       - name: Check native and wasm parity
         env:
           BETTEROFFICE_ENGINE: wasm
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'

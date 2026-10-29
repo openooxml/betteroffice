@@ -11,9 +11,10 @@ fn main() {
         }
         return;
     }
-    println!("cargo:rerun-if-changed=../../vendor/zstd/zstddeclib.c");
+    println!("cargo:rerun-if-changed=vendor/zstd/zstddeclib.c");
 
-    let source = fs::read_to_string("../../vendor/zstd/zstddeclib.c")
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest.join("vendor/zstd/zstddeclib.c"))
         .expect("vendor zstd first with bash scripts/fonts/vendor-zstd.sh");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let source_path = output.join("fontpack_zstd.c");

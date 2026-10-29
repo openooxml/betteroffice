@@ -1417,6 +1417,7 @@ impl PyDocument {
 
 #[pymodule]
 fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(python_common::decode_font_face, module)?)?;
     let py = module.py();
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_class::<PyDocument>()?;
