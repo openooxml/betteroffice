@@ -1,11 +1,11 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, CapturedFormat, CellAddress, CellEdit, CellInput as WorkbookCellInput,
-    CellRange, CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation,
-    Op, PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
+    CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
+    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
+    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SelectionDirection, SheetId,
-    SheetInfo, SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    SnapshotBudget, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
     WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,38 @@ impl WorkbookCalculationContext {
         Ok(CalculationOptions {
             now_serial: Some(self.now_serial),
         })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SheetInfo {
+    sheet_ids: Vec<String>,
+    sheet_names: Vec<String>,
+    active_sheet: u32,
+    content_width: f32,
+    content_height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
+    auto_filter: Option<String>,
+}
+
+impl SheetInfo {
+    fn new(info: betteroffice_xlsx::SheetInfo, auto_filter: Option<String>) -> Self {
+        Self {
+            sheet_ids: info.sheet_ids,
+            sheet_names: info.sheet_names,
+            active_sheet: info.active_sheet.0,
+            content_width: info.content_width,
+            content_height: info.content_height,
+            frozen_rows: info.frozen_rows,
+            frozen_cols: info.frozen_cols,
+            initial_scroll_x: info.initial_scroll_x,
+            initial_scroll_y: info.initial_scroll_y,
+            auto_filter,
+        }
     }
 }
 
@@ -191,6 +223,16 @@ struct ProfiledEditResult {
 struct DisplayListProfile {
     build_ms: f64,
     encode_ms: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellEdit {
+    a1: String,
+    input: String,
+    is_formula: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_array_formula: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -616,7 +658,7 @@ impl Session {
             .workbook
             .sheet_info_for(SheetId(sheet))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&info).map_err(|error| error.to_string())
+        serde_json::to_string(&self.sheet_info_payload(info)?).map_err(|error| error.to_string())
     }
 
     pub fn charts_json(&self, sheet: u32) -> Result<String, String> {
@@ -813,7 +855,8 @@ impl Session {
             .workbook
             .cell(SheetId(args.sheet), CellRef::new(args.row, args.col))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&cell).map_err(|error| error.to_string())
+        serde_json::to_string(&self.cell_payload(SheetId(args.sheet), cell)?)
+            .map_err(|error| error.to_string())
     }
 
     pub fn search_text_json(&self, args: &str) -> Result<String, String> {
@@ -889,7 +932,14 @@ impl Session {
         let cells = self
             .workbook
             .range_cells(SheetId(args.sheet), range)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| self.cell_payload(SheetId(args.sheet), cell))
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         serde_json::to_string(&RangeCells { cells }).map_err(|error| error.to_string())
     }
 
@@ -1160,9 +1210,37 @@ impl Session {
     }
 
     fn sheet_info(&self) -> Result<SheetInfo, String> {
-        self.workbook
+        let info = self
+            .workbook
             .sheet_info()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.sheet_info_payload(info)
+    }
+
+    fn sheet_info_payload(&self, info: betteroffice_xlsx::SheetInfo) -> Result<SheetInfo, String> {
+        let auto_filter = self
+            .workbook
+            .auto_filter(info.active_sheet)
+            .map_err(|error| error.to_string())?;
+        Ok(SheetInfo::new(info, auto_filter))
+    }
+
+    fn cell_payload(
+        &self,
+        sheet: SheetId,
+        cell: betteroffice_xlsx::CellEdit,
+    ) -> Result<CellEdit, String> {
+        let is_array_formula = self
+            .workbook
+            .is_array_formula(sheet, cell.cell)
+            .map_err(|error| error.to_string())?
+            .then_some(true);
+        Ok(CellEdit {
+            a1: cell.cell.to_a1(),
+            input: cell.input,
+            is_formula: cell.is_formula,
+            is_array_formula,
+        })
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {

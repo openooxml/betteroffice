@@ -37,6 +37,31 @@ struct Script {
     steps: Vec<Step>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SheetInfo {
+    sheet_ids: Vec<String>,
+    sheet_names: Vec<String>,
+    active_sheet: u32,
+    content_width: f32,
+    content_height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
+    auto_filter: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellEdit {
+    a1: String,
+    input: String,
+    is_formula: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_array_formula: Option<bool>,
+}
+
 fn map_strings(value: &Value, transform: &mut impl FnMut(&str) -> String) -> Value {
     match value {
         Value::String(value) => Value::String(transform(value)),
@@ -169,7 +194,21 @@ fn execute(
     };
     match op {
         "sheetNames" => json!(workbook.sheet_info().unwrap().sheet_names),
-        "sheetInfo" => serialized(&workbook.sheet_info().unwrap()),
+        "sheetInfo" => {
+            let info = workbook.sheet_info().unwrap();
+            serialized(&SheetInfo {
+                sheet_ids: info.sheet_ids,
+                sheet_names: info.sheet_names,
+                active_sheet: info.active_sheet.0,
+                content_width: info.content_width,
+                content_height: info.content_height,
+                frozen_rows: info.frozen_rows,
+                frozen_cols: info.frozen_cols,
+                initial_scroll_x: info.initial_scroll_x,
+                initial_scroll_y: info.initial_scroll_y,
+                auto_filter: workbook.auto_filter(info.active_sheet).unwrap(),
+            })
+        }
         "listDefinedNames" => serialized(
             &workbook
                 .list_defined_names(&serde_json::from_value(args.clone()).unwrap())
@@ -183,17 +222,27 @@ fn execute(
                 .unwrap(),
         ),
         "calculationStatus" => serialized(&workbook.calculation_status()),
-        "cell" => serialized(
-            &workbook
+        "cell" => {
+            let sheet = SheetId(serde_json::from_value(args["sheet"].clone()).unwrap());
+            let cell = workbook
                 .cell(
-                    SheetId(serde_json::from_value(args["sheet"].clone()).unwrap()),
+                    sheet,
                     CellRef::new(
                         serde_json::from_value(args["row"].clone()).unwrap(),
                         serde_json::from_value(args["col"].clone()).unwrap(),
                     ),
                 )
-                .unwrap(),
-        ),
+                .unwrap();
+            serialized(&CellEdit {
+                a1: cell.cell.to_a1(),
+                input: cell.input,
+                is_formula: cell.is_formula,
+                is_array_formula: workbook
+                    .is_array_formula(sheet, cell.cell)
+                    .unwrap()
+                    .then_some(true),
+            })
+        }
         "version" => json!(workbook.version()),
         "readCells" => wire(workbook.read_cells_json(&args.to_string())),
         "findText" => wire(workbook.find_text_json(&args.to_string())),

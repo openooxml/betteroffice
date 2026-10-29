@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{DifferentialFormat, Error, Result, SheetId, Workbook};
+use crate::{CellRef, DifferentialFormat, Error, Result, SheetId, Workbook};
 
 /// Filters and pagination for [`Workbook::list_defined_names`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +92,24 @@ pub struct CalculationStatus {
 }
 
 impl Workbook {
+    /// Returns the sheet's auto-filter range in A1 notation, or None when absent.
+    pub fn auto_filter(&self, sheet: SheetId) -> Result<Option<String>> {
+        Ok(self
+            .sheet(sheet)?
+            .auto_filter
+            .as_ref()
+            .map(|filter| filter.range.to_a1()))
+    }
+
+    /// Returns whether the cell belongs to an array formula, including its anchor.
+    pub fn is_array_formula(&self, sheet: SheetId, at: CellRef) -> Result<bool> {
+        self.validate_cell(at)?;
+        Ok(self
+            .sheet(sheet)?
+            .array_formulas()
+            .any(|(_, range)| range.contains(at)))
+    }
+
     /// Lists defined names in source order with optional scope and pagination.
     pub fn list_defined_names(&self, request: &DefinedNamesRequest) -> Result<DefinedNamesResult> {
         let offset = request.offset.unwrap_or(0);

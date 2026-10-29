@@ -1,7 +1,7 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRange, CellRef, CellValue, ConditionalFormatRule,
-    ConditionalFormatting, DefinedName, DefinedNamesRequest, DifferentialFormat, Op, Sheet,
-    SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellEdit, CellRange, CellRef, CellValue, ConditionalFormatRule,
+    ConditionalFormatting, DefinedName, DefinedNamesRequest, DifferentialFormat, Error, Op, Sheet,
+    SheetId, SheetInfo, Workbook, WorkbookModel,
 };
 use serde_json::json;
 
@@ -195,10 +195,10 @@ fn conditional_formats_preserve_rule_order_optional_fields_and_json_bytes() {
 }
 
 #[test]
-fn sheet_info_reads_current_auto_filter_after_cached_edits_and_history() {
+fn auto_filter_reads_current_range_after_cached_sheet_info_edits_and_history() {
     let mut workbook = Workbook::from_model(model()).unwrap();
-    assert_eq!(workbook.sheet_info().unwrap().auto_filter, None);
-    assert!(json!(workbook.sheet_info().unwrap())["autoFilter"].is_null());
+    workbook.sheet_info().unwrap();
+    assert_eq!(workbook.auto_filter(SheetId(0)).unwrap(), None);
     for range in [Some("A1:B3"), Some("A1:C3"), None] {
         workbook
             .apply_ops(
@@ -209,41 +209,44 @@ fn sheet_info_reads_current_auto_filter_after_cached_edits_and_history() {
                 CalculationOptions::default(),
             )
             .unwrap();
-        assert_eq!(workbook.sheet_info().unwrap().auto_filter.as_deref(), range);
+        let info = workbook.sheet_info().unwrap();
+        assert_eq!(
+            workbook.auto_filter(info.active_sheet).unwrap().as_deref(),
+            range
+        );
         assert_eq!(
             workbook.sheet_info_for(SheetId(0)).unwrap(),
             workbook.sheet_info().unwrap()
         );
-        assert_eq!(
-            workbook.sheet_info_for(SheetId(1)).unwrap().auto_filter,
-            None
-        );
+        assert_eq!(workbook.auto_filter(SheetId(1)).unwrap(), None);
     }
     workbook.undo(CalculationOptions::default()).unwrap();
     assert_eq!(
-        workbook.sheet_info().unwrap().auto_filter.as_deref(),
+        workbook.auto_filter(SheetId(0)).unwrap().as_deref(),
         Some("A1:C3")
     );
     workbook.set_active_sheet(SheetId(1)).unwrap();
-    assert_eq!(workbook.sheet_info().unwrap().auto_filter, None);
     assert_eq!(
         workbook
-            .sheet_info_for(SheetId(0))
-            .unwrap()
-            .auto_filter
-            .as_deref(),
+            .auto_filter(workbook.sheet_info().unwrap().active_sheet)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        workbook.auto_filter(SheetId(0)).unwrap().as_deref(),
         Some("A1:C3")
     );
     assert_eq!(workbook.active_sheet(), SheetId(1));
     workbook.redo(CalculationOptions::default()).unwrap();
-    assert_eq!(
-        workbook.sheet_info_for(SheetId(0)).unwrap().auto_filter,
-        None
-    );
+    assert_eq!(workbook.auto_filter(SheetId(0)).unwrap(), None);
+    assert!(matches!(
+        workbook.auto_filter(SheetId(2)),
+        Err(Error::SheetOutOfRange(SheetId(2)))
+    ));
 }
 
 #[test]
-fn cell_and_range_reads_mark_array_anchors_members_and_empty_members() {
+fn array_formula_reads_include_anchors_members_and_empty_members() {
     let mut model = model();
     model.sheets[0].set_cell(
         cell("B1"),
@@ -264,23 +267,77 @@ fn cell_and_range_reads_mark_array_anchors_members_and_empty_members() {
     let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
     let workbook = Workbook::open_for_read(&bytes).unwrap();
     for a1 in ["B1", "C1", "B2", "C2"] {
-        let read = workbook.cell(SheetId(0), cell(a1)).unwrap();
-        assert_eq!(read.is_array_formula, Some(true));
-        assert_eq!(json!(read)["isArrayFormula"], true);
+        assert!(workbook.is_array_formula(SheetId(0), cell(a1)).unwrap());
     }
     assert_eq!(
-        serde_json::to_string(&workbook.cell(SheetId(0), cell("B1")).unwrap()).unwrap(),
-        r#"{"a1":"B1","input":"=SEQUENCE(2,2)","isFormula":true,"isArrayFormula":true}"#,
+        workbook.cell(SheetId(0), cell("B1")).unwrap(),
+        CellEdit {
+            cell: cell("B1"),
+            input: "=SEQUENCE(2,2)".into(),
+            is_formula: true
+        },
     );
     assert_eq!(
-        serde_json::to_string(&workbook.cell(SheetId(0), cell("A1")).unwrap()).unwrap(),
-        r#"{"a1":"A1","input":"","isFormula":false}"#,
+        workbook.cell(SheetId(0), cell("A1")).unwrap(),
+        CellEdit {
+            cell: cell("A1"),
+            input: String::new(),
+            is_formula: false
+        },
     );
-    let range = workbook
+    let range: Vec<Vec<CellEdit>> = workbook
         .range_cells(SheetId(0), CellRange::parse_a1("A1:C2").unwrap())
         .unwrap();
-    assert_eq!(range[0][0].is_array_formula, None);
-    assert_eq!(range[1][2].is_array_formula, Some(true));
+    let CellEdit {
+        cell: at,
+        input,
+        is_formula,
+    } = &range[0][0];
+    assert!(!workbook.is_array_formula(SheetId(0), *at).unwrap());
+    assert!(input.is_empty());
+    assert!(!*is_formula);
+    assert!(
+        workbook
+            .is_array_formula(SheetId(0), range[1][2].cell)
+            .unwrap()
+    );
+    assert!(!workbook.is_array_formula(SheetId(1), cell("B1")).unwrap());
+    assert!(matches!(
+        workbook.is_array_formula(SheetId(2), cell("A1")),
+        Err(Error::SheetOutOfRange(SheetId(2)))
+    ));
+    assert!(matches!(
+        workbook.is_array_formula(SheetId(0), CellRef::new(1_048_576, 0)),
+        Err(Error::CellOutOfRange(_))
+    ));
+}
+
+#[test]
+fn sheet_info_keeps_its_public_literal_and_destructuring_shape() {
+    let workbook = Workbook::from_model(model()).unwrap();
+    let SheetInfo {
+        sheet_ids,
+        sheet_names,
+        active_sheet,
+        content_width,
+        content_height,
+        frozen_rows,
+        frozen_cols,
+        initial_scroll_x,
+        initial_scroll_y,
+    } = workbook.sheet_info().unwrap();
+    let info = SheetInfo {
+        sheet_ids,
+        sheet_names,
+        active_sheet,
+        content_width,
+        content_height,
+        frozen_rows,
+        frozen_cols,
+        initial_scroll_x,
+        initial_scroll_y,
+    };
+    assert_eq!(info, workbook.sheet_info().unwrap());
 }
 
 #[test]
