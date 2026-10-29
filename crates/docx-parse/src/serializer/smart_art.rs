@@ -181,17 +181,18 @@ fn wrap(container: &mut XmlElement, value: &ImageWrap, context: &mut SerializerC
     };
     container.children.retain(|child| !matches!(child, XmlNode::Element(child) if child.local_name().starts_with("wrap") && child.local_name() != local));
     let element = ensure(container, local);
+    for (key, value) in [
+        ("distT", value.dist_t),
+        ("distB", value.dist_b),
+        ("distL", value.dist_l),
+        ("distR", value.dist_r),
+    ] {
+        if element.attributes.contains_key(key) {
+            number(element, key, value);
+        }
+    }
     if matches!(local, "wrapSquare" | "wrapTight" | "wrapThrough") {
-        attribute(
-            element,
-            "wrapText",
-            Some(
-                value
-                    .wrap_text
-                    .clone()
-                    .unwrap_or_else(|| "bothSides".to_owned()),
-            ),
-        );
+        attribute(element, "wrapText", value.wrap_text.clone());
     }
     if let Some(points) = &value.polygon {
         let polygon = ensure(element, "wrapPolygon");
@@ -206,6 +207,8 @@ fn wrap(container: &mut XmlElement, value: &ImageWrap, context: &mut SerializerC
             number(&mut element, "y", point.y);
             polygon.children.push(XmlNode::Element(element));
         }
+    } else {
+        element.children.retain(|child| !matches!(child, XmlNode::Element(child) if child.local_name() == "wrapPolygon"));
     }
     if matches!(value.wrap_type.as_str(), "behind" | "inFront") {
         boolean(container, "behindDoc", Some(value.wrap_type == "behind"));
@@ -367,6 +370,19 @@ fn update_frame(
     }
 }
 
+pub(super) fn unapplied_change(baseline: &Value, current: &Value, saved: &Value) -> bool {
+    if baseline == current {
+        return false;
+    }
+    if let (Some(before), Some(after)) = (baseline.as_object(), current.as_object()) {
+        return before
+            .keys()
+            .chain(after.keys())
+            .any(|key| unapplied_change(&baseline[key], &current[key], &saved[key]));
+    }
+    current != saved
+}
+
 pub(super) fn replay(
     shape: &Shape,
     context: &mut SerializerContext,
@@ -424,6 +440,17 @@ pub(super) fn replay(
     let changed = frame_model(shape) != *baseline;
     if changed {
         update_frame(drawing, shape, baseline, context);
+        let mut saved = Shape::empty("rect".to_owned(), shape.size.clone());
+        apply_frame_metadata(&mut saved, drawing);
+        let saved = frame_model(&saved);
+        let current = frame_model(shape);
+        for &key in crate::smart_art::FRAME_FIELDS {
+            if unapplied_change(&baseline[key], &current[key], &saved[key]) {
+                context.warn(format!(
+                    "SmartArt {key} changes cannot be represented exactly; saving supported frame changes and preserving remaining source properties."
+                ));
+            }
+        }
     }
     if !whole_run {
         return Ok(Some(drawing.to_raw_inline_xml()));
@@ -462,6 +489,10 @@ mod tests {
         let xml = format!(
             r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:rPr><w:noProof/></w:rPr><w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><wp:{container} distL="0">{placement}<wp:extent cx="5486400" cy="3200400"/><wp:effectExtent l="1" t="2" r="3" b="4"/><wp:docPr id="71" name="Keep"><a:extLst><a:ext uri="urn:keep"/></a:extLst></wp:docPr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="dm" r:lo="lo" r:qs="qs" r:cs="cs"/><a:extLst><a:ext uri="urn:payload"/></a:extLst></a:graphicData></a:graphic></wp:{container}></w:drawing></w:r>"#
         );
+        capture(xml)
+    }
+
+    fn capture(xml: String) -> (Shape, String) {
         let limits = ParseLimits::default();
         let parsed = parse_xml(xml.as_bytes(), "source", &mut ParseBudget::new(&limits)).unwrap();
         let drawing = parsed
@@ -481,6 +512,86 @@ mod tests {
         shape.drawing_model =
             Some(json!({"frame": frame_model(&shape), "otherSha256": other_model_sha256(&shape)}));
         (shape, xml)
+    }
+
+    #[test]
+    fn smart_art_wrap_distances_update_anchor_and_wrap_element() {
+        let (_, xml) = source(true);
+        let xml = xml.replace(
+            "<wp:docPr",
+            r#"<wp:wrapSquare wrapText="bothSides" distL="114300" distR="57150"/><wp:docPr"#,
+        );
+        for distance in [Some(228_600.0), None] {
+            let (mut shape, _) = capture(xml.clone());
+            let wrap = shape.wrap.as_mut().unwrap();
+            wrap.dist_l = distance;
+            wrap.dist_r = distance;
+            let mut context = context();
+            let saved = replay(&shape, &mut context, true).unwrap().unwrap();
+            let (reopened, _) = capture(saved.clone());
+            assert_eq!(reopened.wrap, shape.wrap);
+            assert_eq!(
+                saved.matches("distL=\"228600\"").count(),
+                if distance.is_some() { 2 } else { 0 }
+            );
+            assert_eq!(
+                saved.matches("distR=\"228600\"").count(),
+                if distance.is_some() { 2 } else { 0 }
+            );
+            assert!(!saved.contains("114300"));
+            assert!(!saved.contains("57150"));
+            assert!(saved.contains("<dgm:relIds"));
+            assert!(context.take_warnings().is_empty());
+        }
+    }
+
+    #[test]
+    fn smart_art_clearing_wrap_polygon_removes_source_element() {
+        let (_, xml) = source(true);
+        let xml = xml.replace("<wp:docPr", r#"<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="21600" y="21600"/></wp:wrapPolygon></wp:wrapTight><wp:docPr"#);
+        let (mut shape, _) = capture(xml);
+        assert!(shape.wrap.as_ref().unwrap().polygon.is_some());
+        shape.wrap.as_mut().unwrap().polygon = None;
+        shape.wrap.as_mut().unwrap().wrap_text = None;
+        let mut context = context();
+        let saved = replay(&shape, &mut context, true).unwrap().unwrap();
+        assert!(!saved.contains("wrapPolygon"));
+        assert!(!saved.contains("wrapText"));
+        assert!(saved.contains("wrapTight"));
+        let (reopened, _) = capture(saved);
+        assert_eq!(reopened.wrap, shape.wrap);
+        assert!(context.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn smart_art_unrepresentable_frame_edits_warn() {
+        for field in ["wrap", "position", "relativeHeight"] {
+            let (mut shape, _) = source(field == "position");
+            match field {
+                "wrap" => {
+                    shape.wrap.as_mut().unwrap().polygon =
+                        Some(vec![crate::image::ImageWrapPoint {
+                            x: Some(0.0),
+                            y: Some(0.0),
+                        }])
+                }
+                "position" => shape.position.as_mut().unwrap().horizontal.offset = Some(123.0),
+                _ => shape.relative_height = Some(42.0),
+            }
+            shape.size.width = 2_743_200.0;
+            let mut context = context();
+            let saved = replay(&shape, &mut context, true).unwrap().unwrap();
+            let (reopened, _) = capture(saved);
+            assert_eq!(reopened.size, shape.size);
+            assert!(
+                context
+                    .take_warnings()
+                    .iter()
+                    .any(|warning| warning.contains(&format!(
+                        "SmartArt {field} changes cannot be represented exactly"
+                    )))
+            );
+        }
     }
 
     #[test]

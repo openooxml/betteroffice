@@ -55,17 +55,15 @@ pub(super) fn markers(
 ) -> Result<(), Failure> {
     let mut bookmarks = Vec::new();
     let mut comments = Vec::new();
-    let drawings: Vec<_> = lowered
-        .cells
-        .iter()
-        .filter(|cell| lowered.xml.nodes[cell.node].word("drawing"))
-        .map(|cell| &cell.raw)
-        .collect();
+    let mut drawing_end = 0;
     for node in &lowered.xml.nodes {
-        if drawings
-            .iter()
-            .any(|span| span.start <= node.span.start && node.span.end <= span.end)
-        {
+        #[cfg(test)]
+        super::work::add(1);
+        if node.span.start < drawing_end {
+            continue;
+        }
+        if node.word("drawing") {
+            drawing_end = node.span.end;
             continue;
         }
         if node.namespace != WORD

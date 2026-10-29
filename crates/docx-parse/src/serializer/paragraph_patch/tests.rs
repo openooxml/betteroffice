@@ -1900,3 +1900,37 @@ fn smart_art_patch_refuses_text_replacement_across_source_runs() {
         "drawing: text edit crosses source runs"
     );
 }
+
+#[test]
+fn smart_art_many_drawings_patch_with_linear_work() {
+    let measured = |drawings: usize| {
+        let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
+        let run = format!("<w:r>{drawing}</w:r>");
+        let source = format!(
+            "<w:p><w:r><w:t>before</w:t></w:r>{}</w:p>",
+            run.repeat(drawings)
+        );
+        let atom = UnitV1::Atom {
+            atom_kind: "shape".to_owned(),
+            payload: attrs(json!({"shapeJson": json!({"drawingRunXml": run}).to_string()})),
+            attrs: Attrs::new(),
+        };
+        let mut seed = vec![text("before", json!({}))];
+        seed.extend(std::iter::repeat_n(atom, drawings));
+        let mut result = seed.clone();
+        result[0] = text("after", json!({}));
+        let mut plan = patch(seed, result);
+        replace(&mut plan, 0, 6, "after", json!({}));
+        super::work::reset();
+        let output = write(&source, &plan).unwrap();
+        let work = super::work::get();
+        assert_eq!(output, source.replacen(">before<", ">after<", 1));
+        assert_eq!(output.matches("<dgm:relIds/>").count(), drawings);
+        work
+    };
+    let (small, large) = (measured(2_500), measured(20_000));
+    assert!(
+        linear_work_growth(small, large),
+        "8x the drawings exceeded 10x the work: {small} -> {large}"
+    );
+}

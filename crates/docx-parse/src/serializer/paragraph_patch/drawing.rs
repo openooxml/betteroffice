@@ -10,17 +10,27 @@ const DIAGRAM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 const DRAWING: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
 pub(super) fn is_smart_art(source: &str, xml: &Xml, node: &Node) -> bool {
-    node.word("drawing")
-        && xml.nodes.iter().any(|child| {
-            node.span.start < child.span.start
-                && child.span.end <= node.span.end
-                && child.namespace == DRAWING
-                && child.local == "graphicData"
-                && child.attr(source, "uri").as_deref() == Some(DIAGRAM)
-                && child.children.iter().any(|&at| {
-                    xml.nodes[at].namespace == DIAGRAM && xml.nodes[at].local == "relIds"
-                })
-        })
+    if !node.word("drawing") {
+        return false;
+    }
+    let mut pending = node.children.clone();
+    while let Some(at) = pending.pop() {
+        #[cfg(test)]
+        super::work::add(1);
+        let child = &xml.nodes[at];
+        if child.namespace == DRAWING
+            && child.local == "graphicData"
+            && child.attr(source, "uri").as_deref() == Some(DIAGRAM)
+            && child
+                .children
+                .iter()
+                .any(|&at| xml.nodes[at].namespace == DIAGRAM && xml.nodes[at].local == "relIds")
+        {
+            return true;
+        }
+        pending.extend(&child.children);
+    }
+    false
 }
 
 fn canonical(xml: &str) -> Option<String> {
@@ -30,20 +40,26 @@ fn canonical(xml: &str) -> Option<String> {
 }
 
 fn equivalent(source: &str, lowered: &Lowered, node: usize, left: &str, right: &str) -> bool {
-    let target = &lowered.xml.nodes[node];
     let mut namespaces = lowered.xml.root_namespaces.clone();
-    for ancestor in &lowered.xml.nodes {
-        if ancestor.span.start <= target.span.start && target.span.end <= ancestor.span.end {
-            for attribute in &ancestor.attributes {
-                if let Some(prefix) = attribute.name.strip_prefix("xmlns:") {
-                    if let Some(value) = ancestor.attr(source, &attribute.name) {
-                        namespaces.insert(prefix.to_owned(), value);
-                    }
-                } else if attribute.name == "xmlns"
-                    && let Some(value) = ancestor.attr(source, "xmlns")
-                {
-                    namespaces.insert(String::new(), value);
+    let mut ancestors = Vec::new();
+    let mut next = Some(node);
+    while let Some(at) = next {
+        #[cfg(test)]
+        super::work::add(1);
+        ancestors.push(at);
+        next = lowered.xml.nodes[at].parent;
+    }
+    for at in ancestors.into_iter().rev() {
+        let ancestor = &lowered.xml.nodes[at];
+        for attribute in &ancestor.attributes {
+            if let Some(prefix) = attribute.name.strip_prefix("xmlns:") {
+                if let Some(value) = ancestor.attr(source, &attribute.name) {
+                    namespaces.insert(prefix.to_owned(), value);
                 }
+            } else if attribute.name == "xmlns"
+                && let Some(value) = ancestor.attr(source, "xmlns")
+            {
+                namespaces.insert(String::new(), value);
             }
         }
     }

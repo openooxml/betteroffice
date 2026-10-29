@@ -156,3 +156,44 @@ test('unsupported SmartArt geometry edits warn while saving supported frame chan
     doc.close();
   }
 }, 30_000);
+
+for (const editor of [false, true]) {
+  test(`${editor ? 'editor' : 'agent'} save applies opaque SmartArt run edits and warns for unsupported properties`, async () => {
+    const source = smartArtFixture(false);
+    source.parts.set('word/diagrams/drawing1.xml', '<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"><dsp:spTree/></dsp:drawing>');
+    source.parts.set('word/diagrams/data1.xml', '<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>');
+    const zip = new JSZip();
+    for (const [name, xml] of source.parts) zip.file(name, xml);
+    const doc = await openDocx(await zip.generateAsync({ type: 'uint8array' }));
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const segment = doc.session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'opaqueDrawing');
+      if (segment?.kind !== 'embed') throw new Error('expected opaque SmartArt');
+      expect(segment.payload.kind).toBe('drawingRun');
+      const { paraId } = doc.session.paragraphs('body')[0]!;
+      doc.session.formatRange({ story: 'body', start: { paraId, offset: 24 }, end: { paraId, offset: 25 } }, {
+        other: { hidden: true, modernTextEffects: { effects: { glow: { radius: 2, color: 'FF0000' } } } },
+      });
+      const base = doc.session.materializeDocx()!;
+      const bytes = editor ? new Uint8Array(await saveEditorDocument(doc.session,
+        yrsToDocument(doc.session, mergeDocxHostMetadata(base, base)), [])) : await doc.export();
+      const saved = await JSZip.loadAsync(bytes);
+      const xml = await saved.file('word/document.xml')!.async('string');
+      const run = smartArtDrawingRun(xml)!;
+      expect(run).toContain('<w:vanish/>');
+      expect(run).toContain('<w:noProof/>');
+      expect(run).toContain('<w:lang w:val="en-US"/>');
+      expect(run).toContain(source.drawing);
+      expect(smartArtTargets(xml, await saved.file('word/_rels/document.xml.rels')!.async('string'))).toHaveLength(4);
+      expect(warning).toHaveBeenCalledWith('Drawing run formatting changes cannot be represented exactly; preserving unsupported source properties and saving supported run changes.');
+      const reopened = await openDocx(bytes);
+      try {
+        const savedSegment = reopened.session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'opaqueDrawing');
+        expect(savedSegment?.attributes.hidden).toBe(true);
+      } finally { reopened.close(); }
+    } finally {
+      warning.mockRestore();
+      doc.close();
+    }
+  }, 30_000);
+}

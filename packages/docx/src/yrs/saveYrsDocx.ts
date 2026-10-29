@@ -526,7 +526,7 @@ export async function writeSessionSave(
     for (const warning of warnings) {
       if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
         console.debug(warning);
-      } else if (warning.startsWith('SmartArt ')) {
+      } else if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) {
         console.warn(warning);
       }
     }
