@@ -885,7 +885,7 @@ function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className'
     reported.current = true;
     try { latest.current?.(error); } catch {}
   }, [error]);
-  return <div role="alert" className={props.className} style={props.style}>{error.message}</div>;
+  return <div dir="ltr" role="alert" className={props.className} style={props.style}>{error.message}</div>;
 }
 
 const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function LegacyDocxEditor(
@@ -2559,6 +2559,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (state.isLoading) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-loading', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"
@@ -2572,6 +2573,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (state.parseError) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-error', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"
@@ -2585,6 +2587,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   if (!history.state) {
     return (
       <div
+        dir="ltr"
         className={cn('oox-root docx-editor docx-editor-empty', isDark && 'dark', className)}
         style={containerStyle}
         data-testid="docx-editor"

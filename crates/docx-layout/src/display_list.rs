@@ -606,6 +606,9 @@ pub struct HighlightSliceMetadata {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ChartA11yAttrs {
     pub label: String,
+    /// The placed chart box every primitive of the chart paints inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Box<ContentFrame>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -6099,15 +6102,15 @@ pub(crate) fn emit_paragraph_fragment(
     let indent = attrs.and_then(|a| a.indent).unwrap_or_default();
 
     // rtl paragraphs mirror the two indent sides
-    let ind_l = indent.left.unwrap_or(0.0).max(0.0);
-    let ind_r = indent.right.unwrap_or(0.0).max(0.0);
+    let ind_l = indent.left.unwrap_or(0.0);
+    let ind_r = indent.right.unwrap_or(0.0);
     let (indent_left, indent_right) = if is_rtl {
         (ind_r, ind_l)
     } else {
         (ind_l, ind_r)
     };
-    let hanging = indent.hanging.unwrap_or(0.0).max(0.0);
-    let first_line = indent.first_line.unwrap_or(0.0).max(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    let first_line = indent.first_line.unwrap_or(0.0);
 
     let block_ref = BlockRef::of(&frag.block_id);
     let pmark_revision = attrs.and_then(|a| {
@@ -6172,7 +6175,7 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                if !is_rtl && indent_left > 0.0 {
+                if !is_rtl && indent_left != 0.0 {
                     indent_left - hanging
                 } else {
                     indent_left
@@ -6501,6 +6504,16 @@ pub(crate) fn line_text_insets(
     has_list_marker: bool,
     overrun: f64,
 ) -> (f64, f64) {
+    if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
+        let text_indent = if !is_first_line {
+            0.0
+        } else if has_list_marker && hanging > 0.0 {
+            overrun
+        } else {
+            first_line - hanging
+        };
+        return (indent_left, text_indent);
+    }
     let has_hanging = hanging > 0.0;
     let has_first_line = first_line > 0.0;
     let mut pad_left = indent_left;
@@ -9585,13 +9598,6 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(block.pm_end);
     attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs {
-        label: chart_aria_label(&chart),
-    });
-    attrs.aria_label = block.chart.title.clone();
-    attrs.aria_description = block.chart.description.clone();
-    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
-
     let width = if frag.width > 0.0 {
         frag.width
     } else {
@@ -9602,6 +9608,18 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
+    attrs.chart = Some(ChartA11yAttrs {
+        label: chart_aria_label(&chart),
+        frame: Some(Box::new(ContentFrame {
+            x: Some(px(frag.x)),
+            y: Some(px(frag.y)),
+            w: Some(px(width)),
+            h: Some(px(height)),
+        })),
+    });
+    attrs.aria_label = block.chart.title.clone();
+    attrs.aria_description = block.chart.description.clone();
+    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
 
     plot_chart_into(
         &chart,
@@ -11643,6 +11661,17 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                 }
                 rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
             }
+        }
+        if let Some(ContentFrame {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+        }) = doc_attrs_mut(primitive)
+            .and_then(|attrs| attrs.chart.as_mut())
+            .and_then(|chart| chart.frame.as_deref_mut())
+        {
+            rect(x, y, w, h);
         }
     }
 }
@@ -17320,5 +17349,65 @@ mod tests {
             (child["x"].as_i64(), child["y"].as_i64()),
             (Some(145), Some(125))
         );
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
+        let attrs = DocAttrs {
+            chart: Some(ChartA11yAttrs {
+                label: "Chart".to_owned(),
+                frame: Some(Box::new(ContentFrame {
+                    x: Some(px(10.0)),
+                    y: Some(px(20.0)),
+                    w: Some(px(40.0)),
+                    h: Some(px(30.0)),
+                })),
+            }),
+            ..DocAttrs::default()
+        };
+        let mut prims = vec![
+            Primitive::Rect(RectPrimitive {
+                x: px(10.0),
+                y: px(20.0),
+                w: px(40.0),
+                h: px(30.0),
+                fill: "#000000".to_owned(),
+                attrs: attrs.clone(),
+            }),
+            Primitive::Rect(RectPrimitive {
+                x: px(15.0),
+                y: px(25.0),
+                w: px(10.0),
+                h: px(5.0),
+                fill: "#ffffff".to_owned(),
+                attrs,
+            }),
+        ];
+        rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), 90.0);
+        let Primitive::Rect(rect) = &prims[0] else {
+            unreachable!()
+        };
+        let expected = (
+            Some(rect.x.clone()),
+            Some(rect.y.clone()),
+            Some(rect.w.clone()),
+            Some(rect.h.clone()),
+        );
+        assert_ne!(expected.0, Some(px(10.0)));
+        for primitive in &prims {
+            let Primitive::Rect(RectPrimitive { attrs, .. }) = primitive else {
+                unreachable!()
+            };
+            let frame = attrs.chart.as_ref().unwrap().frame.as_ref().unwrap();
+            assert_eq!(
+                (
+                    frame.x.clone(),
+                    frame.y.clone(),
+                    frame.w.clone(),
+                    frame.h.clone()
+                ),
+                expected
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@ const EDITOR_SOURCES = [
   'packages/xlsx-react/src',
   'packages/pptx-react/src',
   'packages/vsdx-react/src',
+  'apps/desktop/src',
   'shared/react-toolbar',
   'shared/format-glyph.tsx',
 ];

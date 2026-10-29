@@ -9,7 +9,7 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { classifyRefusal, createWorkbookCommandState } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState, workbookAdmissionBudget } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
@@ -1213,9 +1213,11 @@ describe('workbook commands', () => {
       const validating = spyOn(handle, 'validateEdits');
       const pasting = spyOn(handle, 'editCells');
       const batches = spyOn(handle, 'applyEdits');
+      const cellsBudget = workbookAdmissionBudget.cells;
+      if (budget === 'cells') workbookAdmissionBudget.cells = 1_000;
       try {
         const edits = budget === 'cells'
-          ? Array.from({ length: 100_005 }, (_, at) => ({ row: Math.floor(at / 5) + 1, col: at % 5, input: '7' }))
+          ? Array.from({ length: 1_005 }, (_, at) => ({ row: Math.floor(at / 5) + 1, col: at % 5, input: '7' }))
           : Array.from({ length: 40 }, (_, col) => ({ row: 1, col, input: 'x'.repeat(32_767) }));
         expect(await session.submit(command(session, 1, 'editCells', { args: [0, edits] })))
           .toMatchObject({ status: 'applied', committed: true });
@@ -1229,7 +1231,7 @@ describe('workbook commands', () => {
             const { start, end } = step.target.range;
             cells += (end.row - start.row + 1) * (end.col - start.col + 1);
           }
-          expect(cells).toBeLessThanOrEqual(100_000);
+          expect(cells).toBeLessThanOrEqual(workbookAdmissionBudget.cells);
           if (budget === 'text') expect(cells * 32_767).toBeLessThanOrEqual(1_048_576);
           expect(new TextEncoder().encode(JSON.stringify(request)).length).toBeLessThanOrEqual(16 * 1024 * 1024);
         }
@@ -1242,9 +1244,33 @@ describe('workbook commands', () => {
         expect(handle.cell(0, last.row, last.col).input).toBe('');
         expect(handle.cell(0, 1, 0).input).toBe('');
         expect(session.failure).toBeUndefined();
-      } finally { batches.mockRestore(); pasting.mockRestore(); validating.mockRestore(); await session.dispose(); }
+      } finally {
+        workbookAdmissionBudget.cells = cellsBudget;
+        batches.mockRestore(); pasting.mockRestore(); validating.mockRestore(); await session.dispose();
+      }
     });
   }
+
+  test('paste admission splits at the engine batch cell limit', async () => {
+    expect(workbookAdmissionBudget.cells).toBe(100_000);
+    const { session, handle } = await trackedSession();
+    const validating = spyOn(handle, 'validateEdits');
+    try {
+      expect(await session.submit(command(session, 1, 'editCells', { args: [0, [{ row: 1, col: 0, input: '7' }]] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      const [request] = validating.mock.calls[0]!;
+      const step = request.steps[0]!;
+      if (step.target.range.kind !== 'rowCol') throw new Error('Expected rectangle');
+      const { start } = step.target.range;
+      const rectangle = (rows: number) => ({ ...request, expectVersion: handle.version(), steps: [{ ...step,
+        target: { ...step.target, range: { kind: 'rowCol' as const, start, end: { row: start.row + rows - 1, col: start.col + 4 } } } }] });
+      const admitted = handle.validateEdits(rectangle(20_000));
+      expect(admitted.ok ? 'ok' : admitted.failure).toBe('ok');
+      const refused = handle.validateEdits(rectangle(20_001));
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.failure.code).toBe('limit-exceeded');
+    } finally { validating.mockRestore(); await session.dispose(); }
+  });
 
   test('single-cell receipts retain recalculated and limited addresses on other sheets', async () => {
     const session = await createTestWorkbookSession(bytes);

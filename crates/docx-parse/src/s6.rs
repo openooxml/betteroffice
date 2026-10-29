@@ -233,7 +233,7 @@ fn project_s6_run(run: &mut Run, depth: usize) {
         return;
     }
     for content in &mut run.content {
-        if let RunContent::Shape { shape } = content {
+        if let RunContent::Shape { shape, .. } = content {
             project_s6_shape(shape, depth + 1);
         }
     }

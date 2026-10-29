@@ -14,6 +14,7 @@ use crate::drawing::{
     Bitmap, Clip, ClipChain, ClipRegion, Hatch, LineCap, LineJoin, Op, Paint, PathCommand, Rgba,
     Shape, Stroke,
 };
+use crate::fmath;
 
 pub(crate) const ARC_SEGMENTS: usize = 64;
 pub(crate) const MAX_HANDLES: usize = 4096;
@@ -452,7 +453,8 @@ impl<const FULL: bool> Player<FULL> {
         } else {
             1.0
         };
-        (width * scale * self.dc.xform[0].hypot(self.dc.xform[1]) / self.frame.2 * self.unit.0)
+        (width * scale * fmath::hypot(self.dc.xform[0], self.dc.xform[1]) / self.frame.2
+            * self.unit.0)
             .abs()
     }
 
@@ -727,7 +729,7 @@ impl<const FULL: bool> Player<FULL> {
         if rx == 0.0 || ry == 0.0 {
             return;
         }
-        let angle = |p: (f64, f64)| ((p.1 - cy) / ry).atan2((p.0 - cx) / rx);
+        let angle = |p: (f64, f64)| fmath::atan2((p.1 - cy) / ry, (p.0 - cx) / rx);
         let from = angle(start);
         let mut sweep = angle(end) - from;
         if self.dc.clockwise {
@@ -756,7 +758,7 @@ impl<const FULL: bool> Player<FULL> {
         let steps = steps.clamp(2, ARC_SEGMENTS);
         for step in 0..=steps {
             let theta = from + sweep * step as f64 / steps as f64;
-            let (x, y) = (cx + rx * theta.cos(), cy + ry * theta.sin());
+            let (x, y) = (cx + rx * fmath::cos(theta), cy + ry * fmath::sin(theta));
             if step == 0 && self.path.is_empty() {
                 self.move_to(x, y);
             } else {
@@ -771,7 +773,7 @@ impl<const FULL: bool> Player<FULL> {
         let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
         for step in 0..ARC_SEGMENTS {
             let theta = std::f64::consts::TAU * step as f64 / ARC_SEGMENTS as f64;
-            let (x, y) = (cx + rx * theta.cos(), cy + ry * theta.sin());
+            let (x, y) = (cx + rx * fmath::cos(theta), cy + ry * fmath::sin(theta));
             if step == 0 {
                 self.move_to(x, y);
             } else {
@@ -816,7 +818,10 @@ impl<const FULL: bool> Player<FULL> {
             let steps = ARC_SEGMENTS / 4;
             for step in 0..=steps {
                 let theta = from + quarter * step as f64 / steps as f64;
-                let (x, y) = (centre.0 + rx * theta.cos(), centre.1 + ry * theta.sin());
+                let (x, y) = (
+                    centre.0 + rx * fmath::cos(theta),
+                    centre.1 + ry * fmath::sin(theta),
+                );
                 if self.path.is_empty() {
                     self.move_to(x, y);
                 } else {

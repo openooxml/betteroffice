@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
+use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
@@ -5086,7 +5087,7 @@ struct BackgroundTransform {
 
 impl BackgroundTransform {
     fn for_shape(rect: PxRect, transform: Transform) -> Self {
-        let (sin, cos) = f64::from(transform.rotation_deg).to_radians().sin_cos();
+        let (sin, cos) = fmath::sin_cos(f64::from(transform.rotation_deg).to_radians());
         let width = f64::from(rect.w);
         let height = f64::from(rect.h);
         let flipped_width = if transform.flip_h { -width } else { width };
@@ -5196,7 +5197,7 @@ fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32)
     }
     let center_x = rect.x + rect.w / 2.0;
     let center_y = rect.y + rect.h / 2.0;
-    let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cosf(transform.rotation_deg.to_radians());
     let dx = x - center_x;
     let dy = y - center_y;
     let mut local_x = dx * cos + dy * sin;
@@ -5646,12 +5647,12 @@ fn shadow(
     }
     let direction = (outer.direction as f64 / ANGLE_UNITS_PER_DEGREE).to_radians();
     let distance = outer.distance as f64;
-    let mut dx = (distance * direction.cos()) as f32 * space.scale_x;
-    let mut dy = (distance * direction.sin()) as f32 * space.scale_y;
+    let mut dx = (distance * fmath::cos(direction)) as f32 * space.scale_x;
+    let mut dy = (distance * fmath::sin(direction)) as f32 * space.scale_y;
     if outer.rotate_with_shape {
         dx *= if flip_h { -1.0 } else { 1.0 };
         dy *= if flip_v { -1.0 } else { 1.0 };
-        let (sin, cos) = rotation_deg.to_radians().sin_cos();
+        let (sin, cos) = fmath::sin_cosf(rotation_deg.to_radians());
         (dx, dy) = (cos * dx - sin * dy, sin * dx + cos * dy);
     }
     // Scaling happens about the surface origin, so the anchor `algn` names travels in the
@@ -6383,7 +6384,9 @@ mod tests {
             base: ShapeBase {
                 id: 1,
                 name: "Photo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform::default(),
@@ -8649,7 +8652,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_002,
                     name: "Filled".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform {
@@ -9298,7 +9303,9 @@ mod tests {
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform,
@@ -10752,7 +10759,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 4_242,
                 name: "Logo".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: None,
                 transform: ShapeTransform {
@@ -11211,6 +11220,9 @@ mod tests {
             source_id: 1,
             kind: ShapeKind::Shape,
             name: "Title".to_owned(),
+            title: None,
+            description: None,
+            decorative: false,
             x: 0,
             y: 0,
             width: 0,
@@ -11243,7 +11255,9 @@ mod tests {
             base: pptx_parse::ShapeBase {
                 id: 2,
                 name: "Layout title".to_owned(),
+                title: None,
                 description: None,
+                decorative: false,
                 hidden: false,
                 placeholder: Some(title),
                 transform: ShapeTransform {
