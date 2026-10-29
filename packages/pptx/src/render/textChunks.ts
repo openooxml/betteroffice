@@ -7,7 +7,8 @@ export function paintTextChunks(
   spacing: number
 ): void {
   for (const chunk of positionedTextChunks(run)) {
-    const measured = chunk.width === undefined || spacing !== 0
+    const cjk = Array.from(chunk.text).some((character) => isCjkCharacter(character.codePointAt(0)));
+    const measured = cjk || chunk.width === undefined || spacing !== 0
       ? 0 : ctx.measureText(chunk.fitText ?? chunk.text)?.width;
     let scale = measured && measured > 0 ? (chunk.width ?? 0) / measured : 1;
     if (Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33) scale = 1;
@@ -136,4 +137,3 @@ function isCjkCharacter(codePoint: number | undefined): boolean {
     String.fromCodePoint(codePoint ?? 0),
   );
 }
-

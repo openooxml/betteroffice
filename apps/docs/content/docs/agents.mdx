@@ -5,9 +5,9 @@ description: Search, inspect, and propose Office edits through the agents SDK an
 
 `@betteroffice/agents` gives agents a bounded document workflow:
 discover → grep → read → propose → render → verify → export.
-DOCX supports body text, headers, footers, and table cell stories. Initial XLSX
-and PPTX prototypes add cell input/formula and slide-text proposals; rendering
-and tracked changes remain DOCX-only.
+DOCX supports body text, headers, footers, and table cell stories. XLSX adds
+cell input and formula proposals and PPTX adds slide-text proposals, each with
+its own direct-edit and PNG preview tools; tracked changes are DOCX-only.
 
 ## MCP
 
@@ -58,8 +58,10 @@ document unchanged.
 
 Follow search `nextCursor`, outline `nextOffset`, and read `nextStart` values
 to retrieve more context. Paragraph refs belong to an open session. Text
-offsets use UTF-16. Edits replace text within one paragraph; embeds, structural
-changes, and existing tracked changes are outside this release's edit surface.
+offsets use UTF-16. Proposals replace text within one paragraph; paragraph
+breaks, embeds, and existing tracked changes are protected from them. `edit`
+batches (the MCP `docx_edit` tool) apply paragraph, table row, comment, and
+section edits directly.
 
 Save/reopen checks do not establish semantic or visual correctness. Inspect
 the rendered pages and their warnings before delivery.
@@ -67,10 +69,11 @@ the rendered pages and their warnings before delivery.
 The [package guide](https://github.com/openooxml/betteroffice/tree/main/packages/agents)
 contains the complete tool catalog, limits, host integration, and testing setup.
 
-## Spreadsheet and presentation prototypes
+## Spreadsheets and presentations
 
 `openXlsx(bytes)` and `openPptx(bytes)` expose the same review, accept/reject,
-proposed export, and save/reopen workflow. Both own their sessions.
+proposed export, and save/reopen workflow in their own sessions; `attachXlsx`
+and `attachPptx` wrap a live editor's handle.
 
 For XLSX, use `office_outline` to find sheet IDs, `office_cells` to read an A1
 range, and `office_propose_cells` with `{cell, input}`. Inputs replace entire
@@ -78,8 +81,13 @@ cells; prefix formulas with `=`. Search is case-sensitive over displayed values.
 For PPTX, use `office_grep` and `office_propose` with `{match, newText}` to replace
 one occurrence inside a slide paragraph.
 
+The MCP server adds direct edits: `xlsx_write_range`, `xlsx_format`, `xlsx_sort`,
+and tools for rows, columns, sheets, defined names, filters, charts, and
+conditional formats, with `xlsx_preview` rendering a range as PNG; `pptx_edit`
+changes text, slides, layout mapping, shapes, images, notes, comments, and table
+structure, with `pptx_preview` rendering a slide.
+
 Follow pagination, and narrow searches that report the 10,000-match cap.
-Any committed change invalidates outstanding XLSX/PPTX proposals. PNG rendering,
-tracked changes, and live-session attachment remain DOCX-only. Slide layout,
-notes, and media editing are outside the PPTX prototype. See the package guide
-for complete examples and formula calculation limits.
+Any committed change invalidates outstanding XLSX/PPTX proposals. Accepting a
+proposal as tracked changes is DOCX-only. See the package guide for the complete
+tool catalog and formula calculation limits.

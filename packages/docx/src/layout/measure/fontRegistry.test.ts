@@ -111,6 +111,35 @@ test('Lucida Bright keeps its substitute measurement view', async () => {
   expect(substitutes).toEqual([[1, 'Lucida Bright']]);
 });
 
+test('Japanese requested names keep distinct measurement views of the bundled face', async () => {
+  const provider = createFontProvider();
+  const registered: Uint8Array[] = [];
+  const substitutes: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: bytes => { registered.push(bytes); return registered.length; },
+      registerSubstituteFont: (id, family) => {
+        substitutes.push([id, family]);
+        return substitutes.length + 100;
+      },
+    },
+    { bundled: { resolve: provider.resolve } }
+  );
+  const bytes = new Uint8Array(await provider.resolve('MS Gothic', false, false)!());
+  for (const family of [
+    'MS Mincho', 'ＭＳ 明朝', 'MS Gothic', 'ＭＳ ゴシック',
+    'MS PMincho', 'ＭＳ Ｐ明朝', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS UI Gothic',
+  ]) {
+    expect(provider.resolve(family, false, false)).toBeDefined();
+    const chain = await registry.getFontIdChain(family, false, false);
+    expect(chain).toEqual([substitutes.length + 100]);
+    expect(substitutes.at(-1)?.[1]).toBe(family);
+    expect(registered[substitutes.at(-1)![0] - 1]).toEqual(bytes);
+    expect(await registry.getFontIdChain(family, false, false)).toEqual(chain);
+  }
+  expect(substitutes).toHaveLength(9);
+});
+
 test('a rejected primary still measures with real last-resort bytes', async () => {
   const wasm = await import('../wasm');
   await wasm.preloadLayoutWasm();
