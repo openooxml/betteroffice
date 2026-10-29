@@ -7,7 +7,7 @@ import { LegacyXlsxEditorLoader, XlsxAsyncInThreadSessionLoader } from './XlsxEd
 import { LocaleProvider } from './i18n';
 import { LEGACY_SYNC_API } from './runtimeOptions';
 import { warnXlsxEngine } from './engineWarnings';
-import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
+import { prefetchPeerlessXlsxEditor, XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
 
 export { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
 export type {
@@ -26,6 +26,7 @@ function XlsxAsyncEditorSession(props: Omit<XlsxAsyncEditorProps, 'file'> & { fi
   const engine = choice.identity === identity ? choice : start();
   if (choice !== engine) setChoice(engine);
   useEffect(() => { if (engine.reason) warnXlsxEngine(engine.reason); }, [engine.reason]);
+  if (!engine.reason) prefetchPeerlessXlsxEditor();
   return engine.reason ? <XlsxAsyncInThreadSessionLoader {...props} /> : <XlsxWorkerEditor {...props} backend="peerless" />;
 }
 

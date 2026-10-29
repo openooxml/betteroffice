@@ -9,6 +9,12 @@ import { XlsxWorkerEditorChunkLoadError } from './XlsxWorkerEditorChunkLoadError
 export { XlsxWorkerEditorChunkLoadError } from './XlsxWorkerEditorChunkLoadError';
 
 export const xlsxPeerlessEditorLoader = { load: () => import('./XlsxPeerlessWorkerEditor') };
+let prefetched = false;
+export function prefetchPeerlessXlsxEditor(): void {
+  if (prefetched) return;
+  prefetched = true;
+  import('./XlsxPeerlessWorkerEditor').catch(() => { prefetched = false; });
+}
 const reloadPage = () => globalThis.location?.reload();
 
 type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className' | 'style'> & {
