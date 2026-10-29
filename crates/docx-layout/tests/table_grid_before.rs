@@ -24,6 +24,29 @@ fn table(before: Option<u64>, after: Option<u64>, span: u64) -> Value {
     })
 }
 
+fn shared_grid_table(leading_skip: bool) -> Value {
+    let mut table = table(None, None, 1);
+    let mut first = table["rows"][0]["cells"][0].clone();
+    first["id"] = json!("first");
+    let mut second = first.clone();
+    second["id"] = json!("second");
+    second["blocks"] = json!([{
+        "kind": "paragraph", "id": "shared-content",
+        "runs": [{"kind": "text", "text": "Visible"}]
+    }]);
+    let mut partial = table["rows"][0].clone();
+    partial["id"] = json!("partial");
+    partial["cells"][0]["id"] = json!("partial-cell");
+    partial[if leading_skip { "gridBefore" } else { "gridAfter" }] = json!(1);
+    table["columnWidths"] = json!([100, 100]);
+    table["preferredWidth"] = json!({"value": 3000, "type": "dxa"});
+    table["rows"] = json!([
+        {"id": "full", "height": 24, "heightRule": "exact", "cells": [first, second]},
+        partial
+    ]);
+    table
+}
+
 fn render(table: Value) -> (Value, Value, Value) {
     let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([table])).unwrap();
     let measures = measure_blocks(&mut blocks, 220.0, &MeasurementConfig::default()).unwrap();
@@ -100,32 +123,81 @@ fn grid_before_and_after_paint_only_the_middle_column() {
 }
 
 #[test]
-fn omitted_grid_widths_use_dxa_and_table_relative_percentages() {
+fn omitted_widths_preserve_solved_grid_widths_for_dxa_and_percentages() {
     let mut table = table(Some(1), Some(1), 1);
     table["rows"][0]["widthBefore"] = json!({"value": 600, "type": "dxa"});
     table["rows"][0]["widthAfter"] = json!({"value": 2500, "type": "pct"});
     let (measure, _, display) = render(table);
-    assert_eq!(measure["columnWidths"], json!([40.0, 80.0, 110.0]));
-    assert_cell(&display, 1, 90.0, 80.0);
+    assert_eq!(measure["columnWidths"], json!([20.0, 80.0, 120.0]));
+    assert_eq!(measure["totalWidth"], 220.0);
+    assert_cell(&display, 1, 70.0, 80.0);
 }
 
 #[test]
-fn trailing_omitted_width_is_respected_without_a_leading_skip() {
+fn trailing_omitted_width_preserves_the_solved_grid_without_a_leading_skip() {
     let mut table = table(None, Some(1), 2);
     table["rows"][0]["widthAfter"] = json!({"value": 900, "type": "dxa"});
     let (measure, _, display) = render(table);
-    assert_eq!(measure["columnWidths"], json!([20.0, 80.0, 60.0]));
+    assert_eq!(measure["columnWidths"], json!([20.0, 80.0, 120.0]));
+    assert_eq!(measure["totalWidth"], 220.0);
     assert_cell(&display, 0, 50.0, 100.0);
 }
 
 #[test]
-fn zero_omitted_widths_keep_the_grid_positions_without_a_visible_gap() {
+fn zero_omitted_widths_preserve_the_solved_grid_gaps() {
     let mut table = table(Some(1), Some(1), 1);
     table["rows"][0]["widthBefore"] = json!({"value": 0, "type": "dxa"});
     table["rows"][0]["widthAfter"] = json!({"value": 0, "type": "pct"});
     let (measure, _, display) = render(table);
-    assert_eq!(measure["columnWidths"], json!([0.0, 80.0, 0.0]));
-    assert_cell(&display, 1, 50.0, 80.0);
+    assert_eq!(measure["columnWidths"], json!([20.0, 80.0, 120.0]));
+    assert_eq!(measure["totalWidth"], 220.0);
+    assert_cell(&display, 1, 70.0, 80.0);
+}
+
+#[test]
+fn zero_trailing_omitted_width_keeps_shared_cell_content_and_table_width() {
+    let mut table = shared_grid_table(false);
+    table["rows"][1]["widthAfter"] = json!({"value": 0, "type": "dxa"});
+    let (measure, layout, display) = render(table);
+    assert_eq!(measure["columnWidths"], json!([100.0, 100.0]));
+    assert_eq!(measure["rows"][0]["cells"][1]["width"], 100.0);
+    assert_eq!(measure["totalWidth"], 200.0);
+    assert_eq!(layout["pages"][0]["fragments"][0]["width"], 200.0);
+    let content = display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|primitive| primitive["text"] == "Visible")
+        .unwrap();
+    assert_eq!(content["cell"]["row"], 0);
+    assert_eq!(content["cell"]["col"], 1);
+    assert_eq!(content["clipGroup"]["clip"]["w"], 100.0);
+}
+
+#[test]
+fn omitted_widths_never_shrink_shared_columns_or_change_table_width() {
+    for leading_skip in [false, true] {
+        let table = shared_grid_table(leading_skip);
+        let baseline = render(table.clone());
+        for width in [
+            json!({"value": 0, "type": "dxa"}),
+            json!({"value": 15, "type": "dxa"}),
+            json!({"value": 1, "type": "pct"}),
+            json!({"value": 9000, "type": "pct"}),
+            json!({"value": 15000, "type": "dxa"}),
+        ] {
+            let mut table = table.clone();
+            table["rows"][1][if leading_skip {
+                "widthBefore"
+            } else {
+                "widthAfter"
+            }] = width.clone();
+            let result = render(table);
+            assert_eq!(result.0["columnWidths"], json!([100.0, 100.0]));
+            assert_eq!(result.0["totalWidth"], 200.0);
+            assert_eq!(result, baseline, "leading skip: {leading_skip}, width: {width}");
+        }
+    }
 }
 
 #[test]
