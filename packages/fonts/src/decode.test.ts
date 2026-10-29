@@ -312,6 +312,14 @@ describe('internal font decoder', () => {
       expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
     });
 
+    test.skipIf(!hasWasm)('wasm path rejects a block that expands past its frame without allocating it', async () => {
+      const bomb = fixture('Synthetic-block-bomb.zst');
+      await expect(decodeFontBytes(bomb, undefined, { wasmUrl, maxOutput: 0x7fffffff })).rejects.toThrow(
+        'Font face is corrupt or truncated, or uses a wrong dictionary',
+      );
+      expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
+    });
+
     test.skipIf(!hasWasm || !canCompress)('wasm path grows memory and decodes a raw dictionary', async () => {
       const dict = synthetic();
       const bytes = new Uint8Array(3 * 1024 * 1024);

@@ -64,8 +64,12 @@ For plain zstd, the internal TypeScript decoder uses the built-in Node zstd
 decompressor when available, otherwise the standalone wasm decoder. An explicit
 `wasmUrl` selects wasm; without it the decoder loads `dist/decoder/fontpack.wasm`
 from the package root. `woff2t+zstd` always uses the full wasm pipeline,
-including in Node. Both codecs share one module, which links the
-decompression-only zstd C source and wuff 0.2.9 with default features disabled.
+including in Node. Both codecs share one module, which links `ruzstd` 0.9.1
+(a zstd decoder in Rust, so building it needs no C compiler with a wasm target)
+and wuff 0.2.9 with default features disabled. Native builds of the crate decode
+with the decompression-only zstd C source instead; both report the same errors.
+A raw-content dictionary reaches `ruzstd` wrapped as a formatted dictionary whose
+entropy tables a prefix-compressed frame never uses.
 Wuff reconstructs the font with `decompress_woff2_with_custom_brotli` and an
 identity callback; brotli and flate2 are absent from this wasm feature set. The
 builder alone enables brotli for reference verification.
