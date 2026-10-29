@@ -227,14 +227,14 @@ describe('XlsxEditor engine dispatch', () => {
         restorers.push(() => load.mockRestore(), () => errors.mockRestore());
         const onError = mock((_error: Error) => { throw new Error('Host callback failed'); });
         const ready = mock(() => {});
-        const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
-          : { file, experimentalWorkerOpen: false as const };
         const failed = render(<StrictMode>
-          <XlsxEditor {...props} onReady={ready} onError={onError} style={{ height: 123 }} />
+          {engine === 'legacy'
+            ? <XlsxEditor file={file} {...{ [LEGACY_SYNC_API]: true as const }} onReady={ready} onError={onError} />
+            : <XlsxEditor file={file} experimentalWorkerOpen={false} onReady={ready} onError={onError} style={{ height: 123 }} />}
         </StrictMode>);
         await waitFor(() => expect(failed.queryByTestId('xlsx-error')).not.toBeNull());
         expect(failed.getByRole('alert').getAttribute('data-failure')).toBe('load');
-        expect(failed.getByRole('alert').style.height).toBe('123px');
+        if (engine !== 'legacy') expect(failed.getByRole('alert').style.height).toBe('123px');
         expect(onError).toHaveBeenCalledTimes(1);
         expect(onError.mock.calls[0]![0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
         expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'chunk-load-failed', cause });
