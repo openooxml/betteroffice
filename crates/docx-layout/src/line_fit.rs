@@ -55,7 +55,9 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             return None;
         };
         if !horizontal_rules.is_empty()
-            || (list_marker.as_ref().is_some_and(|marker| !marker.is_empty())
+            || (list_marker
+                .as_ref()
+                .is_some_and(|marker| !marker.is_empty())
                 && *list_marker_hidden != Some(true))
         {
             return None;
@@ -175,9 +177,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
                 }
                 let leader_bottom = match stop.leader.as_deref() {
                     None | Some("none") => continue,
-                    Some("dot" | "middleDot" | "hyphen") => {
-                        -(font_px * 0.25).round() + thickness
-                    }
+                    Some("dot" | "middleDot" | "hyphen") => -(font_px * 0.25).round() + thickness,
                     Some("underscore") => underline_bottom,
                     Some("heavy") => (font_px * 0.1875).round() + thickness.max(2.0),
                     _ => return None,

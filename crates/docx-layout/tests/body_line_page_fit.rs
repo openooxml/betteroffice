@@ -350,8 +350,18 @@ fn underline_and_tab_leader_bounds_extend_the_fit_above_footnotes() {
 #[test]
 fn non_single_underlines_require_full_pitch_above_footnotes() {
     for style in [
-        "double", "wave", "wavy", "thick", "dotted", "dash", "dashed", "dotDash",
-        "dotDotDash", "words", "none", "nil",
+        "double",
+        "wave",
+        "wavy",
+        "thick",
+        "dotted",
+        "dash",
+        "dashed",
+        "dotDash",
+        "dotDotDash",
+        "words",
+        "none",
+        "nil",
     ] {
         let mut target = paragraph(
             "text",
