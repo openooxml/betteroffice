@@ -505,7 +505,9 @@ describe('native package public names', () => {
         const triple = platform.name.replace(`@betteroffice/${format}-native-`, '');
         expect(identity).toBe(triple);
         expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
-        expect(platform.files).toEqual([platform.main]);
+        expect(platform.files).toEqual([platform.main, 'BSD-3-Clause-Zstandard.txt']);
+        expect(read(`${path}/npm/${identity}/BSD-3-Clause-Zstandard.txt`))
+          .toBe(read('crates/betteroffice-fonts/vendor/zstd/LICENSE'));
         expect(platform.description).toBe(manifest.description);
         expect(platform.keywords).toEqual(manifest.keywords);
       }

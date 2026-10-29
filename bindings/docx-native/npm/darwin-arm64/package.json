@@ -6,7 +6,8 @@
   ],
   "main": "betteroffice-docx-native.darwin-arm64.node",
   "files": [
-    "betteroffice-docx-native.darwin-arm64.node"
+    "betteroffice-docx-native.darwin-arm64.node",
+    "BSD-3-Clause-Zstandard.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
   "keywords": [
