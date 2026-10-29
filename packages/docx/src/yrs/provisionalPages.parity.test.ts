@@ -40,6 +40,8 @@ beforeAll(async () => {
       'export const createResidentEngineSession = async () => testHarness.session;',
     './wasm/index':
       'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
+    '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
+    '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
@@ -145,6 +147,8 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   const timers = new Map<number, { at: number; callback: () => void }>();
   const harness = { session, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
     loadedRustDisplayListQueryEngine,
+    preloadOpcWasm: () => import('../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
+    preloadParseWasm: () => import('../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
     ...(virtualTime ? {
       clock: { now: () => now },
       setTimer(callback: () => void, ms: number) {

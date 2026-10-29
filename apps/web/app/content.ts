@@ -77,7 +77,7 @@ export const EDITORS = [
     format: "vsdx",
     demo: false,
     desc: "Update a process map's shape data and drop it into a Word or PowerPoint report.",
-    status: "source preview",
+    status: "from source",
   },
 ];
 

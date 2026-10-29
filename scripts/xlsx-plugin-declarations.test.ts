@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..');
+const declarationMode = process.env.BETTEROFFICE_PACKAGE_DECLARATIONS;
 const PACKAGES = ['xlsx-i18n', 'xlsx', 'xlsx-react'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
 
@@ -99,7 +101,7 @@ function run(command: string[], cwd: string) {
   if (result.status !== 0) throw new Error(result.stdout + result.stderr);
 }
 
-test('the XLSX plugin API and the demo plugin typecheck against built declarations', () => {
+test.skipIf(declarationMode === 'skip')('the XLSX plugin API and the demo plugin typecheck against built declarations', () => {
   const directory = mkdtempSync(join(tmpdir(), 'betteroffice-xlsx-plugins-'));
   try {
     for (const name of PACKAGES) {
@@ -108,7 +110,8 @@ test('the XLSX plugin API and the demo plugin typecheck against built declaratio
       const destination = join(directory, 'node_modules', manifest.name);
       mkdirSync(destination, { recursive: true });
       writeFileSync(join(destination, 'package.json'), JSON.stringify(manifest));
-      run(['x', 'tsup', '--out-dir', join(destination, 'dist')], source);
+      if (declarationMode === 'prebuilt') cpSync(join(source, 'dist'), join(destination, 'dist'), { recursive: true });
+      else run(['x', 'tsup', '--out-dir', join(destination, 'dist')], source);
     }
     for (const name of LINKED) {
       const target = join(directory, 'node_modules', name);

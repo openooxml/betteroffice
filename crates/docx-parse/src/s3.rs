@@ -215,6 +215,7 @@ mod tests {
 
         let numbering = NumberingMap {
             definitions: NumberingDefinitions {
+                first_picture_bullet: None,
                 abstract_nums: vec![crate::numbering::AbstractNumbering {
                     abstract_num_id: 1.0,
                     multi_level_type: None,

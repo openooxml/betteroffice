@@ -16,6 +16,7 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
+    pub source: Option<&'a crate::identity::SourceIndex>,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -53,6 +54,17 @@ impl PatchContext<'_> {
                 .collect()
         };
         (normalize(properties), normalize(run))
+    }
+
+    fn plain_style_supported(&self, properties: &Attrs) -> bool {
+        match (self.metadata, self.source) {
+            (Some(metadata), Some(source)) => metadata.plain_patch_style_supported(
+                self.story,
+                properties.get("pStyle").and_then(Value::as_str),
+                source,
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -237,6 +249,10 @@ fn para_key_or_style(path: &[String]) -> bool {
     para_key(path) || (path.len() == 1 && path[0] == "pStyle")
 }
 
+fn restyle_key(path: &[String]) -> bool {
+    para_key_or_style(path) || path.first().is_some_and(|key| key == "borders")
+}
+
 fn para_key(path: &[String]) -> bool {
     let Some(key) = path.first().map(String::as_str) else {
         return false;
@@ -297,10 +313,8 @@ fn delta_at(
     let old = before.and_then(Value::as_object);
     let new = after.and_then(Value::as_object);
     if (old.is_some() || before.is_none())
-        && (new.is_some() || after.is_none())
-        && (old.is_some() || new.is_some())
         && !old.is_some_and(|map| map.is_empty())
-        && !new.is_some_and(|map| map.is_empty())
+        && new.is_some_and(|map| !map.is_empty())
     {
         let keys: BTreeSet<_> = old
             .into_iter()
@@ -1185,37 +1199,53 @@ pub(crate) fn diff_paragraph_v1(
     let mut after_direct = original_object(&after).cloned().unwrap_or_default();
     before_direct.remove("styleId");
     after_direct.remove("styleId");
-    let explained = deltas(&before.properties, &after.properties)
-        .iter()
-        .all(|delta| {
-            if delta.path.first().is_some_and(|key| key == "pStyle") {
-                return true;
-            }
-            let key = &delta.path[0];
-            let direct = [original_object(&before), original_object(&after)]
-                .iter()
-                .any(|object| {
-                    object
-                        .and_then(|object| object.get(key))
-                        .is_some_and(|value| !value.is_null())
-                });
-            let list_indent = matches!(
-                key.as_str(),
-                "indentLeft"
-                    | "indentFirstLine"
-                    | "hangingIndent"
-                    | "indentLeftChars"
-                    | "indentFirstLineChars"
-                    | "hangingIndentChars"
-            );
-            !direct
-                && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
-                && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
-                    || list_indent)
-        });
+    let para_deltas = deltas(&before.properties, &after.properties);
+    let explained = para_deltas.iter().all(|delta| {
+        if delta.path.first().is_some_and(|key| key == "pStyle") {
+            return true;
+        }
+        let key = &delta.path[0];
+        let direct = [original_object(&before), original_object(&after)]
+            .iter()
+            .any(|object| {
+                object
+                    .and_then(|object| object.get(key))
+                    .is_some_and(|value| !value.is_null())
+            });
+        let list_indent = matches!(
+            key.as_str(),
+            "indentLeft"
+                | "indentFirstLine"
+                | "hangingIndent"
+                | "indentLeftChars"
+                | "indentFirstLineChars"
+                | "hangingIndentChars"
+        );
+        !direct
+            && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
+            && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
+                || list_indent)
+    });
+    let plain_restyle = !before.properties.contains_key("numPr")
+        && before_direct.is_empty()
+        && (before.units.is_empty()
+            || before
+                .carriers
+                .get("_originalRunBoundaries")
+                .and_then(Value::as_array)
+                .is_some_and(|runs| {
+                    runs.iter().all(|run| {
+                        run.get("formatting")
+                            .and_then(Value::as_object)
+                            .is_none_or(|formatting| formatting.is_empty())
+                    })
+                }))
+        && para_deltas.iter().all(|delta| restyle_key(&delta.path))
+        && context.plain_style_supported(&before.properties)
+        && context.plain_style_supported(&after.properties);
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
         && before.properties.get("numPr") == after.properties.get("numPr")
-        && original_numpr(&before).is_some()
+        && (original_numpr(&before).is_some() || plain_restyle)
         && original_numpr(&before) == original_numpr(&after)
         && before_direct == after_direct
         && explained;
@@ -1263,7 +1293,6 @@ pub(crate) fn diff_paragraph_v1(
             "tc: run property revision",
         ));
     }
-    let para_deltas = deltas(&before.properties, &after.properties);
     validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
     validate_carriers(
@@ -1276,7 +1305,9 @@ pub(crate) fn diff_paragraph_v1(
     )?;
     validate_deltas(
         &para_deltas,
-        if patchable_restyle {
+        if patchable_restyle && plain_restyle {
+            restyle_key
+        } else if patchable_restyle {
             para_key_or_style
         } else {
             para_key
@@ -1474,6 +1505,18 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
+    let mut seed_properties = verification_properties(&before, context.seeded_markers);
+    let mut result_properties = verification_properties(&after, context.live_markers);
+    let para_deltas = if patchable_restyle && plain_restyle {
+        for properties in [&mut seed_properties, &mut result_properties] {
+            properties.retain(|key, _| key == "pStyle" || !restyle_key(std::slice::from_ref(key)));
+        }
+        let changes = deltas(&seed_properties, &result_properties);
+        validate_deltas(&changes, para_key_or_style, &context)?;
+        changes
+    } else {
+        para_deltas
+    };
     let inherit = InheritanceV1 {
         paragraph: seeded_properties,
         runs: before
@@ -1491,7 +1534,7 @@ pub(crate) fn diff_paragraph_v1(
     let seed = SeedV1 {
         inherit,
         unit_sha256: unit_sha256(&before.units),
-        properties: verification_properties(&before, context.seeded_markers),
+        properties: seed_properties,
         units: before.units,
     };
     Ok(ParagraphPatchV1 {
@@ -1503,10 +1546,7 @@ pub(crate) fn diff_paragraph_v1(
         para_deltas,
         para_inherit,
         mark_inherit,
-        result_sha256: result_sha256(
-            &units(&replay),
-            &verification_properties(&after, context.live_markers),
-        ),
+        result_sha256: result_sha256(&units(&replay), &result_properties),
     })
 }
 
@@ -1647,6 +1687,7 @@ mod tests {
             session_key: "p1",
             story: "body",
             metadata: None,
+            source: None,
             seeded_markers: &[],
             live_markers: &[],
         }

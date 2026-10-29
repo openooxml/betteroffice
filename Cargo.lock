@@ -138,6 +138,7 @@ name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
+ "betteroffice-docx-layout",
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-opc",
@@ -186,6 +187,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "libm",
  "png",
  "resvg",
 ]
@@ -262,6 +264,7 @@ name = "betteroffice-pptx-engine"
 version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
@@ -277,6 +280,7 @@ dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "proptest",
  "quick-xml",
  "serde",
@@ -309,6 +313,7 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
@@ -505,6 +510,18 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
  "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-opc",
+ "betteroffice-xlsx",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-parse",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -967,6 +984,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "wuff",
  "zstd",
 ]
 
@@ -2440,6 +2458,7 @@ version = "0.0.0"
 dependencies = [
  "betteroffice-opc",
  "betteroffice-xlsx",
+ "betteroffice-xlsx-engine",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "js-sys",

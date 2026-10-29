@@ -6,7 +6,7 @@
 //! [`shape_with_direction`]. Bidi reordering happens above this layer using
 //! [`crate::bidi`] runs, so text handed in here is a single directional run.
 
-use crate::family_metrics::{FamilyMetrics, family_advance};
+use crate::family_metrics::{FamilyMetrics, family_cluster_advance};
 use crate::font_store::{FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey};
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -44,6 +44,11 @@ pub enum ShapeDirection {
     Auto,
     Ltr,
     Rtl,
+}
+
+/// Whether `character` is a Unicode nonspacing mark.
+pub fn is_nonspacing_mark(character: char) -> bool {
+    unicode_bidi::bidi_class(character) == unicode_bidi::BidiClass::NSM
 }
 
 /// Shape `text` with the given registered font, returning glyphs in visual
@@ -188,14 +193,10 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
         if !clusters[&(bounds[0] as u32)].0 {
             continue;
         }
-        let advance = text.get(bounds[0]..bounds[1]).and_then(|cluster| {
-            cluster
-                .chars()
-                .filter(|&ch| !is_default_ignorable(ch))
-                .try_fold(0.0, |total, ch| {
-                    family_advance(widths, ch).map(|advance| total + (advance * 1000.0).round())
-                })
-        });
+        let advance = text
+            .get(bounds[0]..bounds[1])
+            .and_then(|cluster| family_cluster_advance(widths, cluster))
+            .map(|advance| (advance * 1000.0).round());
         clusters.insert(
             bounds[0] as u32,
             (true, advance.map(|advance| advance * (size / 1000.0))),
@@ -209,7 +210,7 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
     }
 }
 
-fn is_default_ignorable(ch: char) -> bool {
+pub(crate) fn is_default_ignorable(ch: char) -> bool {
     matches!(
         ch as u32,
         0x00AD
@@ -235,6 +236,7 @@ fn is_default_ignorable(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::family_metrics::family_advance;
 
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
 

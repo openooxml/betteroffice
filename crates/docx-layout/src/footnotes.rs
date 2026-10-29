@@ -100,6 +100,11 @@ pub struct NoteSeparatorHeights {
     pub footnote: BTreeMap<usize, f64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub endnote: BTreeMap<usize, f64>,
+    /// Width overrides keyed by caller section and `f64::to_bits`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub footnote_widths: BTreeMap<usize, BTreeMap<u64, f64>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endnote_widths: BTreeMap<usize, BTreeMap<u64, f64>>,
 }
 
 impl NoteSeparatorHeights {
@@ -112,6 +117,40 @@ impl NoteSeparatorHeights {
 
     pub fn height(&self, kind: NoteKind, section_index: usize) -> f64 {
         self.get(kind, section_index)
+            .unwrap_or(FOOTNOTE_SEPARATOR_HEIGHT)
+    }
+
+    pub fn insert_for_width(
+        &mut self,
+        kind: NoteKind,
+        section_index: usize,
+        width: f64,
+        height: f64,
+    ) {
+        match kind {
+            NoteKind::Footnote => &mut self.footnote_widths,
+            NoteKind::Endnote => &mut self.endnote_widths,
+        }
+        .entry(section_index)
+        .or_default()
+        .insert(width.to_bits(), height);
+    }
+
+    pub fn get_for_page(&self, kind: NoteKind, page: &Page) -> Option<f64> {
+        let margins = page.body_margins.as_ref().unwrap_or(&page.margins);
+        let width = (page.size.w - margins.left - margins.right).max(1.0);
+        match kind {
+            NoteKind::Footnote => &self.footnote_widths,
+            NoteKind::Endnote => &self.endnote_widths,
+        }
+        .get(&page.region_section_index)
+        .and_then(|widths| widths.get(&width.to_bits()))
+        .copied()
+        .or_else(|| self.get(kind, page.region_section_index))
+    }
+
+    pub fn height_for_page(&self, kind: NoteKind, page: &Page) -> f64 {
+        self.get_for_page(kind, page)
             .unwrap_or(FOOTNOTE_SEPARATOR_HEIGHT)
     }
 }
@@ -561,13 +600,11 @@ pub fn calculate_note_reserved_heights(
     regions: &DocumentRegions,
 ) -> OrderedMap<u32, f64> {
     let contents = content_map(contents);
-    let sections_by_page: BTreeMap<_, _> = pages
-        .iter()
-        .map(|page| (page.number, page.region_section_index))
-        .collect();
+    let pages_by_number: BTreeMap<_, _> = pages.iter().map(|page| (page.number, page)).collect();
     let mut reserved = OrderedMap::new();
     for (page_number, note_ids) in page_note_map.iter() {
-        let section_index = sections_by_page.get(page_number).copied().unwrap_or(0);
+        let page = pages_by_number.get(page_number).copied();
+        let section_index = page.map_or(0, |page| page.region_section_index);
         let mut total_height = 0.0;
         for kind in [NoteKind::Footnote, NoteKind::Endnote] {
             let heights: Vec<Height> = note_ids
@@ -588,7 +625,11 @@ pub fn calculate_note_reserved_heights(
                 .iter()
                 .map(|column| column.iter().map(HasHeight::height).sum::<f64>())
                 .fold(0.0_f64, f64::max);
-            total_height += tallest + separator_heights.height(kind, section_index);
+            let separator_height = page.map_or_else(
+                || separator_heights.height(kind, section_index),
+                |page| separator_heights.height_for_page(kind, page),
+            );
+            total_height += tallest + separator_height;
         }
         if total_height > 0.0 {
             reserved.set(*page_number, total_height);
@@ -955,7 +996,7 @@ pub fn attach_note_areas(
                     note_group_height(
                         group,
                         columns,
-                        separator_heights.height(*kind, page.region_section_index),
+                        separator_heights.height_for_page(*kind, page),
                     )
                 })
                 .sum()
@@ -981,7 +1022,7 @@ pub fn attach_note_areas(
             let height = note_group_height(
                 group,
                 columns,
-                separator_heights.height(*kind, page.region_section_index),
+                separator_heights.height_for_page(*kind, page),
             );
             let y = if placement == "beneathText" {
                 let mut y = beneath_text_cursor.min(note_bottom - height);
@@ -1008,12 +1049,12 @@ pub fn attach_note_areas(
                 y: Some(y),
                 height: Some(height),
                 columns: Some(columns),
-                separator: separator_heights
-                    .get(*kind, page.region_section_index)
-                    .map(|height| crate::types::NoteLayoutItemContract {
+                separator: separator_heights.get_for_page(*kind, page).map(|height| {
+                    crate::types::NoteLayoutItemContract {
                         height: Some(height),
                         ..Default::default()
-                    }),
+                    }
+                }),
                 notes: Some(group.iter().map(|content| note_item(content)).collect()),
             });
         }
@@ -1265,6 +1306,7 @@ mod tests {
             &NoteSeparatorHeights {
                 footnote: [(0, 12.0), (1, 16.0)].into_iter().collect(),
                 endnote: [(0, 12.0), (1, 64.0)].into_iter().collect(),
+                ..Default::default()
             },
             &regions,
         );
@@ -1309,6 +1351,54 @@ mod tests {
         let presentations = build_note_presentations(&refs, &pages, &regions);
         assert_eq!(presentations.get(&1).unwrap().display_label, "III");
         assert_eq!(presentations.get(&2).unwrap().display_label, "III");
+    }
+
+    #[test]
+    fn separator_widths_follow_page_geometry_while_columns_follow_the_caller() {
+        let mut narrow = page(1, 0, Vec::new());
+        narrow.size.w = 288.0;
+        let wide = page(2, 0, Vec::new());
+        let mut pages = layout(vec![narrow, wide]);
+        let contents = vec![
+            content(1, NoteKind::Footnote, 20.0),
+            content(2, NoteKind::Footnote, 20.0),
+        ];
+        let page_map = [(1, vec![1]), (2, vec![2])].into_iter().collect();
+        let regions = DocumentRegions {
+            note_settings: NoteSettings {
+                footnote_columns: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut heights = NoteSeparatorHeights {
+            footnote: [(0, 48.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&heights).unwrap(),
+            json!({"footnote": {"0": 48.0}})
+        );
+        assert_eq!(
+            heights.height_for_page(NoteKind::Footnote, &pages.pages[1]),
+            48.0
+        );
+        heights.insert_for_width(NoteKind::Footnote, 0, 96.0, 48.0);
+        heights.insert_for_width(NoteKind::Footnote, 0, 624.0, 16.0);
+        let reserved =
+            calculate_note_reserved_heights(&page_map, &contents, &pages.pages, &heights, &regions);
+        assert_eq!(reserved.get(&1), Some(&68.0));
+        assert_eq!(reserved.get(&2), Some(&36.0));
+        attach_note_areas(&mut pages, &page_map, &contents, &heights, &regions);
+        for (page, separator_height) in pages.pages.iter().zip([48.0, 16.0]) {
+            let area = &page.note_areas.as_ref().unwrap()[0];
+            assert_eq!(area.columns, Some(2));
+            assert_eq!(area.height, Some(20.0 + separator_height));
+            assert_eq!(
+                area.separator.as_ref().unwrap().height,
+                Some(separator_height)
+            );
+        }
     }
 
     #[test]

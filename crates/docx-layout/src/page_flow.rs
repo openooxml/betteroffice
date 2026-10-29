@@ -326,7 +326,9 @@ pub struct Paginator {
     footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     start_page_number: u32,
     section_index: usize,
+    region_section_indices: Vec<usize>,
     section_page_margins: Vec<SectionPageMargins>,
+    physical_section_page_margins: Vec<SectionPageMargins>,
     section_page_float_bands: SharedPageFloatBands,
     column_capacities: Vec<Option<f64>>,
     /// Whether the section in force has opened a page yet.
@@ -389,7 +391,9 @@ impl Paginator {
             footnote_reserved_heights: footnote_reserved_heights.map(Arc::new),
             start_page_number: 1,
             section_index: 0,
+            region_section_indices: Vec::new(),
             section_page_margins: Vec::new(),
+            physical_section_page_margins: Vec::new(),
             section_page_float_bands: SharedPageFloatBands::default(),
             column_capacities: Vec::new(),
             section_started: false,
@@ -405,6 +409,21 @@ impl Paginator {
     /// per section; see [`SectionPageMargins`].
     pub fn set_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
         self.section_page_margins = margins;
+    }
+
+    pub(crate) fn set_physical_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
+        self.physical_section_page_margins = margins;
+    }
+
+    pub(crate) fn set_region_section_indices(&mut self, indices: Vec<usize>) {
+        self.region_section_indices = indices;
+    }
+
+    fn region_section_index(&self) -> usize {
+        self.region_section_indices
+            .get(self.section_index)
+            .copied()
+            .unwrap_or(self.section_index)
     }
 
     pub fn set_section_page_float_bands(&mut self, mut bands: Vec<SectionPageFloatBands>) {
@@ -519,19 +538,23 @@ impl Paginator {
     /// Sets ownership for future pages and the untouched current page, which
     /// then opens the section.
     pub fn set_section_index(&mut self, section_index: usize) {
-        let entering = section_index != self.section_index;
+        let physical_changed = section_index != self.section_index;
+        let previous_region = self.region_section_index();
         self.section_index = section_index;
+        let entering = previous_region != self.region_section_index();
         if entering {
             self.section_started = false;
         }
         if let Some(idx) = self.pristine_page() {
             let page_index = self.states[idx].page_index;
-            self.pages[page_index].region_section_index = section_index;
+            self.pages[page_index].region_section_index = self.region_section_index();
             if entering {
                 self.opens_section[idx] = true;
                 self.section_started = true;
                 self.displayed_parity_offset =
                     self.page_parity_offset(true, self.pages[page_index].number);
+            }
+            if physical_changed {
                 if self.states[idx].column_index == 0 && self.promote_pending_geometry() {
                     self.restamp_pristine_page();
                 } else {
@@ -617,7 +640,7 @@ impl Paginator {
     /// restart when it opens the section, else the previous page's plus one.
     fn page_parity_offset(&self, opens_section: bool, page_number: u32) -> bool {
         self.section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|margins| margins.restart)
             .filter(|_| opens_section)
             .map_or(self.continued_parity_offset, |start| {
@@ -630,12 +653,16 @@ impl Paginator {
     fn page_margins(&self, opens_section: bool, page_number: u32) -> PageMargins {
         let variant = self
             .section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|variants| {
+                let physical = self
+                    .physical_section_page_margins
+                    .get(self.section_index)
+                    .unwrap_or(variants);
                 if opens_section && variants.first.is_some() {
-                    variants.first.as_ref()
+                    physical.first.as_ref()
                 } else if (page_number % 2 == 0) != self.displayed_parity_offset {
-                    variants.even.as_ref()
+                    physical.even.as_ref()
                 } else {
                     None
                 }
@@ -822,7 +849,7 @@ impl Paginator {
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
         self.opening_margins[page_index] = self.margins.clone();
         self.opening_columns[page_index] = self.columns.clone();
-        self.pages[page_index].region_section_index = self.section_index;
+        self.pages[page_index].region_section_index = self.region_section_index();
         let state = &mut self.states[idx];
         state.pen_y = content_top;
         state.content_top = content_top;
@@ -907,7 +934,7 @@ impl Paginator {
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
-            region_section_index: self.section_index,
+            region_section_index: self.region_section_index(),
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: if footnote_height > 0.0 {
@@ -1004,7 +1031,7 @@ impl Paginator {
 
     /// Clears float bands below the cursor, in one pass over the bands (sorted
     /// by top), until `height` fits: the new cursor and whether it fits there.
-    fn clear_float_bands(&self, idx: usize, height: f64) -> (f64, bool) {
+    fn clear_float_bands(&self, idx: usize, height: f64, trailing: f64) -> (f64, bool) {
         let state = &self.states[idx];
         let mut pen_y = state.pen_y;
         let bands = self.float_bands(idx);
@@ -1018,7 +1045,7 @@ impl Paginator {
             }
             pen_y = band.bottom;
         }
-        (pen_y, state.content_limit - pen_y >= height)
+        (pen_y, state.content_limit - pen_y >= height - trailing)
     }
 
     fn column_capacity(&mut self, idx: usize) -> f64 {
@@ -1035,6 +1062,11 @@ impl Paginator {
         capacity
     }
 
+    pub(crate) fn allows_trailing_leading(&mut self) -> bool {
+        let idx = self.get_current();
+        self.available_height_of(idx) == self.states[idx].content_limit - self.states[idx].pen_y
+    }
+
     /// Returns the current state's available height.
     pub fn get_available_height(&mut self) -> f64 {
         let idx = self.get_current();
@@ -1044,6 +1076,21 @@ impl Paginator {
     pub fn get_column_capacity(&mut self) -> f64 {
         let idx = self.get_current();
         self.column_capacity(idx)
+    }
+
+    pub(crate) fn get_column_capacity_with_trailing(&mut self, trailing: f64) -> f64 {
+        let idx = self.get_current();
+        if trailing == 0.0 {
+            return self.column_capacity(idx);
+        }
+        let state = &self.states[idx];
+        let bottom_top = self
+            .float_bands(idx)
+            .iter()
+            .filter(|band| band.top < state.content_limit)
+            .fold(state.content_top, |top, band| top.max(band.bottom));
+        let bottom_capacity = (state.content_limit - bottom_top).max(0.0) + trailing;
+        self.column_capacity(idx).max(bottom_capacity)
     }
 
     /// Whether a fresh page after the current one can give the flow less room
@@ -1068,8 +1115,14 @@ impl Paginator {
         !self.float_bands(idx).is_empty()
     }
 
-    fn fits(&self, height: f64, idx: usize) -> bool {
-        self.available_height_of(idx) >= height
+    fn fits_with_trailing(&self, height: f64, trailing: f64, idx: usize) -> bool {
+        let available = self.available_height_of(idx);
+        let allowance = if available == self.states[idx].content_limit - self.states[idx].pen_y {
+            trailing
+        } else {
+            0.0
+        };
+        available >= height - allowance
     }
 
     /// Moves to the next column of the current region, or opens a new page once
@@ -1091,6 +1144,10 @@ impl Paginator {
 
     /// Advances until a height fits or an oversized fragment can overflow.
     pub fn ensure_fits(&mut self, height: f64) -> usize {
+        self.ensure_fits_with_trailing(height, 0.0)
+    }
+
+    pub(crate) fn ensure_fits_with_trailing(&mut self, height: f64, trailing: f64) -> usize {
         let mut idx = self.get_current();
         let safe_height = if height.is_finite() && height > 0.0 {
             height
@@ -1098,17 +1155,18 @@ impl Paginator {
             0.0
         };
 
-        while !self.fits(safe_height, idx) {
+        let trailing = trailing.max(0.0).min(safe_height);
+        while !self.fits_with_trailing(safe_height, trailing, idx) {
             // oversized-fragment guard, re-checked per iteration because a
             // queued continuous-section geometry can change page capacity
-            let column_capacity = self.column_capacity(idx);
+            let column_capacity = self.get_column_capacity_with_trailing(trailing);
             if safe_height > column_capacity {
                 if self.states[idx].pen_y != self.states[idx].content_top {
                     idx = self.advance_column(idx).0;
                 }
                 return idx;
             }
-            let (pen_y, fits) = self.clear_float_bands(idx, safe_height);
+            let (pen_y, fits) = self.clear_float_bands(idx, safe_height, trailing);
             self.states[idx].pen_y = pen_y;
             if fits {
                 return idx;
@@ -1123,10 +1181,21 @@ impl Paginator {
     /// returns its resolved `(x, y)`.
     pub fn add_fragment(
         &mut self,
+        fragment: Fragment,
+        height: f64,
+        space_before: f64,
+        space_after: f64,
+    ) -> (f64, f64) {
+        self.add_fragment_with_trailing(fragment, height, space_before, space_after, 0.0)
+    }
+
+    pub(crate) fn add_fragment_with_trailing(
+        &mut self,
         mut fragment: Fragment,
         height: f64,
         space_before: f64,
         space_after: f64,
+        trailing: f64,
     ) -> (f64, f64) {
         // Read deferred spacing before fitting can advance the state.
         let cur = self.get_current();
@@ -1134,10 +1203,10 @@ impl Paginator {
             .leading_spacing(space_before)
             .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
-        let opening_geometry = (!self.fits(total_height, cur))
+        let opening_geometry = (!self.fits_with_trailing(total_height, trailing, cur))
             .then(|| Box::new(OpeningFragmentGeometry::capture(self, cur)));
 
-        let idx = self.ensure_fits(total_height);
+        let idx = self.ensure_fits_with_trailing(total_height, trailing);
 
         let actual_space_before = self
             .leading_spacing(space_before)
@@ -1563,6 +1632,114 @@ mod tests {
     }
 
     #[test]
+    fn physical_section_change_refreshes_footer_bands_without_restarting_caller() {
+        let initial = margins(60.0, 80.0);
+        let next = PageMargins {
+            top: 70.0,
+            left: 120.0,
+            ..initial.clone()
+        };
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            initial.clone(),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: None,
+            restart: Some(2),
+        }]);
+        paginator.set_section_page_float_bands(vec![
+            SectionPageFloatBands {
+                default: vec![band(400.0, 520.0)],
+                anchor_margins: Some(initial),
+                ..SectionPageFloatBands::default()
+            },
+            SectionPageFloatBands {
+                default: vec![band(800.0, 920.0)],
+                anchor_margins: Some(next.clone()),
+                ..SectionPageFloatBands::default()
+            },
+        ]);
+        let first = paginator.get_current();
+        paginator.set_pen_y(first, 200.0);
+        paginator
+            .update_page_layout(
+                Some(Size {
+                    w: 600.0,
+                    h: 1000.0,
+                }),
+                Some(next),
+                true,
+            )
+            .unwrap();
+        let following = paginator.force_authored_page_break(false);
+        assert_eq!(
+            paginator.pages[following].float_bands,
+            vec![band(400.0, 520.0)]
+        );
+        let parity = paginator.displayed_parity_offset;
+
+        paginator.set_section_index(1);
+
+        let page = &paginator.pages[following];
+        assert_eq!(page.float_bands, vec![band(800.0, 920.0)]);
+        assert_eq!(page.margins.left, 120.0);
+        assert_eq!(page.margins.top, 70.0);
+        assert_eq!(page.body_margins.as_ref().unwrap().bottom, 200.0);
+        assert_eq!(paginator.states[following].content_limit, 800.0);
+        assert_eq!(page.region_section_index, 0);
+        assert!(!paginator.opens_section[following]);
+        assert_eq!(paginator.displayed_parity_offset, parity);
+    }
+
+    #[test]
+    fn shared_caller_variants_use_each_physical_sections_margins() {
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            margins(60.0, 80.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: Some(margins(180.0, 80.0)),
+            restart: Some(1),
+        }]);
+        paginator.set_physical_section_page_margins(vec![
+            SectionPageMargins {
+                first: Some(margins(100.0, 80.0)),
+                even: Some(margins(120.0, 80.0)),
+                restart: None,
+            },
+            SectionPageMargins {
+                first: Some(margins(240.0, 80.0)),
+                even: Some(margins(220.0, 80.0)),
+                restart: None,
+            },
+        ]);
+        let first = paginator.get_current();
+        assert_eq!(paginator.state(first).content_top, 100.0);
+        paginator.set_pen_y(first, 200.0);
+        let even = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.state(even).content_top, 120.0);
+        paginator.set_section_index(1);
+        assert_eq!(paginator.state(even).content_top, 220.0);
+        assert_eq!(paginator.pages[even].region_section_index, 0);
+        assert!(!paginator.opens_section[even]);
+    }
+
+    #[test]
     fn page_bands_merge_after_parity_filtering_and_restamp_without_changing_geometry() {
         let band = |top, bottom, odd_page| PageFloatBand {
             top,
@@ -1619,7 +1796,7 @@ mod tests {
         crate::column_balancing::ColumnBalancePaginator::set_content_limit(&mut paginator, 200.0);
         assert_eq!(paginator.column_capacity(idx), 104.0);
         assert_eq!(paginator.available_height_of(idx), 104.0);
-        assert_eq!(paginator.clear_float_bands(idx, 104.0), (96.0, true));
+        assert_eq!(paginator.clear_float_bands(idx, 104.0, 0.0), (96.0, true));
         let mut new_columns = columns();
         new_columns.count = 2.0;
         paginator.update_columns(new_columns);

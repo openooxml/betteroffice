@@ -4,9 +4,15 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "test": "bun test src",
+    "test": "bun test src test",
     "typecheck": "tsc --noEmit",
     "start": "bun src/server.ts"
+  },
+  "dependencies": {
+    "@betteroffice/docx": "workspace:*",
+    "@betteroffice/pptx": "workspace:*",
+    "@betteroffice/xlsx": "workspace:*",
+    "yjs": "^13.6.32"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

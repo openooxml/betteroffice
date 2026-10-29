@@ -1662,8 +1662,12 @@ pub(crate) fn round(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(d) => d as i32,
         Err(e) => return err(e),
     };
+    finite(round_number(x, digits))
+}
+
+pub(crate) fn round_number(value: f64, digits: i32) -> f64 {
     let factor = fmath::powi(10.0, digits);
-    finite((x * factor).round() / factor)
+    (value * factor).round() / factor
 }
 
 /// MROUND(number, multiple): nearest multiple, half away from zero. opposite

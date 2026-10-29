@@ -98,6 +98,7 @@ version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "libm",
 ]
 
 [[package]]
@@ -148,6 +149,7 @@ dependencies = [
  "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "quick-xml",
  "serde",
  "thiserror",
@@ -177,6 +179,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
