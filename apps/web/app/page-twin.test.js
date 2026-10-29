@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseFidelity } from "../lib/fidelity.ts";
 import { parseAgentEvals } from "../lib/agent-evals.ts";
+import { publishedPosts } from "../lib/blog.ts";
 import { homepageMarkdown } from "./markdown.ts";
 import { USED_BY, USED_BY_LABEL, USED_BY_MORE } from "./used-by.ts";
 
@@ -14,7 +15,7 @@ process.env.BETTEROFFICE_AGENT_EVALS = README;
 const { Home } = await import("./home.tsx");
 
 const html = renderToStaticMarkup(createElement(Home));
-const markdown = homepageMarkdown(parseFidelity(README), parseAgentEvals(README));
+const markdown = homepageMarkdown(parseFidelity(README), parseAgentEvals(README), publishedPosts());
 
 const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', "#x27": "'", "#39": "'" };
 const plain = (fragment) =>

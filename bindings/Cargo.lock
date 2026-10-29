@@ -178,8 +178,13 @@ dependencies = [
 name = "betteroffice-drawingml"
 version = "0.5.1"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "indexmap",
+ "libm",
  "serde",
+ "tiff",
+ "weezl",
 ]
 
 [[package]]
@@ -187,6 +192,7 @@ name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "libm",
 ]
 
 [[package]]
@@ -241,10 +247,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-pptx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
+ "serde",
+ "serde_json",
+ "yrs",
+]
+
+[[package]]
 name = "betteroffice-pptx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-pptx",
+ "betteroffice-pptx-engine",
+ "getrandom 0.3.4",
  "napi",
  "napi-build",
  "napi-derive",
@@ -259,6 +280,7 @@ dependencies = [
  "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "quick-xml",
  "serde",
  "thiserror",
@@ -298,6 +320,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
@@ -307,7 +330,7 @@ dependencies = [
 name = "betteroffice-python-common"
 version = "0.0.1"
 dependencies = [
- "getrandom",
+ "getrandom 0.4.3",
  "pyo3",
 ]
 
@@ -447,12 +470,23 @@ name = "betteroffice-xlsx-calc"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
+ "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-engine"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-xlsx",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
 version = "0.5.1"
 dependencies = [
+ "libm",
  "serde",
 ]
 
@@ -461,6 +495,7 @@ name = "betteroffice-xlsx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx",
+ "betteroffice-xlsx-engine",
  "napi",
  "napi-build",
  "napi-derive",
@@ -484,6 +519,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "quick-xml",
+ "serde",
 ]
 
 [[package]]
@@ -500,6 +536,7 @@ name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-render",
+ "libm",
  "png",
  "rustybuzz",
  "tiny-skia",
@@ -513,6 +550,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "hashbrown 0.17.1",
+ "libm",
  "serde",
  "unicode-segmentation",
 ]
@@ -745,7 +783,7 @@ version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 dependencies = [
- "getrandom",
+ "getrandom 0.4.3",
 ]
 
 [[package]]
@@ -895,6 +933,18 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 5.3.0",
+ "wasip2",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
@@ -902,7 +952,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 6.0.0",
  "wasm-bindgen",
 ]
 
@@ -1044,9 +1094,9 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "lock_api"
@@ -1325,6 +1375,12 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "r-efi"
@@ -1741,6 +1797,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "wasip2"
+version = "1.0.4+wasi-0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1796,6 +1861,12 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wuff"

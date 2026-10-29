@@ -126,6 +126,15 @@ pub struct ShapeSnapshot {
     pub source_id: u32,
     pub kind: ShapeKind,
     pub name: String,
+    /// `cNvPr/@title`, the alternative-text title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `cNvPr/@descr`, the alternative-text description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// True when `cNvPr` carries the a16 decorative extension.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
     pub x: i64,
     pub y: i64,
     pub width: i64,
@@ -198,9 +207,36 @@ pub enum ShapeKind {
     Group,
 }
 
+pub use pptx_parse::HeaderFooterSettings;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideHeaderFooterText {
+    pub shape_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideDateText {
+    pub shape_id: String,
+    pub text: String,
+    pub field: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideHeaderFooter {
+    pub footer: Option<SlideHeaderFooterText>,
+    pub slide_number: Option<SlideHeaderFooterText>,
+    pub date: Option<SlideDateText>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlideLayoutSnapshot {
+    #[serde(default)]
+    pub header_footer: Option<HeaderFooterSettings>,
     pub name: Option<String>,
     pub r#type: Option<String>,
 }
@@ -208,6 +244,8 @@ pub struct SlideLayoutSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlideSnapshot {
+    #[serde(default)]
+    pub header_footer: Option<SlideHeaderFooter>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]

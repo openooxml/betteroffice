@@ -431,6 +431,16 @@ impl PreservedPackage {
         )
     }
 
+    #[doc(hidden)]
+    pub fn source_sheet_header_footer(&self, index: usize) -> Option<Option<&[u8]>> {
+        self.sheets.get(index).map(|sheet| {
+            sheet
+                .template
+                .child("headerFooter")
+                .map(|element| element.bytes.as_slice())
+        })
+    }
+
     /// Cell facts of source sheet `index` the model does not keep.
     pub fn source_cell_facts(&self, index: usize) -> Option<&SourceCellFacts> {
         self.sheets.get(index).map(|sheet| &sheet.cell_facts)

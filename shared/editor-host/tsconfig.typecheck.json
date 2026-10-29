@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@betteroffice/docx-react": ["../../packages/docx-react/src/index.ts"],
+      "@betteroffice/xlsx-react": ["../../packages/xlsx-react/src/index.ts"],
+      "@betteroffice/pptx-react": ["../../packages/pptx-react/src/index.ts"],
+      "@betteroffice/docx": ["../../packages/docx/src/core.ts"],
+      "@betteroffice/docx/*": ["../../packages/docx/src/*"],
+      "@betteroffice/xlsx": ["../../packages/xlsx/src/index.ts"],
+      "@betteroffice/xlsx/*": ["../../packages/xlsx/src/*"],
+      "@betteroffice/pptx": ["../../packages/pptx/src/index.ts"],
+      "@betteroffice/pptx/*": ["../../packages/pptx/src/*"],
+      "@betteroffice/fonts": ["../../packages/fonts/src/index.ts"],
+      "@betteroffice/fonts-cjk": ["../../packages/fonts-cjk/src/index.ts"],
+      "@betteroffice/docx-i18n": ["../../packages/docx-i18n/src/index.ts"],
+      "@betteroffice/docx-i18n/*": ["../../packages/docx-i18n/src/*"],
+      "@betteroffice/xlsx-i18n": ["../../packages/xlsx-i18n/src/index.ts"],
+      "@betteroffice/xlsx-i18n/*": ["../../packages/xlsx-i18n/src/*"],
+      "@betteroffice/pptx-i18n": ["../../packages/pptx-i18n/src/index.ts"],
+      "@betteroffice/pptx-i18n/*": ["../../packages/pptx-i18n/src/*"]
+    }
+  }
+}

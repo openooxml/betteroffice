@@ -349,6 +349,7 @@ export function LegacyToolbarContent({ children }: { children: ReactNode }) {
       {popup &&
         createPortal(
           <div
+            dir="ltr"
             ref={setPopupRef}
             role="dialog"
             aria-label={label}

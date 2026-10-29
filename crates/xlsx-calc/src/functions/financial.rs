@@ -4,6 +4,7 @@
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{EvalContext, err};
+use crate::fmath;
 use crate::parser::Expr;
 
 use super::{finite, nth_number, omitted};
@@ -33,7 +34,7 @@ pub(crate) fn fv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if rate == 0.0 {
         return finite(-(pv + pmt * nper));
     }
-    let growth = (1.0 + rate).powf(nper);
+    let growth = fmath::pow(1.0 + rate, nper);
     let annuity = if due { pmt * (1.0 + rate) } else { pmt };
     finite(-(pv * growth + annuity * (growth - 1.0) / rate))
 }
@@ -66,7 +67,7 @@ pub(crate) fn pmt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if rate == 0.0 {
         return finite(-(pv + fv) / nper);
     }
-    let growth = (1.0 + rate).powf(nper);
+    let growth = fmath::pow(1.0 + rate, nper);
     let timing = if due { 1.0 + rate } else { 1.0 };
     finite(-(pv * growth + fv) * rate / ((growth - 1.0) * timing))
 }
@@ -95,7 +96,7 @@ pub(crate) fn pv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if rate == 0.0 {
         return finite(-(fv + pmt * nper));
     }
-    let growth = (1.0 + rate).powf(nper);
+    let growth = fmath::pow(1.0 + rate, nper);
     let annuity = if due { pmt * (1.0 + rate) } else { pmt };
     finite(-(fv + annuity * (growth - 1.0) / rate) / growth)
 }
@@ -133,7 +134,7 @@ pub(crate) fn nper(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if numerator / denominator <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finite((numerator / denominator).ln() / (1.0 + rate).ln())
+    finite(fmath::ln(numerator / denominator) / fmath::ln(1.0 + rate))
 }
 
 /// NPV(rate, value, ...): the present value of cash flows one period apart,

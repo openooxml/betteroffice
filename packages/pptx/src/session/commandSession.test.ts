@@ -2448,3 +2448,83 @@ test('remote_update_chunks_apply_in_order_as_one_remote_command', async () => {
     try { await rpc.dispose(); } finally { host.dispose(); }
   }
 });
+
+test('recovery update leaves client state and can be taken only once', async () => {
+  const host = await engineHost();
+  let client: PresentationCommandClient | undefined;
+  let openedUpdate: ArrayBuffer | undefined;
+  const transport: SessionTransport = { ...host.transport, listen(listener) {
+    return host.transport.listen((message) => {
+      if (isHostMessage(message) && message.kind === 'reply' && message.ok &&
+        message.value && typeof message.value === 'object' && 'recoveryUpdate' in message.value) {
+        openedUpdate = (message.value as PresentationCommandOpenResult).recoveryUpdate;
+      }
+      listener(message);
+    });
+  } };
+  try {
+    client = await createPresentationCommandClient(await deck(), { ...host.options, collaboration: true }, transport);
+    expect(openedUpdate).toBeInstanceOf(ArrayBuffer);
+    expect(client.state.recoveryBaseline).toBe('update');
+    expect('recoveryUpdate' in client.state).toBe(false);
+    expect(client.takeRecoveryUpdate?.()).toBe(openedUpdate);
+    expect(client.takeRecoveryUpdate?.()).toBeUndefined();
+    const target = content((await client.read()).result).stories[0]!;
+    await client.dispatch(insert(selection(target), 'accepted'));
+    expect('recoveryUpdate' in client.state).toBe(false);
+  } finally { await client?.dispose(); host.dispose(); }
+});
+
+for (const mode of ['source', 'initialUpdate', 'collaboration'] as const) test(`open exports recovery state only for ${mode} baseline requirements`, async () => {
+  const host = await engineHost();
+  const bytes = await deck(['alpha']);
+  await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+  const seed = wasm.openPresentation(bytes);
+  const initialUpdate = seed.encodeStateAsUpdate();
+  seed.dispose();
+  const encoded = spyOn(host.Document.prototype, 'encodeStateAsUpdate');
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+  try {
+    const state = await rpc.call.openCommandEditor(bytes.slice().buffer, { ...host.options,
+      ...(mode === 'initialUpdate' ? { initialUpdate } : {}), collaboration: mode === 'collaboration' });
+    expect(encoded).toHaveBeenCalledTimes(mode === 'source' ? 0 : 1);
+    expect(state.recoveryBaseline).toBe(mode === 'source' ? 'source' : 'update');
+    expect(Boolean(state.recoveryUpdate)).toBe(mode !== 'source');
+    expect(state.recoveryEngine).toBe(host.Document.version());
+  } finally { encoded.mockRestore(); await rpc.dispose(); host.dispose(); }
+});
+
+test('normal checkpoints omit recovery updates and only rebase encodes the whole state', async () => {
+  const h = await open(['alpha']);
+  const encoded = spyOn(h.handle(), 'encodeStateAsUpdate');
+  try {
+    const target = (await h.read()).stories[0]!;
+    let state: PresentationCommandAck = h.state;
+    for (let seq = 1; seq <= 3; seq++) {
+      state = await h.rpc.call.command(envelope(state, seq, insert(selection(target), String(seq))));
+      const saved = await h.rpc.call.checkpointCommandEditor(h.fence(seq));
+      expect('recoveryUpdate' in saved).toBe(false);
+    }
+    expect(encoded).not.toHaveBeenCalled();
+    const rebased = await h.rpc.call.checkpointCommandEditor(h.fence(3), { rebase: true });
+    expect(rebased.recoveryUpdate).toBeInstanceOf(ArrayBuffer);
+    expect(encoded).toHaveBeenCalledTimes(1);
+  } finally { encoded.mockRestore(); await h.dispose(); }
+});
+
+
+for (const partial of [false, true]) test(`rebase transfers an owned update buffer with partial view ${partial}`, async () => {
+  const h = await open(['alpha']);
+  const storage = Uint8Array.of(7, 8, 9, 10);
+  const update = partial ? storage.subarray(1, 3) : storage;
+  const expected = [...update];
+  const encoded = spyOn(h.handle(), 'encodeStateAsUpdate').mockReturnValue(update);
+  try {
+    const normal = await h.rpc.call.checkpointCommandEditor(h.fence(0));
+    expect('recoveryUpdate' in normal).toBe(false);
+    expect(encoded).not.toHaveBeenCalled();
+    const saved = await h.rpc.call.checkpointCommandEditor(h.fence(0), { rebase: true });
+    expect([...new Uint8Array(saved.recoveryUpdate!)]).toEqual(expected);
+    expect(storage.buffer.byteLength).toBe(partial ? 4 : 0);
+  } finally { encoded.mockRestore(); await h.dispose(); }
+});

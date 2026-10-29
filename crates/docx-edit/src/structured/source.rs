@@ -470,7 +470,6 @@ impl CommentWrites {
         Self { written }
     }
 
-    #[cfg(any(test, feature = "wasm"))]
     pub(crate) fn snapshot(&self) -> HashSet<(String, Option<String>)> {
         self.written
             .lock()
@@ -478,7 +477,6 @@ impl CommentWrites {
             .clone()
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn replace(&self, written: HashSet<(String, Option<String>)>) {
         *self
             .written

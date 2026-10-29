@@ -21,7 +21,7 @@ use crate::queries::revision_parts;
 use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
 use crate::seed::{SourceMetadata, numeric_field_instruction};
 use crate::sticky_positions::sticky_offset;
-use crate::target::{EditTextView, StoryView, TextPosition, Views};
+use crate::target::{EditTextView, StoryView, TextPosition, Views, drawing_from_payload};
 use crate::{
     COMMENTS, DEL, EditingDoc, INS, KIND_KEY, TextRange, decode_anchor, map_string, story_ref,
 };
@@ -3179,6 +3179,7 @@ impl<'a> Exporter<'a> {
             content: InlineKind::Unsupported {
                 element,
                 alt_text: None,
+                drawing: None,
             },
         }
     }
@@ -3249,7 +3250,7 @@ impl<'a> Exporter<'a> {
                 }
             }
             "field" => self.field(ctx, payload, &base, depth),
-            "image" => self.image(ctx, payload, &anchor),
+            "image" => self.image(ctx, payload, &anchor, drawing_from_payload(payload, true)),
             "opaqueDrawing" => {
                 let element =
                     super::source::element_name(any_str(payload.get("xml")).unwrap_or_default());
@@ -3270,10 +3271,13 @@ impl<'a> Exporter<'a> {
                     },
                 );
                 match preview {
-                    Some(preview) => self.image(ctx, preview, &anchor),
+                    Some(preview) => {
+                        self.image(ctx, preview, &anchor, drawing_from_payload(payload, false))
+                    }
                     None => InlineKind::Unsupported {
                         element,
                         alt_text: None,
+                        drawing: drawing_from_payload(payload, false),
                     },
                 }
             }
@@ -3322,6 +3326,7 @@ impl<'a> Exporter<'a> {
                 InlineKind::Unsupported {
                     element: element.to_owned(),
                     alt_text,
+                    drawing: drawing_from_payload(payload, false),
                 }
             }
         };
@@ -3336,7 +3341,13 @@ impl<'a> Exporter<'a> {
     }
 
     /// An image, its relationship resolved against the part that owns the story it is in.
-    fn image(&mut self, ctx: &StoryCtx, payload: &Payload, anchor: &Anchor) -> InlineKind {
+    fn image(
+        &mut self,
+        ctx: &StoryCtx,
+        payload: &Payload,
+        anchor: &Anchor,
+        drawing: Option<crate::DrawingProperties>,
+    ) -> InlineKind {
         let relationship_id = any_text(payload.get("rId"));
         let mut target = None;
         if let (Some(id), Some(read), Some(part)) =
@@ -3377,6 +3388,7 @@ impl<'a> Exporter<'a> {
                 Some(RelationshipTarget::External(url)) => Some(url),
                 _ => None,
             },
+            drawing,
         }
     }
 

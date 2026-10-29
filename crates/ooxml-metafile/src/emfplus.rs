@@ -13,6 +13,7 @@ use crate::drawing::{
     Bitmap, Clip, ClipRegion, Drawing, Font, Image, LineCap, LineJoin, LinearGradient, Op, Paint,
     PathCommand, Pixels, Rgba, Shape, Spread, Stroke, Text, TextAnchor,
 };
+use crate::fmath;
 use crate::player::{ARC_SEGMENTS, IDENTITY, Player, Xform, apply, chain, concat, rect_path};
 use crate::read::{finite_at, i16_at, i32_at, u8_at, u16_at, u32_at};
 
@@ -529,7 +530,7 @@ fn play<const FULL: bool>(
                 0x402D => [1.0, 0.0, 0.0, 1.0, finite_at(data, 0)?, finite_at(data, 4)?],
                 0x402E => [finite_at(data, 0)?, 0.0, 0.0, finite_at(data, 4)?, 0.0, 0.0],
                 _ => {
-                    let (sin, cos) = finite_at(data, 0)?.to_radians().sin_cos();
+                    let (sin, cos) = fmath::sin_cos(finite_at(data, 0)?.to_radians());
                     [cos, sin, -sin, cos, 0.0, 0.0]
                 }
             };
@@ -795,7 +796,7 @@ fn arc_figure(
     let (x, y, w, h) = rect;
     let (cx, cy, rx, ry) = (x + w / 2.0, y + h / 2.0, w / 2.0, h / 2.0);
     let at = |degrees: f64| {
-        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (sin, cos) = fmath::sin_cos(degrees.to_radians());
         (cx + rx * cos, cy + ry * sin)
     };
     let sweep = sweep.clamp(-360.0, 360.0);

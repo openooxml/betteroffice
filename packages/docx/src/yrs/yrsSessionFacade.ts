@@ -66,6 +66,7 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
+import { editSessionUpdateEvents } from './updateEvents';
 import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
@@ -204,7 +205,7 @@ const materializedSources = new WeakMap<EditSession, { source: Uint8Array; docum
 const openedSources = new WeakMap<ArrayBuffer, Uint8Array>();
 
 export function forgetMaterializedSource(session: EditSession): void {
-  materializedSources.delete(session);
+  materializedSources.delete(editSessionUpdateEvents(session).session);
 }
 
 function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
@@ -219,6 +220,8 @@ export function wrapSession(
   clientId: number,
   opened?: { source: Uint8Array; host: YrsDocxHost }
 ): YrsSession {
+  const hub = editSessionUpdateEvents(session);
+  session = hub.session;
   const peerSession = session as EditSession & {
     encode_peer_metadata?: () => Uint8Array;
     bootstrap_peer?: (state: Uint8Array, metadata: Uint8Array, source?: Uint8Array) => void;
@@ -352,7 +355,10 @@ export function wrapSession(
       return operation();
     } finally {
       wasmCallDepth -= 1;
-      if (wasmCallDepth === 0) flushUpdates();
+      if (wasmCallDepth === 0) {
+        hub.drain();
+        flushUpdates();
+      }
     }
   };
 
@@ -409,14 +415,15 @@ export function wrapSession(
         : (JSON.parse(session.selection()) as YrsSelection | null))?.head.story ?? 'all'
     );
 
+  let unsubscribeUpdates: (() => void) | null = null;
+
   const ensureObserver = () => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array, origin: number) => {
-      if (origin !== 0 && origin !== 1) return;
+    unsubscribeUpdates = hub.subscribe((update, origin) => {
       readCacheRevision += 1;
       pendingUpdates.push({
         update: update.slice(),
-        origin: origin === 0 ? 'local' : 'remote',
+        origin,
       });
       flushUpdates();
     });
@@ -426,7 +433,9 @@ export function wrapSession(
   const clearUnusedObserver = (): void => {
     if (!observing || listeners.size > 0 || destroyed) return;
     pendingUpdates.length = 0;
-    session.clear_update_observer();
+    const unsubscribe = unsubscribeUpdates;
+    unsubscribeUpdates = null;
+    unsubscribe?.();
     observing = false;
   };
 
@@ -1702,7 +1711,12 @@ export function wrapSession(
       for (const registry of detachedProposals) registry.destroy();
       detachedProposals.clear();
       pendingUpdates.length = 0;
-      if (observing) session.clear_update_observer();
+      if (observing) {
+        const unsubscribe = unsubscribeUpdates;
+        unsubscribeUpdates = null;
+        observing = false;
+        unsubscribe?.();
+      }
       session.free();
     },
   };

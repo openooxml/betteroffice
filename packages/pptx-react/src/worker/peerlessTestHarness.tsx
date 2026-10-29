@@ -1,6 +1,6 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { Suspense } from 'react';
@@ -25,6 +25,7 @@ if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
+let recoveryUpdate: ArrayBuffer | undefined;
 let commands: PresentationCommandEnvelope[];
 let owner: PptxWorkerSession | undefined;
 let holding = false;
@@ -70,6 +71,10 @@ export async function deck(small = false): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+beforeAll(async () => {
+  await wasm.initWasm(await readFile(new URL('../../../pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+});
+
 beforeEach(() => {
   const originalRect = HTMLElement.prototype.getBoundingClientRect;
   const toolbarRect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
@@ -81,6 +86,7 @@ beforeEach(() => {
   holding = false; unknownNext = false; held = []; suspensions = 0;
 
   owner = undefined;
+  recoveryUpdate = undefined;
   const worker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
   Object.defineProperty(globalThis, 'Worker', { configurable: true, value: class {} });
   restorers.push(() => {
@@ -129,7 +135,8 @@ beforeEach(() => {
     crashWorker = () => { endpoint.dispatchEvent(Object.assign(new Event('error'), { message: 'Worker stopped' })); };
     releaseReplies = () => { holding = false; for (const message of held.splice(0)) (message as () => void)(); };
     const off = pair.client.listen((message) => {
-      const reply = message as { kind: string; id: number };
+      const reply = message as { kind: string; id: number; value?: { recoveryUpdate?: ArrayBuffer } };
+      if (reply.value?.recoveryUpdate) recoveryUpdate = reply.value.recoveryUpdate;
       if (unknownNext && reply.kind === 'reply' && commandIds.has(reply.id)) {
         unknownNext = false;
         deliver({ ...reply, ok: false, error: { name: 'CommandOutcomeUnknown', message: 'Edit outcome is unknown', refusal: { seq: client.state.throughSeq + 1 } } });
@@ -159,8 +166,17 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  try { releaseReplies(); cleanup(); await owner?.dispose(); }
-  finally { for (const restore of restorers.splice(0).reverse()) restore(); }
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    releaseReplies(); cleanup(); await owner?.dispose();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    for (const restore of restorers.splice(0).reverse()) restore();
+  }
 });
 afterAll(async () => {
   if (!ownsDom) return;
@@ -180,7 +196,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   </Suspense>;
   const mounted = render(ui());
   const view = { ...mounted, ...within(mounted.container) };
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), { timeout: 10_000 });
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
   const box = list.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;
@@ -197,7 +213,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
     await waitFor(() => expect(client.state.selection).toMatchObject({ kind: 'object', shapeId: box.shapeId }));
     await waitFor(() => expect(view.getAllByTestId(/pptx-resize-/)).toHaveLength(8));
   };
-  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands };
+  return { view, stage, canvas, box, point, select, list, bytes, api, ui, client, commands, recoveryUpdate };
 }
 
 

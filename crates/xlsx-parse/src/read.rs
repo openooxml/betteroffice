@@ -500,7 +500,7 @@ fn row_count_attr(
 
 /// Decode the `_xHHHH_` escapes excel writes for characters a name cannot hold
 /// literally; `_x005F_` is its own escape for a leading underscore.
-fn unescape_name(source: &str) -> String {
+pub(crate) fn unescape_name(source: &str) -> String {
     if !source.contains("_x") && !source.contains("_X") {
         return source.to_string();
     }

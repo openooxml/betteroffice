@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::measure_blocks::{
     MeasurementConfig, extent_height, measure_blocks_without_table_compat_shift, measure_paragraph,
 };
-use crate::paragraph_spacing::apply_contextual_spacing_blocks;
+use crate::paragraph_spacing::{apply_contextual_spacing_blocks, suppress_document_auto_before};
 use crate::types::{
     AxisPosition, BlockExtent, BlockId, BoxEdges, FieldRun, ImageRun, ImageRunPosition, Layout,
     LayoutBlock, MeasuredBlock, PageFloatBand, PageMargins, ParagraphBlock, Run, Size,
@@ -120,6 +120,15 @@ pub fn measure_header_footer(
         return Ok(None);
     }
     let mut blocks = blocks;
+    if kind == HeaderFooterKind::Header {
+        for block in &mut blocks {
+            if !contributes_to_flow(block) {
+                continue;
+            }
+            suppress_document_auto_before(block);
+            break;
+        }
+    }
     apply_contextual_spacing_blocks(&mut blocks);
     let mut detached = float_detached_top_and_bottom_images(&mut blocks);
     let mut measures =
@@ -847,8 +856,8 @@ pub fn header_footer_float_bands(
 pub fn extend_body_margins(
     page_size: &Size,
     margins: &PageMargins,
-    header_height: f64,
-    footer_height: f64,
+    header_height: impl Into<Option<f64>>,
+    footer_height: impl Into<Option<f64>>,
 ) -> PageMargins {
     let header_distance = margins.header.unwrap_or(DEFAULT_HF_DISTANCE_PX);
     let footer_distance = margins.footer.unwrap_or(DEFAULT_HF_DISTANCE_PX);
@@ -859,10 +868,16 @@ pub fn extend_body_margins(
     let mut output = margins.clone();
     output.top = effective_top;
     output.bottom = effective_bottom;
-    if !suppress_header && header_height > effective_top - header_distance {
+    if !suppress_header
+        && let Some(header_height) = header_height.into()
+        && header_height > effective_top - header_distance
+    {
         output.top = effective_top.max(header_distance + header_height);
     }
-    if !suppress_footer && footer_height > effective_bottom - footer_distance {
+    if !suppress_footer
+        && let Some(footer_height) = footer_height.into()
+        && footer_height > effective_bottom - footer_distance
+    {
         output.bottom = effective_bottom.max(footer_distance + footer_height);
     }
     let maximum = (page_size.h - MIN_CONTENT_HEIGHT_PX).max(0.0);
@@ -1611,6 +1626,34 @@ mod tests {
             .sum();
         assert_eq!(variant.flow_height, text_height + 5.0 + 8.0 + 6.0);
         assert_eq!(variant.visual_bottom, variant.flow_height);
+    }
+
+    #[test]
+    fn absent_bands_ignore_distances_but_zero_height_bands_keep_them() {
+        let margins = PageMargins {
+            top: 30.0,
+            right: 96.0,
+            bottom: 30.0,
+            left: 96.0,
+            header: Some(47.2),
+            footer: Some(47.2),
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        for (header, footer, top, bottom) in [
+            (None, None, 30.0, 30.0),
+            (Some(0.0), None, 47.2, 30.0),
+            (None, Some(0.0), 30.0, 47.2),
+            (Some(16.0), Some(16.0), 47.2 + 16.0, 47.2 + 16.0),
+        ] {
+            let extended = extend_body_margins(&page_size, &margins, header, footer);
+            assert_eq!(extended.top, top);
+            assert_eq!(extended.bottom, bottom);
+            assert_eq!(extended.header, margins.header);
+            assert_eq!(extended.footer, margins.footer);
+        }
     }
 
     #[test]
