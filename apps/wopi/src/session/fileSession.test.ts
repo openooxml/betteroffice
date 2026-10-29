@@ -1,8 +1,12 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { initEngines } from "../replica/engines";
 import { openFreshClient, openTestClient, sourceBytes, type TestClient } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC, ttl, type Harness } from "../../test/session/harness";
-import type { FileSession } from "./fileSession";
+import { FileSession } from "./fileSession";
+import { FileJournal } from "./journal";
 import { WopiHostError } from "../host/errors";
 
 beforeAll(async () => {
@@ -490,6 +494,138 @@ describe("locks, conflicts and permissions", () => {
     } finally {
       client.destroy();
       await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  for (const save of ["hold resume", "autosave", "explicit save", "last leave"] as const) {
+    test(`a fresh writer retries a failed conflict copy through ${save} without changing the original`, async () => {
+      let unavailable = true;
+      const h = makeHarness({ quirks: { timestampConflict: true }, relativeStatus: () => unavailable ? 500 : null });
+      const expiresAt = ttl(h.clock, 1000);
+      addToken(h, "tok-a", "user-a", { expiresAt });
+      addToken(h, "tok-b", "user-b");
+      const a = await h.registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: expiresAt, mode: "edit" });
+      const session = a.session;
+      const client = await clientFor(session, a.joinPayload);
+      const originalBytes = h.host.files.get("file1")!.bytes.slice();
+      const failures: unknown[] = [];
+      const conflicts: unknown[] = [];
+      const writable: unknown[] = [];
+      const lost: unknown[] = [];
+      session.on("saveFailed", (event) => failures.push(event));
+      session.on("conflict", (event) => conflicts.push(event));
+      session.on("writable", (event) => writable.push(event));
+      session.on("lostFlush", (event) => lost.push(event));
+      try {
+        edit(session, a.user.id, client, "held-conflict-edit ");
+        h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
+        expect((await session.requestSave(a.user.id)).saved).toBe(false);
+        expect(session.viewOnlyReason).toBe("externalChange");
+        expect(session.dirty).toBe(true);
+        expect(failures).toEqual([{ kind: "server" }]);
+        expect(h.callsFor("PUT_RELATIVE").map((call) => call.token)).toEqual(["tok-a"]);
+        expect(h.host.files.size).toBe(1);
+        await h.clock.advance(1000);
+        expect(a.user.isTokenValidAt(h.clock.t)).toBe(false);
+        expect(session.awaitingFlushToken).toBe(true);
+        expect(session.state).toBe("open");
+
+        if (save === "hold resume") unavailable = false;
+        const b = await joinEditor(h, "tok-b");
+        expect(b.session).toBe(session);
+        expect(b.user.canWrite).toBe(true);
+        expect(b.file.canWrite).toBe(false);
+        expect(b.file.readOnly).toBe(true);
+        expect(b.viewOnlyReason).toBe("externalChange");
+        expect(session.viewOnlyReason).toBe("externalChange");
+        expect(session.awaitingFlushToken).toBe(false);
+        const returning = await clientFor(session, b.joinPayload);
+        try {
+          returning.edit("blocked-returning-conflict-edit ", 1);
+          expect(session.applyUpdate(b.user.id, returning.encodeStateAsUpdate(session.replica!.encodeStateVector()))).toEqual({ accepted: false, reason: "user is read only" });
+        } finally {
+          returning.destroy();
+        }
+        if (save !== "hold resume") {
+          expect(session.dirty).toBe(true);
+          expect(h.host.files.size).toBe(1);
+          unavailable = false;
+          if (save === "autosave") await h.clock.advance(30000);
+          else if (save === "explicit save") {
+            expect(await session.requestSave(b.user.id)).toMatchObject({ saved: true, by: b.user.id, conflictName: expect.any(String) });
+          } else await session.leave(b.user.id);
+        }
+        expect(session.dirty).toBe(false);
+        expect(h.putCount()).toBe(1);
+        expect(h.callsFor("PUT")[0]?.token).toBe("tok-a");
+        expect(h.callsFor("PUT_RELATIVE").map((call) => call.token)).toEqual(save === "hold resume" ? ["tok-a", "tok-b"] : ["tok-a", "tok-b", "tok-b"]);
+        expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
+        expect(h.host.files.get("file1")!.itemVersion).toBe("1");
+        expect(conflicts).toHaveLength(1);
+        expect(writable).toEqual([]);
+        expect(lost).toEqual([]);
+        const copies = [...h.host.files.values()].filter((file) => file.id !== "file1");
+        expect(copies).toHaveLength(1);
+        const fresh = await openFreshClient("xlsx", copies[0]!.bytes, nextId());
+        try {
+          expect(fresh.contains("held-conflict-edit")).toBe(true);
+          expect(fresh.contains("blocked-returning-conflict-edit")).toBe(false);
+        } finally {
+          fresh.destroy();
+        }
+        if (save !== "last leave") await session.leave(b.user.id);
+        expect(h.callsFor("UNLOCK").map((call) => call.token)).toEqual(["tok-b"]);
+        expect(session.state).toBe("closed");
+        expect(h.registry.list()).toHaveLength(0);
+      } finally {
+        client.destroy();
+        await session.close();
+      }
+    });
+  }
+
+  test("a journal flush failure keeps external changes on the conflict-copy path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-conflict-"));
+    let unavailable = true;
+    const h = makeHarness({ quirks: { timestampConflict: true }, relativeStatus: () => unavailable ? 500 : null });
+    const expiresAt = ttl(h.clock, 1000);
+    addToken(h, "tok-a", "user-a", { expiresAt });
+    addToken(h, "tok-b", "user-b");
+    const fileKey = h.registry.fileKey("testhost", SRC);
+    const journal = new FileJournal(dir, fileKey);
+    const session = new FileSession({
+      hostClient: h.hostClient, hostId: "testhost", wopiSrc: SRC,
+      fileKey, instanceId: "conflict-journal-test",
+      journal, logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await session.join({ wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: expiresAt, mode: "edit" });
+    const client = await clientFor(session, a.joinPayload);
+    const originalBytes = h.host.files.get("file1")!.bytes.slice();
+    try {
+      edit(session, a.user.id, client, "journal-conflict-edit ");
+      h.host.files.get("file1")!.lastModifiedTime = "1999-01-01T00:00:00.000Z";
+      expect((await session.requestSave(a.user.id)).saved).toBe(false);
+      await h.clock.advance(1000);
+      expect(session.awaitingFlushToken).toBe(true);
+      journal.flush = () => { throw new Error("flush failed"); };
+      unavailable = false;
+      const b = await session.join({ wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(session.journalBroken).toBe(true);
+      expect(session.viewOnlyReason).toBe("externalChange");
+      expect(b.viewOnlyReason).toBe("externalChange");
+      expect(b.file.canWrite).toBe(false);
+      expect(session.dirty).toBe(false);
+      expect(session.applyUpdate(b.user.id, new Uint8Array([1]))).toEqual({ accepted: false, reason: "user is read only" });
+      expect((await session.requestSave(b.user.id)).saved).toBe(false);
+      await session.leave(b.user.id);
+      expect(h.putCount()).toBe(1);
+      expect(h.callsFor("PUT_RELATIVE").map((call) => call.token)).toEqual(["tok-a", "tok-b"]);
+      expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
+      expect(h.host.files.size).toBe(2);
+    } finally {
+      client.destroy();
+      await session.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
