@@ -58,7 +58,7 @@ origin browsers and the host use to reach the app:
 ```bash
 docker run -d --name betteroffice-wopi \
   -p 3000:3000 \
-  -v betteroffice-wopi-data:/data \
+  -v wopi-data:/data \
   -e WOPI_PUBLIC_URL=https://office.example.com \
   -e 'WOPI_HOSTS=[{"id":"opencloud","wopiSrcOrigins":["https://cloud.example.com"],"frameOrigins":["https://cloud.example.com"]}]' \
   betteroffice-wopi
