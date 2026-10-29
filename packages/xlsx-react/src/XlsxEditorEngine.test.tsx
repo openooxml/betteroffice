@@ -33,7 +33,7 @@ const workerEditor = mock((props: MarkerProps) => {
   return <div data-testid="worker-editor" data-instance={instance}
     data-read-only={props.readOnly ?? false} data-plugins={props.plugins?.length ?? 0} data-backend={backend} />;
 });
-mock.module('./worker/XlsxWorkerEditor', () => ({ XlsxWorkerEditor: workerEditor }));
+mock.module('./worker/XlsxWorkerEditor', () => ({ XlsxWorkerEditor: workerEditor, prefetchPeerlessXlsxEditor() {} }));
 mock.module('./worker/LegacyXlsxWorkerEditor', () => ({ LegacyXlsxWorkerEditor: workerEditor }));
 mock.module('./viewer/XlsxSessionViewer', () => ({
   XlsxSessionViewer: (props: MarkerProps) => <div data-testid="worker-viewer"
