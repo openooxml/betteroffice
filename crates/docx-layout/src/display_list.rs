@@ -4813,7 +4813,8 @@ fn text_canvas_clusters(
     }
     let fonts = fonts?;
     let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
-    let font = *chain.first()?;
+    let font = *chain.ids.first()?;
+    let coverage_only = chain.coverage_only;
     fonts.store.family_widths(font).ok()??;
     let text = if fmt.all_caps == Some(true) {
         text.to_uppercase()
@@ -4874,7 +4875,15 @@ fn text_canvas_clusters(
             offset: px(pen),
         });
         pen += if fmt.small_caps == Some(true) {
-            painted_text_width(fonts, font, cluster, fmt, bidi_level, authoritative)?
+            painted_text_width(
+                fonts,
+                font,
+                cluster,
+                fmt,
+                bidi_level,
+                authoritative,
+                coverage_only,
+            )?
         } else {
             advances[&start]
         };
