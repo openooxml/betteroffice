@@ -135,6 +135,7 @@
       "unsupportedCommand": "Chưa được hỗ trợ.",
       "invalidArguments": "Giá trị này không hợp lệ.",
       "inputFailed": "Không thể lưu mục nhập ô trước đó.",
+      "sheetProtected": "Ô này nằm trên một trang tính được bảo vệ.",
       "documentReplaced": "Đã mở một sổ làm việc khác.",
       "targetChanged": "Vùng chọn đã thay đổi.",
       "gestureActive": "Hãy hoàn tất việc di chuyển biểu đồ trước.",

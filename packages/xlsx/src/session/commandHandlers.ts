@@ -109,7 +109,12 @@ function cellTarget(handle: WorkbookHandle, sheet: number, row: number, col: num
   return sheetTarget(handle, sheet, { kind: 'rowCol', start: { row, col }, end: { row, col } }, sheetIds);
 }
 
-function checkedBatch(handle: WorkbookHandle, steps: XlsxEditStep[]): void {
+function checkedBatch(handle: WorkbookHandle, state: WorkbookCommandState, steps: XlsxEditStep[]): void {
+  if (!state.editableSheets) {
+    const catalog = handle.readCells({ ranges: [] });
+    if (!catalog.ok) throw new Error(catalog.failure.message);
+    state.editableSheets = catalog.sheets.map((sheet) => sheet.editable);
+  }
   const expectVersion = handle.version();
   const encoder = new TextEncoder();
   const requestBytes = encoder.encode(JSON.stringify({ expectVersion, steps: [] })).length;
@@ -129,7 +134,8 @@ function checkedBatch(handle: WorkbookHandle, steps: XlsxEditStep[]): void {
     const { start, end } = corners(step.target.range);
     const visits = (end.row - start.row + 1) * (end.col - start.col + 1);
     const units = step.op === 'setCellInputs' ? step.inputs.flat().reduce((sum, input) => sum + input.length, 0) : 0;
-    const probe: XlsxEditStep = { op: 'patchStyle', target: step.target, patch: {} };
+    const probe: XlsxEditStep = state.editableSheets[resolveCommandTarget(handle, step.target).sheet]
+      ? { op: 'patchStyle', target: step.target, patch: {} } : step;
     const size = encoder.encode(JSON.stringify(probe)).length + 1;
     if (chunk.length === MAX_VALIDATION_STEPS || cells + visits > workbookAdmissionBudget.cells ||
       text + units > MAX_VALIDATION_TEXT || bytes + size > MAX_VALIDATION_BYTES) flush();
@@ -329,13 +335,14 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
       op.args[0] = translateWorkbookSheetIds(op.args[0], state.sheetIds, handle.sheetInfo().sheetIds);
       break;
     case 'editCell': {
-      const [sheet, row, col] = op.args;
-      checkedBatch(handle, [{ op: 'patchStyle', target: cellTarget(handle, sheet, row, col, state.info?.sheetIds), patch: {} }]);
+      const [sheet, row, col, input] = op.args;
+      checkedBatch(handle, state, [{ op: 'setCellInputs',
+        target: cellTarget(handle, sheet, row, col, state.info?.sheetIds), inputs: [[input]] }]);
       break;
     }
     case 'editCells': {
       const [sheet, edits] = op.args;
-      checkedBatch(handle, inputSteps(handle, edits.map((edit) => ({ ...edit, sheet })), state.info?.sheetIds));
+      checkedBatch(handle, state, inputSteps(handle, edits.map((edit) => ({ ...edit, sheet })), state.info?.sheetIds));
       break;
     }
     case 'applyOps':
@@ -356,7 +363,7 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
       break;
     case 'propose':
       if (!handle.isProposalsAvailable()) throw new WorkbookCommandRefusal('unsupported');
-      checkedBatch(handle, inputSteps(handle, op.args[2], state.info?.sheetIds));
+      checkedBatch(handle, state, inputSteps(handle, op.args[2], state.info?.sheetIds));
       break;
     case 'acceptProposal':
       if (!handle.isProposalsAvailable()) throw new WorkbookCommandRefusal('unsupported');
