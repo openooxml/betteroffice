@@ -1727,7 +1727,9 @@ fn measure_paragraph_with_context(
                 )
                 .unwrap_or_else(|| {
                     if config.font_chains.values().all(Vec::is_empty)
-                        || config.font_chains.contains_key("@betteroffice/fonts/coverage")
+                        || config
+                            .font_chains
+                            .contains_key("@betteroffice/fonts/coverage")
                     {
                         wrapped_synthetic_paragraph_extent(paragraph, content_width)
                     } else {
@@ -3631,7 +3633,9 @@ fn measure_table_cells(
             };
             if rotated
                 && (config.font_chains.values().all(Vec::is_empty)
-                    || config.font_chains.contains_key("@betteroffice/fonts/coverage"))
+                    || config
+                        .font_chains
+                        .contains_key("@betteroffice/fonts/coverage"))
             {
                 for (block, measure) in cell.blocks.iter().zip(&mut measures) {
                     if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =

@@ -50,7 +50,7 @@ async function prepareCjk() {
 const added: Array<{ family: string; bytes: ArrayBuffer }> = [];
 const google: string[] = [];
 let append: ReturnType<typeof spyOn>;
-let fetch: ReturnType<typeof spyOn>;
+let fetchSpy: ReturnType<typeof spyOn>;
 class FakeFontFace {
   readonly status = 'loaded';
   constructor(readonly family: string, readonly bytes: ArrayBuffer) {}
@@ -74,11 +74,11 @@ beforeAll(() => {
     }
     return appendChild(node);
   });
-  fetch = spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+  fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
     if (url.protocol !== 'file:') throw new Error(`Unexpected font request: ${url}`);
     return new Response(readFileSync(url));
-  });
+  }) as unknown as typeof fetch);
 });
 
 afterEach(() => {
@@ -91,7 +91,7 @@ afterEach(() => {
 
 afterAll(() => {
   append.mockRestore();
-  fetch.mockRestore();
+  fetchSpy.mockRestore();
   setGoogleFontsEnabled(googleFontsEnabled);
   if (fontFace) Object.defineProperty(globalThis, 'FontFace', fontFace);
   else Reflect.deleteProperty(globalThis, 'FontFace');
@@ -104,16 +104,21 @@ afterAll(() => {
 test('a missing CJK module leaves SimSun to Google without registering or caching Latin substitutes', async () => {
   expect(await loadFontWithMapping('SimSun')).toBe(false);
   expect(importCjk).toHaveBeenCalled();
-  expect(google.some((url) => url.includes('family=Noto+Serif+SC'))).toBe(true);
+  expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
+    'Noto Serif SC:ital,wght@0,400;0,700;1,400;1,700',
+  ]);
   expect(added).toEqual([]);
   expect(isFontLoaded('SimSun')).toBe(false);
   expect(isFontLoaded('Noto Serif SC')).toBe(false);
   expect(await loadFontWithMapping('SimSun')).toBe(false);
+  expect(google).toHaveLength(1);
 });
 
 test('an uncovered script family uses Google without a managed substitute', async () => {
   expect(await loadFontWithMapping('Noto Sans Devanagari')).toBe(false);
-  expect(google.some((url) => url.includes('family=Noto+Sans+Devanagari'))).toBe(true);
+  expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
+    'Noto Sans Devanagari:ital,wght@0,400;0,700;1,400;1,700',
+  ]);
   expect(added).toEqual([]);
   expect(isFontLoaded('Noto Sans Devanagari')).toBe(false);
 });

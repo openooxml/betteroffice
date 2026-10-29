@@ -2,6 +2,7 @@ import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import JSZip from 'jszip';
 import { openDocx } from '../src';
 import { renderDocxPage } from '../src/render';
@@ -59,6 +60,22 @@ test('renders actual before/after pages without changing the live document', asy
     expect(doc.read(hit.ref).text).toBe('Executive summary');
     await expect(doc.render(1000)).rejects.toThrow('Choose a page');
   } finally { doc.close(); }
+});
+
+test('headless default preview keeps Latin native beside an uncovered emoji', async () => {
+  const doc = await openDocx(await fixture(), { renderer: renderDocxPage });
+  const build = spyOn(doc.session, 'buildDisplayListJson');
+  try {
+    const rendered = await renderDocxPage(doc.session, 1);
+    const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
+    const text = display.pages[0]!.primitives.filter(
+      primitive => primitive.kind === 'text' || primitive.kind === 'glyphRun',
+    );
+    expect(text.map(primitive => primitive.text).join('')).toContain('😀 café İSTANBUL');
+    expect(text.some(primitive => primitive.kind === 'glyphRun' && primitive.text.includes('€4.2'))).toBe(true);
+    expect(text.every(primitive => primitive.kind === 'glyphRun' && primitive.paintClip === undefined)).toBe(true);
+    expect(rendered.warnings).toContain('Some characters have no glyph in the available fonts. Their preview may show replacement boxes.');
+  } finally { build.mockRestore(); doc.close(); }
 });
 
 test('renders embedded image pixels in live and proposed previews', async () => {

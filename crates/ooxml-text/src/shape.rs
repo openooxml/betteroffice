@@ -209,7 +209,7 @@ fn apply_family_widths(glyphs: &mut [ShapedGlyph], text: &str, size: f32, widths
     }
 }
 
-fn is_default_ignorable(ch: char) -> bool {
+pub(crate) fn is_default_ignorable(ch: char) -> bool {
     matches!(
         ch as u32,
         0x00AD

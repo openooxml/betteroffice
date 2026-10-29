@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
-import { configureDefaultFonts } from './defaultFontProvider';
+import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE } from './defaultFontProvider';
 import { createRustMeasureSource } from './rustMeasureSource';
 import * as wasm from '../wasm';
 
@@ -97,4 +97,24 @@ test('an explicitly configured manager keeps authoritative missing-glyph shaping
       (primitive: { kind: string }) => primitive.kind === 'glyphRun',
     )).toBe(true);
   }
+});
+
+test('implicit fonts keep Latin currency, tabs and default ignorables on the native path', async () => {
+  const { config } = await prepare();
+  expect(config.fontChains[IMPLICIT_FONT_COVERAGE]?.length).toBeGreaterThan(0);
+  const text = 'Project Aurora revenue is €5.1\u00a0million.\u00ad\u200b\u200d\ufeff\u0013\u0014\u0015';
+  const extent = JSON.parse(wasm.measureParagraphJson(JSON.stringify({
+    ...config,
+    block: { kind: 'paragraph', runs: [
+      { kind: 'text', text, fontFamily: 'Calibri' },
+      { kind: 'tab', fontFamily: 'Calibri' },
+      { kind: 'text', text: 'Delivery is scheduled.', fontFamily: 'Calibri' },
+    ] },
+    maxWidth: 400,
+  })));
+  expect(extent.kind).toBe('paragraph');
+  expect(extent.lines.length).toBeGreaterThan(0);
+  const primitives = paint(config.fontChains, 'Calibri', text);
+  expect(primitives.length).toBeGreaterThan(0);
+  expect(primitives.every((primitive: { kind: string }) => primitive.kind === 'glyphRun')).toBe(true);
 });
