@@ -382,9 +382,10 @@ pub(super) fn patch_tables(
         }
         for (at, (before, after)) in before.iter().zip(after).enumerate() {
             let old_cells = stories(before)?;
-            if old_cells != stories(after)?
+            let new_cells = stories(after)?;
+            if !new_cells.iter().all(|story| old_cells.contains(story))
                 || named(&old_xml[old_rows[at].clone()], "w:tc")?.len() != old_cells.len()
-                || named(&new_xml[new_rows[at].clone()], "w:tc")?.len() != old_cells.len()
+                || named(&new_xml[new_rows[at].clone()], "w:tc")?.len() != new_cells.len()
             {
                 return None;
             }

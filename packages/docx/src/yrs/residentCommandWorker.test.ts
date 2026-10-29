@@ -1872,7 +1872,7 @@ test('worker moveEmbed save and reopen retain one drawing and its relationship',
   const reopened = new ResidentEngineWorkerClient(startWorker(8302));
   try {
     const original = engine.storySegments('body').filter(s => s.kind === 'embed');
-    expect(original.every(s => s.kind === 'embed' && s.payload.docPr === undefined)).toBe(true);
+    expect(original.map(s => s.kind === 'embed' && s.payload.docPr)).toEqual([expect.objectContaining({ docPrId: '9', name: 'Picture' })]);
     const frame = applyFrameDeltaOwned(null, decodeFrameDelta(initial.frame.payload.frame));
     const glyphs = frame.displayList.pages[0]!.primitives.filter(p => p.kind === 'glyphRun' || p.kind === 'text');
     const box = displayPrimitiveRect(glyphs[glyphs.length - 1]!);
@@ -3852,4 +3852,58 @@ test('worker geometry exposes picture rotation for resize admission', async () =
   try {
     expect(initial.frame.payload.geometry!.objects.find(object => object.kind === 'image')).toMatchObject({ rotation: 90 });
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('an edit in a script without a fallback face in the requirements hints the host once until it asks again', async () => {
+  const { worker, client } = await openWorker();
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = (event) => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  const scripts = async () => (JSON.parse(await client.fontRequirements(LAYOUT)) as { scripts?: string[] }[])
+    .flatMap(({ scripts }) => scripts ?? []);
+  try {
+    expect(await scripts()).toEqual([]);
+    await client.edit(intent(1, 0, 'insertText', { text: 'abc \u00e9' }));
+    expect(hints).toEqual([]);
+    await client.edit(intent(2, 1, 'insertText', { text: '\u65e5\u672c\u8a9e' }));
+    expect(hints).toEqual([{ session: 'd1-command-worker', incarnation: 1, epoch: 1 }]);
+    await client.edit(intent(3, 2, 'insertText', { text: '\u304b\u306a' }));
+    expect(hints).toHaveLength(1);
+    expect(await scripts()).toContain('cjk-jp');
+    await client.edit(intent(4, 3, 'insertText', { text: '\ud55c' }));
+    expect(hints).toHaveLength(2);
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('showing hidden text in a script without a fallback face hints, and requirements follow the shown text', async () => {
+  const { worker, client } = await openWorker({ bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r>' +
+    '<w:r><w:rPr><w:vanish/></w:rPr><w:t>\u304b\u306a</w:t></w:r></w:p>',
+  });
+  const hints: unknown[] = [];
+  const receive = worker.onmessage!;
+  worker.onmessage = (event) => {
+    if (event.data.ok && event.data.fontRequirementsHint) hints.push(event.data.fontRequirementsHint);
+    receive(event);
+  };
+  const scripts = async () => (JSON.parse(await client.fontRequirements(LAYOUT)) as { scripts?: string[] }[])
+    .flatMap(({ scripts }) => scripts ?? []);
+  try {
+    expect(await scripts()).toEqual([]);
+    await client.edit(intent(1, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: true } as never));
+    expect(hints).toHaveLength(1);
+    expect(await scripts()).toContain('cjk-jp');
+    await client.edit(intent(2, 0, 'setRenderEnvironment', { themeColors: { accent1: 'FF0000' }, showHiddenText: true } as never));
+    expect(hints).toHaveLength(1);
+    await client.edit(intent(3, 0, 'setRenderEnvironment', { themeColors: {}, showHiddenText: false } as never));
+    expect(hints).toHaveLength(2);
+    expect(await scripts()).toEqual([]);
+  } finally {
+    client.destroy();
+  }
 }, TIMEOUT);

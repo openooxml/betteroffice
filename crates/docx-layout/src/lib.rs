@@ -851,13 +851,10 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 #[wasm_bindgen]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
     module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
-        return Ok(base);
-    };
     with_measure_fonts(|store| {
         store
             .borrow_mut()
-            .register_substitute(ooxml_text::FontId::from_u32(base), requested)
+            .register_named_substitute(ooxml_text::FontId::from_u32(base), requested_family)
             .map(|id| id.to_u32())
             .map_err(|e| JsValue::from_str(&e.to_string()))
     })
@@ -937,12 +934,17 @@ pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
 }
 
 /// Reads what measurement font `id` measures with: the bytes it shapes and a descriptor of the
-/// metrics and advance scale layered over them. `None` for an id the store does not hold.
+/// metrics, fallback advance scale and widths layered over them. `None` for an unknown id.
 pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Option<T> {
     with_measure_fonts(|store| {
         let store = store.borrow();
         let (bytes, metrics, scale) = store.measured_face(ooxml_text::FontId::from_u32(id)).ok()?;
-        Some(read(bytes, &format!("{metrics:?}/{scale}")))
+        let widths = store.family_widths(ooxml_text::FontId::from_u32(id)).ok()?;
+        let descriptor = match widths {
+            Some(widths) => format!("{metrics:?}/{scale}/{widths:?}"),
+            None => format!("{metrics:?}/{scale}"),
+        };
+        Some(read(bytes, &descriptor))
     })
 }
 
@@ -959,7 +961,66 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// string error avoids constructing a wasm `JsValue` when the editing engine
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
-    with_measure_fonts(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+    let envelope: serde_json::Value =
+        serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    let mut input: ooxml_text::measure::MeasureInput =
+        serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    input.compat.space_shrink_limit =
+        Some(docx_space_shrink_limit(&envelope["compat"], &input.block));
+    let extent = with_measure_fonts(|store| {
+        ooxml_text::measure::measure_paragraph(&store.borrow(), &input)
+            .map_err(|error| error.to_string())
+    })?;
+    serde_json::to_string(&extent).map_err(|error| format!("invalid: serialize: {error}"))
+}
+
+pub(crate) fn docx_space_shrink_limit(
+    compat: &serde_json::Value,
+    block: &ooxml_text::measure::BlockIn,
+) -> f32 {
+    let attrs = block.attrs.as_ref();
+    let runs = &block.runs;
+    let has_text = runs.iter().any(|run| {
+        run.kind != "lineBreak"
+            && run
+                .text
+                .as_deref()
+                .or(run.fallback.as_deref())
+                .is_some_and(|text| !text.is_empty())
+    });
+    let measured_latin = !attrs.is_some_and(|attrs| {
+        attrs.bidi
+            || attrs
+                .justification_mode
+                .as_deref()
+                .is_some_and(|mode| mode != "both")
+    }) && runs.iter().all(|run| {
+        let text = run
+            .text
+            .as_deref()
+            .or(run.fallback.as_deref())
+            .unwrap_or("");
+        if has_text && (run.kind == "lineBreak" || text.is_empty()) {
+            return true;
+        }
+        !run.rtl
+            && run.kind != "lineBreak"
+            && text.chars().all(|ch| {
+                ch <= '\u{024f}'
+                    || ch.is_whitespace()
+                    || ('\u{0300}'..='\u{036f}').contains(&ch)
+                    || ('\u{1ab0}'..='\u{1aff}').contains(&ch)
+                    || ('\u{1dc0}'..='\u{1dff}').contains(&ch)
+                    || ('\u{2000}'..='\u{206f}').contains(&ch)
+                    || ('\u{20d0}'..='\u{20ff}').contains(&ch)
+                    || ('\u{fe20}'..='\u{fe2f}').contains(&ch)
+            })
+    });
+    if !measured_latin || compat["compatibilityMode"].as_u64().unwrap_or(12) >= 15 {
+        0.25
+    } else {
+        0.0
+    }
 }
 
 /// Typed form of [`measure_paragraph_json_resident`] against the same font
@@ -1035,10 +1096,10 @@ mod tests {
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
     #[test]
-    fn plain_faces_and_segoe_substitute_views_keep_separate_advance_scales() {
+    fn plain_faces_and_segoe_substitute_views_keep_separate_widths() {
         clear_measure_fonts();
         let base = register_measure_font_bytes(LIBERATION_SANS).unwrap();
-        for (family, expected) in [("Segoe UI Light", 0.949), ("Segoe UI Semilight", 0.976)] {
+        for family in ["Segoe UI Light", "Segoe UI Semilight"] {
             let view = register_substitute_measure_font(base, family).unwrap();
             assert_ne!(view, base);
             with_measure_fonts(|store| {
@@ -1049,12 +1110,87 @@ mod tests {
                         .unwrap(),
                     1.0
                 );
-                let scale = store
-                    .advance_scale(ooxml_text::FontId::from_u32(view))
+                let metrics = ooxml_text::family_metrics::family_metrics(
+                    &family.to_lowercase(),
+                    false,
+                    false,
+                )
+                .unwrap();
+                let expected = ooxml_text::family_metrics::family_advance(metrics, 'm').unwrap();
+                let advance = store
+                    .advance_width(ooxml_text::FontId::from_u32(view), 'm')
+                    .unwrap()
                     .unwrap();
-                assert!((scale - expected).abs() < 1e-6);
+                let upem = store
+                    .metrics(ooxml_text::FontId::from_u32(view))
+                    .unwrap()
+                    .units_per_em;
+                assert!((advance / f32::from(upem) - expected).abs() < 1e-6);
             });
         }
+        clear_measure_fonts();
+    }
+
+    #[test]
+    fn arial_narrow_substitute_measures_paragraphs_at_its_table_widths() {
+        clear_measure_fonts();
+        let base = register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        let view = register_substitute_measure_font(base, "Arial Narrow").unwrap();
+        assert_ne!(view, base);
+        let text = "the quick brown fox jumps over minimum widths";
+        let width = |font| {
+            let input = serde_json::json!({
+                "block": {
+                    "kind": "paragraph",
+                    "runs": [{"kind": "text", "text": text, "fontFamily": "Arial Narrow"}]
+                },
+                "maxWidth": 1000.0,
+                "fontChains": {"arial narrow|0|0": [font]},
+                "defaults": {"fontSize": 12.0, "fontFamily": "Arial Narrow"}
+            });
+            let output = measure_paragraph_json_resident(&input.to_string()).unwrap();
+            let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(output["lines"].as_array().unwrap().len(), 1);
+            output["lines"][0]["width"].as_f64().unwrap()
+        };
+        let metrics =
+            ooxml_text::family_metrics::family_metrics("arial narrow", false, false).unwrap();
+        let expected = text
+            .chars()
+            .map(|ch| ooxml_text::family_metrics::family_advance(metrics, ch).unwrap())
+            .sum::<f32>()
+            * 16.0;
+        let measured = width(view);
+        let base_width = width(base);
+        assert!((measured - f64::from(expected)).abs() < 1e-3);
+        assert!((measured / base_width - 0.82).abs() < 0.01);
+        clear_measure_fonts();
+    }
+
+    #[test]
+    fn measurement_face_descriptors_distinguish_width_tables() {
+        clear_measure_fonts();
+        let base = register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        let view = register_substitute_measure_font(base, "Arial Narrow").unwrap();
+        let scaled = with_measure_fonts(|store| {
+            let mut store = store.borrow_mut();
+            let view = ooxml_text::FontId::from_u32(view);
+            let mut requested =
+                ooxml_text::word_fonts::requested_line_metrics("Arial Narrow").unwrap();
+            requested.advance_scale = store.advance_scale(view).unwrap();
+            let scaled = store
+                .register_substitute(ooxml_text::FontId::from_u32(base), requested)
+                .unwrap();
+            assert_eq!(
+                store.measured_face(view).unwrap(),
+                store.measured_face(scaled).unwrap()
+            );
+            scaled.to_u32()
+        });
+        assert_ne!(
+            with_measure_face(view, |_, descriptor| descriptor.to_owned()).unwrap(),
+            with_measure_face(scaled, |_, descriptor| descriptor.to_owned()).unwrap()
+        );
         clear_measure_fonts();
     }
 

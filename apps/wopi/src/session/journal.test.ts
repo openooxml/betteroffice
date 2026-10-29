@@ -7,7 +7,7 @@ import { initEngines } from "../replica/engines";
 import { openFreshClient, openTestClient, sourceBytes } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../../test/session/harness";
 import { FileJournal } from "./journal";
-import { FileSession } from "./fileSession";
+import { FileSession, LOCK_LEASE_MS } from "./fileSession";
 import { SessionRegistry } from "./registry";
 import type { Format } from "../replica/replica";
 
@@ -60,6 +60,7 @@ describe("FileJournal", () => {
       const session = [...h.registry.list()][0]!;
       const client = await openTestClient(a.joinPayload, sourceBytes(format), 93001);
       try {
+        expect(session.baselineGeneration).toBe(1);
         client.edit("saved-edit ", 0);
         session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
         await h.clock.advance(30000);
@@ -73,6 +74,7 @@ describe("FileJournal", () => {
         const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
         const session2 = [...registry2.list()][0]!;
         try {
+          expect(session2.baselineGeneration).toBe(2);
           expect(session2.replayStats?.rejected).toBe(0);
           expect(session2.replayStats?.accepted).toBeGreaterThan(0);
           expect(session2.dirty).toBe(true);
@@ -386,6 +388,154 @@ describe("FileJournal", () => {
 });
 
 describe("journal durability regressions", () => {
+  test("a fresh writer flushes a broken journal from hold without accepting new updates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness();
+    const expiresAt = h.clock.t + 1000;
+    addToken(h, "tok-a", "user-a", { expiresAt });
+    addToken(h, "tok-b", "user-b");
+    let unavailable = true;
+    const fetch = h.host.fetch.bind(h.host);
+    h.host.fetch = async (request) => {
+      if (unavailable && request.headers.get("X-WOPI-Override") === "PUT") return new Response(null, { status: 500 });
+      return fetch(request);
+    };
+    let failing = false;
+    const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC), {
+      write: (fd, buffer, offset, length) => failing ? 0 : writeSync(fd, buffer, offset, length),
+    });
+    const session = new FileSession({
+      hostClient: h.hostClient, hostId: "testhost", wopiSrc: SRC,
+      fileKey: SessionRegistry.fileKey("testhost", SRC), instanceId: "journal-return-test",
+      journal, logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await session.join({ wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: expiresAt, mode: "edit" });
+    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 96041);
+    const failures: unknown[] = [];
+    const writable: unknown[] = [];
+    session.on("saveFailed", (event) => failures.push(event));
+    session.on("writable", (event) => writable.push(event));
+    try {
+      failing = true;
+      client.edit("unjournaled-held-edit ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+      expect(journal.read()?.updates).toEqual([]);
+      await h.clock.drain();
+      expect(h.putCount()).toBe(1);
+      expect(failures).toEqual([{ kind: "server" }]);
+      expect(session.dirty).toBe(true);
+      await h.clock.advance(1000);
+      expect(a.user.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(session.awaitingFlushToken).toBe(true);
+      expect(session.state).toBe("open");
+
+      unavailable = false;
+      const b = await session.join({ wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(b.user.canWrite).toBe(true);
+      expect(b.file.canWrite).toBe(false);
+      expect(b.file.readOnly).toBe(true);
+      expect(b.viewOnlyReason).toBe("journalBroken");
+      expect(session.journalBroken).toBe(true);
+      expect(session.viewOnlyReason).toBe("journalBroken");
+      expect(writable).toEqual([]);
+      expect(session.awaitingFlushToken).toBe(false);
+      expect(session.dirty).toBe(false);
+      expect(h.callsFor("REFRESH_LOCK").map((call) => call.token)).toEqual(["tok-b"]);
+      expect(h.callsFor("PUT").map((call) => call.token)).toEqual(["tok-a", "tok-b"]);
+      const returning = await openTestClient(b.joinPayload, sourceBytes("xlsx"), 96042);
+      try {
+        returning.edit("blocked-returning-edit ", 1);
+        expect(session.applyUpdate(b.user.id, returning.encodeStateAsUpdate(session.replica!.encodeStateVector()))).toEqual({ accepted: false, reason: "user is read only" });
+        expect(session.dirty).toBe(false);
+      } finally {
+        returning.destroy();
+      }
+      const fresh = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 96043);
+      try {
+        expect(fresh.contains("unjournaled-held-edit")).toBe(true);
+        expect(fresh.contains("blocked-returning-edit")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+      await session.leave(b.user.id);
+      expect(h.callsFor("UNLOCK").map((call) => call.token)).toEqual(["tok-b"]);
+      expect(session.state).toBe("closed");
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+
+  test("a broken journal retains update refusal while a save crossing lease expiry recovers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const h = makeHarness({ refreshStatus: () => 500 });
+    addToken(h, "tok-a", "user-a");
+    let failing = false;
+    const journal = new FileJournal(dir, SessionRegistry.fileKey("testhost", SRC), {
+      write: (fd, buffer, offset, length) => failing ? 0 : writeSync(fd, buffer, offset, length),
+    });
+    const session = new FileSession({
+      hostClient: h.hostClient, hostId: "testhost", wopiSrc: SRC,
+      fileKey: SessionRegistry.fileKey("testhost", SRC), instanceId: "journal-lease-test",
+      journal, logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await session.join({ wopiSrc: SRC, accessToken: "tok-a", accessTokenTtl: 0, mode: "edit" });
+    const client = await openTestClient(a.joinPayload, sourceBytes("xlsx"), 96021);
+    let releaseSave: () => void = () => {};
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    let enteredSave: () => void = () => {};
+    const saveEntered = new Promise<void>((resolve) => { enteredSave = resolve; });
+    const replica = session.replica!;
+    const save = replica.save.bind(replica);
+    const writable: unknown[] = [];
+    session.on("writable", (event) => writable.push(event));
+    try {
+      const deadline = h.clock.t + LOCK_LEASE_MS;
+      while (h.clock.t < deadline - 1000) {
+        session.heartbeat(a.user.id);
+        await h.clock.advance(Math.min(30000, deadline - 1000 - h.clock.t));
+      }
+      replica.save = async () => {
+        enteredSave();
+        await saveGate;
+        return save();
+      };
+      failing = true;
+      client.edit("unjournaled-lease-edit ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
+      await saveEntered;
+      expect(journal.read()?.updates).toEqual([]);
+      session.heartbeat(a.user.id);
+      await h.clock.advance(1001);
+      expect(session.lockHeld).toBe(false);
+      expect(session.viewOnlyReason).toBe("journalBroken");
+      releaseSave();
+      await h.clock.drain();
+      expect(h.putCount()).toBe(0);
+      expect(session.dirty).toBe(true);
+      await h.clock.advance(30000);
+      expect(session.lockHeld).toBe(true);
+      expect(session.dirty).toBe(false);
+      expect(session.journalBroken).toBe(true);
+      expect(session.viewOnlyReason).toBe("journalBroken");
+      expect(writable).toEqual([]);
+      client.edit("blocked-after-journal-recovery ", 1);
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(false);
+      expect(h.putCount()).toBe(1);
+      const fresh = await openFreshClient("xlsx", h.host.files.get("file1")!.bytes, 96022);
+      try {
+        expect(fresh.contains("unjournaled-lease-edit")).toBe(true);
+        expect(fresh.contains("blocked-after-journal-recovery")).toBe(false);
+      } finally {
+        fresh.destroy();
+      }
+    } finally {
+      releaseSave();
+      client.destroy();
+      await session.close();
+    }
+  });
+
   test("opening a journal truncates a torn tail before appending recoverable records", () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const journal = new FileJournal(dir, "torn-tail");

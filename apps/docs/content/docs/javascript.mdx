@@ -225,6 +225,21 @@ Reads project pending paragraph-mark revisions as if accepted in the accepted
 view or rejected in the original view. Joined paragraphs keep the following
 paragraph's id. Edits still refuse pending paragraph-mark revisions.
 
+An atom whose embed is a drawing carries `drawing`: the drawing's own `wp:docPr`
+properties (`docPrId`, `name`, `title` and `descr`, each null when the attribute
+is absent or empty, plus `hidden` and `decorative`), its `placement` (`inline`
+or `anchor`) and its `type` (`picture`, `shape`, `textBox`, `group`, `chart`,
+`diagram` or `other`). Content-control atoms carry `drawings` when nonempty,
+listing the same properties in document order, including nested controls and
+hyperlinks, projected to the requested revision view;
+drawings inside field results are not listed, except drawings in a tracked
+change inside a complex field's result, which reads treat as content beside the
+field, inside or outside a control.
+Structured export image and unsupported inlines carry
+the same object as `drawing`, null when the drawing has none, and an image
+inline's `altText` is its `descr`, falling back to its `title`. Sessions seeded
+before these fields existed read them as absent until the document is reseeded.
+
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
 the current version. An overlay may render during a pending layout with that and
 `context.snapshot.layout` null, its `geometry` prop then being the previous
@@ -246,6 +261,37 @@ preview the pixels show.
 A target in a header or footer has fragments on every built page that paints it
 and its anchor on the first; one that no laid-out page paints, built or not, is
 `missing-target` once the layout is complete.
+A `{ kind: 'drawing', paragraph, offset }` target answers with the drawn frame
+box of the drawing atom at `offset` in that paragraph, the UTF-16 atom offset a
+story read reports, on every page that paints it, with the first frame as its
+`anchor`. Add `index` to address the zero-based entry of `drawings` from an
+accepted-view read on a content-control atom at that offset: `{ kind: 'drawing', paragraph, offset, index: 0 }`.
+An index outside that list or on another atom is `missing-target`.
+An offset that is not on a drawing atom is `missing-target`, and so
+is a drawing no page paints once the layout is complete; while a page that may
+hold it is not laid out yet it is `layout-unavailable`. A picture's `title`,
+`descr` and `placement` follow edits to its alt text and wrapping. Find a tagged picture
+from a story read, then ask for its frame (`anchorFor` stands for however the
+plugin builds the paragraph anchor it passes to `paragraph` and `search` targets):
+
+```ts
+const stories = await context.read.readStories({ view: 'accepted' });
+for (const story of stories.ok ? stories.stories : []) {
+  if (!story.ok) continue;
+  for (const paragraph of story.paragraphs) {
+    for (const atom of paragraph.atoms) {
+      const drawing = atom.drawing;
+      if (!drawing || ![drawing.name, drawing.title, drawing.descr].some((value) => value?.includes('template-marker'))) continue;
+      const frame = context.geometry?.getAnchorGeometry({
+        kind: 'drawing',
+        paragraph: anchorFor(story.story, paragraph.paraId),
+        offset: atom.offset,
+      });
+      if (frame?.ok) console.log(drawing.name, frame.anchor);
+    }
+  }
+}
+```
 A plugin's `reservations(context)` returns `{ version, items }`: inline boxes,
 blocks beside a paragraph and hidden ranges, in pixels at zoom 1, which the editor
 lays out without painting and saves and paged exports leave out;
@@ -430,6 +476,8 @@ and a refused edit batch returned as-is reaches the caller unchanged.
 `readContent` includes effective `list` facts on story paragraphs, including inherited
 bullets and numbered markers. Slides include `title`, `hidden` and `layout` (name and
 type); unavailable facts are `null`. These fields are optional for older engines.
+Slides also include `headerFooter` with visible slide footer, slide number and date
+placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
@@ -731,6 +779,9 @@ const saved = deck.save();
 
 A story reads as its paragraphs joined by `\n`, with story-local UTF-16 offsets;
 the read reports each paragraph's span, soft line breaks and field results.
+Each shape at every depth also reports its alternative text: `title` and
+`description` from its non-visual properties when non-empty, and
+`decorative: true` when it carries the decorative extension.
 Steps insert, replace and delete text within one paragraph, format and align
 text, replace speaker notes, and set a top-level shape's rectangle, fill or
 outline. Fields and soft line breaks are never replaced or deleted. Ids and

@@ -17,7 +17,8 @@ import { cn } from '../../lib/utils';
 import { useFixedDropdown } from '../../hooks/useFixedDropdown';
 import { useTranslation } from '../../i18n';
 import { useDisabledDescription } from './disabledDescription';
-import type { TranslationKey } from '@betteroffice/docx-i18n';
+import { createT, en } from '@betteroffice/docx-i18n';
+import type { TFunction, TranslationKey } from '@betteroffice/docx-i18n';
 
 // ============================================================================
 // TYPES
@@ -285,9 +286,9 @@ export function isValidAlignment(value: string): value is ParagraphAlignment {
 /**
  * Get alignment label from value
  */
-export function getAlignmentLabel(value: ParagraphAlignment): string {
+export function getAlignmentLabel(value: ParagraphAlignment, t: TFunction = createT(en)): string {
   const option = ALIGNMENT_OPTIONS.find((opt) => opt.value === value);
-  return option?.label || 'Left';
+  return option ? t(option.labelKey) : t('alignment.left');
 }
 
 /**

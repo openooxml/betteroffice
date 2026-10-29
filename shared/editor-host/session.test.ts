@@ -10,4 +10,8 @@ describe("editor host session", () => {
       Uint8Array.of(7)
     );
   });
+
+  test("an unfinished save uses the host's translated message", () => {
+    expect(() => savedBytes(null, null, "Der Editor öffnet die Datei noch.")).toThrow("Der Editor öffnet die Datei noch.");
+  });
 });

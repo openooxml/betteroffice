@@ -12,6 +12,7 @@ import {
 } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../../test/session/harness";
 import { decodeJoinPayload, type EncodedJoinPayload } from "../sessionApi";
+import { BASELINE_GENERATION_PROTOCOL } from "../baseline";
 import {
   decodeMessages,
   encodeAwarenessFrame,
@@ -86,11 +87,13 @@ async function joinPage(s: Setup, token: string, mode: "edit" | "view" = "edit",
   return (JSON.parse(match![1]!) as { sessionHandle: string }).sessionHandle;
 }
 
-async function hydrate(s: Setup, handle: string, clientId: number): Promise<TestClient> {
+type HydratedClient = TestClient & { baselineGeneration: number };
+
+async function hydrate(s: Setup, handle: string, clientId: number): Promise<HydratedClient> {
   const headers = { Authorization: `Bearer ${handle}` };
   const source = new Uint8Array(await (await fetch(`${s.base}/api/session/source`, { headers })).arrayBuffer());
-  const join = (await (await fetch(`${s.base}/api/session/join`, { headers })).json()) as EncodedJoinPayload;
-  return openTestClient(decodeJoinPayload(join), source, clientId);
+  const join = (await (await fetch(`${s.base}/api/session/join`, { headers })).json()) as EncodedJoinPayload & { baselineGeneration: number };
+  return Object.assign(await openTestClient(decodeJoinPayload(join), source, clientId), { baselineGeneration: join.baselineGeneration });
 }
 
 async function waitFor(fn: () => boolean, label: string): Promise<void> {
@@ -139,8 +142,8 @@ class FrameClient {
     frameClients.push(this);
   }
 
-  static async connect(s: Setup, handle: string, client: TestClient, sequenced = false): Promise<FrameClient> {
-    const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle, `bo-wopi.generation.${s.h.registry.list()[0]!.baselineGeneration}`]);
+  static async connect(s: Setup, handle: string, client: HydratedClient, sequenced = false): Promise<FrameClient> {
+    const ws = new WebSocket(`${s.wsBase}/collab`, ["bo-wopi.v1", handle, `${BASELINE_GENERATION_PROTOCOL}${client.baselineGeneration}`]);
     const frameClient = new FrameClient(client, ws);
     await new Promise<void>((resolve, reject) => {
       ws.addEventListener("open", () => resolve(), { once: true });
@@ -192,6 +195,43 @@ async function expectNoTokens(s: Setup, extra: string[] = []): Promise<void> {
 }
 
 describe("collab relay", () => {
+  test("a socket delayed past source replacement is refused before attaching", async () => {
+    const s = setup("pptx");
+    const handle = await joinPage(s, "SECRETTOKEN-relay-view-444", "view");
+    const staleClient = await hydrate(s, handle, 907001);
+    const session = s.h.registry.list()[0]!;
+    const external = await openFreshClient("pptx", sourceBytes("pptx"), 907101);
+    cleanups.push(() => staleClient.destroy(), () => external.destroy(), () => session.abandon());
+    external.edit("delayed-replacement ", 0);
+    const file = s.h.host.files.get("file1")!;
+    file.bytes = await external.save();
+    file.itemVersion = "2";
+    const writerHandle = await joinPage(s, TOKENS[0]!);
+    const connect = spyOn(session, "connect");
+    try {
+      const stale = await FrameClient.connect(s, handle, staleClient);
+      await waitFor(() => stale.closeCode !== null, "delayed source rejoin close");
+      expect(stale.closeCode).toBe(4409);
+      expect(stale.closeReason).toBe("rejoin from source");
+      expect(connect).not.toHaveBeenCalled();
+      expect(staleClient.contains("delayed-replacement")).toBe(false);
+
+      const current = await hydrate(s, handle, 907201);
+      expect(current.baselineGeneration).toBe(staleClient.baselineGeneration + 1);
+      const viewer = await FrameClient.connect(s, handle, current);
+      const writer = await FrameClient.connect(s, writerHandle, await hydrate(s, writerHandle, 907301));
+      cleanups.push(() => current.destroy(), () => writer.client.destroy());
+      expect(connect).toHaveBeenCalledTimes(2);
+      writer.editAndSend("delayed-live ", 1);
+      await waitFor(() => viewer.client.contains("delayed-live"), "current generation live edit");
+      expect(viewer.ws.readyState).toBe(WebSocket.OPEN);
+      expect(viewer.closeCode).toBeNull();
+      await expectNoTokens(s, [stale.closeReason]);
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
   for (const changed of ["version", "timestamp"] as const) {
     test(`source ${changed} replacement closes existing viewers with 4409 and new sockets stay open`, async () => {
       const s = setup("xlsx");
@@ -885,7 +925,7 @@ class WsTransport implements CollaborationTransport {
   listeners = new Set<(event: CollaborationTransportEvent) => void>();
   constructor(private url: string, private handle: string, private baselineGeneration: number) {}
   connect(): void {
-    const ws = new WebSocket(this.url, ["bo-wopi.v1", this.handle, `bo-wopi.generation.${this.baselineGeneration}`]);
+    const ws = new WebSocket(this.url, ["bo-wopi.v1", this.handle, `${BASELINE_GENERATION_PROTOCOL}${this.baselineGeneration}`]);
     this.ws = ws;
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => this.emit({ type: "open" }));
@@ -923,9 +963,8 @@ async function providerClient(
 ): Promise<{ provider: { connect(): void; destroy(): void; synced: boolean }; test: ProviderTestClient }> {
   const headers = { Authorization: `Bearer ${handle}` };
   const source = new Uint8Array(await (await fetch(`${s.base}/api/session/source`, { headers })).arrayBuffer());
-  const payload: JoinPayload = decodeJoinPayload(
-    (await (await fetch(`${s.base}/api/session/join`, { headers })).json()) as EncodedJoinPayload,
-  );
+  const join = (await (await fetch(`${s.base}/api/session/join`, { headers })).json()) as EncodedJoinPayload & { baselineGeneration: number };
+  const payload: JoinPayload = decodeJoinPayload(join);
   let replica: CollaborationReplica;
   let provider: { connect(): void; destroy(): void; synced: boolean };
   let wrapped: ProviderTestClient;
@@ -935,7 +974,7 @@ async function providerClient(
     session.openDocx(source.slice(), false);
     session.loadState(payload.initialUpdate.slice());
     replica = session as unknown as CollaborationReplica;
-    provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
+    provider = new DocxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, join.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => {
         const paragraphs = session.paragraphs("body");
@@ -950,7 +989,7 @@ async function providerClient(
     if (payload.format !== "xlsx") throw new Error("payload format");
     workbook.applyUpdate(payload.initialUpdate.slice());
     replica = workbook as unknown as CollaborationReplica;
-    provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
+    provider = new XlsxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, join.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => { workbook.editCell(0, 25 + slot, 0, marker); },
       contains: (marker) => {
@@ -962,7 +1001,7 @@ async function providerClient(
   } else {
     const presentation = openPresentation(source.slice(), { clientId, initialUpdate: payload.format === "pptx" ? payload.initialUpdate.slice() : undefined });
     replica = presentation as unknown as CollaborationReplica;
-    provider = new PptxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, s.h.registry.list()[0]!.baselineGeneration)) as never;
+    provider = new PptxProvider(replica as never, new WsTransport(`${s.wsBase}/collab`, handle, join.baselineGeneration)) as never;
     wrapped = {
       edit: (marker, slot = 0) => {
         const stories = presentation.snapshot().slides.flatMap((slide) => slide.shapes.flatMap((shape) => shape.textStories));

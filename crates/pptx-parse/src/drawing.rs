@@ -7,6 +7,7 @@ use ooxml_drawingml::{
 
 use crate::PptxError;
 use crate::custom_geometry::parse_custom_geometry;
+use crate::fmath;
 use crate::model::*;
 use crate::relationships::Relationship;
 use crate::theme::system_color_value;
@@ -664,7 +665,9 @@ fn fallback_shape(
         base: ShapeBase {
             id: (index + 1) as u32,
             name: format!("Diagram Shape {}", index + 1),
+            title: None,
             description: None,
+            decorative: false,
             hidden: false,
             placeholder: None,
             transform: ShapeTransform {
@@ -1197,15 +1200,36 @@ fn parse_base(non_visual: Option<&XmlElement>, transform: Option<&XmlElement>) -
             .and_then(|value| value.attribute("name"))
             .unwrap_or_default()
             .to_owned(),
+        title: common
+            .and_then(|value| value.attribute("title"))
+            .map(str::to_owned),
         description: common
             .and_then(|value| value.attribute("descr"))
             .map(str::to_owned),
+        decorative: common.is_some_and(is_decorative),
         hidden: common
             .and_then(|value| value.attribute("hidden"))
             .is_some_and(parse_bool),
         placeholder,
         transform: parse_transform(transform),
     }
+}
+
+fn is_decorative(common: &XmlElement) -> bool {
+    let Some(extensions) = common.child("extLst") else {
+        return false;
+    };
+    for extension in extensions.children_named("ext") {
+        if extension.attribute("uri") != Some("{C183D7F6-B498-43B3-948B-1728B52AA6E4}") {
+            continue;
+        }
+        for decorative in extension.children_named("decorative") {
+            if matches!(decorative.attribute("val"), Some("1" | "true")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn parse_placeholder(element: &XmlElement) -> Placeholder {
@@ -1303,7 +1327,7 @@ fn parse_adjust_values(
             let Some((width, height)) = extent else {
                 continue;
             };
-            width.min(height).powf(value.extent_power)
+            fmath::pow(width.min(height), value.extent_power)
         };
         let adjustment = value.value / denominator;
         if adjustment.is_finite() {
@@ -1399,14 +1423,14 @@ pub(crate) fn evaluate_guide_formula(
             ..*x
         },
         ("at2", [x, y]) => {
-            GuideValue::scalar(y.value.atan2(x.value).to_degrees() * ANGLE_UNITS_PER_DEGREE)
+            GuideValue::scalar(fmath::atan2(y.value, x.value).to_degrees() * ANGLE_UNITS_PER_DEGREE)
         }
         ("cat2", [x, y, z]) => GuideValue {
-            value: x.value * z.value.atan2(y.value).cos(),
+            value: x.value * fmath::cos(fmath::atan2(z.value, y.value)),
             ..*x
         },
         ("cos", [x, y]) => GuideValue {
-            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().cos(),
+            value: x.value * fmath::cos((y.value / ANGLE_UNITS_PER_DEGREE).to_radians()),
             ..*x
         },
         ("max", [x, y]) => {
@@ -1424,7 +1448,7 @@ pub(crate) fn evaluate_guide_formula(
             }
         }
         ("mod", [x, y, z]) => GuideValue {
-            value: x.value.hypot(y.value).hypot(z.value),
+            value: fmath::hypot(fmath::hypot(x.value, y.value), z.value),
             extent_power: additive_extent_power(&[*x, *y, *z]),
         },
         ("pin", [x, y, z]) => {
@@ -1437,11 +1461,11 @@ pub(crate) fn evaluate_guide_formula(
             }
         }
         ("sat2", [x, y, z]) => GuideValue {
-            value: x.value * z.value.atan2(y.value).sin(),
+            value: x.value * fmath::sin(fmath::atan2(z.value, y.value)),
             ..*x
         },
         ("sin", [x, y]) => GuideValue {
-            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().sin(),
+            value: x.value * fmath::sin((y.value / ANGLE_UNITS_PER_DEGREE).to_radians()),
             ..*x
         },
         ("sqrt", [x]) if x.value >= 0.0 => GuideValue {
@@ -1449,7 +1473,7 @@ pub(crate) fn evaluate_guide_formula(
             extent_power: x.extent_power / 2.0,
         },
         ("tan", [x, y]) => GuideValue {
-            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().tan(),
+            value: x.value * fmath::tan((y.value / ANGLE_UNITS_PER_DEGREE).to_radians()),
             ..*x
         },
         _ => return None,
