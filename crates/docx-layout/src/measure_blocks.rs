@@ -1714,6 +1714,8 @@ fn measure_paragraph_with_context(
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
+        let measured = crate::leading_inline_box::measurement_paragraph(paragraph);
+        let paragraph = measured.as_ref();
         let measure = |paragraph: &ParagraphBlock| {
             if !content_width.is_finite() || content_width <= 0.0 {
                 synthetic_paragraph_extent(paragraph, content_width)
@@ -1771,6 +1773,7 @@ fn measure_paragraph_with_context(
         extent
     });
     let mut extent = extent;
+    crate::leading_inline_box::restore_extent(paragraph, &mut extent);
     measure_horizontal_rules(paragraph, &mut extent);
     measure_rule_pictures(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
@@ -2003,6 +2006,13 @@ fn config_fingerprint(config: &MeasurementConfig) -> u64 {
 /// pictures at the tallest picture's height; the paragraph mark's font adds
 /// no room.
 fn measure_rule_pictures(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return;
+    }
     let rule_picture = |run: &crate::types::Run| match run {
         crate::types::Run::Image(image) if image.horizontal_rule == Some(true) => {
             (image.position.is_none()
@@ -4209,6 +4219,13 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     else {
         return extent_height(measure);
     };
+    if paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.leading_inline_box.is_some())
+    {
+        return extent.total_height;
+    }
     let non_empty: Vec<_> = paragraph
         .runs
         .iter()

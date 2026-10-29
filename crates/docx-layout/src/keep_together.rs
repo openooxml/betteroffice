@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::line_fit::{slice_fit_height, trailing_leading};
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::table_row_break::{RowBreaks, first_table_fragment_height};
@@ -41,6 +42,8 @@ struct KeepMember {
     after: f64,
     trailing: f64,
     leading: f64,
+    leading_tail: f64,
+    tail: f64,
     continuation: f64,
     next_split: usize,
     next_nonzero: usize,
@@ -79,6 +82,11 @@ impl<'a> KeepRun<'a> {
                 after,
                 trailing,
                 leading: paragraph_min_leading_slice(block, measure),
+                leading_tail: leading_slice_tail(block, measure),
+                tail: measure
+                    .lines
+                    .last()
+                    .map_or(0.0, |line| trailing_leading(block, line)),
                 continuation: before.max(owed) + trailing,
                 next_split: group.members.len(),
                 next_nonzero: group.members.len(),
@@ -136,7 +144,7 @@ impl<'a> KeepRun<'a> {
         every_cell_starts: bool,
         lead_skip: f64,
         fresh_lead_skip: f64,
-    ) -> Option<(f64, f64)> {
+    ) -> Option<(f64, f64, f64)> {
         let start = self.position;
         let end = self.members[start].next_split;
         let follower = if end < self.members.len() {
@@ -144,6 +152,22 @@ impl<'a> KeepRun<'a> {
         } else {
             self.group.follower
         };
+        let owed = self.members[end - 1].after;
+        let witness = if end < self.members.len() {
+            Some((
+                self.members[end].before.max(owed) + self.members[end].leading,
+                self.members[end].leading_tail,
+            ))
+        } else {
+            follower_contribution(
+                follower.and_then(|index| measured.get(index)),
+                owed,
+                capacity,
+                split_first_row,
+                every_cell_starts,
+            )
+        };
+        let terminal_leading = witness.map_or(self.members[end - 1].tail, |(_, tail)| tail);
         #[cfg(test)]
         if KEEP_REFERENCE.with(|reference| reference.get()) {
             let index = self.group.members[start];
@@ -190,20 +214,8 @@ impl<'a> KeepRun<'a> {
                 split_first_row,
                 every_cell_starts,
             ) - fresh_lead_skip;
-            return Some((current, fresh));
+            return Some((current, fresh, terminal_leading));
         }
-        let owed = self.members[end - 1].after;
-        let witness = if end < self.members.len() {
-            Some(self.members[end].before.max(owed) + self.members[end].leading)
-        } else {
-            follower_contribution(
-                follower.and_then(|index| measured.get(index)),
-                owed,
-                capacity,
-                split_first_row,
-                every_cell_starts,
-            )
-        };
         let head = &self.members[start];
         let measure = |first: f64, stop: bool| {
             let mut budget = 0.0;
@@ -219,8 +231,8 @@ impl<'a> KeepRun<'a> {
                 };
                 if stop
                     && member.nonnegative_suffix
-                    && witness.is_none_or(|height| height.is_finite() && height >= 0.0)
-                    && budget - fresh_lead_skip > capacity
+                    && witness.is_none_or(|(height, _)| height.is_finite() && height >= 0.0)
+                    && budget - fresh_lead_skip - terminal_leading > capacity
                 {
                     return None;
                 }
@@ -230,7 +242,7 @@ impl<'a> KeepRun<'a> {
                     position + 1
                 };
             }
-            Some(witness.map_or(budget, |height| budget + height))
+            Some(witness.map_or(budget - terminal_leading, |(height, _)| budget + height))
         };
         let fresh = measure(0.0 + head.trailing, true)? - fresh_lead_skip;
         if fresh > capacity {
@@ -238,7 +250,7 @@ impl<'a> KeepRun<'a> {
         }
         let current =
             measure(leading(head.before).max(deferred) + head.trailing, false)? - lead_skip;
-        Some((current, fresh))
+        Some((current, fresh, terminal_leading))
     }
 }
 
@@ -377,19 +389,23 @@ pub(crate) fn paragraph_can_split(block: &ParagraphBlock, measure: &ParagraphExt
 /// one. Placement and the keepNext witness both read this so they cannot
 /// disagree about how much of a follower must come along.
 pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphExtent) -> f64 {
-    let lines = if paragraph_is_unbreakable(block, measure) {
+    slice_fit_height(block, &measure.lines[..minimum_slice_lines(block, measure)])
+}
+
+fn minimum_slice_lines(block: &ParagraphBlock, measure: &ParagraphExtent) -> usize {
+    if paragraph_is_unbreakable(block, measure) {
         measure.lines.len()
     } else if paragraph_widow_control(block, measure) {
         WIDOW_CONTROL_MIN_LINES
     } else {
-        1
-    };
-    measure
-        .lines
-        .iter()
-        .take(lines)
-        .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-        .sum()
+        measure.lines.len().min(1)
+    }
+}
+
+fn leading_slice_tail(block: &ParagraphBlock, measure: &ParagraphExtent) -> f64 {
+    measure.lines[..minimum_slice_lines(block, measure)]
+        .last()
+        .map_or(0.0, |line| trailing_leading(block, line))
 }
 
 pub(crate) fn paragraph_min_trailing_slice(
@@ -474,6 +490,31 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
     }
 
     let follower = group.follower.and_then(|index| measured.get(index));
+    match follower_contribution(follower, owed, capacity, split_first_row, every_cell_starts) {
+        Some((witness, _)) => budget += witness,
+        None => {
+            if let Some(MeasuredBlock {
+                block: LayoutBlock::Paragraph(block),
+                measure: BlockExtent::Paragraph(measure),
+            }) = group.members.last().and_then(|&index| measured.get(index))
+            {
+                budget -= measure
+                    .lines
+                    .last()
+                    .map_or(0.0, |line| trailing_leading(block, line));
+            }
+        }
+    }
+    budget
+}
+
+fn follower_contribution(
+    follower: Option<&MeasuredBlock>,
+    owed: f64,
+    capacity: f64,
+    split_first_row: bool,
+    every_cell_starts: bool,
+) -> Option<(f64, f64)> {
     let witness = match follower.map(|mb| &mb.measure) {
         Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => {
             match follower.map(|mb| &mb.block) {
@@ -493,41 +534,13 @@ pub(crate) fn measure_keep_with_next_group_witnessing(
     };
     match follower.map(|mb| &mb.block) {
         Some(LayoutBlock::Paragraph(block)) => {
-            budget += get_spacing_before(block).max(owed) + witness
+            let tail = match follower.map(|mb| &mb.measure) {
+                Some(BlockExtent::Paragraph(measure)) => leading_slice_tail(block, measure),
+                _ => 0.0,
+            };
+            Some((get_spacing_before(block).max(owed) + witness, tail))
         }
-        _ if witness > 0.0 => budget += owed + witness,
-        _ => {}
-    }
-    budget
-}
-
-fn follower_contribution(
-    follower: Option<&MeasuredBlock>,
-    owed: f64,
-    capacity: f64,
-    split_first_row: bool,
-    every_cell_starts: bool,
-) -> Option<f64> {
-    let witness = match follower.map(|mb| &mb.measure) {
-        Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => {
-            match follower.map(|mb| &mb.block) {
-                Some(LayoutBlock::Paragraph(block)) => paragraph_min_leading_slice(block, p),
-                _ => p.lines[0].line_height,
-            }
-        }
-        Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
-            Some(LayoutBlock::Table(block)) => {
-                table_leading_slice(block, table, capacity, split_first_row, every_cell_starts)
-            }
-            _ => 0.0,
-        },
-        Some(BlockExtent::Image(image)) => image.height,
-        Some(BlockExtent::TextBox(text_box)) => text_box.height,
-        _ => 0.0,
-    };
-    match follower.map(|mb| &mb.block) {
-        Some(LayoutBlock::Paragraph(block)) => Some(get_spacing_before(block).max(owed) + witness),
-        _ if witness > 0.0 => Some(owed + witness),
+        _ if witness > 0.0 => Some((owed + witness, 0.0)),
         _ => None,
     }
 }

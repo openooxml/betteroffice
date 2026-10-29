@@ -2135,6 +2135,8 @@ struct FieldRunIn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
+    leading_inline_box: Option<crate::types::LeadingInlineBox>,
+    #[serde(default)]
     horizontal_rules: Vec<crate::types::HorizontalRule>,
     #[serde(default)]
     alignment: Option<String>,
@@ -6483,6 +6485,7 @@ fn authoritative_line_items<'a>(
     line: &LineIn,
     ctx: &RenderCtx<'_>,
     default_level: u8,
+    leading_inline_box: bool,
 ) -> Option<Vec<LinePaintItem<'a>>> {
     let mut slices: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> = Vec::new();
     if !line.bidi_slices.is_empty() {
@@ -6591,7 +6594,7 @@ fn authoritative_line_items<'a>(
                     run: image,
                     pm_start: image.pm_start,
                     pm_end: image.pm_end,
-                    single_image_line: item_count == 1,
+                    single_image_line: item_count == 1 && !leading_inline_box,
                     level,
                     logical_order,
                 });
@@ -6671,7 +6674,12 @@ fn emit_line(
         attrs.and_then(|attrs| attrs.auto_space_dn),
     );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
-    let authoritative_items = authoritative_line_items(block, line, ctx, default_bidi_level);
+    let leading_inline_box = geom.is_first_line
+        && attrs
+            .and_then(|attrs| attrs.leading_inline_box.as_ref())
+            .is_some();
+    let authoritative_items =
+        authoritative_line_items(block, line, ctx, default_bidi_level, leading_inline_box);
     let authoritative_active = authoritative_items.is_some();
     let authoritative_width = authoritative_items
         .as_ref()
@@ -7005,7 +7013,7 @@ fn emit_line(
                         run: imr,
                         pm_start: seg.pm_start,
                         pm_end: seg.pm_end,
-                        single_image_line: segments.len() == 1,
+                        single_image_line: segments.len() == 1 && !leading_inline_box,
                         level: default_bidi_level,
                         logical_order: None,
                     });
@@ -7319,7 +7327,9 @@ fn emit_line(
     // position, which is `pmStart + 1`. The fragment's own pmStart is the
     // paragraph boundary, and a caret cannot sit there — emitting it would land
     // every click and vertical move BEFORE the paragraph.
-    if !emitted_positioned_text {
+    if !emitted_positioned_text
+        && !(leading_inline_box && segments.is_empty() && !block.runs.is_empty())
+    {
         let pos = line_break_pos.or(geom.frag_pm_start.map(|p| p + 1));
         if let Some(p) = pos {
             let mut marker_attrs = block_ref.attrs();

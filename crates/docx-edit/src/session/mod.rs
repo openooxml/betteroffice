@@ -12,10 +12,15 @@ use crate::{EngineSession, UndoSession};
 pub use self::error::{EngineError, EngineErrorKind, EngineResult};
 pub use self::host::Host;
 
+pub(crate) mod args;
+mod controls;
 mod crdt;
 mod error;
 mod host;
 mod open;
+mod raw;
+mod tables;
+mod text;
 
 #[cfg(test)]
 mod tests;

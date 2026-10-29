@@ -192,10 +192,9 @@ describe('CI runner routing', () => {
       'ci.yml python': ['kyora-4x8'],
       'ci.yml route': ['kyora-4x8'],
       'e2e.yml route': ['kyora-4x8'],
-      'e2e.yml scenarios (Corpus scenarios)': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (1/3))': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (2/3))': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (3/3))': ['kyora-8x8'],
+      'e2e.yml corpus': ['kyora-8x8'],
+      'e2e.yml browser-build': ['kyora-8x8'],
+      'e2e.yml browser': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
     expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);
@@ -244,7 +243,7 @@ describe('CI runner routing', () => {
       }
       for (const entry of routed) {
         expect(readers.get(entry.name), entry.name).toHaveLength(1);
-        expect(entry.job.needs, entry.name).toBe('route');
+        expect([entry.job.needs].flat()[0], entry.name).toBe('route');
         // A failed router must not skip a required job, which would count as passed.
         expect(entry.job.if, entry.name).toBe('${{ !cancelled() }}');
       }

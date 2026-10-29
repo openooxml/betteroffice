@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import type { CollaborationReplica } from '../collaboration/types';
-import { XlsxDocument } from './generated/xlsx_wasm.js';
+import initGlue, { XlsxDocument } from './generated/xlsx_wasm.js';
 import { initWasm, openWorkbook } from './loader';
 import type { WorkbookHandle, WorkbookUpdateOrigin } from './loader';
 
@@ -32,7 +32,11 @@ function requireReplica(replica: CollaborationReplica): CollaborationReplica {
 }
 
 describe('wasm collaboration', () => {
-  beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(async () => {
+    const bytes = new Uint8Array(readFileSync(WASM));
+    await initGlue({ module_or_path: bytes });
+    await initWasm(bytes);
+  });
 
   it('opens explicit and generated replicas and validates client IDs', () => {
     expect(() => openWorkbook(sampleBytes(), { clientId: 1 })).toThrow(
