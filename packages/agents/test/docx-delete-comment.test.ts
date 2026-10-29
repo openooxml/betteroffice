@@ -276,7 +276,6 @@ test('delete_comment keeps the registered empty parts of a session-created last 
   const before = await JSZip.loadAsync(await doc.export());
   await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: added.results[0].comment! }] });
   const bytes = await doc.export();
-  const zip = await JSZip.loadAsync(bytes);
   expect(await part(bytes, 'word/comments.xml')).toBe((await before.file('word/comments.xml')!.async('string')).replace(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g, ''));
   for (const [name, prefix] of COMMENT_COMPANIONS) {
     expect(await part(bytes, `word/${name}.xml`)).toBe((await before.file(`word/${name}.xml`)!.async('string')).replace(new RegExp(`<${prefix}:[^ />]+\\b[^>]*\\/>`, 'g'), ''));
@@ -314,9 +313,12 @@ for (const companions of [[], ['commentsExtended'], COMMENT_COMPANIONS.map(([nam
       const saved = await JSZip.loadAsync(bytes);
       before.file('word/comments.xml', comments.replace(removed, ''));
       const document = await before.file('word/document.xml')!.async('string');
+      const removedReference = document.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)!
+        .find(run => run.includes(`<w:commentReference w:id="${id}"`))!;
+      expect(removedReference).not.toContain('<w:t');
       before.file('word/document.xml', document
         .replace(new RegExp(`<w:commentRange(?:Start|End)\\b[^>]*w:id="${id}"[^>]*/>`, 'g'), '')
-        .replace(new RegExp(`<w:r>(?:<w:rPr>[\\s\\S]*?</w:rPr>)?<w:commentReference w:id="${id}"\\s*/></w:r>`, 'g'), ''));
+        .replace(removedReference, ''));
       for (const [name, prefix] of COMMENT_COMPANIONS) {
         const file = before.file(`word/${name}.xml`);
         if (!file) continue;
@@ -328,7 +330,7 @@ for (const companions of [[], ['commentsExtended'], COMMENT_COMPANIONS.map(([nam
       const paths = Object.keys(before.files).filter(path => !before.files[path].dir).sort();
       expect(Object.keys(saved.files).filter(path => !saved.files[path].dir).sort()).toEqual(paths);
       for (const path of paths) {
-        expect(await saved.file(path)!.async('uint8array')).toEqual(await before.file(path)!.async('uint8array'));
+        expect(await saved.file(path)!.async('uint8array'), path).toEqual(await before.file(path)!.async('uint8array'));
       }
       expect((await open(bytes)).list({ story: 'comments' }).items.map(comment => comment.text).sort())
         .toEqual(doc.list({ story: 'comments' }).items.map(comment => comment.text).sort());

@@ -149,11 +149,12 @@ export class DocxAgentDocument {
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; allowLegacy: boolean; check: Promise<CommentSource> };
-  private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
+  private commentPackageBaseline?: { version: number; deletion: boolean; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
   private deletedComments = new Set<string>();
   private commentSaveIdentities = new Map<string, DocxCommentSaveIdentity>();
   private commentSaveBaseline?: DocxCommentSaveBaseline;
+  private commentSaveBaselineVersion?: number;
 
   constructor(
     readonly session: YrsSession,
@@ -455,15 +456,25 @@ export class DocxAgentDocument {
       if (held) { this.checkPending(held); this.apply(draft, held); }
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
       const version = this.epoch;
-      const bytes = (await saveYrsDocx(draft, { updateModifiedDate, commentIdentities: this.commentSaveIdentities, commentBaseline: this.commentSaveBaseline })).bytes;
       const comments = draft.listComments();
+      const baseline = this.commentSaveBaseline && JSON.stringify(comments) === JSON.stringify(this.commentSaveBaseline.comments)
+        ? this.commentSaveBaseline : undefined;
+      const bytes = (await saveYrsDocx(draft, { updateModifiedDate,
+        commentIdentities: this.deletedComments.size ? this.commentSaveIdentities : undefined,
+        commentBaseline: baseline,
+        commentDeletion: !!baseline && !held && this.commentSaveBaselineVersion === version,
+      })).bytes;
       const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
-      if (comments.some(comment => !seeded.has(comment.id))) {
+      if (this.deletedComments.size && comments.some(comment => !seeded.has(comment.id))) {
         const source = await this.checkCommentPart(true);
         if (source) {
           const identities = await readSavedCommentIdentities(source, bytes, comments, this.commentSaveIdentities);
           if (this.epoch === version) this.commentSaveIdentities = identities;
         }
+      }
+      if (baseline && !held && this.epoch === version) {
+        this.commentSaveBaseline = { bytes, comments };
+        this.commentSaveBaselineVersion = version;
       }
       return bytes;
     } catch (error) {
@@ -642,6 +653,7 @@ export class DocxAgentDocument {
         let deleted: Set<string> | undefined;
         let commentIdentities: Map<string, DocxCommentSaveIdentity> | undefined;
         let commentBaseline: DocxCommentSaveBaseline | undefined;
+        let resetCommentBaseline = false;
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
@@ -660,21 +672,31 @@ export class DocxAgentDocument {
             const remaining = new Set(comments.map(comment => comment.id));
             deleted = new Set([...this.deletedComments, ...outcomes.flatMap(outcome => outcome.result.deleted ?? [])].filter(id => !remaining.has(id)));
             const previous = this.session.listComments();
-            let baseline = await this.commentBaselineBytes(version);
-            const saveBaseline = { bytes: baseline, comments: previous };
-            const identities = await readSavedCommentIdentities(source, baseline, previous, this.commentSaveIdentities);
-            if (deletingComments && edits.some(edit => edit.op !== 'delete_comment')) {
-              const kept = await this.fork(draft.clientId);
-              try {
-                for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
-                baseline = (await saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities, commentBaseline: saveBaseline })).bytes;
-              } finally { kept.destroy(); }
+            let baseline = await this.commentBaselineBytes(version, deletingComments);
+            const identities = deletingComments || this.deletedComments.size
+              ? await readSavedCommentIdentities(source, baseline, previous, this.commentSaveIdentities) : undefined;
+            let saved: Uint8Array;
+            if (deletingComments) {
+              if (edits.some(edit => edit.op !== 'delete_comment')) {
+                const kept = await this.fork(draft.clientId);
+                try {
+                  for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
+                  baseline = (await saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
+                    commentBaseline: { bytes: baseline, comments: previous },
+                  })).bytes;
+                } finally { kept.destroy(); }
+              }
+              saved = (await saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
+                commentBaseline: { bytes: baseline, comments: previous }, commentDeletion: true,
+              })).bytes;
+              commentBaseline = { bytes: saved, comments };
+            } else {
+              saved = (await saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
+              resetCommentBaseline = true;
             }
-            const saved = (await saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities, commentBaseline: saveBaseline })).bytes;
             await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,
               comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline, deleted, deletingComments ? previous : undefined, identities);
-            commentIdentities = await readSavedCommentIdentities(source, saved, comments, identities);
-            commentBaseline = { bytes: saved, comments };
+            if (identities) commentIdentities = await readSavedCommentIdentities(source, saved, comments, identities);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -688,7 +710,13 @@ export class DocxAgentDocument {
         if (resolved) this.resolvedComments = resolved;
         if (deleted) this.deletedComments = deleted;
         if (commentIdentities) this.commentSaveIdentities = commentIdentities;
-        if (commentBaseline) this.commentSaveBaseline = commentBaseline;
+        if (commentBaseline) {
+          this.commentSaveBaseline = commentBaseline;
+          this.commentSaveBaselineVersion = this.epoch;
+        } else if (resetCommentBaseline) {
+          this.commentSaveBaseline = undefined;
+          this.commentSaveBaselineVersion = undefined;
+        }
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {
@@ -874,9 +902,9 @@ export class DocxAgentDocument {
     return this.commentPartCheck.check;
   }
 
-  private commentBaselineBytes(version: number): Promise<Uint8Array> {
-    if (this.commentPackageBaseline?.version !== version) {
-      this.commentPackageBaseline = { version, bytes: this.exportBytes(undefined, false) };
+  private commentBaselineBytes(version: number, deletion = false): Promise<Uint8Array> {
+    if (this.commentPackageBaseline?.version !== version || this.commentPackageBaseline.deletion !== deletion) {
+      this.commentPackageBaseline = { version, deletion, bytes: deletion ? this.exportBytes(undefined, false) : this.export() };
     }
     return this.commentPackageBaseline.bytes;
   }

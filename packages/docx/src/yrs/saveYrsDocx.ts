@@ -69,6 +69,8 @@ export interface DocxSaveOptions extends RepackOptions {
   commentIdentities?: ReadonlyMap<string, DocxCommentSaveIdentity>;
   /** @internal */
   commentBaseline?: DocxCommentSaveBaseline;
+  /** @internal */
+  commentDeletion?: boolean;
 }
 
 function storyBlocks(document: Document): BlockContent[][] {
@@ -89,7 +91,7 @@ function storyBlocks(document: Document): BlockContent[][] {
 }
 
 const COMMENTS_PART = 'word/comments.xml';
-const COMMENT_SOURCE_PARTS = [COMMENTS_PART, 'word/commentsExtended.xml', 'word/commentsIds.xml', 'word/commentsExtensible.xml', 'word/_rels/comments.xml.rels', '[Content_Types].xml', 'word/_rels/document.xml.rels'];
+const COMMENT_SOURCE_PARTS = [COMMENTS_PART, 'word/commentsExtended.xml', 'word/commentsIds.xml', 'word/commentsExtensible.xml', 'word/_rels/comments.xml.rels', '[Content_Types].xml', 'word/_rels/document.xml.rels', 'docProps/core.xml'];
 
 function commentSourceBuffer(original: ArrayBuffer, baseline: Uint8Array): ArrayBuffer {
   const parts = unzipContainer(new Uint8Array(original));
@@ -526,6 +528,7 @@ export async function writeSessionSave(
   const separators = noteSeparatorKeys(document);
   let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
   const rewritten = (part: string): boolean => {
+    if (options.commentDeletion) return false;
     const kind = (['footnotes', 'endnotes'] as const).find(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
@@ -546,7 +549,7 @@ export async function writeSessionSave(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(session, output, capture, sourceBuffer);
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
@@ -582,9 +585,11 @@ export async function writeSessionSave(
             }),
           }),
     };
-    const source = sectionEdits ? sourceBuffer : originalBuffer;
+    const source = options.commentDeletion && options.commentBaseline ? Uint8Array.from(options.commentBaseline.bytes).buffer
+      : options.commentBaseline ? commentSourceBuffer(sectionEdits ? sourceBuffer : originalBuffer, options.commentBaseline.bytes)
+        : sectionEdits ? sourceBuffer : originalBuffer;
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), options.commentBaseline ? commentSourceBuffer(source, options.commentBaseline.bytes) : source, options, undefined, undefined, plan, skipMutations
+      withSourceOrdinals(output, spliced), source, options, undefined, undefined, plan, skipMutations
     );
     for (const warning of warnings) {
       if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
@@ -660,10 +665,13 @@ export async function saveYrsDocx(
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
+  if (options.commentDeletion && !options.commentBaseline) throw new Error('Comment deletion requires a saved comment baseline');
   let capture = captureSessionSave(session);
   if (options.commentBaseline) {
     await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
-    const saved = parseDocumentWithRust(commentSourceBuffer(base.originalBuffer!, options.commentBaseline.bytes), {
+    const source = options.commentDeletion ? Uint8Array.from(options.commentBaseline.bytes).buffer
+      : commentSourceBuffer(base.originalBuffer!, options.commentBaseline.bytes);
+    const saved = parseDocumentWithRust(source, {
       parseHeadersFooters: false, parseNotes: false, detectVariables: false, includeCanonical: false,
     }).document.package.document.comments;
     base = { ...base, package: { ...base.package, document: { ...base.package.document, comments: saved } } };
@@ -672,6 +680,13 @@ export async function saveYrsDocx(
       patchedParts: capture.plan.patchedParts.filter(entry => entry.part !== COMMENTS_PART),
       splicedParts: capture.plan.splicedParts?.filter(entry => entry.part !== COMMENTS_PART),
     } };
+    if (options.commentDeletion) {
+      capture.plan = {
+        assignments: [],
+        patchedParts: Object.keys(unzipContainer(options.commentBaseline.bytes))
+          .filter(part => part.endsWith('.xml') && part !== COMMENTS_PART).map(part => ({ part, paraIds: [] })),
+      };
+    }
   }
   const comments = savedComments(session, base, options.commentIdentities, options.commentBaseline?.comments);
   if (options.commentBaseline && !comments.changed && base.package.document.comments) {
