@@ -1477,7 +1477,9 @@ impl WorkbookAuthority {
             if restored == own {
                 continue;
             }
-            let read = |json: &str| serde_json::from_str::<Vec<ConditionalFormatting>>(json).ok();
+            let read = |json: &str| {
+                serde_json::from_slice::<Vec<ConditionalFormatting>>(json.as_bytes()).ok()
+            };
             if let (Some(restored), Some(original)) = (read(&restored), read(&own))
                 && xlsx_parse::keeps_source_conditional_formats(&restored, &original)
             {
@@ -4790,13 +4792,13 @@ fn materialize_sheet<T: ReadTxn>(
     };
     sheet.hyperlinks = project_hyperlinks(baseline_hyperlinks, sheet_map, txn)?;
     sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+        Some(Out::Any(Any::String(json))) => serde_json::from_slice(json.as_bytes())
             .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
         Some(_) => return Err("sheet auto filter is not a string".to_string()),
         None => fallbacks.auto_filter.cloned(),
     };
     sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+        Some(Out::Any(Any::String(json))) => serde_json::from_slice(json.as_bytes())
             .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
         Some(_) => return Err("sheet conditional formats are not a string".to_string()),
         None => fallbacks.conditional_formats.to_vec(),
@@ -6854,13 +6856,13 @@ fn materialize_sheet_oracle<T: ReadTxn>(
         _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.auto_filter = match sheet_map.get(txn, AUTO_FILTER) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+        Some(Out::Any(Any::String(json))) => serde_json::from_slice(json.as_bytes())
             .map_err(|error| format!("sheet auto filter is invalid: {error}"))?,
         Some(_) => return Err("sheet auto filter is not a string".to_string()),
         None => fallbacks.auto_filter.cloned(),
     };
     sheet.conditional_formats = match sheet_map.get(txn, CONDITIONAL_FORMATS) {
-        Some(Out::Any(Any::String(json))) => serde_json::from_str(&json)
+        Some(Out::Any(Any::String(json))) => serde_json::from_slice(json.as_bytes())
             .map_err(|error| format!("sheet conditional formats are invalid: {error}"))?,
         Some(_) => return Err("sheet conditional formats are not a string".to_string()),
         None => fallbacks.conditional_formats.to_vec(),
