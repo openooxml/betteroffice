@@ -1114,7 +1114,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       addToken(h, "tok-external", "external-app");
       const a = await joinEditor(h, "tok-a");
@@ -1262,7 +1262,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(relaunchChecks).toBe(2);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
     } finally {
       await session.close();
@@ -1286,7 +1286,7 @@ describe("session safety regressions", () => {
       await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
       expect(h.calls.some((call) => call.override === "GET_LOCK")).toBe(true);
       expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
-      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(viewer.user.isTokenValidAt(h.clock.t)).toBe(false);
       expect(session.viewOnlyReason).not.toBe("lockedElsewhere");
     } finally {
       await session.close();
@@ -1298,7 +1298,7 @@ describe("session safety regressions", () => {
     const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
     let enteredUnlock: () => void = () => {};
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-    const h = makeHarness({ refreshStatus: () => 500 });
+    const h = makeHarness({ refreshStatus: () => 500, reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     const a = await joinEditor(h, "tok-a");
     const session = a.session;
