@@ -326,6 +326,10 @@ test('retries failed decoding and isolates dictionaries by asset root', async ()
     const normal = await loadBundledFontBytes(regular, options);
     structuredClone(normal, { transfer: [normal] });
     expect(new Uint8Array(await loadBundledFontBytes(bold, options))).toEqual(decodedBold);
+    expect(decode.mock.calls.map(([, , options]) => options?.wasmUrl?.href)).toEqual([
+      ...Array(3).fill('https://intl-retry.example/decoder/fontpack.wasm'),
+      ...Array(2).fill('https://intl-other.example/decoder/fontpack.wasm'),
+    ]);
   } finally {
     [regular.byteLength, bold.byteLength] = sizes;
   }
@@ -360,9 +364,10 @@ test('CDN loads the pinned intl pack and custom roots without importing the add-
       `https://intl-custom-cdn.example/fonts/${bold.file}`,
       `https://intl-custom-cdn.example/fonts/${regular.file}`,
     ].sort());
-    expect(decode.mock.calls.map(([, , options]) => options?.wasmUrl?.href)).toEqual(
-      Array(4).fill(`https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`),
-    );
+    expect(decode.mock.calls.map(([, , options]) => options?.wasmUrl?.href)).toEqual([
+      ...Array(2).fill(`https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`),
+      ...Array(2).fill('https://intl-custom-cdn.example/fonts/decoder/fontpack.wasm'),
+    ]);
     expect(importIntl).toHaveBeenCalledTimes(imports);
   } finally {
     [regular.byteLength, bold.byteLength] = sizes;

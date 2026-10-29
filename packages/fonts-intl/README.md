@@ -63,6 +63,9 @@ The manifest records `codec`, `dict`, `sha256`, `encodedLength` and decoded `byt
 Bold faces use their family's decoded Regular as a raw-content dictionary. The font manager
 decodes the assets before supplying font bytes and returns independently owned buffers.
 When using a custom `baseUrl`, copy these assets alongside the other font packages' assets.
+Copy `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm` to
+`<baseUrl>/decoder/fontpack.wasm` and serve it as `application/wasm`. This decoder ships
+in `@betteroffice/fonts`, and both its bundled and CDN providers use the custom root.
 
 ## Licensing
 

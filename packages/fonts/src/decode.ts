@@ -116,7 +116,11 @@ async function instantiate(url: URL): Promise<Decoder> {
     instance = result.instance;
   } else {
     if (typeof fetch !== 'function') throw new Error('Cannot fetch font decoder wasm');
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+    });
     if (!response.ok) {
       throw new Error(`Cannot load font decoder wasm: HTTP ${response.status}`);
     }

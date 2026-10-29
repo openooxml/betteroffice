@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
-import { existsSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as nodeZlib from 'node:zlib';
+import fontsPackage from '../package.json';
 import { decodeFontBytes } from './decode';
 
 interface Zlib {
@@ -190,33 +193,53 @@ describe('internal font decoder', () => {
       expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
     });
 
-    test.skipIf(!hasWasm)('bundled published entry requests its adjacent decoder wasm', async () => {
-      const build = await Bun.build({
-        entrypoints: [new URL('../dist/index.js', import.meta.url).pathname],
-        target: 'browser',
-        external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
-        define: { 'import.meta.url': JSON.stringify('https://consumer.example/dist/index.js') },
-      });
-      expect(build.success).toBe(true);
-      const entry = await import(`data:text/javascript;base64,${Buffer.from(await build.outputs[0]!.text()).toString('base64')}`);
-      const face = { ...entry.resolveScriptFallbackFace('thai', false, false), byteLength: hello.length };
-      const pack = `https://bundled-pack.example/fonts/${face.file}`;
-      const decoder = 'https://consumer.example/dist/decoder/fontpack.wasm';
-      const requested: string[] = [];
+    test.skipIf(!hasWasm)('bundled published entry loads custom assets with the shipped decoder', async () => {
+      const deployment = mkdtempSync(join(tmpdir(), 'fonts-bundle-'));
       const originalFetch = globalThis.fetch;
-      globalThis.fetch = (async (input: RequestInfo | URL) => {
-        const url = String(input);
-        requested.push(url);
-        if (url === pack) return new Response(helloFrame);
-        if (url === decoder) return new Response(readFileSync(wasmUrl));
-        return new Response('missing', { status: 404 });
-      }) as typeof fetch;
       try {
-        expect(new Uint8Array(await entry.loadBundledFontBytes(face, { baseUrl: 'https://bundled-pack.example/fonts/' })))
-          .toEqual(hello);
+        const build = await Bun.build({
+          entrypoints: [new URL('../dist/index.js', import.meta.url).pathname],
+          target: 'browser',
+          outdir: join(deployment, 'dist'),
+          external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
+          define: { 'import.meta.url': JSON.stringify('https://consumer.example/dist/index.js') },
+        });
+        expect(build.success).toBe(true);
+        expect(build.outputs).toHaveLength(1);
+        expect(existsSync(join(deployment, 'dist/decoder/fontpack.wasm'))).toBe(false);
+        expect(fontsPackage.files).toContain('dist');
+        const entry = await import(`data:text/javascript;base64,${Buffer.from(await build.outputs[0]!.text()).toString('base64')}`);
+        const face = entry.resolveScriptFallbackFace('thai', false, false);
+        const assets = join(deployment, 'fonts');
+        mkdirSync(join(assets, 'decoder'), { recursive: true });
+        copyFileSync(wasmUrl, join(assets, 'decoder/fontpack.wasm'));
+        copyFileSync(new URL(`../../fonts-intl/assets/${face.file}`, import.meta.url), join(assets, face.file));
+        const baseUrl = 'https://bundled-pack.example/fonts/';
+        const pack = `${baseUrl}${face.file}`;
+        const decoder = `${baseUrl}decoder/fontpack.wasm`;
+        const requested: string[] = [];
+        globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
+          const url = String(input);
+          requested.push(url);
+          if (url === decoder) {
+            expect(options?.credentials).toBe('omit');
+            expect(options?.referrerPolicy).toBe('no-referrer');
+            expect(options?.signal).toBeInstanceOf(AbortSignal);
+          }
+          const file = url.startsWith(baseUrl) ? join(assets, url.slice(baseUrl.length)) : '';
+          return file && existsSync(file)
+            ? new Response(readFileSync(file), url === decoder
+                ? { headers: { 'Content-Type': 'application/wasm' } }
+                : undefined)
+            : new Response('missing', { status: 404 });
+        }) as typeof fetch;
+        const bytes = await entry.loadBundledFontBytes(face, { baseUrl: baseUrl.slice(0, -1) });
+        expect(bytes.byteLength).toBe(face.byteLength);
+        expect(new DataView(bytes).getUint32(0)).toBe(0x00010000);
         expect(requested).toEqual([pack, decoder]);
       } finally {
         globalThis.fetch = originalFetch;
+        rmSync(deployment, { recursive: true, force: true });
       }
     });
 

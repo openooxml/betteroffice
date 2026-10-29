@@ -316,7 +316,12 @@ export function loadBundledFontBytes(
       ? undefined
       : resolvedAssetBase(options.baseUrl);
   if (INTL_FILES.has(face.file)) {
-    return loadPackedFontBytes(face, (dependency) => assetUrl(dependency, baseUrl));
+    return loadPackedFontBytes(
+      face,
+      (dependency) => assetUrl(dependency, baseUrl),
+      undefined,
+      baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
+    );
   }
   const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;

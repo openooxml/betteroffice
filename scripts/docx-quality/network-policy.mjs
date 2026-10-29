@@ -4,7 +4,7 @@ const version = (name) =>
   JSON.parse(readFileSync(new URL(`../../packages/${name}/package.json`, import.meta.url), 'utf8'))
     .version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const fontUrl = new RegExp(
-  `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}/assets/[A-Za-z0-9-]+\\.(?:ttf|otf)|fonts-cjk@${version('fonts-cjk')}/assets/[A-Za-z0-9-]+\\.otf|fonts-intl@${version('fonts-intl')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst)$`
+  `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}/(?:assets/[A-Za-z0-9-]+\\.(?:ttf|otf)|dist/decoder/fontpack\\.wasm)|fonts-cjk@${version('fonts-cjk')}/assets/[A-Za-z0-9-]+\\.otf|fonts-intl@${version('fonts-intl')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst)$`
 );
 
 /** Allow only the jsDelivr font binaries the capture harness requests, fetched without credentials. */

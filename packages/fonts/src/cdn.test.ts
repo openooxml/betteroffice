@@ -139,18 +139,23 @@ describe('CDN font provider', () => {
     const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
     const original = host.getBuiltinModule;
     host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
-    const decoder = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`;
     const frame = new Uint8Array([
       0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x05, 0x29, 0x00, 0x00,
       0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xa3, 0x6d, 0x9f, 0x88,
     ]);
     try {
-      for (const baseUrl of [undefined, 'https://custom.example/fonts/']) {
+      for (const baseUrl of [undefined, 'https://custom.example/fonts/', 'http://127.0.0.1:4178/fonts/']) {
         const pack = `${baseUrl ?? `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${fontsIntlVersion}/assets/`}NotoSansThai-Regular.ttf.zst`;
+        const decoder = baseUrl === undefined
+          ? `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`
+          : `${baseUrl}decoder/fontpack.wasm`;
         const requested: string[] = [];
-        globalThis.fetch = (async (input: RequestInfo | URL) => {
+        globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
           const url = String(input);
           requested.push(url);
+          expect(options?.credentials).toBe('omit');
+          expect(options?.referrerPolicy).toBe('no-referrer');
+          expect(options?.signal).toBeInstanceOf(AbortSignal);
           return url === pack
             ? new Response(frame)
             : new Response('missing decoder', { status: 404 });

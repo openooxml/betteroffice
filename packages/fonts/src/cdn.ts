@@ -33,13 +33,16 @@ export function createFontProvider(
     options.cjkBaseUrl ?? options.baseUrl ?? CJK_BASE_URL,
   );
   const intlBase = assetBase(options.baseUrl ?? INTL_BASE_URL);
+  const decoderUrl = options.baseUrl === undefined
+    ? new URL(DECODER_URL)
+    : new URL('decoder/fontpack.wasm', base);
   return fontProvider((face) => {
     if (face.file.endsWith('.ttf.zst')) {
       return loadPackedFontBytes(
         face,
         async (dependency) => new URL(dependency.file, intlBase),
         30_000,
-        new URL(DECODER_URL),
+        decoderUrl,
       );
     }
     return loadFontBytes(

@@ -86,6 +86,8 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
 - Each decoded face is checked against the manifest's byte length, which detects truncation but not
   tampering, so use an origin you trust. A CDN can see which faces a document requests.
 - Intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
+- With a custom `baseUrl` in either entry, copy `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm`
+  to `<baseUrl>/decoder/fontpack.wasm` and serve it as `application/wasm`. The package build ships this decoder in `dist/decoder/`.
 - Serve the raw TTF/OTF files with `br` or `gzip` encoding. The base and CJK faces are raw TTF/OTF, because the browser and
   the WebAssembly engine must measure the same bytes; compression brings the 65 faces from 14,527 KB to
   7,156 KB.
