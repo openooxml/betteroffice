@@ -181,19 +181,8 @@ fn parse_picture_bullet_size(bullet: &XmlElement) -> Option<PictureBulletSize> {
 }
 
 fn picture_bullet_points(value: &str) -> Option<f64> {
-    let value = value.trim().to_ascii_lowercase();
-    let (number, factor) = [
-        ("pt", 1.0),
-        ("in", 72.0),
-        ("px", 0.75),
-        ("cm", 72.0 / 2.54),
-        ("mm", 72.0 / 25.4),
-    ]
-    .into_iter()
-    .find_map(|(unit, factor)| value.strip_suffix(unit).map(|number| (number, factor)))?;
-    let points = number.trim().parse::<f64>().ok()? * factor;
-    (points.is_finite() && points > 0.0 && ((points * 96.0 / 72.0) as f32).is_finite())
-        .then_some(points)
+    let pixels = crate::vml::css_length_to_px(Some(value))?;
+    (pixels > 0.0 && (pixels as f32).is_finite()).then_some(pixels * 72.0 / 96.0)
 }
 
 fn parse_abstract_numbering(
@@ -921,6 +910,8 @@ mod tests {
             ("288px", "96px"),
             ("7.62cm", "2.54cm"),
             ("76.2mm", "25.4mm"),
+            ("18pc", "6pc"),
+            ("288", "96"),
         ] {
             let xml = format!(
                 r#"<w:numbering><w:numPicBullet w:numPicBulletId="9"><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet><w:numPicBullet w:numPicBulletId="1"><w:pict><v:shape style="width:1pt;height:1pt"/></w:pict></w:numPicBullet></w:numbering>"#
@@ -929,6 +920,21 @@ mod tests {
             let size = &definitions["firstPictureBullet"];
             assert!((size["width"].as_f64().unwrap() - 216.0).abs() < 0.001);
             assert!((size["height"].as_f64().unwrap() - 72.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn invalid_or_non_positive_picture_bullet_size_is_ignored() {
+        for (width, height) in [
+            ("invalid", "1in"),
+            ("1in", "invalid"),
+            ("0", "1in"),
+            ("1in", "-1pc"),
+        ] {
+            let xml = format!(
+                r#"<w:numbering><w:numPicBullet><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet></w:numbering>"#
+            );
+            assert!(parse(&xml).definitions.first_picture_bullet.is_none());
         }
     }
 

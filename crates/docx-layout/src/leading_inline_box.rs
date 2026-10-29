@@ -67,11 +67,17 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
     let Some(size) = size(paragraph) else {
         return;
     };
+    let is_rtl = paragraph.attrs.as_ref().and_then(|attrs| attrs.bidi) == Some(true);
     for line in &mut extent.lines {
         let has_box = line.head_run == 0;
         if has_box {
             line.width = (line.width - size.width).max(0.0);
-            line.left_offset = Some(line.left_offset.unwrap_or(0.0) + size.width);
+            let offset = if is_rtl {
+                &mut line.right_offset
+            } else {
+                &mut line.left_offset
+            };
+            *offset = Some(offset.unwrap_or(0.0) + size.width);
             let height = line.line_height;
             line.ascent = line.ascent.max(size.height);
             line.line_height = line.line_height.max(line.ascent + line.descent);
@@ -86,7 +92,9 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
         );
         for segment in line.segments.iter_mut().flatten() {
             if segment.head_run == 0 {
-                segment.left_offset += size.width;
+                if !is_rtl {
+                    segment.left_offset += size.width;
+                }
                 segment.available_width = (segment.available_width - size.width).max(0.0);
                 segment.width = (segment.width - size.width).max(0.0);
             }
@@ -107,10 +115,8 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
         if let Some(clusters) = &mut line.cluster_advances {
             clusters.retain_mut(|cluster| {
                 cluster.run_index = cluster.run_index.and_then(|index| index.checked_sub(1));
-                if has_box {
-                    cluster.x_offset = cluster
-                        .x_offset
-                        .map(|offset| (offset - size.width).max(0.0));
+                if has_box && !is_rtl {
+                    cluster.x_offset = cluster.x_offset.map(|offset| (offset - size.width).max(0.0));
                 }
                 cluster.run_index.is_some()
             });

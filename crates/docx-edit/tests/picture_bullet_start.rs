@@ -163,6 +163,52 @@ fn sized_picture_bullet_advances_only_the_first_paragraph_without_numbered_text(
 }
 
 #[test]
+fn bidi_picture_bullet_reserves_the_right_edge_and_keeps_the_left_margin() {
+    let text = "שלום עולם";
+    let body = format!(
+        r#"<w:p w14:paraId="00000001"><w:pPr><w:bidi/></w:pPr><w:r><w:rPr><w:rtl/></w:rPr><w:t>{text}</w:t></w:r></w:p>{}"#,
+        paragraph(2, "Second")
+    );
+    let (_, base_layout, base_display) = render(&document(&body, None));
+    let xml = numbering(&bullet("width:1in;height:1in"), false);
+    let (_, layout, display) = render(&document(&body, Some(&xml)));
+    let end = 1 + text.encode_utf16().count() as i64;
+    let right_edge = |display: &docx_layout::display_list::DisplayList| {
+        docx_layout::hit::range_rects(display, 1, end)
+            .iter()
+            .map(|rect| rect.x + rect.width)
+            .reduce(f64::max)
+            .unwrap()
+    };
+    let page = &layout["layout"]["pages"][0];
+    let right_margin =
+        page["size"]["w"].as_f64().unwrap() - page["margins"]["right"].as_f64().unwrap();
+    near(right_edge(&base_display), right_margin);
+    near((right_margin - right_edge(&display)) * 0.75, 72.0);
+    let line = &layout["measured"][0]["measure"]["lines"][0];
+    near(line["leftOffset"].as_f64().unwrap_or(0.0), 0.0);
+    near(line["rightOffset"].as_f64().unwrap() * 0.75, 72.0);
+    assert_eq!(page["margins"], base_layout["layout"]["pages"][0]["margins"]);
+    near(
+        origin(&display, "Second").0,
+        page["margins"]["left"].as_f64().unwrap(),
+    );
+    near(
+        origin(&display, "Second").0,
+        origin(&base_display, "Second").0,
+    );
+    near(
+        docx_layout::hit::caret_rect(&display, 1).unwrap().x,
+        right_edge(&display),
+    );
+    for position in 1..=end {
+        let caret = docx_layout::hit::caret_rect(&display, position).unwrap();
+        let base_caret = docx_layout::hit::caret_rect(&base_display, position).unwrap();
+        near((base_caret.x - caret.x) * 0.75, 72.0);
+    }
+}
+
+#[test]
 fn picture_bullet_moves_an_existing_inline_picture_to_its_baseline() {
     let body = r#"<w:p w14:paraId="00000001"><w:r><w:pict><v:shape style="width:209pt;height:48.6pt"><v:imagedata r:id="image"/></v:shape></w:pict></w:r></w:p>"#;
     let (_, _, base) = render(&document(body, None));
