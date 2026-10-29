@@ -123,7 +123,7 @@ export function createPresentationSessionHost(
         clientId: input.clientId,
         fonts: fonts(input.fonts),
         fallbackFonts: fonts(input.fallbackFonts),
-        initialUpdate: input.initialUpdate,
+        initialUpdate: input.initialUpdate, retainSource: false,
       });
       try {
         const projection = metadata(opened);

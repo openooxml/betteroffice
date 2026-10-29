@@ -168,3 +168,43 @@ It is used only by tests.
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
+
+---
+
+## Zstandard decoder
+
+`vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
+`facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
+It is compiled into the internal `fontpack` crate and its standalone wasm decoder.
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
+included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt` for decoder
+redistribution.
+
+---
+
+## lol_alloc
+
+The standalone font decoder links `lol_alloc` 0.4.1's single-threaded freelist
+allocator, https://github.com/Craig-Macomber/lol_alloc.
+
+Copyright (c) 2022 Craig
+
+License: MIT. The unmodified upstream licence is included under
+`packages/fonts/LICENSES/MIT-lol_alloc.txt` for decoder redistribution.
+
+---
+
+## wuff
+
+The internal font decoder links `wuff` 0.2.9 for WOFF2 reconstruction,
+https://github.com/nicoburns/wuff. Its wasm feature set excludes brotli and
+flate2. The native pack builder enables brotli for reference verification.
+
+Copyright (c) 2013-2017 by the WOFF2 Authors.
+Copyright (c) 2025 by Nico Burns.
+
+License: MIT. The unmodified upstream licence is included under
+`packages/fonts/LICENSES/MIT-wuff.txt` for decoder redistribution.

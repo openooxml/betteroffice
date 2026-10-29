@@ -1,11 +1,11 @@
 //! Glyph-run shaping, fallback, geometry, and determinism tests.
 
 use docx_layout::display_list::{
-    DisplayList, GlyphRunPrimitive, Primitive, build_display_list_json,
+    DisplayList, GlyphRunPrimitive, Primitive, TextRunPrimitive, build_display_list_json,
     build_display_list_json_with_fonts,
 };
 use docx_layout::hit::{hit_test, range_rects};
-use ooxml_text::{FontStore, shape};
+use ooxml_text::{FontId, FontStore, kern_features, shape};
 
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
@@ -274,6 +274,385 @@ fn build_input(
         input["fontChains"] = serde_json::json!({ "liberation sans|0|0": ids });
     }
     input.to_string()
+}
+
+fn browser_text_run(
+    store: &FontStore,
+    family: &str,
+    font: FontId,
+    text: &str,
+    formatting: serde_json::Value,
+) -> TextRunPrimitive {
+    browser_text_run_with_chain(store, family, &[font.to_u32()], text, formatting)
+}
+
+fn browser_text_run_with_chain(
+    store: &FontStore,
+    family: &str,
+    chain: &[u32],
+    text: &str,
+    formatting: serde_json::Value,
+) -> TextRunPrimitive {
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input(text, 0.0, None, false, None)).unwrap();
+    let run = &mut input["measured"][0]["block"]["runs"][0];
+    run["fontFamily"] = serde_json::json!(family);
+    run.as_object_mut()
+        .unwrap()
+        .extend(formatting.as_object().unwrap().clone());
+    let chains = serde_json::json!({
+        (format!(
+            "{}|{}|{}",
+            family.to_lowercase(),
+            u8::from(formatting["bold"].as_bool().unwrap_or(false)),
+            u8::from(formatting["italic"].as_bool().unwrap_or(false))
+        )): chain
+    });
+    let measure = ooxml_text::measure_paragraph_json(
+        store,
+        &serde_json::json!({
+            "block": input["measured"][0]["block"],
+            "maxWidth": FRAG_WIDTH,
+            "fontChains": chains,
+            "authoritativeShaping": formatting["authoritativeShaping"].as_bool().unwrap_or(false),
+            "defaults": {"fontSize": 12.0, "fontFamily": family}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut measure: serde_json::Value = serde_json::from_str(&measure).unwrap();
+    if formatting["authoritativeShaping"].as_bool() == Some(true) {
+        for line in measure["lines"].as_array_mut().unwrap() {
+            let line = line.as_object_mut().unwrap();
+            line.remove("bidiSlices");
+            line.remove("clusterAdvances");
+        }
+    }
+    input["measured"][0]["measure"] = measure;
+    input["fontChains"] = chains;
+    let output = build_display_list_json_with_fonts(&input.to_string(), store).unwrap();
+    let list: DisplayList = serde_json::from_str(&output).unwrap();
+    list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) if run.text == text => Some(run.clone()),
+            _ => None,
+        })
+        .expect("browser text run")
+}
+
+fn shaped_width(store: &FontStore, font: FontId, text: &str) -> f64 {
+    shape(store, font, text, 16.0, &kern_features(false))
+        .unwrap()
+        .iter()
+        .map(|glyph| f64::from(glyph.x_advance))
+        .sum()
+}
+
+#[test]
+fn browser_painted_all_caps_use_substitute_widths() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let text = "Narrow headings avii";
+    for family in ["Arial Narrow", "Aptos"] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        let run = browser_text_run(
+            &store,
+            family,
+            view,
+            text,
+            serde_json::json!({"allCaps": true}),
+        );
+        let painted = text.to_uppercase();
+        let own_width = shaped_width(&store, base, &painted);
+        let view_width = shaped_width(&store, view, &painted);
+        let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+        assert!(run.horizontal_scale.is_none());
+        assert!(run.letter_spacing.is_none());
+        assert!((scale - view_width / own_width).abs() < 1e-5, "{family}");
+        assert!(
+            (own_width * scale - run.width.as_f64().unwrap()).abs() < 0.002,
+            "{family}"
+        );
+        assert_eq!(run.x.as_f64(), Some(FRAG_X));
+        assert_eq!(run.text, text);
+        assert!(run.all_caps);
+    }
+}
+
+#[test]
+fn browser_painted_matching_arial_keeps_its_horizontal_scale() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store.register_named_substitute(base, "Arial").unwrap();
+    assert_eq!(view, base);
+    for formatting in [
+        serde_json::json!({"allCaps": true}),
+        serde_json::json!({"textShadow": true}),
+    ] {
+        let run = browser_text_run(&store, "Arial", view, "Plain Arial", formatting);
+        assert!(run.horizontal_scale.is_none());
+        assert!(run.substitute_scale.is_none());
+        assert!(
+            !serde_json::to_string(&run)
+                .unwrap()
+                .contains("substituteScale")
+        );
+    }
+}
+
+#[test]
+fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf").to_vec(),
+        )
+        .unwrap();
+    for family in [
+        "MS Mincho",
+        "ＭＳ 明朝",
+        "MS Gothic",
+        "ＭＳ ゴシック",
+        "MS PMincho",
+        "ＭＳ Ｐ明朝",
+        "MS PGothic",
+        "ＭＳ Ｐゴシック",
+        "MS UI Gothic",
+    ] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        let text = "1111111111中あア";
+        let width = shaped_width(&store, view, text);
+        let numeric_auto_space = 0.25 * 16.0;
+        assert!(
+            (width - shaped_width(&store, base, text)).abs() > 0.01,
+            "{family}"
+        );
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let metrics =
+                ooxml_text::family_metrics::family_metrics(&family.to_lowercase(), bold, italic)
+                    .unwrap();
+            assert!(std::ptr::eq(
+                store.family_widths(view).unwrap().unwrap(),
+                metrics
+            ));
+            for formatting in [
+                serde_json::json!({"allCaps": true, "bold": bold, "italic": italic}),
+                serde_json::json!({"textShadow": true, "bold": bold, "italic": italic}),
+            ] {
+                let run = browser_text_run(&store, family, view, text, formatting);
+                assert!(run.substitute_scale.is_none(), "{family} {bold} {italic}");
+                assert!(run.horizontal_scale.is_none(), "{family} {bold} {italic}");
+                let clusters = run.attrs.canvas_clusters.as_deref().unwrap();
+                assert_eq!(clusters.len(), 13, "{family}");
+                for (index, cluster) in clusters.iter().take(10).enumerate() {
+                    assert_eq!(
+                        cluster.offset.as_f64(),
+                        Some(index as f64 * 8.0),
+                        "{family}"
+                    );
+                }
+                assert_eq!(
+                    clusters[10].offset.as_f64(),
+                    Some(80.0 + numeric_auto_space),
+                    "{family}"
+                );
+                assert_eq!(
+                    clusters[11].offset.as_f64(),
+                    Some(96.0 + numeric_auto_space),
+                    "{family}"
+                );
+                let katakana_x = 96.0 + numeric_auto_space + shaped_width(&store, view, "あ");
+                assert!(
+                    (clusters[12].offset.as_f64().unwrap() - katakana_x).abs() < 0.001,
+                    "{family}"
+                );
+                assert!(
+                    (run.width.as_f64().unwrap() - width - numeric_auto_space).abs() < 0.002,
+                    "{family} {bold} {italic}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn browser_painted_substitutes_skip_near_unity_corrections() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let mut metrics = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    metrics.advance_scale = 1.0005;
+    let view = store.register_substitute(base, metrics).unwrap();
+    let run = browser_text_run(
+        &store,
+        "Lucida Bright",
+        view,
+        "near unity",
+        serde_json::json!({"textShadow": true}),
+    );
+    assert!(run.horizontal_scale.is_none());
+    assert!(run.substitute_scale.is_none());
+    let scaled = browser_text_run(
+        &store,
+        "Lucida Bright",
+        view,
+        "near unity",
+        serde_json::json!({"textShadow": true, "horizontalScale": 150.0}),
+    );
+    assert_eq!(
+        scaled.horizontal_scale.as_ref().unwrap().as_f64(),
+        Some(150.0)
+    );
+    assert!(scaled.substitute_scale.is_none());
+}
+
+#[test]
+fn browser_painted_substitute_keeps_existing_character_scale() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let text = "Narrow headings";
+    let run = browser_text_run(
+        &store,
+        "Arial Narrow",
+        view,
+        text,
+        serde_json::json!({"allCaps": true, "horizontalScale": 150.0}),
+    );
+    let painted = text.to_uppercase();
+    let own_width = shaped_width(&store, base, &painted);
+    let ratio = shaped_width(&store, view, &painted) / own_width;
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    assert!((scale - ratio).abs() < 1e-5);
+    assert_eq!(run.horizontal_scale.as_ref().unwrap().as_f64(), Some(150.0));
+    assert!((own_width * scale * 1.5 - run.width.as_f64().unwrap()).abs() < 0.002);
+    assert_eq!(run.x.as_f64(), Some(FRAG_X));
+}
+
+#[test]
+fn browser_painted_effects_use_table_and_static_substitute_widths() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let text = "0123456789";
+    for family in ["Segoe UI Semilight", "Lucida Bright"] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        for effect in ["textShadow", "emboss", "imprint", "textOutline"] {
+            let run = browser_text_run(
+                &store,
+                family,
+                view,
+                text,
+                serde_json::json!({(effect): true}),
+            );
+            let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+            assert!(run.horizontal_scale.is_none());
+            assert!(
+                (shaped_width(&store, base, text) * scale - run.width.as_f64().unwrap()).abs()
+                    < 0.002,
+                "{family} {effect}"
+            );
+        }
+    }
+}
+
+#[test]
+fn browser_painted_small_caps_use_the_measured_casing_ratio() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store.register_named_substitute(base, "Aptos").unwrap();
+    let text = "Abc WIDE ij";
+    for authoritative in [false, true] {
+        let formatting =
+            serde_json::json!({"smallCaps": true, "authoritativeShaping": authoritative});
+        let run = browser_text_run(&store, "Aptos", view, text, formatting.clone());
+        let own = browser_text_run(&store, "Aptos", base, text, formatting);
+        let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+        assert!(run.horizontal_scale.is_none());
+        assert!((own.width.as_f64().unwrap() * scale - run.width.as_f64().unwrap()).abs() < 0.002);
+        assert!(run.small_caps);
+    }
+}
+
+#[test]
+fn browser_painted_substitute_leaders_keep_measured_repeat_positions() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let advance = shaped_width(&store, view, ".");
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input("\t", advance * 3.0, None, false, None)).unwrap();
+    input["measured"][0]["block"]["runs"] = serde_json::json!([{
+        "kind": "tab", "pmStart": 1, "pmEnd": 2, "width": advance * 3.0,
+        "fontFamily": "Arial Narrow", "fontSize": 12.0,
+        "leaderGlyphs": {"glyph": ".", "count": 3, "advance": advance}
+    }]);
+    input["fontChains"] = serde_json::json!({"arial narrow|0|0": [view.to_u32()]});
+    let output = build_display_list_json_with_fonts(&input.to_string(), &store).unwrap();
+    let list: DisplayList = serde_json::from_str(&output).unwrap();
+    let run = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) if run.text == "..." => Some(run),
+            _ => None,
+        })
+        .unwrap();
+    let scale = run.substitute_scale.as_ref().unwrap().as_f64().unwrap();
+    assert!(run.horizontal_scale.is_none());
+    let leader = run.attrs.leader_glyphs.as_ref().unwrap();
+    assert!((leader.advance.as_ref().unwrap().as_f64().unwrap() - advance).abs() < 0.001);
+    assert!((shaped_width(&store, base, ".") * scale - advance).abs() < 0.001);
+    assert_eq!(run.x.as_f64(), Some(FRAG_X));
+}
+
+#[test]
+fn browser_painted_substitute_keeps_measured_tracking() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let run = browser_text_run(
+        &store,
+        "Arial Narrow",
+        view,
+        "tracked heading",
+        serde_json::json!({"allCaps": true, "letterSpacing": 10.0}),
+    );
+    assert!(run.substitute_scale.is_some());
+    assert!(run.horizontal_scale.is_none());
+    assert_eq!(run.letter_spacing.as_ref().unwrap().as_f64(), Some(10.0));
+}
+
+#[test]
+fn browser_painted_fallback_text_has_no_primary_substitute_correction() {
+    let mut store = store_with_liberation();
+    let base = FontId::from_u32(0);
+    let view = store
+        .register_named_substitute(base, "Arial Narrow")
+        .unwrap();
+    let text = "مرحبا";
+    assert!(text.chars().all(|ch| !store.covers(view, ch).unwrap()));
+    let fallback = store
+        .register(
+            include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf").to_vec(),
+        )
+        .unwrap();
+    assert!(text.chars().all(|ch| store.covers(fallback, ch).unwrap()));
+    let run = browser_text_run_with_chain(
+        &store,
+        "Arial Narrow",
+        &[view.to_u32(), fallback.to_u32()],
+        text,
+        serde_json::json!({"textShadow": true}),
+    );
+    assert!(run.substitute_scale.is_none());
+    assert!(run.horizontal_scale.is_none());
 }
 
 fn build_rtl_mixed_input() -> String {

@@ -347,6 +347,17 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   times: 'times new roman',
   courier: 'courier new',
 
+  // Legacy Windows names and PostScript spellings Office draws with the core
+  // families, read off the faces its exports embed.
+  helv: 'arial',
+  'arial mt': 'arial',
+  arialmt: 'arial',
+  'tms rmn': 'times new roman',
+  'times roman': 'times new roman',
+  timesnewroman: 'times new roman',
+  timesnewromanps: 'times new roman',
+  timesnewromanpsmt: 'times new roman',
+
   // Metric-compatible clones of the core families. A deck that asks for one
   // was laid out against those metrics, so it resolves to the same face rather
   // than through the last-resort pick (#797).
@@ -388,6 +399,7 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   // Japanese (the Mincho serif families map to the sans face — Noto Serif JP
   // is not vendored)
   'ms pgothic': 'ms gothic',
+  'ms ui gothic': 'ms gothic',
   meiryo: 'ms gothic',
   'yu gothic': 'ms gothic',
   'ｍｓ ゴシック': 'ms gothic',
@@ -537,6 +549,7 @@ export function resolveScriptFallbackFace(
  */
 function looksSerif(family: string): boolean {
   const lower = family.toLowerCase();
+  if (/sans[ -]?serif/.test(lower)) return false;
   return (
     lower.includes('antiqua') ||
     lower.includes('bookman') ||

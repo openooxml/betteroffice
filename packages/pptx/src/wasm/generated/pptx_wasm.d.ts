@@ -167,6 +167,10 @@ export class PptxRenderer {
     constructor();
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
+    /**
+     * requested font faces before layout, for one slide or the whole deck.
+     */
+    requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
     setActiveSlide(document: PptxDocument, id: string, key: string): boolean;
     slideLayoutKey(document: PptxDocument, slide_index: number): string;
@@ -323,6 +327,7 @@ export interface InitOutput {
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];

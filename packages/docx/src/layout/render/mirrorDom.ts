@@ -443,6 +443,8 @@ const UNSIGNED_FIELDS = new Set([
   'leaderGlyphs',
   'modernEffects',
   'strokePaint',
+  'substituteScale',
+  'canvasClusters',
   'textBodyProperties',
 ]);
 let unmatchedSignatures = 0;
@@ -456,7 +458,9 @@ function primitiveSignature(p: object, positions: number[]): string {
   const widget = (p as DocAttrs).inlineSdtWidget;
   let undefinedKeys = '';
   for (const key in p) {
-    if ((p as Record<string, unknown>)[key] === undefined) undefinedKeys += ` ${key}`;
+    if (key !== 'substituteScale' && (p as Record<string, unknown>)[key] === undefined) {
+      undefinedKeys += ` ${key}`;
+    }
   }
   const json = JSON.stringify(p, function (this: unknown, key: string, value: unknown) {
     if (this === p && UNSIGNED_FIELDS.has(key)) return undefined;

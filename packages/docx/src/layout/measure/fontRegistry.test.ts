@@ -35,7 +35,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
       expect(resolveLastResortFace(family, bold, true, 'word').style).toBe('italic');
     });
     for (const failPrimary of [false, true]) {
-      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with Segoe UI measurement views'}`, async () => {
+      test(`${family} ${bold} upright uses ${failPrimary ? 'Liberation measurement views' : 'Selawik with its own Segoe UI measurement view'}`, async () => {
         const provider = createFontProvider();
         const primary = provider.resolve(family, bold, false)!;
         const registered: Uint8Array[] = [];
@@ -65,8 +65,7 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI', 'Segoe
           expect(chain).toEqual([101, 102]);
           expect(registered[0]).toEqual(new Uint8Array(await primary()));
           expect(registered[1]).toEqual(lastResort);
-          expect(substitutes).toContainEqual([1, 'Segoe UI']);
-          if (family !== 'Segoe UI') expect(substitutes).not.toContainEqual([1, family]);
+          expect(substitutes).toContainEqual([1, primary.measureAs ?? family]);
           expect(substitutes).toContainEqual([2, family]);
         }
       });
@@ -112,6 +111,35 @@ test('Lucida Bright keeps its substitute measurement view', async () => {
   expect(substitutes).toEqual([[1, 'Lucida Bright']]);
 });
 
+test('Japanese requested names keep distinct measurement views of the bundled face', async () => {
+  const provider = createFontProvider();
+  const registered: Uint8Array[] = [];
+  const substitutes: Array<[number, string]> = [];
+  const registry = new TextMeasureFontRegistry(
+    {
+      registerFont: bytes => { registered.push(bytes); return registered.length; },
+      registerSubstituteFont: (id, family) => {
+        substitutes.push([id, family]);
+        return substitutes.length + 100;
+      },
+    },
+    { bundled: { resolve: provider.resolve } }
+  );
+  const bytes = new Uint8Array(await provider.resolve('MS Gothic', false, false)!());
+  for (const family of [
+    'MS Mincho', 'ＭＳ 明朝', 'MS Gothic', 'ＭＳ ゴシック',
+    'MS PMincho', 'ＭＳ Ｐ明朝', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS UI Gothic',
+  ]) {
+    expect(provider.resolve(family, false, false)).toBeDefined();
+    const chain = await registry.getFontIdChain(family, false, false);
+    expect(chain).toEqual([substitutes.length + 100]);
+    expect(substitutes.at(-1)?.[1]).toBe(family);
+    expect(registered[substitutes.at(-1)![0] - 1]).toEqual(bytes);
+    expect(await registry.getFontIdChain(family, false, false)).toEqual(chain);
+  }
+  expect(substitutes).toHaveLength(9);
+});
+
 test('a rejected primary still measures with real last-resort bytes', async () => {
   const wasm = await import('../wasm');
   await wasm.preloadLayoutWasm();
@@ -149,7 +177,7 @@ test('a rejected primary still measures with real last-resort bytes', async () =
 });
 
 for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
-  test(`${family} uses Word line metrics and unscaled Selawik advances with the real engine`, async () => {
+  test(`${family} uses Word line metrics and Segoe UI advances with the real engine`, async () => {
     const wasm = await import('../wasm');
     await wasm.preloadLayoutWasm();
     const provider = createFontProvider();
@@ -179,7 +207,9 @@ for (const family of ['Segoe UI Light', 'Segoe UI Semilight', 'Segoe UI']) {
       expect(measured.lines[0].descent).toBeCloseTo(514 / 2048 * 16, 5);
       expect(measured.lines[0].lineHeight).toBeCloseTo((2210 + 514) / 2048 * 16, 5);
       expect(unscaled.lines[0].width).toBeGreaterThan(0);
-      expect(measured.lines[0].width / unscaled.lines[0].width).toBeCloseTo(1.0, 5);
+      const ratio = measured.lines[0].width / unscaled.lines[0].width;
+      if (family === 'Segoe UI Semilight') expect(Math.abs(ratio - 1)).toBeLessThan(0.002);
+      else expect(ratio).toBeCloseTo(1.0, 5);
     } finally {
       wasm.clearMeasureFonts();
     }

@@ -271,6 +271,8 @@ export interface InlineSdtWidgetAttrs {
 
 export interface ChartA11yAttrs {
   label: string;
+  /** The placed chart box every primitive of the chart paints inside. */
+  frame?: { x?: number; y?: number; w?: number; h?: number };
 }
 
 // attributes shared by primitives that map back to document content; replaces
@@ -395,6 +397,10 @@ export interface TextRunPrimitive extends DocAttrs {
   rotationDeg?: number;
   /** Horizontal text scale as a percentage (100 = normal). Absent = 100. */
   horizontalScale?: number;
+  /** Canvas-only width ratio for substitute font bytes. Absent = 1. */
+  substituteScale?: number;
+  /** Browser text clusters at offsets from the run origin. */
+  canvasClusters?: Array<{ text: string; offset: number }>;
   /** Render glyphs uppercase without changing the accessible source text. */
   allCaps?: boolean;
   /** Render lowercase glyphs as small uppercase. */

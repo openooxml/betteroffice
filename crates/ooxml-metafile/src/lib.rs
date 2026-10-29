@@ -10,6 +10,7 @@ mod dib;
 pub mod drawing;
 mod emf;
 mod emfplus;
+mod fmath;
 mod gradient;
 mod player;
 mod read;

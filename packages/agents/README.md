@@ -32,6 +32,8 @@ codex mcp add betteroffice -- /absolute/path/to/node_modules/.bin/betteroffice-m
 | --- | --- |
 | `--root <directory>` | Required. Every file path is resolved against it, including symlinks. |
 | `--read-only` | Exposes only the inspection tools: no proposals, edits, acceptance or export. |
+| `--formats <list>` | Comma-separated formats to serve (`docx`, `xlsx`, `pptx`); env `BETTEROFFICE_MCP_FORMATS`. The flag wins over the env var. |
+| `--tools <list>` | Comma-separated tool names to expose; unknown names fail at startup. Env `BETTEROFFICE_MCP_TOOLS`. The flag wins over the env var. |
 
 Exports always write a new file and never overwrite an existing one. Path checks are not an
 operating-system sandbox, so use a workspace directory you control.
@@ -82,7 +84,7 @@ call `doc.accept(id, { tracked: true, date: '2026-09-27T12:00:00Z' })`.
 | `attachPptx(handle, options?)` | Wraps a live `PresentationHandle`. |
 | `renderDocxPage` (from `@betteroffice/agents/render`) | Node canvas renderer for DOCX page previews. |
 | `renderPptxSlide` | Node canvas renderer for PPTX slide previews. |
-| `createOfficeMcpServer({ root, renderer?, readOnly? })` (from `@betteroffice/agents/mcp`) | The MCP server, for hosts that connect their own transport. |
+| `createOfficeMcpServer({ root, renderer?, readOnly?, formats?, tools? })` (from `@betteroffice/agents/mcp`) | The MCP server, for hosts that connect their own transport. |
 
 DOCX and PPTX documents stage text edits with `grep`, `read` and `propose`; workbooks use
 `readCells` and `proposeCells` instead. All adapters share `review`, `accept`, `reject`, `verify`,

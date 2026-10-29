@@ -1050,6 +1050,21 @@ impl WorkbookAuthority {
         self.doc.client_id().get()
     }
 
+    pub(crate) fn inherit_xf_xml_markers(&mut self, source: &Stylesheet) {
+        if !self.base.styles.has_xf_xml_markers() {
+            Arc::make_mut(&mut self.base)
+                .styles
+                .inherit_xf_xml_markers(source);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_xf_xml_markers_for_test(&mut self) {
+        let mut value = serde_json::to_value(&self.base.styles).unwrap();
+        value.as_object_mut().unwrap().remove("xfs_with_extra_xml");
+        Arc::make_mut(&mut self.base).styles = serde_json::from_value(value).unwrap();
+    }
+
     pub(crate) fn snapshot_revision(&self) -> u64 {
         self.snapshot_revision.load(Ordering::Relaxed)
     }

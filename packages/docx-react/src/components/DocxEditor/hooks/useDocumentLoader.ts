@@ -21,6 +21,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { DocumentLoadGeneration } from './documentLoadGeneration';
 import { DocxWorkerError } from '../internals/docxWorkerError';
+import { useTranslation } from '../../../i18n';
 
 /**
  * Document lifecycle: load buffer / pre-parsed doc, react to
@@ -75,6 +76,7 @@ export function useDocumentLoader({
   /** The editor instance's font loads, see `useFontLoadScope`. */
   fontScope: FontLoadScope;
 }) {
+  const { t } = useTranslation();
   // The live history document changes after every edit, but yrs must only be
   // reseeded when a new source document is loaded. Keep that load boundary
   // separate so PagedEditor can replace its session without treating normal
@@ -192,12 +194,12 @@ export function useDocumentLoader({
         await loadGeneration.waitForCompletion(generation);
       } catch (error) {
         if (!loadGeneration.complete(generation)) return;
-        const message = error instanceof Error ? error.message : 'Failed to parse document';
+        const message = error instanceof Error ? error.message : t('editor.failedToParse');
         setLoadingState({ isLoading: false, parseError: message });
         onError?.(error instanceof Error ? error : new Error(message));
       }
     },
-    [loadGeneration, resetForNewDocument, history, onError, setLoadingState]
+    [loadGeneration, resetForNewDocument, history, onError, setLoadingState, t]
   );
 
   const acceptHostDocument = useCallback(

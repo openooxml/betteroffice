@@ -16,7 +16,8 @@ name = "pptx_edit"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-wasm = ["dep:js-sys", "dep:wasm-bindgen"]
+engine = []
+wasm = ["engine", "dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 base64 = "0.22"

@@ -157,7 +157,7 @@ type PeerlessEditorBoundaryProps = Pick<PptxAsyncEditorProps, 'onError' | 'class
 
 function PeerlessEditorError({ error, className, style }: { error: Error; className?: string; style?: CSSProperties }) {
   const chunk = error instanceof PptxWorkerEditorChunkLoadError;
-  return <div className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
+  return <div dir="ltr" className={className} style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
     <PresentationFailure kind={chunk ? 'load' : 'open'} details={error.message} onReload={chunk ? reloadPage : undefined} />
   </div>;
 }
@@ -644,7 +644,7 @@ function PptxAsyncEditorSession(props: PptxAsyncEditorInternalProps) {
   const engine = choice.identity === identity ? choice : start();
   if (choice !== engine) setChoice(engine);
   useEffect(() => { if (engine.reason) warnPptxEngine(engine.reason); }, [engine.reason]);
-  const fallback = <div className={props.className} style={props.style} role="status">
+  const fallback = <div dir="ltr" className={props.className} style={props.style} role="status">
     {props.file && props.loadingIndicator !== undefined ? props.loadingIndicator : t('worker.preparing')}
   </div>;
   return <PeerlessEditorBoundary onError={props.onError} className={props.className} style={props.style}>
@@ -3110,8 +3110,8 @@ export function PptxEditorContent({
               <span
                 role="listitem"
                 style={presenceChip('#64748b', true)}
-                title={`${toolbarPresence.overflow} more collaborators`}
-                aria-label={`${toolbarPresence.overflow} more collaborators`}
+                title={t('presence.moreCollaborators', { count: toolbarPresence.overflow })}
+                aria-label={t('presence.moreCollaborators', { count: toolbarPresence.overflow })}
               >
                 +{toolbarPresence.overflow}
               </span>
@@ -3135,7 +3135,7 @@ export function PptxEditorContent({
     ) : null;
 
   const editor = (
-    <div ref={rootRef} className={className} style={{ ...styles.root, ...style }}>
+    <div dir="ltr" ref={rootRef} className={className} style={{ ...styles.root, ...style }}>
       {toolbarRegion}
       <input
         ref={pictureInputRef}
@@ -3297,7 +3297,7 @@ export function PptxEditorContent({
                   )}
                   {remoteShapePresence.overflow > 0 ? (
                     <span style={styles.remoteShapeOverflow} aria-hidden="true">
-                      +{remoteShapePresence.overflow} selections
+                      {t('presence.moreSelections', { count: remoteShapePresence.overflow })}
                     </span>
                   ) : null}
                   {selectionBox ? (

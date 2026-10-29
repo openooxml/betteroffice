@@ -78,7 +78,7 @@ export function ProposalsPanel({
   onClose,
   visualDisabledReason,
 }: Props) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const store = usePptxCommands();
   const titleId = useId();
   const [selected, setSelected] = useState<{
@@ -250,7 +250,7 @@ export function ProposalsPanel({
               </button>
               {!visualDisabledReason && (
                 <Suspense fallback={null}>
-                  <ProposalChangeDetails change={change} t={t} />
+                  <ProposalChangeDetails change={change} t={t} lang={lang} />
                 </Suspense>
               )}
               <button
@@ -349,7 +349,7 @@ export function ProposalsPanel({
               </select>
             </label>
             <Suspense fallback={null}>
-              <ProposalChangeDetails change={preview.data.proposal.changes[selected.index]} t={t} textOnly />
+              <ProposalChangeDetails change={preview.data.proposal.changes[selected.index]} t={t} lang={lang} textOnly />
             </Suspense>
             <div style={styles.previews}>
               <PreviewCanvas

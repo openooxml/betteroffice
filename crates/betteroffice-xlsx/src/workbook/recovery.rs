@@ -868,6 +868,7 @@ impl Workbook {
         let pending_remote_updates = read_sections(&mut reader)?;
         reader.finish().map_err(invalid)?;
         let header = checkpoint.header;
+        let source_markers = source.and_then(source_style_xml_markers);
         let mut authority = WorkbookAuthority::restore_recovery_state(
             authority_bytes,
             header.client_id,
@@ -875,6 +876,9 @@ impl Workbook {
             codec >= ROW_DEFAULTS_CODEC_VERSION,
         )
         .map_err(invalid)?;
+        if let Some(styles) = &source_markers {
+            authority.inherit_xf_xml_markers(styles);
+        }
         pulse();
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
@@ -882,7 +886,10 @@ impl Workbook {
         {
             return Err(invalid("Unsupported workbook recovery codec"));
         }
-        let model = checkpoint.calculation.apply(projection)?;
+        let mut model = checkpoint.calculation.apply(projection)?;
+        if let Some(styles) = &source_markers {
+            model.styles.inherit_xf_xml_markers(styles);
+        }
         pulse();
         authority.set_snapshot_projection_valid(true);
         let states = preserved_states

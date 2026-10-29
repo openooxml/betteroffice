@@ -141,7 +141,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
     collaboration: null,
     init: { epoch: 1, readOnly: false, layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: frame, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
-    commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads,
+    commandInit: null, commandHost: null, releaseCommandHost: null, releaseResidentSelectionReads, fontRequirementsHinted: true,
     createResidentCommandHost: (options: DocxCommandHostOptions) => options.hooks,
     displayPositionIndex: () => ({ positionOf: (at: YrsLoc, root: string) => {
       expect(at).toEqual(focus);

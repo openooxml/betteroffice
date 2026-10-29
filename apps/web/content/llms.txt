@@ -4,7 +4,7 @@
 
 DOCX, XLSX and PPTX are published on npm, crates.io and PyPI. VSDX diagram support builds from source and has no published packages. Versions differ by format and registry; the registries and the [release notes](https://github.com/openooxml/betteroffice/releases) list current versions, and the documentation holds the API reference.
 
-Used by: [OpenCode](https://opencode.ai), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
+Used by: [OpenCode](https://opencode.ai), [T3 Code](https://t3.codes), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
 
 ## Features
 
@@ -19,7 +19,7 @@ Agents propose edits that people review in the editor as attributed tracked chan
 - [Python guide](https://docs.betteroffice.dev/docs/python): installation and examples.
 - [Agents guide](https://docs.betteroffice.dev/docs/agents): the agent SDK and MCP server.
 - [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration): connecting editors and deploying a relay.
-- [VSDX guide](https://docs.betteroffice.dev/docs/vsdx): the diagram editor source preview.
+- [VSDX guide](https://docs.betteroffice.dev/docs/vsdx): the diagram editor, built from source.
 
 ## npm packages
 

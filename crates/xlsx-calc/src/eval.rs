@@ -12,6 +12,7 @@ use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, Sheet
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
+use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
@@ -1042,7 +1043,7 @@ fn arithmetic(op: BinaryOp, a: f64, b: f64) -> CellValue {
             }
         }
         BinaryOp::Pow => {
-            let r = a.powf(b);
+            let r = fmath::pow(a, b);
             if r.is_finite() {
                 num(r)
             } else {
@@ -1599,6 +1600,44 @@ mod tests {
     use super::*;
     use crate::parse_formula;
     use xlsx_model::{Cell, DefinedName, Sheet, Workbook};
+
+    #[test]
+    fn formula_math_matches_libm_bits() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for (formula, expected) in [
+            (
+                "=0.6108*EXP(17.27*20/(20+237.3))",
+                0.6108 * libm::exp(17.27 * 20.0 / (20.0 + 237.3)),
+            ),
+            (
+                "=(7^1.37)/(15^1.37)",
+                libm::pow(7.0, 1.37) / libm::pow(15.0, 1.37),
+            ),
+            ("=((5/3)^(1/4))-1", libm::pow(5.0 / 3.0, 1.0 / 4.0) - 1.0),
+            ("=POWER(7,1.37)", libm::pow(7.0, 1.37)),
+            ("=LN(7)", libm::log(7.0)),
+            ("=LOG(7,3)", libm::log(7.0) / libm::log(3.0)),
+            ("=LOG10(7)", libm::log10(7.0)),
+            ("=SIN(1.37)", libm::sin(1.37)),
+            ("=COS(1.37)", libm::cos(1.37)),
+            ("=TAN(1.37)", libm::tan(1.37)),
+            ("=ASIN(0.37)", libm::asin(0.37)),
+            ("=ACOS(0.37)", libm::acos(0.37)),
+            ("=ATAN(1.37)", libm::atan(1.37)),
+            ("=ATAN2(7,3)", libm::atan2(3.0, 7.0)),
+            ("=SINH(1.37)", libm::sinh(1.37)),
+            ("=COSH(1.37)", libm::cosh(1.37)),
+            ("=TANH(1.37)", libm::tanh(1.37)),
+        ] {
+            let expr = parse_formula(formula.strip_prefix('=').unwrap()).unwrap();
+            let CellValue::Number { value } = evaluate(&expr, &context) else {
+                panic!("{formula} did not return a number");
+            };
+            assert_eq!(value.to_bits(), expected.to_bits(), "{formula}");
+        }
+    }
 
     fn number(value: f64) -> Cell {
         Cell {
