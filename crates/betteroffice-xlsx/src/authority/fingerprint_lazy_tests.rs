@@ -188,7 +188,12 @@ fn historical_state_encodings_match_eager_acceptance() {
             .unwrap();
             let domain = fingerprint_domain(version, reading);
             let (fingerprint, client) = fingerprint_model_with_row_domain_oracle(
-                &case.model, version, version >= 4, true, rows, domain,
+                &case.model,
+                version,
+                version >= 4,
+                true,
+                rows,
+                domain,
             )
             .unwrap();
             if version == SCHEMA_VERSION {
@@ -212,8 +217,8 @@ fn historical_state_encodings_match_eager_acceptance() {
             base.fingerprint = fingerprint;
             base.bootstrap_client_id = client;
             let update = encoded_reading(&case.model, &base, version, reading, rows);
-            let adopted = |authority: &WorkbookAuthority| {
-                match authority.snapshot_replacement(&update) {
+            let adopted =
+                |authority: &WorkbookAuthority| match authority.snapshot_replacement(&update) {
                     SnapshotAdoption::Replacement(adopted) => adopted,
                     SnapshotAdoption::Incompatible(error) => {
                         panic!("{}: {era}: {error}", case.label)
@@ -221,8 +226,7 @@ fn historical_state_encodings_match_eager_acceptance() {
                     SnapshotAdoption::NotApplicable => {
                         panic!("{}: {era}: not adopted", case.label)
                     }
-                }
-            };
+                };
             let actual_adopted = adopted(&actual);
             let expected_adopted = adopted(&expected);
             assert_eq!(
@@ -235,12 +239,21 @@ fn historical_state_encodings_match_eager_acceptance() {
             changed.sheets[0].name.push('!');
             (base.fingerprint, base.bootstrap_client_id) =
                 fingerprint_model_with_row_domain_oracle(
-                    &changed, version, version >= 4, true, rows, domain,
+                    &changed,
+                    version,
+                    version >= 4,
+                    true,
+                    rows,
+                    domain,
                 )
                 .unwrap();
             let rejected = encoded_reading(&changed, &base, version, reading, rows);
             for authority in [&expected, &actual] {
-                assert!(!authority.base.accepts_fingerprint(version, &base.fingerprint));
+                assert!(
+                    !authority
+                        .base
+                        .accepts_fingerprint(version, &base.fingerprint)
+                );
                 assert!(matches!(
                     authority.snapshot_replacement(&rejected),
                     SnapshotAdoption::Incompatible(_)
@@ -254,7 +267,10 @@ fn historical_state_encodings_match_eager_acceptance() {
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
             assert_eq!(
-                adopted_fingerprints.clone().into_iter().collect::<BTreeMap<_, _>>(),
+                adopted_fingerprints
+                    .clone()
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
                 expected_map,
             );
             assert_eq!(
@@ -273,7 +289,11 @@ fn historical_state_encodings_match_eager_acceptance() {
             .unwrap();
             for mut fingerprints in [adopted_fingerprints, restored.base.fingerprints.clone()] {
                 fingerprints.retain(|version, _| *version <= SCHEMA_VERSION);
-                append_fingerprint(&mut fingerprints, version, expected_map[&version][0].clone());
+                append_fingerprint(
+                    &mut fingerprints,
+                    version,
+                    expected_map[&version][0].clone(),
+                );
                 assert_eq!(
                     fingerprints.into_iter().collect::<BTreeMap<_, _>>(),
                     expected_map,
@@ -330,8 +350,18 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
             lazy.clone(),
             expected.clone(),
         ),
-        ("planned-planned", lazy.clone(), lazy.clone(), expected.clone()),
-        ("planned-ready", lazy.clone(), ready.clone(), expected.clone()),
+        (
+            "planned-planned",
+            lazy.clone(),
+            lazy.clone(),
+            expected.clone(),
+        ),
+        (
+            "planned-ready",
+            lazy.clone(),
+            ready.clone(),
+            expected.clone(),
+        ),
         ("ready-planned", ready, lazy.clone(), duplicated),
         ("materialized-planned", materialized, lazy, expected),
     ] {
@@ -348,7 +378,11 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         let mut expected_appended = expected.clone();
         append_fingerprint(&mut appended, SCHEMA_VERSION, case.label.clone());
         append_fingerprint(&mut expected_appended, SCHEMA_VERSION, case.label.clone());
-        assert_eq!(appended.materialized_bytes(), Some(appended.retained_bytes()), "{label}");
+        assert_eq!(
+            appended.materialized_bytes(),
+            Some(appended.retained_bytes()),
+            "{label}"
+        );
         assert_eq!(
             appended.into_iter().collect::<BTreeMap<_, _>>(),
             expected_appended,
@@ -357,9 +391,15 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         let removed = expected.get(&SCHEMA_VERSION).cloned().unwrap_or_default();
         actual.retain(|version, _| *version < SCHEMA_VERSION);
         expected.retain(|version, _| *version < SCHEMA_VERSION);
-        assert_eq!(actual.materialized_bytes(), Some(actual.retained_bytes()), "{label}");
+        assert_eq!(
+            actual.materialized_bytes(),
+            Some(actual.retained_bytes()),
+            "{label}"
+        );
         assert!(
-            removed.iter().all(|value| !actual.accepts(SCHEMA_VERSION, value)),
+            removed
+                .iter()
+                .all(|value| !actual.accepts(SCHEMA_VERSION, value)),
             "{label}",
         );
         for _ in 0..2 {
@@ -704,11 +744,13 @@ fn oversized_cell_payload_retains_only_materialized_fingerprints() {
 fn oversized_shared_strings_do_not_survive_in_a_plan() {
     use xlsx_model::open_timing;
 
-    let mut model = WorkbookModel::default();
-    model.shared_strings = (0..=fingerprints::MAX_LAZY_BYTES / 32_767)
-        .map(|_| "x".repeat(32_767))
-        .collect();
-    model.sheets.push(Sheet::new("Payload"));
+    let model = WorkbookModel {
+        shared_strings: (0..=fingerprints::MAX_LAZY_BYTES / 32_767)
+            .map(|_| "x".repeat(32_767))
+            .collect(),
+        sheets: vec![Sheet::new("Payload")],
+        ..WorkbookModel::default()
+    };
     open_timing::begin();
     let actual = WorkbookBase::from_model(&model).unwrap();
     assert_eq!(
