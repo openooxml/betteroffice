@@ -37,6 +37,7 @@ function DelayedEditor(props: ComponentProps<typeof MountedEditor>) {
       serialize: async () => props.file.bytes,
       whenReady: async () => {},
       encodeStateVector: async () => Uint8Array.of(0),
+      hasPendingUpdates: () => state.current.pending,
       focus() {},
       print() {},
       async flushPendingInput() {
