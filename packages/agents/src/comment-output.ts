@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import type { DocxCommentSaveIdentity } from '@betteroffice/docx/yrs';
 import { DocumentToolError } from './types';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -296,12 +297,14 @@ function withoutElements(part: XmlPart, elements: readonly XmlElement[]): string
   return xml;
 }
 
-function commentIds(seeded: ReadonlySet<string>, comments: readonly CommentOutput[]): Map<string, string> {
+function commentIds(seeded: ReadonlySet<string>, comments: readonly CommentOutput[], identities: ReadonlyMap<string, DocxCommentSaveIdentity> = new Map()): Map<string, string> {
   const ids = new Map([...seeded].map(id => [id, id]));
-  const used = new Set([...seeded].map(Number));
+  const used = new Set([...seeded].map(Number).concat([...identities.values()].map(identity => identity.id)));
   let next = Math.max(0, ...used) + 1;
   for (const comment of comments) {
     if (ids.has(comment.id)) continue;
+    const identity = identities.get(comment.id);
+    if (identity) { ids.set(comment.id, String(identity.id)); continue; }
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
       while (used.has(next)) next++;
@@ -311,6 +314,34 @@ function commentIds(seeded: ReadonlySet<string>, comments: readonly CommentOutpu
     ids.set(comment.id, String(id));
   }
   return ids;
+}
+
+export async function readSavedCommentIdentities(source: CommentSource, bytes: Uint8Array, comments: readonly CommentOutput[], previous: ReadonlyMap<string, DocxCommentSaveIdentity>): Promise<Map<string, DocxCommentSaveIdentity>> {
+  const identities = new Map(previous);
+  if (!comments.length) return identities;
+  const zip = await JSZip.loadAsync(bytes);
+  const part = await readXml(zip, COMMENTS, W, 'comments');
+  const seeded = new Set(source.comments.map(comment => comment.element.attributes.get(expanded(W, 'id'))!));
+  const ids = commentIds(seeded, comments, previous);
+  const durableIds = new Map<string, string>();
+  if (zip.file('word/commentsIds.xml')) {
+    const [, namespace, root, entry] = COMMENT_COMPANIONS[1];
+    const metadata = await readXml(zip, 'word/commentsIds.xml', namespace, root);
+    for (const element of metadata.root.children.filter(element => element.name === expanded(namespace, entry))) {
+      const paraId = element.attributes.get(expanded(namespace, 'paraId'));
+      const durableId = element.attributes.get(expanded(namespace, 'durableId'));
+      if (paraId && durableId) durableIds.set(paraId.toUpperCase(), durableId);
+    }
+  }
+  for (const comment of comments) {
+    const id = ids.get(comment.id)!;
+    const element = part.root.children.find(element => element.name === expanded(W, 'comment') && element.attributes.get(expanded(W, 'id')) === id);
+    requireOutput(element, 'Saving comments would lose a comment identity.');
+    const paraId = lastParagraph(element)?.attributes.get(expanded(W14, 'paraId'));
+    const durableId = paraId ? durableIds.get(paraId.toUpperCase()) : undefined;
+    identities.set(comment.id, { id: Number(id), ...(paraId ? { paraId } : {}), ...(durableId ? { durableId } : {}) });
+  }
+  return identities;
 }
 
 function storyProjection(part: XmlPart, aliases: ReadonlyMap<string, string>, deleted: ReadonlySet<string>): string {
@@ -350,38 +381,101 @@ function storyProjection(part: XmlPart, aliases: ReadonlyMap<string, string>, de
   return xml;
 }
 
-async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlySet<string>, expected: readonly CommentOutput[], previous: readonly CommentOutput[], deleted: ReadonlySet<string>): Promise<void> {
-  const aliases = (comments: readonly CommentOutput[]) => new Map([...commentIds(seeded, comments)].map(([id, saved]) => [saved, id]));
+async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlySet<string>, expected: readonly CommentOutput[], previous: readonly CommentOutput[], deleted: ReadonlySet<string>, identities: ReadonlyMap<string, DocxCommentSaveIdentity>, original: JSZip): Promise<void> {
+  const aliases = (comments: readonly CommentOutput[]) => new Map([...commentIds(seeded, comments, identities)].map(([id, saved]) => [saved, id]));
   const beforeIds = aliases(previous);
   const savedIds = aliases(expected);
+  const removedParts = new Set<string>();
+  const removedParaIds = new Set<string>();
+  const removedDurableIds = new Set<string>();
+  const verifyPart = async (name: string, namespace: string, root: string, entry: string, drop: (element: XmlElement) => boolean) => {
+    if (!source.file(name)) {
+      requireOutput(!zip.file(name), `Saving comments would add an unexpected comment part ${name}.`);
+      return;
+    }
+    const before = await readXml(source, name, namespace, root);
+    const entries = before.root.children.filter(element => element.name === expanded(namespace, entry));
+    const removed = entries.filter(drop);
+    if (!zip.file(name)) {
+      requireOutput(!original.file(name) && removed.length === entries.length && entries.length === before.root.children.length,
+        `Saving comments would remove surviving comment markup in ${name}.`);
+      removedParts.add(name);
+      return;
+    }
+    const saved = await readXml(zip, name, namespace, root);
+    requireOutput(withoutElements(before, removed) === saved.xml, `Saving comments would rewrite a surviving comment or companion entry in ${name}.`);
+  };
+  if (source.file(COMMENTS)) {
+    const before = await readXml(source, COMMENTS, W, 'comments');
+    for (const element of before.root.children.filter(element => element.name === expanded(W, 'comment'))) {
+      const id = element.attributes.get(expanded(W, 'id'));
+      if (id === undefined || !deleted.has(beforeIds.get(id) ?? id)) continue;
+      const paraId = lastParagraph(element)?.attributes.get(expanded(W14, 'paraId'));
+      if (paraId) removedParaIds.add(paraId.toUpperCase());
+      const durableId = element.attributes.get(expanded(COMMENT_COMPANIONS[1][1], 'durableId'));
+      if (durableId) removedDurableIds.add(durableId.toUpperCase());
+    }
+  }
+  if (source.file('word/commentsIds.xml')) {
+    const [name, namespace, root, entry] = COMMENT_COMPANIONS[1];
+    const before = await readXml(source, name, namespace, root);
+    for (const element of before.root.children.filter(element => element.name === expanded(namespace, entry))) {
+      const paraId = element.attributes.get(expanded(namespace, 'paraId'));
+      const durableId = element.attributes.get(expanded(namespace, 'durableId'));
+      if (paraId && durableId && removedParaIds.has(paraId.toUpperCase())) removedDurableIds.add(durableId.toUpperCase());
+    }
+  }
+  await verifyPart(COMMENTS, W, 'comments', 'comment', element => {
+    const id = element.attributes.get(expanded(W, 'id'));
+    return id !== undefined && deleted.has(beforeIds.get(id) ?? id);
+  });
+  for (const [name, namespace, root, entry, key] of COMMENT_COMPANIONS) {
+    await verifyPart(name, namespace, root, entry, element => {
+      const id = element.attributes.get(expanded(namespace, key));
+      return id !== undefined && (key === 'paraId' ? removedParaIds : removedDurableIds).has(id.toUpperCase());
+    });
+  }
   const storyRoots = new Set(['document', 'hdr', 'ftr', 'footnotes', 'endnotes'].map(name => expanded(W, name)));
   const mutable = new Set(COMMENT_TYPES.keys());
   for (const [name, file] of Object.entries(source.files)) {
     if (file.dir || mutable.has(name)) continue;
-    const original = await file.async('string');
-    const kept = await zip.file(name)?.async('string');
-    requireOutput(kept !== undefined, `Saving comments would remove the unrelated package part ${name}.`);
-    if (name.endsWith('.xml') && original.includes(W)) {
-      const before = parseXml(original);
-      if (storyRoots.has(before.root.name)) {
-        const saved = parseXml(kept);
-        requireOutput(!saved.elements.some(element => {
-          const id = element.attributes.get(expanded(W, 'id'));
-          return ['commentRangeStart', 'commentRangeEnd', 'commentReference'].some(local => element.name === expanded(W, local))
-            && id !== undefined && deleted.has(savedIds.get(id) ?? id);
-        }), `Saving comments would leave an orphan comment marker in ${name}.`);
-        requireOutput(storyProjection(before, beforeIds, deleted) === storyProjection(saved, savedIds, new Set()),
-          `Saving comments would change unrelated story markup in ${name}.`);
+    const kept = zip.file(name);
+    requireOutput(kept, `Saving comments would remove the unrelated package part ${name}.`);
+    if (name.endsWith('.xml') || name === DOCUMENT_RELS) {
+      const xml = await file.async('string');
+      const savedXml = await kept.async('string');
+      if (xml.includes(W)) {
+        const before = parseXml(xml);
+        if (storyRoots.has(before.root.name)) {
+          const saved = parseXml(savedXml);
+          requireOutput(!saved.elements.some(element => {
+            const id = element.attributes.get(expanded(W, 'id'));
+            return ['commentRangeStart', 'commentRangeEnd', 'commentReference'].some(local => element.name === expanded(W, local))
+              && id !== undefined && deleted.has(savedIds.get(id) ?? id);
+          }), `Saving comments would leave an orphan comment marker in ${name}.`);
+          requireOutput(storyProjection(before, beforeIds, deleted) === storyProjection(saved, savedIds, new Set()),
+            `Saving comments would change unrelated story markup in ${name}.`);
+          continue;
+        }
+      }
+      if (removedParts.size && (name === '[Content_Types].xml' || name === DOCUMENT_RELS)) {
+        const before = parseXml(xml);
+        const removed = before.root.children.filter(element => name === '[Content_Types].xml'
+          ? element.name === expanded(TYPES, 'Override') && removedParts.has(element.attributes.get('{}PartName')?.slice(1) ?? '')
+          : element.name === expanded(RELS, 'Relationship') && COMMENT_TYPES.has(partName('word/', element.attributes.get('{}Target') ?? ''))
+            && removedParts.has(partName('word/', element.attributes.get('{}Target') ?? '')));
+        requireOutput(withoutWhitespaceText(withoutElements(before, removed)) === withoutWhitespaceText(savedXml),
+          `Saving comments would change unrelated registrations in ${name}.`);
         continue;
       }
     }
     const bytes = await file.async('uint8array');
-    const saved = await zip.file(name)!.async('uint8array');
+    const saved = await kept.async('uint8array');
     requireOutput(bytes.length === saved.length && bytes.every((byte, index) => byte === saved[index]),
       `Saving comments would change the unrelated package part ${name}.`);
   }
   for (const [name, file] of Object.entries(zip.files)) {
-    requireOutput(file.dir || source.file(name) || mutable.has(name), `Saving comments would add the unrelated package part ${name}.`);
+    requireOutput(file.dir || source.file(name), `Saving comments would add the unrelated package part ${name}.`);
   }
 }
 
@@ -488,11 +582,17 @@ function preservesComment(saved: XmlPart, element: XmlElement, original: Comment
   return fragment === `${original.xml.slice(0, at)} w14:paraId="${paraId}"${original.xml.slice(at)}`;
 }
 
-export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], baseline?: Uint8Array, deleted: ReadonlySet<string> = new Set(), previous?: readonly CommentOutput[]): Promise<void> {
+export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Array, added: number, expected: readonly CommentOutput[] = [], baseline?: Uint8Array, deleted: ReadonlySet<string> = new Set(), previous?: readonly CommentOutput[], identities: ReadonlyMap<string, DocxCommentSaveIdentity> = new Map()): Promise<void> {
   const zip = await JSZip.loadAsync(bytes);
   const rels = await relationships(zip, DOCUMENT_RELS);
   requireOutput(new Set(rels.map(rel => rel.id)).size === rels.length, 'Saving comments would create duplicate relationship ids.');
   const comments = rels.filter(rel => rel.type.endsWith('/comments'));
+  if (!zip.file(COMMENTS)) {
+    requireOutput(previous && !source.zip.file(COMMENTS) && added === 0 && expected.length === 0 && comments.length === 0
+      && COMMENT_COMPANIONS.every(([name]) => !zip.file(name)), 'Saving comments would lose the comments part.');
+    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, new Set(), expected, previous, deleted, identities, source.zip);
+    return;
+  }
   requireOutput(comments.length === 1 && comments[0].type === `${OFFICE_RELS}comments` && comments[0].mode !== 'External' && partName('word/', comments[0].target) === COMMENTS,
     'Saving comments would leave the comments part without a unique internal relationship.');
   for (const original of source.relationships) {
@@ -509,7 +609,7 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   const saved = await readXml(zip, COMMENTS, W, 'comments');
   const elements = saved.root.children.filter(element => element.name === expanded(W, 'comment'));
   const seeded = new Set(source.comments.map(comment => comment.element.attributes.get(expanded(W, 'id'))!));
-  const savedIds = commentIds(seeded, expected);
+  const savedIds = commentIds(seeded, expected, identities);
   const removed = source.comments.filter(comment => deleted.has(comment.element.attributes.get(expanded(W, 'id'))!));
   requireOutput(elements.every(element => !deleted.has(element.attributes.get(expanded(W, 'id'))!)), 'Saving comments would retain a deleted comment.');
   const replies = expected.filter(comment => comment.parentId !== null && !seeded.has(comment.id));
@@ -571,7 +671,7 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   }
   await verifyCommentCompanions(source.zip, zip, elements, fresh, resolvedParagraphIds, removed.map(comment => comment.element));
   if (previous) {
-    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, seeded, expected, previous, deleted);
+    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, seeded, expected, previous, deleted, identities, source.zip);
     return;
   }
   const mutable = new Set(['word/document.xml', '[Content_Types].xml', DOCUMENT_RELS, 'docProps/core.xml', ...COMMENT_TYPES.keys()]);

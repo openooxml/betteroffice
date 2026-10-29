@@ -49,6 +49,18 @@ export interface DocxSavedDocument {
   conflicts: DocxSavedParagraph[];
 }
 
+/** @internal */
+export interface DocxCommentSaveIdentity {
+  id: number;
+  paraId?: string;
+  durableId?: string;
+}
+
+export interface DocxSaveOptions extends RepackOptions {
+  /** @internal */
+  commentIdentities?: ReadonlyMap<string, DocxCommentSaveIdentity>;
+}
+
 function storyBlocks(document: Document): BlockContent[][] {
   const pkg = document.package;
   const headerFooterBlocks = [pkg.headers, pkg.footers].flatMap((entries) =>
@@ -95,12 +107,14 @@ function commentBodyKey(body: unknown): string | undefined {
 
 function savedComments(
   session: YrsSession,
-  base: Document
+  base: Document,
+  identities?: ReadonlyMap<string, DocxCommentSaveIdentity>
 ): { comments: Comment[]; sessionIds: Map<number, string>; changed: boolean } {
   const source = base.package.document.comments ?? [];
   const listed = session.listComments();
   resolveCommentMedia(listed, (token) => session.mediaDataUrl(token));
-  const ids = savedCommentIds(source.map((comment) => comment.id), listed);
+  const ids = savedCommentIds(source.map((comment) => comment.id), listed,
+    identities && new Map([...identities].map(([id, identity]) => [id, identity.id])));
   const held = new Map(listed.map((comment) => [comment.id, comment]));
   let retained: Set<string> | undefined;
   if (source.some(comment => !held.has(String(comment.id)))) {
@@ -143,9 +157,12 @@ function savedComments(
   for (const entry of held.values()) {
     changed = true;
     const id = ids.get(entry.id)!;
+    const identity = identities?.get(entry.id);
     if (String(id) !== entry.id) sessionIds.set(id, entry.id);
     comments.push({
       id,
+      ...(identity?.paraId ? { paraId: identity.paraId } : {}),
+      ...(identity?.durableId ? { durableId: identity.durableId } : {}),
       author: entry.author,
       done: entry.done,
       parentId: parentOf(entry.parentId),
@@ -601,14 +618,14 @@ export async function writeSessionSave(
  */
 export async function saveYrsDocx(
   session: YrsSession,
-  options: RepackOptions = {}
+  options: DocxSaveOptions = {}
 ): Promise<DocxSavedDocument> {
   const base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
   const capture = captureSessionSave(session);
-  const comments = savedComments(session, base);
+  const comments = savedComments(session, base, options.commentIdentities);
   const document = yrsToDocument(
     session,
     comments.changed

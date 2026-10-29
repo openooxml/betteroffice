@@ -198,6 +198,8 @@ export {
   saveYrsDocx,
   writeSessionSave,
   type DocxSavedDocument,
+  type DocxCommentSaveIdentity,
+  type DocxSaveOptions,
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';

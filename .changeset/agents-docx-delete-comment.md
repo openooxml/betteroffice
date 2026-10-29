@@ -1,5 +1,6 @@
 ---
 '@betteroffice/agents': patch
+'@betteroffice/docx': patch
 ---
 
-Adds the opt-in `delete_comment` operation to `docx_edit` to remove a comment or a root comment's entire thread.
+`docx_edit` adds `delete_comment`, which removes a comment or a root comment's whole thread, including its range markers, reference and companion entries.

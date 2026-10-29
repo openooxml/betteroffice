@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { openDocx, type DocumentToolError, type DocxAgentDocument } from '../src';
 import * as commentOutput from '../src/comment-output';
 import { docxEditSchema } from '../src/docx-schema';
-import { COMMENT_COMPANIONS, EXISTING_COMMENT, commentFixture } from './fixture';
+import { COMMENT_COMPANIONS, EXISTING_COMMENT, commentFixture, editFixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
 async function open(bytes: Uint8Array) {
@@ -127,6 +127,110 @@ test('delete_comment removes the last comment and keeps empty registered comment
   }
   expect((await open(bytes)).list({ story: 'comments' }).total).toBe(0);
 });
+
+test('delete_comment verifies core properties without comparing different save timestamps', async () => {
+  const zip = await JSZip.loadAsync(await commentFixture());
+  const core = '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Kept title</dc:title><dcterms:modified xsi:type="dcterms:W3CDTF">2020-01-01T00:00:00Z</dcterms:modified></cp:coreProperties>';
+  zip.file('docProps/core.xml', core);
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>'));
+  zip.file('_rels/.rels', (await zip.file('_rels/.rels')!.async('string')).replace('</Relationships>', '<Relationship Id="core" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+  const original = Date.prototype.toISOString;
+  let now = Date.parse('2026-10-01T00:00:00Z');
+  const clock = spyOn(Date.prototype, 'toISOString').mockImplementation(() => original.call(new Date(now += 1000)));
+  try {
+    expect((await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: '0' }] })).applied).toBe(true);
+  } finally { clock.mockRestore(); }
+  expect(await part(await doc.export(), 'docProps/core.xml')).toContain('<dc:title>Kept title</dc:title>');
+});
+
+async function twoAddedComments() {
+  const doc = await open(await editFixture());
+  const first = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+  const second = doc.grep({ query: 'Closing note.' }).matches[0];
+  const result = await doc.edit({ version: doc.list().version, edits: [
+    { op: 'add_comment', match: first.match, author: 'Editor', text: 'First note.' },
+    { op: 'add_comment', match: second.match, author: 'Editor', text: 'Second note.' },
+  ] });
+  return { doc, first: result.results[0].comment!, second: result.results[1].comment! };
+}
+
+test('delete_comment preserves a session-created survivor and every companion identity', async () => {
+  const { doc, first } = await twoAddedComments();
+  const before = await doc.export();
+  const comments = await part(before, 'word/comments.xml');
+  const deleted = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('First note.'))!;
+  const paraId = [...deleted.matchAll(/w14:paraId="([^"]+)"/g)].at(-1)![1];
+  const ids = await part(before, 'word/commentsIds.xml');
+  const deletedId = ids.match(/<w16cid:commentId\b[^>]*\/>/g)!.find(xml => xml.includes(paraId))!;
+  const durableId = deletedId.match(/w16cid:durableId="([^"]+)"/)![1];
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: first }] });
+  const bytes = await doc.export();
+  expect(await part(bytes, 'word/comments.xml')).toBe(comments.replace(deleted, ''));
+  for (const [name, prefix] of COMMENT_COMPANIONS) {
+    const original = await part(before, `word/${name}.xml`);
+    const removed = original.match(new RegExp(`<${prefix}:[^ />]+\\b[^>]*\\/>`, 'g'))!.find(row => row.includes(name === 'commentsExtensible' ? durableId : paraId))!;
+    expect(await part(bytes, `word/${name}.xml`)).toBe(original.replace(removed, ''));
+  }
+  expect((await open(bytes)).list({ story: 'comments' }).items).toMatchObject([{ text: 'Second note.' }]);
+  const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: match.match, author: 'Editor', text: 'Third note.' }] });
+  const afterAdd = await part(await doc.export(), 'word/comments.xml');
+  const survivor = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('Second note.'))!;
+  expect(afterAdd).toContain(survivor);
+  expect(afterAdd).toContain('Third note.');
+});
+
+test('delete_comment removes a session-created last comment from a package opened without comments', async () => {
+  const doc = await open(await editFixture());
+  const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+  const added = await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: match.match, author: 'Editor', text: 'Temporary note.' }] });
+  await doc.export();
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: added.results[0].comment! }] });
+  const bytes = await doc.export();
+  const zip = await JSZip.loadAsync(bytes);
+  expect(zip.file('word/comments.xml')).toBeNull();
+  for (const [name] of COMMENT_COMPANIONS) expect(zip.file(`word/${name}.xml`)).toBeNull();
+  expect(await part(bytes, 'word/_rels/document.xml.rels')).not.toContain('relationships/comments');
+  expect(await part(bytes, '[Content_Types].xml')).not.toContain('/word/comments');
+  expect(await part(bytes, 'word/document.xml')).not.toContain('w:comment');
+  expect((await open(bytes)).list({ story: 'comments' }).total).toBe(0);
+});
+
+for (const corruption of ['text', 'numeric id', 'paragraph id', 'durable id', 'companion row']) {
+  test(`delete_comment rejects a changed session-created survivor's ${corruption}`, async () => {
+    const { doc, first } = await twoAddedComments();
+    await doc.export();
+    const state = doc.session.encodeState();
+    const version = doc.list().version;
+    const original = commentOutput.verifyCommentOutput;
+    const verify = spyOn(commentOutput, 'verifyCommentOutput').mockImplementationOnce(async (...args) => {
+      const zip = await JSZip.loadAsync(args[1]);
+      const comments = await zip.file('word/comments.xml')!.async('string');
+      const survivor = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('Second note.'))!;
+      if (corruption === 'text') zip.file('word/comments.xml', comments.replace('Second note.', 'Changed note.'));
+      else if (corruption === 'numeric id') {
+        const id = survivor.match(/w:id="([^"]+)"/)![1];
+        zip.file('word/comments.xml', comments.replace(`w:id="${id}"`, 'w:id="99"'));
+        zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replaceAll(`w:id="${id}"`, 'w:id="99"'));
+      } else if (corruption === 'paragraph id') {
+        const id = [...survivor.matchAll(/w14:paraId="([^"]+)"/g)].at(-1)![1];
+        for (const name of ['comments', 'commentsExtended', 'commentsIds']) zip.file(`word/${name}.xml`, (await zip.file(`word/${name}.xml`)!.async('string')).replaceAll(id, '01020304'));
+      } else if (corruption === 'durable id') {
+        const ids = await zip.file('word/commentsIds.xml')!.async('string');
+        const id = ids.match(/w16cid:durableId="([^"]+)"/)![1];
+        for (const name of ['commentsIds', 'commentsExtensible']) zip.file(`word/${name}.xml`, (await zip.file(`word/${name}.xml`)!.async('string')).replaceAll(id, '10203040'));
+      } else zip.file('word/commentsExtended.xml', (await zip.file('word/commentsExtended.xml')!.async('string')).replace('<w15:commentEx ', '<w15:commentEx extra="changed" '));
+      args[1] = await zip.generateAsync({ type: 'uint8array' });
+      await original(...args);
+    });
+    try {
+      expect((await refusal(doc.edit({ version, edits: [{ op: 'delete_comment', comment: first }] }))).code).toBe('UNSUPPORTED_TARGET');
+      expect(doc.session.encodeState()).toEqual(state);
+      expect(doc.list().version).toBe(version);
+    } finally { verify.mockRestore(); }
+  });
+}
 
 test('delete_comment accepts a legacy comment without paragraph ids', async () => {
   const zip = await JSZip.loadAsync(await commentFixture({ companions: [] }));

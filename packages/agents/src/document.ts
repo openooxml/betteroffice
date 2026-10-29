@@ -1,5 +1,5 @@
-import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
-import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
+import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxCommentSaveIdentity, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
 import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
@@ -152,6 +152,7 @@ export class DocxAgentDocument {
   private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
   private deletedComments = new Set<string>();
+  private commentSaveIdentities = new Map<string, DocxCommentSaveIdentity>();
 
   constructor(
     readonly session: YrsSession,
@@ -444,7 +445,18 @@ export class DocxAgentDocument {
     try {
       if (held) { this.checkPending(held); this.apply(draft, held); }
       if (!draft.materializeDocx()?.originalBuffer) throw new DocumentToolError('UNSUPPORTED', 'Export requires a session opened from DOCX bytes.');
-      return (await saveYrsDocx(draft)).bytes;
+      const version = this.epoch;
+      const bytes = (await saveYrsDocx(draft, { commentIdentities: this.commentSaveIdentities })).bytes;
+      const comments = draft.listComments();
+      const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
+      if (comments.some(comment => !seeded.has(comment.id))) {
+        const source = await this.checkCommentPart(true);
+        if (source) {
+          const identities = await readSavedCommentIdentities(source, bytes, comments, this.commentSaveIdentities);
+          if (this.epoch === version) this.commentSaveIdentities = identities;
+        }
+      }
+      return bytes;
     } catch (error) {
       if (error instanceof DocxSectionError) throw new DocumentToolError('UNSUPPORTED', error.message);
       throw error;
@@ -619,6 +631,7 @@ export class DocxAgentDocument {
         const outcomes: Array<ReturnType<EditStep>> = [];
         let resolved: Map<string, boolean> | undefined;
         let deleted: Set<string> | undefined;
+        let commentIdentities: Map<string, DocxCommentSaveIdentity> | undefined;
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
@@ -635,6 +648,7 @@ export class DocxAgentDocument {
             const earlier = this.resolvedComments;
             const remaining = new Set(comments.map(comment => comment.id));
             deleted = new Set([...this.deletedComments, ...outcomes.flatMap(outcome => outcome.result.deleted ?? [])].filter(id => !remaining.has(id)));
+            let identities = new Map(this.commentSaveIdentities);
             let baseline: Uint8Array;
             let previous: typeof comments | undefined;
             if (edits.some(edit => edit.op === 'delete_comment')) {
@@ -642,11 +656,14 @@ export class DocxAgentDocument {
               try {
                 for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
                 previous = kept.listComments();
-                baseline = (await saveYrsDocx(kept)).bytes;
+                baseline = (await saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities })).bytes;
               } finally { kept.destroy(); }
             } else baseline = await this.commentBaselineBytes(version);
-            await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline, deleted, previous);
+            identities = await readSavedCommentIdentities(source, baseline, previous ?? this.session.listComments(), identities);
+            const saved = (await saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities })).bytes;
+            await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })), baseline, deleted, previous, identities);
+            commentIdentities = await readSavedCommentIdentities(source, saved, comments, identities);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -659,6 +676,7 @@ export class DocxAgentDocument {
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
         if (deleted) this.deletedComments = deleted;
+        if (commentIdentities) this.commentSaveIdentities = commentIdentities;
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {
