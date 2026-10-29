@@ -13,6 +13,15 @@ use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 pub struct NumberingDefinitions {
     pub abstract_nums: Vec<AbstractNumbering>,
     pub nums: Vec<NumberingInstance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_picture_bullet: Option<PictureBulletSize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureBulletSize {
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,6 +152,10 @@ pub fn parse_numbering(
     let Some(root) = document.root() else {
         return Ok(NumberingMap { definitions });
     };
+    if let Some(bullet) = root.child("w", "numPicBullet") {
+        budget.charge_leaf_value(part)?;
+        definitions.first_picture_bullet = parse_picture_bullet_size(bullet);
+    }
     for element in root.children_named("w", "abstractNum") {
         budget.charge_leaf_value(part)?;
         if let Some(value) = parse_abstract_numbering(element, part, budget)? {
@@ -156,6 +169,20 @@ pub fn parse_numbering(
         }
     }
     Ok(NumberingMap { definitions })
+}
+
+fn parse_picture_bullet_size(bullet: &XmlElement) -> Option<PictureBulletSize> {
+    let shape = bullet.child("w", "pict")?.child("v", "shape")?;
+    let style = crate::vml::parse_style_attr(shape.attribute(None, "style"));
+    Some(PictureBulletSize {
+        width: picture_bullet_points(style.get("width")?)?,
+        height: picture_bullet_points(style.get("height")?)?,
+    })
+}
+
+fn picture_bullet_points(value: &str) -> Option<f64> {
+    let pixels = crate::vml::css_length_to_px(Some(value))?;
+    (pixels > 0.0 && (pixels as f32).is_finite()).then_some(pixels * 72.0 / 96.0)
 }
 
 fn parse_abstract_numbering(
@@ -901,6 +928,56 @@ mod tests {
                 .marker_font_family
                 .as_deref(),
             Some("Cambria")
+        );
+    }
+
+    #[test]
+    fn first_picture_bullet_size_uses_css_units_and_document_order() {
+        for (width, height) in [
+            ("216pt", "72pt"),
+            ("3in", "1in"),
+            ("288px", "96px"),
+            ("7.62cm", "2.54cm"),
+            ("76.2mm", "25.4mm"),
+            ("18pc", "6pc"),
+            ("288", "96"),
+        ] {
+            let xml = format!(
+                r#"<w:numbering><w:numPicBullet w:numPicBulletId="9"><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet><w:numPicBullet w:numPicBulletId="1"><w:pict><v:shape style="width:1pt;height:1pt"/></w:pict></w:numPicBullet></w:numbering>"#
+            );
+            let definitions = serde_json::to_value(parse(&xml).definitions).unwrap();
+            let size = &definitions["firstPictureBullet"];
+            assert!((size["width"].as_f64().unwrap() - 216.0).abs() < 0.001);
+            assert!((size["height"].as_f64().unwrap() - 72.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn invalid_or_non_positive_picture_bullet_size_is_ignored() {
+        for (width, height) in [
+            ("invalid", "1in"),
+            ("1in", "invalid"),
+            ("0", "1in"),
+            ("1in", "-1pc"),
+        ] {
+            let xml = format!(
+                r#"<w:numbering><w:numPicBullet><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet></w:numbering>"#
+            );
+            assert!(parse(&xml).definitions.first_picture_bullet.is_none());
+        }
+    }
+
+    #[test]
+    fn unsized_first_picture_bullet_does_not_select_a_later_bullet() {
+        let definitions = parse(
+            r#"<w:numbering><w:numPicBullet><w:pict><v:shape/></w:pict></w:numPicBullet><w:numPicBullet><w:pict><v:shape style="width:3in;height:3in"/></w:pict></w:numPicBullet></w:numbering>"#,
+        )
+        .definitions;
+        assert!(
+            serde_json::to_value(definitions)
+                .unwrap()
+                .get("firstPictureBullet")
+                .is_none()
         );
     }
 

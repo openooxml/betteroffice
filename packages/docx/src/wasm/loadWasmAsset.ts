@@ -1,6 +1,6 @@
 /**
- * Shared init-state machinery for the four generated wasm modules (opc /
- * layout / edit / parse). The binaries are external assets (gitignored,
+ * Shared init-state machinery for the generated wasm modules (opc / edit / parse).
+ * The binaries are external assets (gitignored,
  * rebuilt by scripts/build-docx-wasm.ts, shipped in dist/generated/) —
  * never embedded base64.
  *
@@ -101,6 +101,8 @@ function defaultAsyncInput(url: URL): WasmAsyncInput {
 }
 
 export interface WasmModuleState {
+  /** Ready after init; loading during init or a shared compile, including before instantiation. */
+  status(): 'idle' | 'loading' | 'ready';
   /** Async init from the packaged asset URL (or an explicit override). */
   preload(input?: WasmAsyncInput): Promise<void>;
   /** @internal */
@@ -207,6 +209,9 @@ export function createWasmModuleState(options: {
   }
 
   return {
+    status() {
+      return initialized ? 'ready' : pending || compiled ? 'loading' : 'idle';
+    },
     module,
     sharedModule(): Promise<WebAssembly.Module | null> {
       if (compiled) return compiled;

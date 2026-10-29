@@ -55,7 +55,9 @@ pub(crate) fn measure_paragraph(
         authoritative_shaping: config.authoritative_shaping,
     };
     let extent = crate::measure_paragraph_typed_resident(&request).ok()?;
-    Some(extent_from_out(extent))
+    let mut extent = extent_from_out(extent);
+    crate::leading_inline_box::restore_extent(paragraph, &mut extent);
+    Some(extent)
 }
 
 pub(crate) fn intrinsic_widths(
@@ -120,6 +122,8 @@ pub(crate) fn min_content_width(
 }
 
 fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
+    let measured = crate::leading_inline_box::measurement_paragraph(paragraph);
+    let paragraph = measured.as_ref();
     let attrs = paragraph.attrs.as_ref();
     let indent = attrs.and_then(|attrs| attrs.indent.as_ref());
     let rule_width = (content_width

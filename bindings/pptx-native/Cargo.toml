@@ -13,6 +13,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 betteroffice-pptx = { path = "../../crates/betteroffice-pptx", features = ["raster"] }
+betteroffice-pptx-engine = { path = "../../crates/pptx-engine" }
+getrandom = "0.3"
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
 serde = { version = "1", features = ["derive"] }

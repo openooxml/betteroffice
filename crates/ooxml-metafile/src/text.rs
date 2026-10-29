@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::drawing::{Font, Op, Paint, Rgba, Text, TextAnchor};
+use crate::fmath;
 use crate::player::{Combine, LogFont, Player, apply, axis_aligned_rect};
 use crate::read::{i16_at, i32_at, u16_at, u32_at};
 
@@ -433,7 +434,7 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, mut run: Run) -> Option<()>
     };
     let m = player.logical_to_output();
     let angle = f64::from(font.escapement).to_radians() / 10.0;
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = fmath::sin_cos(angle);
     let down = m[0] * m[3] - m[1] * m[2] >= 0.0;
     let (u_l, v_l) = if down {
         ((cos, -sin), (sin, cos))

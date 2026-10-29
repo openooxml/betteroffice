@@ -15,7 +15,7 @@ fn paragraph(id: u32, lines: &[f64], attrs: Value) -> Value {
         .iter()
         .map(|height| {
             json!({"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1, "width": 10,
-                "ascent": 8, "descent": 2, "lineHeight": height})
+                "ascent": height * 0.8, "descent": height * 0.2, "lineHeight": height})
         })
         .collect();
     json!({

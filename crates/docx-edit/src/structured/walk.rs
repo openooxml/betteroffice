@@ -21,7 +21,7 @@ use crate::queries::revision_parts;
 use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
 use crate::seed::{SourceMetadata, numeric_field_instruction};
 use crate::sticky_positions::sticky_offset;
-use crate::target::{EditTextView, StoryView, TextPosition, Views};
+use crate::target::{EditTextView, StoryView, TextPosition, Views, drawing_from_payload};
 use crate::{
     COMMENTS, DEL, EditingDoc, INS, KIND_KEY, TextRange, decode_anchor, map_string, story_ref,
 };
@@ -107,53 +107,6 @@ fn any_flag(value: Option<&Any>) -> bool {
         Some(_) => true,
         None => false,
     }
-}
-
-/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
-/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
-fn drawing_from_payload(payload: &Payload, image: bool) -> Option<crate::DrawingProperties> {
-    let properties = any_map(payload.get("docPr"))?;
-    let text = |key: &str| match properties.get(key) {
-        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
-        _ => None,
-    };
-    let live = |key: &str| match payload.get(key) {
-        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
-        _ => None,
-    };
-    let (title, descr) = if image {
-        (live("title"), live("alt"))
-    } else {
-        (text("title"), text("descr"))
-    };
-    let wrap = if image {
-        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
-    } else {
-        None
-    };
-    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
-    Some(crate::DrawingProperties {
-        doc_pr_id: text("docPrId"),
-        name: text("name"),
-        title,
-        descr,
-        hidden: flag("hidden"),
-        decorative: flag("decorative"),
-        placement: match (wrap.as_deref(), text("placement").as_deref()) {
-            (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
-            (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
-            _ => docx_parse::image::DrawingPlacement::Inline,
-        },
-        drawing_type: match text("type").as_deref() {
-            Some("picture") => docx_parse::image::DrawingType::Picture,
-            Some("shape") => docx_parse::image::DrawingType::Shape,
-            Some("textBox") => docx_parse::image::DrawingType::TextBox,
-            Some("group") => docx_parse::image::DrawingType::Group,
-            Some("chart") => docx_parse::image::DrawingType::Chart,
-            Some("diagram") => docx_parse::image::DrawingType::Diagram,
-            _ => docx_parse::image::DrawingType::Other,
-        },
-    })
 }
 
 fn any_map(value: Option<&Any>) -> Option<&HashMap<String, Any>> {

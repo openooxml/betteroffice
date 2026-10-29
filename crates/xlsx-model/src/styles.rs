@@ -1,7 +1,7 @@
 //! style types (fonts, fills, borders, xf chains, theme colors). pure data;
 //! the cellXfs indirection chain is walked through the `Stylesheet` accessors.
 
-use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, BTreeSet, HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
@@ -786,6 +786,8 @@ pub struct Stylesheet {
     bound_plain: Option<u32>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     format_sources: BTreeMap<u32, Option<u32>>,
+    #[serde(skip)]
+    xfs_with_extra_xml: Option<BTreeSet<u32>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     exact_style_indices: bool,
     /// set at the `cell_xfs` indices read from snapshot records written before
@@ -957,6 +959,7 @@ impl Stylesheet {
             saved_plain: _,
             bound_plain: _,
             format_sources: _,
+            xfs_with_extra_xml: _,
             exact_style_indices: _,
             released_xfs: _,
             derived_memo: _,
@@ -1129,6 +1132,30 @@ impl Stylesheet {
             NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
             NumberFormat::Custom { pattern } => self.intern_custom_cell_format(format, pattern),
         };
+        let result = result.map(|index| {
+            index.map(|index| {
+                if !self.xf_has_extra_xml(index) {
+                    return index;
+                }
+                let clean = (0..self.cell_xfs.len() as u32).find(|&candidate| {
+                    !self.xf_has_extra_xml(candidate)
+                        && self.cell_format(Some(candidate)) == *format
+                });
+                let index = clean.unwrap_or_else(|| {
+                    let xf = self.cell_xfs[index as usize].clone();
+                    let index = self.cell_xfs.len() as u32;
+                    self.cell_xfs.push(xf);
+                    index
+                });
+                seed_memo(
+                    &mut self.xf_memo,
+                    self.cell_xfs.len(),
+                    Some(fingerprint(&self.cell_xfs[index as usize])),
+                    index,
+                );
+                index
+            })
+        });
         if let Ok(Some(index)) = result
             && index as usize >= previous_len
         {
@@ -1159,6 +1186,38 @@ impl Stylesheet {
     #[doc(hidden)]
     pub fn mark_generated_format(&mut self, index: u32) {
         self.format_sources.insert(index, None);
+    }
+
+    #[doc(hidden)]
+    pub fn mark_xf_extra_xml(&mut self, index: u32) {
+        self.xfs_with_extra_xml
+            .get_or_insert_with(BTreeSet::new)
+            .insert(index);
+    }
+
+    #[doc(hidden)]
+    pub fn has_xf_xml_markers(&self) -> bool {
+        self.xfs_with_extra_xml.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn inherit_xf_xml_markers(&mut self, source: &Self) {
+        if self.xfs_with_extra_xml.is_none() {
+            self.xfs_with_extra_xml = Some(source.xfs_with_extra_xml.clone().unwrap_or_default());
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn xf_has_extra_xml(&self, index: u32) -> bool {
+        let source = self
+            .format_sources
+            .get(&index)
+            .copied()
+            .flatten()
+            .unwrap_or(index);
+        self.xfs_with_extra_xml
+            .as_ref()
+            .is_some_and(|indices| indices.contains(&source))
     }
 
     #[doc(hidden)]
@@ -1401,6 +1460,9 @@ impl Stylesheet {
         self.num_fmts.truncate(marks.num_fmts);
         self.format_sources
             .retain(|index, _| (*index as usize) < marks.cell_xfs);
+        if let Some(indices) = &mut self.xfs_with_extra_xml {
+            indices.retain(|index| (*index as usize) < marks.cell_xfs);
+        }
         self.derived_memo
             .retain(|_, index| (*index as usize) < marks.cell_xfs);
     }

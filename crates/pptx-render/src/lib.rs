@@ -2,6 +2,7 @@
 
 mod chart;
 mod display_list;
+mod fmath;
 mod geometry;
 mod image_effects;
 mod layout;

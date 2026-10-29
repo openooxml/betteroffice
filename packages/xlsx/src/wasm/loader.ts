@@ -10,13 +10,16 @@ import type { ChartInfo, ChartMutation } from '../charts';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import initWasmModule, {
   XlsxDocument,
+  XlsxSnapshotBuilder,
+  allocationFailure,
+  backend,
+  displayListCellLimit,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
   renderXlsxMarkdownJson,
-} from './generated/xlsx_wasm.js';
+} from './engine';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
-import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
@@ -696,14 +699,14 @@ function toError(e: unknown): Error {
  */
 export function engineAllocationFailure(): { bytes: number; memoryBytes: number } | null {
   if (!initialized) return null;
-  const bytes = xlsxWasm.allocationFailure();
+  const bytes = allocationFailure();
   return bytes > 0 ? { bytes, memoryBytes: engineMemory?.buffer.byteLength ?? 0 } : null;
 }
 
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
 export function getDisplayListCellLimit(): number {
   requireInitialized();
-  return xlsxWasm.displayListCellLimit();
+  return displayListCellLimit();
 }
 
 /**
@@ -711,6 +714,13 @@ export function getDisplayListCellLimit(): number {
  */
 export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
+}
+
+export type EngineBackend = 'wasm' | 'native';
+
+/** Which engine runs this workbook code ('native' when @betteroffice/xlsx-native is installed and matches this version on Node, Bun or Deno, else 'wasm'). */
+export function engineBackend(): EngineBackend {
+  return backend;
 }
 
 /**
@@ -783,9 +793,7 @@ type SnapshotBuilder = {
 
 export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
   requireInitialized();
-  const Constructor = (xlsxWasm as unknown as {
-    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
-  }).XlsxSnapshotBuilder;
+  const Constructor = XlsxSnapshotBuilder as unknown as (new () => SnapshotBuilder) | undefined;
   if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
   let builder: SnapshotBuilder | undefined = new Constructor();
   function active(): SnapshotBuilder {

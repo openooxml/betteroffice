@@ -2260,7 +2260,6 @@ impl EditingDoc {
     }
 
     /// Whether an opening has written this document's generation.
-    #[cfg(feature = "wasm")]
     pub(crate) fn has_opening(&self) -> bool {
         let txn = self.yrs_doc().transact();
         txn.get_map(SESSION)
@@ -3126,6 +3125,7 @@ impl EditingDoc {
                             session_key: key,
                             story,
                             metadata: metadata.as_deref(),
+                            source: Some(&source),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };

@@ -284,5 +284,5 @@ fn distance_to_segment(point: Point, (a, b): Segment) -> f64 {
     } else {
         0.0
     };
-    (point.0 - a.0 - t * delta.0).hypot(point.1 - a.1 - t * delta.1)
+    libm::hypot(point.0 - a.0 - t * delta.0, point.1 - a.1 - t * delta.1)
 }
