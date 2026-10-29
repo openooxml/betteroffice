@@ -90,7 +90,8 @@ test('an unknown worker family gets no implicit substitute', async () => {
         families: ['Custom'], provider: undefined, compat: undefined, signal: new AbortController().signal,
       });
       expect(environment.faces).toEqual(hosted ? [{ family: 'Custom', data: custom, weight: 'normal', style: 'normal' }] : []);
-      expect(environment.chains['custom|0|0']).toEqual(hosted ? [0] : undefined);
+      if (hosted) expect(environment.chains['custom|0|0']).toEqual([0]);
+      else expect(environment.chains['custom|0|0']).toBeUndefined();
     }
   } finally { create.mockRestore(); }
 });

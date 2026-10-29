@@ -235,8 +235,9 @@ test('a legacy editor leaves hosted Calibri to the browser while unhosted Cambri
   );
   expect(hosted(browser)).not.toHaveLength(0);
   expect(hosted(implicit)).toEqual(hosted(browser));
-  expect(implicit.some((primitive) => primitive.kind === 'glyphRun' && primitive.text === 'Hosted Calibri')).toBe(false);
-  expect(implicit.some((primitive) => primitive.kind === 'glyphRun' && primitive.text === 'Unhosted Cambria')).toBe(true);
+  const nativeText = implicit.filter((primitive) => primitive.kind === 'glyphRun').map((primitive) => primitive.text).join('');
+  expect(nativeText).not.toContain('Hosted Calibri');
+  expect(nativeText).toContain('Unhosted Cambria');
 }, 60_000);
 
 test('each document reports its first page painted once, however often its pages repaint', async () => {

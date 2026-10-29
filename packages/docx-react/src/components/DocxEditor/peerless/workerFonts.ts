@@ -2,7 +2,7 @@ import { createRustMeasureSource, type ResidentFontRequirement } from '@betterof
 import type { EmbeddedFontFace, FontDefinition } from '@betteroffice/docx/utils';
 import type { DocxFontEnvironment, YrsResidentFontRegistration } from '@betteroffice/docx/yrs';
 import type { DocxEditorProps } from '../../DocxEditor';
-import { hostedFontProvider } from '../../../../hooks/hostedFonts';
+import { hostedFontProvider } from '../../../hooks/hostedFonts';
 
 export async function customWorkerFontFaces(fonts: ReadonlyArray<FontDefinition> | undefined, signal: AbortSignal): Promise<EmbeddedFontFace[]> {
   return Promise.all((fonts ?? []).map(async font => {

@@ -1084,7 +1084,9 @@ mod tests {
         let mut bytes = FIXTURE.to_vec();
         let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
         let entry = bytes[12..]
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .take(count)
             .find(|entry| &entry[..4] == b"cmap")
             .unwrap();

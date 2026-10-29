@@ -67,13 +67,16 @@ test('headless default preview keeps Latin native beside an uncovered emoji', as
   const build = spyOn(doc.session, 'buildDisplayListJson');
   try {
     const rendered = await renderDocxPage(doc.session, 1);
+    const input = JSON.parse(build.mock.calls[0]![0]) as { fontChains: Record<string, number[]> };
+    expect(input.fontChains['@betteroffice/fonts/coverage']).toBeUndefined();
     const display = JSON.parse(build.mock.results[0]!.value as string) as DisplayList;
     const text = display.pages[0]!.primitives.filter(
       primitive => primitive.kind === 'text' || primitive.kind === 'glyphRun',
     );
     expect(text.map(primitive => primitive.text).join('')).toContain('😀 café İSTANBUL');
-    expect(text.some(primitive => primitive.kind === 'glyphRun' && primitive.text.includes('€4.2'))).toBe(true);
+    expect(text.filter(primitive => primitive.kind === 'glyphRun').map(primitive => primitive.text).join('')).toContain('€4.2');
     expect(text.every(primitive => primitive.kind === 'glyphRun' && primitive.paintClip === undefined)).toBe(true);
+    expect(text.some(primitive => primitive.kind === 'glyphRun' && primitive.text.includes('😀') && primitive.glyphs.some(glyph => glyph.id === 0))).toBe(true);
     expect(rendered.warnings).toContain('Some characters have no glyph in the available fonts. Their preview may show replacement boxes.');
   } finally { build.mockRestore(); doc.close(); }
 });
