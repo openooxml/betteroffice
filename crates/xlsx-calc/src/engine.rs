@@ -986,7 +986,12 @@ fn write_if_changed(
     value: CellValue,
     budget: &EvaluationBudget,
 ) -> bool {
-    if *wb.value_cow(u.0, cell_of(u)) == value {
+    let value = precision_as_displayed(wb, u, value);
+    let previous = wb.value_cow(u.0, cell_of(u));
+    let negative_zero = !wb.full_precision
+        && matches!(previous.as_ref(), CellValue::Number { value } if *value == 0.0 && value.is_sign_negative())
+        && matches!(&value, CellValue::Number { value } if *value == 0.0 && value.is_sign_positive());
+    if *previous == value && !negative_zero {
         return false;
     }
     budget.invalidate_criteria_cell(u.0, cell_of(u));
@@ -995,6 +1000,34 @@ fn write_if_changed(
         sheet.set_calculated_value(at, value);
     }
     true
+}
+
+fn precision_as_displayed(wb: &Workbook, u: Key, value: CellValue) -> CellValue {
+    if wb.full_precision {
+        return value;
+    }
+    let CellValue::Number { value: number } = value else {
+        return value;
+    };
+    let style = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.effective_style(cell_of(u)));
+    let code = match wb.styles.resolved_format(style).number_format {
+        xlsx_model::styles::FormatCode::Custom(code) => Some(code),
+        xlsx_model::styles::FormatCode::Builtin(id) => xlsx_model::numfmt::builtin_format_code(id),
+    };
+    let Some(digits) = code.and_then(|code| xlsx_model::numfmt::displayed_precision(number, code))
+    else {
+        return value;
+    };
+    let rounded = crate::functions::math::round_number(number, digits);
+    if rounded.is_finite() {
+        CellValue::Number {
+            value: if rounded == 0.0 { 0.0 } else { rounded },
+        }
+    } else {
+        value
+    }
 }
 
 fn sort_key(a: &(SheetId, CellRef), b: &(SheetId, CellRef)) -> std::cmp::Ordering {
