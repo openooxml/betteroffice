@@ -40,6 +40,7 @@ impl std::error::Error for FaceError {
     }
 }
 
+#[inline(never)]
 pub fn decode_font_face(
     bytes: &[u8],
     codec: &str,
@@ -64,6 +65,7 @@ pub fn decode_font_face(
 
 /// [`decode_font_face`] with the output limit as a JavaScript number, validated only
 /// when a supported codec meets a zstd frame, as the standalone decoder does.
+#[inline(never)]
 pub fn decode_font_face_js(
     bytes: &[u8],
     codec: &str,

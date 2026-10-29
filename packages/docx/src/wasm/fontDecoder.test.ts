@@ -43,6 +43,6 @@ test('the root font decoder returns ArrayBuffers and rejects with engine errors'
     expect(backing.subarray(1, -1)).toEqual(entry.bytes);
   }
   for (const entry of fontErrorCases()) {
-    await expect(decodePublicFontFace(entry.bytes.slice().buffer, entry)).rejects.toThrow(new Error(entry.message));
+    await expect(decodePublicFontFace(entry.bytes.slice(), entry)).rejects.toThrow(new Error(entry.message));
   }
 });

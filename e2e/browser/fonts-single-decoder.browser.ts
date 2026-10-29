@@ -83,7 +83,7 @@ for (const format of ['docx', 'pptx'] as const) {
       const asset = new RegExp(`/${face}\\.ttf(-[\\w-]+)?\\.zst$`);
       expect(requests.some(url => asset.test(new URL(url).pathname)), face).toBe(true);
     }
-    expect(requests.filter(url => new URL(url).pathname.endsWith('fontpack.wasm'))).toEqual([]);
+    expect(requests.filter(url => /\/fontpack(-[\w-]+)?\.wasm$/.test(new URL(url).pathname))).toEqual([]);
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
   });

@@ -49,7 +49,7 @@ test('releasing during a pending decode rejects it and terminates the worker', a
   const decoding = prepared.decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
   const rejected = decoding.catch((error: unknown) => error);
   try {
-    await Promise.resolve();
+    for (let tick = 0; tick < 50 && h.compiles === 0; tick++) await Promise.resolve();
     expect(h.compiles).toBe(1);
     prepared.release();
     expect(await rejected).toMatchObject({ name: 'SessionFailure', code: 'disposed' });
