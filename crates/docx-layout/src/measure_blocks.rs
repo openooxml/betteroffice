@@ -6401,11 +6401,7 @@ mod tests {
             for (attrs, grid_before, grid_start) in [
                 (json!({"indent": {"left": 0, "hanging": 20}}), None, None),
                 (json!(null), None, Some(0)),
-                (
-                    json!({"indent": {"left": 0, "hanging": 20}}),
-                    Some(1),
-                    None,
-                ),
+                (json!({"indent": {"left": 0, "hanging": 20}}), Some(1), None),
             ] {
                 let mut table = autofit_repro_table(
                     50.0,

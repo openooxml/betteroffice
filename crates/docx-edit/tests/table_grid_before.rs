@@ -201,8 +201,8 @@ fn imported_fixed_layout_keeps_cell_preferences_with_grid_before() {
 #[test]
 fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
     docx_layout::with_private_measure_fonts(|| {
-        let cells = ["First", "Second"]
-            .map(|text| cell(r#"<w:tcW w:w="1500" w:type="dxa"/>"#, text));
+        let cells =
+            ["First", "Second"].map(|text| cell(r#"<w:tcW w:w="1500" w:type="dxa"/>"#, text));
         let full = row("", &cells.concat());
         let skipped = row(r#"<w:gridAfter w:val="1"/>"#, &cell("", "Last"));
         let (table, measure) =
@@ -244,7 +244,11 @@ fn mixed_skipped_rows_keep_main_grid_and_unskipped_widths() {
         assert_eq!(table.rows[3].cells[0].col_span, Some(1.0));
         assert_eq!(table.rows[3].cells[0].width_value, None);
         for row in [0, 4] {
-            let widths: Vec<_> = measure.rows[row].cells.iter().map(|cell| cell.width).collect();
+            let widths: Vec<_> = measure.rows[row]
+                .cells
+                .iter()
+                .map(|cell| cell.width)
+                .collect();
             let main_widths: Vec<_> = main.rows[row].cells.iter().map(|cell| cell.width).collect();
             assert_eq!(widths, main_widths);
         }

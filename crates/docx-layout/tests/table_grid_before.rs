@@ -37,7 +37,11 @@ fn shared_grid_table(leading_skip: bool) -> Value {
     let mut partial = table["rows"][0].clone();
     partial["id"] = json!("partial");
     partial["cells"][0]["id"] = json!("partial-cell");
-    partial[if leading_skip { "gridBefore" } else { "gridAfter" }] = json!(1);
+    partial[if leading_skip {
+        "gridBefore"
+    } else {
+        "gridAfter"
+    }] = json!(1);
     table["columnWidths"] = json!([100, 100]);
     table["preferredWidth"] = json!({"value": 3000, "type": "dxa"});
     table["rows"] = json!([
@@ -195,7 +199,10 @@ fn omitted_widths_never_shrink_shared_columns_or_change_table_width() {
             let result = render(table);
             assert_eq!(result.0["columnWidths"], json!([100.0, 100.0]));
             assert_eq!(result.0["totalWidth"], 200.0);
-            assert_eq!(result, baseline, "leading skip: {leading_skip}, width: {width}");
+            assert_eq!(
+                result, baseline,
+                "leading skip: {leading_skip}, width: {width}"
+            );
         }
     }
 }
