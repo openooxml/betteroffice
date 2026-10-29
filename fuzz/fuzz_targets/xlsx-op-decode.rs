@@ -347,17 +347,30 @@ fn normalize_nested(
     input: &[u8],
     span: Range<usize>,
     canonical: &serde_json::Value,
+    shape: Option<&Shape>,
     replacements: &mut Vec<(Range<usize>, Vec<u8>)>,
 ) {
-    if input[span.start] == b'[' && canonical.is_object() {
+    let Some(fields) = members(input, span.clone()) else {
+        return;
+    };
+    if input[span.start] == b'['
+        && canonical
+            .as_object()
+            .is_some_and(|value| value.contains_key("kind") || value.contains_key("type"))
+        && fields.first().is_some_and(|field| {
+            serde_json::from_slice::<serde_json::Value>(&input[field.value.clone()])
+                .is_ok_and(|value| value.is_string() || value.is_number())
+        })
+    {
         replacements.push((span, serde_json::to_vec(canonical).unwrap()));
         return;
     }
-    let Some(fields) = members(input, span) else {
-        return;
-    };
     for (index, field) in fields.into_iter().enumerate() {
-        let value = match field.name.as_deref() {
+        let name = field.name.as_deref().or_else(|| match shape {
+            Some(Shape::Map(fields)) => fields.get(index).map(|(name, _)| name.as_str()),
+            _ => None,
+        });
+        let value = match name {
             Some(name) => canonical.get(name),
             None => canonical.get(index),
         };
@@ -371,7 +384,12 @@ fn normalize_nested(
         {
             replacements.push((field.value, serde_json::to_vec(value).unwrap()));
         } else {
-            normalize_nested(input, field.value, value, replacements);
+            let child = match shape {
+                Some(Shape::Map(fields)) => name.and_then(|name| matching_field(fields, name)),
+                Some(Shape::Seq(fields)) => fields.get(index),
+                _ => None,
+            };
+            normalize_nested(input, field.value, value, child, replacements);
         }
     }
 }
@@ -399,7 +417,8 @@ fn normalized_fields(
             continue;
         }
         if let Some(value) = name.and_then(|name| canonical.get(name)) {
-            normalize_nested(input, field.value, value, &mut replacements);
+            let shape = name.and_then(|name| matching_field(&schema, name));
+            normalize_nested(input, field.value, value, shape, &mut replacements);
         }
     }
     replacements
@@ -634,6 +653,37 @@ mod tests {
             r##""cell":{"value":{"kind":"number","value":3.5}}}"##,
         );
         assert_eq!(normalize(input), expected.as_bytes());
+    }
+
+    #[test]
+    fn positional_cell_ref_is_untouched() {
+        let input = concat!(
+            r##"{"type":"setCell","sheet":0,"at":[0,0,false,false],"##,
+            r##""cell":{"value":{"kind":"empty"}}}"##,
+        );
+        let oracle = serde_json::from_str::<OracleOp>(input).unwrap();
+        let bytes = input.as_bytes();
+        assert!(normalized_fields(bytes, root(bytes), &oracle).is_empty());
+        assert_eq!(normalize(input), bytes);
+        check_op(bytes, serde_json::from_str(input), Ok(oracle));
+    }
+
+    #[test]
+    fn fuzz_helpers_cover_matching_and_one_sided_inputs() {
+        for input in [
+            r##"{"type":"setColWidth","sheet":0,"col":0,"width":0.10}"##,
+            concat!(
+                r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+                r##""cell":{"value":{"kind":1,"value":3.50}}}"##,
+            ),
+            r##"{"type":"removeSheet","index":0,"unknown":1e309}"##,
+        ] {
+            let bytes = input.as_bytes();
+            check_op(bytes, serde_json::from_slice(bytes), serde_json::from_slice(bytes));
+            let vector = format!("[{input}]");
+            let bytes = vector.as_bytes();
+            check_ops(bytes, serde_json::from_slice(bytes), serde_json::from_slice(bytes));
+        }
     }
 
     #[test]
