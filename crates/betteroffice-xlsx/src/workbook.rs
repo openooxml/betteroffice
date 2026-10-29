@@ -9,7 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
-mod recovery;
+pub(crate) mod recovery;
 mod rich_text;
 #[cfg(test)]
 mod save_oracle_tests;

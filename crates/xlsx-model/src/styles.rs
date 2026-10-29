@@ -1165,6 +1165,27 @@ impl Stylesheet {
     }
 
     #[doc(hidden)]
+    pub fn recovery_provenance(&self) -> (&BTreeMap<u32, Option<u32>>, bool, &[bool]) {
+        (
+            &self.format_sources,
+            self.exact_style_indices,
+            &self.released_xfs,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn restore_recovery_provenance(
+        &mut self,
+        sources: BTreeMap<u32, Option<u32>>,
+        exact: bool,
+        released: Vec<bool>,
+    ) {
+        self.format_sources = sources;
+        self.exact_style_indices = exact;
+        self.released_xfs = released;
+    }
+
+    #[doc(hidden)]
     pub fn format_source(&self, index: u32) -> (Option<u32>, Option<u32>) {
         match self.format_sources.get(&index) {
             None => (Some(index), None),

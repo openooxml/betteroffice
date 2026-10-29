@@ -1116,8 +1116,10 @@ interface RecoverySession {
 /** @experimental */
 export declare const workbookSessionRecovery: WeakMap<WorkbookSession, WorkbookSessionRecovery>;
 export declare const workbookRecoveryBackend: {
+    /** Checkpoints are only restorable by the same engine version and codec. */
     open(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 };
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function createWorkbookRecoverySession(bytes: Uint8Array, options: OpenWorkbookSessionOptions, transport: SessionTransport, checkpoint?: Checkpoint, version?: string): Promise<RecoverySession>;
 export declare function createWorkbookSessionRecovery(bytes: Uint8Array, options: OpenWorkbookSessionOptions, checkpoint: (allowed: () => boolean) => Promise<WorkbookCheckpoint | undefined>, epoch: number, liveCalculation?: boolean, version?: string, fail?: (error: unknown) => void): {
     recovery: WorkbookSessionRecovery;
@@ -1522,6 +1524,7 @@ export interface WorkbookSessionEvents {
  */
 export type WorkbookSessionMethods = {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
+    /** Checkpoints are only restorable by the same engine version and codec. */
     openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
@@ -1533,6 +1536,7 @@ export type WorkbookSessionMethods = {
     applyEdits(request: XlsxEditRequest): XlsxEditResult;
     command(command: WorkbookCommand): WorkbookWireAck;
     edit(command: WorkbookSharedCommand): WorkbookSharedWireAck;
+    /** Checkpoints are only restorable by the same engine version and codec. */
     checkpoint(preserveHistory?: boolean): WorkbookCheckpoint;
     commandFrame(request?: WorkbookCommandFrameRequest): FrameEnvelope<WorkbookCommandWireFrame> | undefined;
     frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
@@ -2915,6 +2919,9 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
@@ -2934,6 +2941,9 @@ export class XlsxDocument {
      */
     rangeCellsJson(args: string): string;
     readCellsJson(request: string): string;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
     /**
      * redo the last undone transaction; same shape as `undoJson`.
@@ -3705,7 +3715,9 @@ export declare function isProposalsAvailable(): boolean;
  * Throws an `Error` if the bytes are not a readable workbook.
  */
 export declare function openWorkbook(bytes: Uint8Array, options?: OpenWorkbookOptions): WorkbookHandle;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory?: boolean): Uint8Array;
+/** Checkpoints are only restorable by the same engine version and codec. */
 export declare function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number, options?: OpenWorkbookOptions): WorkbookHandle;
 export declare function workbookPeerSnapshot(handle: WorkbookHandle): {
     begin(records: number, bytes: number): void;

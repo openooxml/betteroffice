@@ -209,6 +209,7 @@ impl XlsxDocument {
         Ok(self.document(env)?.client_id())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi]
     pub fn recovery_checkpoint(
         &self,
@@ -777,6 +778,7 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[napi(factory, js_name = "openRecoveryCheckpoint")]
     pub fn open_recovery_checkpoint(env: Env, bytes: Uint8Array, through_seq: f64) -> Result<Self> {
         let bytes = bytes.to_vec();

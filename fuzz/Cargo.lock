@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,6 +95,7 @@ dependencies = [
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
+ "betteroffice-xlsx",
  "libfuzzer-sys",
 ]
 
@@ -183,6 +190,84 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-xlsx"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "betteroffice-xlsx-calc",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-ops",
+ "betteroffice-xlsx-parse",
+ "betteroffice-xlsx-raster",
+ "betteroffice-xlsx-render",
+ "serde",
+ "serde_json",
+ "sha2",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-xlsx-calc"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-model",
+ "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-model"
+version = "0.5.1"
+dependencies = [
+ "libm",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-ops"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-calc",
+ "betteroffice-xlsx-model",
+ "quick-xml",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-parse"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-xlsx-model",
+ "quick-xml",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-raster"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-render",
+ "libm",
+ "png",
+ "rustybuzz",
+ "tiny-skia",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "betteroffice-xlsx-render"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-xlsx-model",
+ "hashbrown 0.17.1",
+ "libm",
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -439,6 +524,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "font-types"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -526,6 +617,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "image"
@@ -1191,6 +1287,12 @@ name = "unicode-script"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "usvg"

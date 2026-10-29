@@ -162,6 +162,7 @@ impl Default for XlsxSnapshotBuilder {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = recoveryCheckpoint)]
     pub fn recovery_checkpoint(
         &self,
@@ -173,6 +174,7 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     #[wasm_bindgen(js_name = openRecoveryCheckpoint)]
     pub fn open_recovery_checkpoint(
         bytes: &[u8],

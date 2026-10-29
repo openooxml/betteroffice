@@ -322,6 +322,7 @@ struct AcceptResult {
 }
 
 impl Session {
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn recovery_checkpoint(
         &self,
         through_seq: u64,
@@ -336,6 +337,7 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// Checkpoints are only restorable by the same engine version and codec.
     pub fn open_recovery_checkpoint(bytes: &[u8], expected_seq: u64) -> Result<Self, String> {
         let (workbook, through_seq, calculation_context, _) =
             Workbook::restore_recovery_checkpoint(bytes).map_err(|error| error.to_string())?;

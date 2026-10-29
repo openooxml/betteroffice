@@ -41,30 +41,13 @@ export interface WorkbookRecovery extends RecoveryMetadata {
 const MAGIC = new Uint8Array([88, 76, 83, 88, 82, 69, 67, 86]);
 const CODEC_VERSION = 3;
 const HEADER_BYTES = 21;
-const ENGINE_CODECS = new Set([3, 5, 6, 7]);
+const ENGINE_CODEC_VERSION = 8;
 
 export function isCollaborativeWorkbookRecovery(engine: Uint8Array): boolean {
   const unsupported = (): never => { throw new TypeError('Unsupported workbook recovery checkpoint'); };
-  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) || !ENGINE_CODECS.has(engine[8])) {
-    return unsupported();
-  }
-  // Engine metadata follows the codec header and SHA-256 digest.
-  let offset = 41;
-  let length = 0;
-  for (let shift = 0; shift <= 28; shift += 7) {
-    const byte = engine[offset++];
-    if (byte === undefined) return unsupported();
-    length += (byte & 0x7f) * 2 ** shift;
-    if (byte < 0x80) {
-      if (length > engine.length - offset) return unsupported();
-      try {
-        const metadata = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(engine.subarray(offset, offset + length)));
-        if (typeof metadata?.collaborative !== 'boolean') return unsupported();
-        return metadata.collaborative;
-      } catch { return unsupported(); }
-    }
-  }
-  return unsupported();
+  if (engine.length < 42 || !MAGIC.every((byte, index) => engine[index] === byte) ||
+    engine[8] !== ENGINE_CODEC_VERSION || engine[41] > 1) return unsupported();
+  return engine[41] === 1;
 }
 
 function checksum(bytes: Uint8Array, hash = 2166136261): number {
@@ -72,6 +55,7 @@ function checksum(bytes: Uint8Array, hash = 2166136261): number {
   return hash >>> 0;
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookCommandState,
   revision: number, versions: [number, string][], refusedSeqs: number[] = [],
   sessionState = { version: revision, dirty: revision > 0 },
@@ -108,6 +92,7 @@ export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookComman
   return bytes;
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
   const invalid = () => { throw new TypeError('Invalid workbook recovery checkpoint'); };
   if (bytes.length < HEADER_BYTES || !MAGIC.every((byte, index) => bytes[index] === byte)) invalid();
