@@ -948,7 +948,7 @@ function opaqueDrawingRunFromPayload(
   };
 }
 
-function shapeRunFromPayload(payload: Attrs): Run {
+function shapeRunFromPayload(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
     shapeType: 'rect',
@@ -1027,7 +1027,7 @@ function shapeRunFromPayload(payload: Attrs): Run {
     transform.flipV = true;
   if (transform.rotation || transform.flipH || transform.flipV) shape.transform = transform;
 
-  return { type: 'run', content: [{ type: 'shape', shape }] };
+  return { type: 'run', content: [{ type: 'shape', shape }], formatting: format(attributes) };
 }
 
 function inlineSdtFromPayload(
@@ -1149,7 +1149,7 @@ function ordinaryContentForItem(
     case 'horizontalRule':
       return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
-      return shapeRunFromPayload(item.payload);
+      return shapeRunFromPayload(item.payload, item.attributes, format);
     case 'chart':
       return chartRunFromPayload(item.payload, recovery);
     case 'opaqueDrawing':
@@ -1200,7 +1200,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
-    child = shapeRunFromPayload(item.payload);
+    child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     child = chartRunFromPayload(item.payload, recovery) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
@@ -1246,7 +1246,7 @@ function addToHyperlink(
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
   } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
-  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload);
+  else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
   else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;
   else if (item.embedKind === 'field') {

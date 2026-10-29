@@ -6,7 +6,7 @@ const DGM = 'http://schemas.openxmlformats.org/drawingml/2006/diagram';
 const DSP = 'http://schemas.microsoft.com/office/drawing/2008/diagram';
 const RELS = 'http://schemas.openxmlformats.org/package/2006/relationships';
 
-export function smartArtFixture(anchored: boolean, options: { bodyNamespace?: boolean; extensionSize?: number } = {}) {
+export function smartArtFixture(anchored: boolean, options: { bodyNamespace?: boolean; extensionSize?: number; hidden?: boolean } = {}) {
   const container = anchored
     ? '<wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="19" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
       '<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>91440</wp:posOffset></wp:positionH>' +
@@ -21,7 +21,7 @@ export function smartArtFixture(anchored: boolean, options: { bodyNamespace?: bo
     `<a:graphic><a:graphicData uri="${DGM}"><dgm:relIds r:dm="rId10" r:lo="rId11" r:qs="rId12" r:cs="rId13"/>` +
     `<a:extLst><a:ext uri="urn:synthetic:diagram"><keep:payload xmlns:keep="urn:synthetic:keep">${'x'.repeat(options.extensionSize ?? 0)}Retain me</keep:payload></a:ext></a:extLst>` +
     `</a:graphicData></a:graphic></wp:${anchored ? 'anchor' : 'inline'}></w:drawing>`;
-  const drawingRun = '<w:r w:rsidR="0099AABB"><w:rPr><w:noProof/><w:lang w:val="en-US"/></w:rPr>' + drawing + '</w:r>';
+  const drawingRun = '<w:r w:rsidR="0099AABB"><w:rPr><w:noProof/>' + (options.hidden ? '<w:vanish/>' : '') + '<w:lang w:val="en-US"/></w:rPr>' + drawing + '</w:r>';
   const document = `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:a="${A}" xmlns:wp="${WP}" ${options.bodyNamespace ? '' : `xmlns:dgm="${DGM}" `}xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body${options.bodyNamespace ? ` xmlns:dgm="${DGM}"` : ''}>` +
     '<w:p w14:paraId="10000001" w:rsidR="00A1B2C3"><w:r w:rsidR="00A1B2C3"><w:t xml:space="preserve">Process overview before </w:t></w:r>' +
     drawingRun + '<w:r><w:t xml:space="preserve"> and after the diagram.</w:t></w:r></w:p>' +

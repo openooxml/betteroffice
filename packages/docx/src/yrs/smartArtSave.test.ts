@@ -1,10 +1,12 @@
 import { beforeAll, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { parseDocx, repackDocxWithWarnings } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { smartArtDrawingRun, smartArtFixture, smartArtNamespaces, smartArtTargets } from './__fixtures__/smartArt';
 import { saveEditorDocument, mergeDocxHostMetadata } from './editorSave';
+import { documentToYrs } from './documentToYrs';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -12,6 +14,55 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url))));
   await preloadOpcWasm();
 });
+
+for (const anchored of [false, true]) {
+  for (const seeder of ['native', 'projected'] as const) {
+    for (const edit of ['preserve hidden', 'show', 'hide'] as const) {
+      it(`${seeder} ${anchored ? 'anchored' : 'inline'} SmartArt ${edit} survives model serialization`, async () => {
+        const source = smartArtFixture(anchored, { hidden: edit !== 'hide' });
+        const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
+          [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
+        )));
+        const host = await parseDocx(bytes.buffer, { preloadFonts: false });
+        const session = await createYrsSession();
+        const reopened = await createYrsSession();
+        try {
+          if (seeder === 'native') session.seedFromDocx(bytes);
+          else documentToYrs(session, host);
+          const segment = session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'shape');
+          expect(segment?.kind).toBe('embed');
+          expect(segment?.attributes.hidden === true).toBe(edit !== 'hide');
+          const { paraId } = session.paragraphs('body')[0]!;
+          if (edit !== 'preserve hidden') {
+            session.formatRange({ story: 'body', start: { paraId, offset: 24 }, end: { paraId, offset: 25 } }, {
+              other: { hidden: edit === 'hide' },
+            });
+          }
+          session.insertText({ story: 'body', paraId, offset: 0 }, 'Edited ');
+          const result = await repackDocxWithWarnings(yrsToDocument(session, host));
+          const saved = new Uint8Array(result.buffer);
+          const parts = unzipContainer(saved);
+          const xml = new TextDecoder().decode(parts['word/document.xml']);
+          const run = smartArtDrawingRun(xml)!;
+          expect(run).toContain(source.drawing);
+          expect(run).toContain('<w:noProof/>');
+          expect(run).toContain('<w:lang w:val="en-US"/>');
+          expect(run.includes('<w:vanish')).toBe(edit !== 'show');
+          if (edit === 'preserve hidden') expect(run).toBe(source.drawingRun);
+          expect(xml).toContain('Edited Process overview before ');
+          expect(result.warnings.filter(warning => warning.startsWith('Drawing run'))).toEqual([]);
+          reopened.openDocx(saved, true);
+          const savedSegment = reopened.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'shape');
+          expect(savedSegment?.kind).toBe('embed');
+          expect(savedSegment?.attributes.hidden === true).toBe(edit !== 'show');
+        } finally {
+          reopened.destroy();
+          session.destroy();
+        }
+      }, 30_000);
+    }
+  }
+}
 
 for (const anchored of [false, true]) {
   it(`saveEditorDocument preserves ${anchored ? 'anchored' : 'inline'} SmartArt in an edited paragraph`, async () => {

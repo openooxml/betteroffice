@@ -224,13 +224,18 @@ fn replay_run_properties(
         .root()
         .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
     let baseline = crate::inline::parse_run(root, None, None, None).run;
-    if baseline.formatting == run.formatting && baseline.property_changes == run.property_changes {
+    let formatting = run.formatting.as_ref().or(baseline.formatting.as_ref());
+    if baseline.formatting.as_ref() == formatting
+        && baseline.property_changes == run.property_changes
+    {
         return Ok(source.to_owned());
     }
-    let properties = |run: &Run| -> Result<XmlElement, ParseError> {
+    let properties = |formatting: Option<&TextFormatting>,
+                      changes: Option<&[RunPropertyChange]>|
+     -> Result<XmlElement, ParseError> {
         let xml = format!(
             "<w:r>{}</w:r>",
-            serialize_run_properties(run.formatting.as_ref(), run.property_changes.as_deref())
+            serialize_run_properties(formatting, changes)
         );
         let parsed = parse_xml(
             xml.as_bytes(),
@@ -239,8 +244,11 @@ fn replay_run_properties(
         )?;
         Ok(parsed.root().expect("generated run").clone())
     };
-    let before = properties(&baseline)?;
-    let after = properties(run)?;
+    let before = properties(
+        baseline.formatting.as_ref(),
+        baseline.property_changes.as_deref(),
+    )?;
+    let after = properties(formatting, run.property_changes.as_deref())?;
     let before = before.child_by_local_name("rPr");
     let after = after.child_by_local_name("rPr");
     let children = |properties: Option<&XmlElement>| {
@@ -309,7 +317,7 @@ fn replay_run_properties(
         (
             "formatting",
             serde_json::to_value(&baseline.formatting),
-            serde_json::to_value(&run.formatting),
+            serde_json::to_value(formatting.filter(|value| **value != TextFormatting::default())),
             serde_json::to_value(&saved.formatting),
         ),
         (
@@ -1513,10 +1521,15 @@ mod tests {
                 let source = format!(
                     r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:keep="urn:keep">{properties}{drawing}</w:r>"#
                 );
+                let mut run = smart_art_run(&source, opaque);
+                run.formatting = None;
+                let mut omitted_context = context();
+                assert_eq!(serialize_run(&run, &mut omitted_context).unwrap(), source);
+                assert!(omitted_context.take_warnings().is_empty());
                 for hidden in [Some(true), Some(false), None] {
                     let mut run = smart_art_run(&source, opaque);
-                    run.formatting = hidden.map(|hidden| TextFormatting {
-                        hidden: Some(hidden),
+                    run.formatting = Some(TextFormatting {
+                        hidden,
                         ..TextFormatting::default()
                     });
                     let mut context = context();
