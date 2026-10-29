@@ -1114,10 +1114,8 @@ export function useRustDisplayList(
       setLayoutCompleteSession(null);
       queryEpochGate.invalidate();
       requestSettleRelayout();
-      // Update observers fire from inside the wasm transaction. Calling any
-      // other EditSession method here would re-enter the borrowed wasm object
-      // (wasm-bindgen correctly rejects that unsafe alias). Selection is sent
-      // with the next input request after the transaction has returned.
+      // Update listeners run after the wasm call returns. Selection is sent
+      // with the next input request.
       if (canUseResidentEngineWorker()) workerRef.current?.client.invalidate(update, null);
       // Only frame freshness drops here. The worker keeps the page surfaces
       // (workerSurfacesActive) so the canvas retains its pixels until the

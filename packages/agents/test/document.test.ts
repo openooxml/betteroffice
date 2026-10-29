@@ -64,7 +64,7 @@ describe('grep, read, propose, export', () => {
     await doc.accept(proposal.id);
     expect(doc.read(hits[0].ref).text).toBe('The forecast is draft; the appendix is approved.');
     expect(() => doc.propose({ author: 'test', edits: [{ match: hits[0].match, newText: 'stale' }] })).toThrow('changed');
-    expect(() => doc.propose({ author: 'test', edits: [{ match: 'nonexistent', newText: 'wrong' }] })).toThrow('Run grep again');
+    expect(() => doc.propose({ author: 'test', edits: [{ match: 'nonexistent', newText: 'wrong' }] })).toThrow('not the text to replace');
   });
 
   test('preserves offsets across embeds and surrogate pairs', async () => {

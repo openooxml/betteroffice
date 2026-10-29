@@ -46,7 +46,7 @@ beforeAll(async () => {
       readFileSync(
         resolve(
           import.meta.dir,
-          '../../../../../docx/src/wasm/generated/layout/docx_layout_bg.wasm'
+          '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
         )
       )
     )

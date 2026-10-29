@@ -5,6 +5,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
+import { engineBackend } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -31,7 +32,7 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
-describe('workbook session wasm reuse', () => {
+describe.skipIf(engineBackend() === 'native')('workbook session wasm reuse', () => {
   test('keeps worker URLs and options statically evaluable', () => {
     const source = createSourceFile('client.ts',
       readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);

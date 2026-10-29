@@ -7,7 +7,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import type { XlsxCellRead } from '../edits';
 import * as workbookWasm from '../wasm/loader';
 import { wasmAssetUrl } from '../wasm/asset';
-import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
+import { XlsxDocument } from '../wasm/engine';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import { createWorkbookSession, hydratePeer, type WorkbookSession } from './client';
 import { workbookPeerSources } from './clientInternals';
@@ -950,9 +950,7 @@ describe('workbook peer hydration', () => {
 
   test('fails retained open with a typed error when the worker module has no hydration payload', async () => {
     const independentOpen = spyOn(XlsxDocument, 'open');
-    const calculatedOpen = spyOn(XlsxDocument as typeof XlsxDocument & {
-      openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
-    }, 'openWithCalculationJson');
+    const calculatedOpen = spyOn(XlsxDocument, 'openWithCalculationJson');
     const opening = createTestWorkbookSession(fixture, (transport) => ({
       ...transport,
       post(message, transfer) {
@@ -1072,9 +1070,7 @@ describe('workbook peer hydration', () => {
     const saved = await session.save();
     const clock = spyOn(Date, 'now').mockReturnValue(0);
     const ordinaryOpen = spyOn(XlsxDocument, 'open');
-    const calculatedOpen = spyOn(XlsxDocument as typeof XlsxDocument & {
-      openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
-    }, 'openWithCalculationJson');
+    const calculatedOpen = spyOn(XlsxDocument, 'openWithCalculationJson');
     let peer: WorkbookHandle | undefined;
     try {
       peer = await hydratePeer(session);

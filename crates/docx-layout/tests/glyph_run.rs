@@ -301,7 +301,12 @@ fn browser_text_run_with_chain(
         .unwrap()
         .extend(formatting.as_object().unwrap().clone());
     let chains = serde_json::json!({
-        (format!("{}|0|0", family.to_lowercase())): chain
+        (format!(
+            "{}|{}|{}",
+            family.to_lowercase(),
+            u8::from(formatting["bold"].as_bool().unwrap_or(false)),
+            u8::from(formatting["italic"].as_bool().unwrap_or(false))
+        )): chain
     });
     let measure = ooxml_text::measure_paragraph_json(
         store,
@@ -394,6 +399,81 @@ fn browser_painted_matching_arial_keeps_its_horizontal_scale() {
                 .unwrap()
                 .contains("substituteScale")
         );
+    }
+}
+
+#[test]
+fn browser_painted_japanese_substitutes_keep_cjk_outlines_at_full_scale() {
+    let mut store = FontStore::new();
+    let base = store
+        .register(
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf").to_vec(),
+        )
+        .unwrap();
+    for family in [
+        "MS Mincho",
+        "ＭＳ 明朝",
+        "MS Gothic",
+        "ＭＳ ゴシック",
+        "MS PMincho",
+        "ＭＳ Ｐ明朝",
+        "MS PGothic",
+        "ＭＳ Ｐゴシック",
+        "MS UI Gothic",
+    ] {
+        let view = store.register_named_substitute(base, family).unwrap();
+        let text = "1111111111中あア";
+        let width = shaped_width(&store, view, text);
+        let numeric_auto_space = 0.25 * 16.0;
+        assert!(
+            (width - shaped_width(&store, base, text)).abs() > 0.01,
+            "{family}"
+        );
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let metrics =
+                ooxml_text::family_metrics::family_metrics(&family.to_lowercase(), bold, italic)
+                    .unwrap();
+            assert!(std::ptr::eq(
+                store.family_widths(view).unwrap().unwrap(),
+                metrics
+            ));
+            for formatting in [
+                serde_json::json!({"allCaps": true, "bold": bold, "italic": italic}),
+                serde_json::json!({"textShadow": true, "bold": bold, "italic": italic}),
+            ] {
+                let run = browser_text_run(&store, family, view, text, formatting);
+                assert!(run.substitute_scale.is_none(), "{family} {bold} {italic}");
+                assert!(run.horizontal_scale.is_none(), "{family} {bold} {italic}");
+                let clusters = run.attrs.canvas_clusters.as_deref().unwrap();
+                assert_eq!(clusters.len(), 13, "{family}");
+                for (index, cluster) in clusters.iter().take(10).enumerate() {
+                    assert_eq!(
+                        cluster.offset.as_f64(),
+                        Some(index as f64 * 8.0),
+                        "{family}"
+                    );
+                }
+                assert_eq!(
+                    clusters[10].offset.as_f64(),
+                    Some(80.0 + numeric_auto_space),
+                    "{family}"
+                );
+                assert_eq!(
+                    clusters[11].offset.as_f64(),
+                    Some(96.0 + numeric_auto_space),
+                    "{family}"
+                );
+                let katakana_x = 96.0 + numeric_auto_space + shaped_width(&store, view, "あ");
+                assert!(
+                    (clusters[12].offset.as_f64().unwrap() - katakana_x).abs() < 0.001,
+                    "{family}"
+                );
+                assert!(
+                    (run.width.as_f64().unwrap() - width - numeric_auto_space).abs() < 0.002,
+                    "{family} {bold} {italic}"
+                );
+            }
+        }
     }
 }
 
