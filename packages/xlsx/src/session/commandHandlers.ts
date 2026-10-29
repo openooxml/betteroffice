@@ -110,7 +110,7 @@ function cellTarget(handle: WorkbookHandle, sheet: number, row: number, col: num
 }
 
 function checkedBatch(handle: WorkbookHandle, state: WorkbookCommandState, steps: XlsxEditStep[]): void {
-  if (!state.editableSheets) {
+  if (!state.editableSheets || state.catalogDirty) {
     const catalog = handle.readCells({ ranges: [] });
     if (!catalog.ok) throw new Error(catalog.failure.message);
     state.editableSheets = catalog.sheets.map((sheet) => sheet.editable);
@@ -134,7 +134,7 @@ function checkedBatch(handle: WorkbookHandle, state: WorkbookCommandState, steps
     const { start, end } = corners(step.target.range);
     const visits = (end.row - start.row + 1) * (end.col - start.col + 1);
     const units = step.op === 'setCellInputs' ? step.inputs.flat().reduce((sum, input) => sum + input.length, 0) : 0;
-    const probe: XlsxEditStep = state.editableSheets[resolveCommandTarget(handle, step.target).sheet]
+    const probe: XlsxEditStep = state.editableSheets[resolveCommandTarget(handle, step.target, state.info?.sheetIds).sheet]
       ? { op: 'patchStyle', target: step.target, patch: {} } : step;
     const size = encoder.encode(JSON.stringify(probe)).length + 1;
     if (chunk.length === MAX_VALIDATION_STEPS || cells + visits > workbookAdmissionBudget.cells ||
