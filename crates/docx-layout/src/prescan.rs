@@ -68,9 +68,31 @@ pub struct LayoutPlan {
     /// Break type entering section `i + 1`; trailing entry is the body's.
     pub section_break_types: Vec<Option<SectionBreakType>>,
     pub section_page_restarts: Vec<Option<SectionPageRestart>>,
+    pub(crate) region_section_indices: Option<Vec<usize>>,
     /// Keep-with-next groups keyed by head, plus their interior-member set.
     pub keep_with_next: KeepWithNextScan,
     pub(crate) section_marks: Vec<bool>,
+}
+
+impl LayoutPlan {
+    pub(crate) fn region_section_index(&self, section_index: usize) -> usize {
+        self.region_section_indices
+            .as_ref()
+            .and_then(|indices| indices.get(section_index))
+            .copied()
+            .unwrap_or(section_index)
+    }
+
+    pub(crate) fn section_page_restart(&self, section_index: usize) -> Option<SectionPageRestart> {
+        let region_index = self.region_section_index(section_index);
+        if section_index > 0 && self.region_section_index(section_index - 1) == region_index {
+            return None;
+        }
+        self.section_page_restarts
+            .get(region_index)
+            .copied()
+            .flatten()
+    }
 }
 
 /// Gathers pagination look-ahead into one plan.
@@ -87,6 +109,8 @@ pub fn prescan(
     );
     let (section_configs, break_indices) =
         collect_section_configs(measured, body_config, final_config);
+    let region_section_indices =
+        crate::regions::section_region_indices(measured.iter().map(|measured| &measured.block));
     let mut section_break_types: Vec<Option<SectionBreakType>> = break_indices
         .iter()
         .map(|&i| match &measured[i].block {
@@ -102,6 +126,7 @@ pub fn prescan(
         break_indices,
         section_break_types,
         section_page_restarts: Vec::new(),
+        region_section_indices,
         keep_with_next,
         section_marks,
     })

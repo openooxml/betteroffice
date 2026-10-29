@@ -126,6 +126,15 @@ pub struct ShapeSnapshot {
     pub source_id: u32,
     pub kind: ShapeKind,
     pub name: String,
+    /// `cNvPr/@title`, the alternative-text title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `cNvPr/@descr`, the alternative-text description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// True when `cNvPr` carries the a16 decorative extension.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
     pub x: i64,
     pub y: i64,
     pub width: i64,

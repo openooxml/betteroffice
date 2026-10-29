@@ -1817,6 +1817,45 @@ fn package_styled(
     parts
 }
 
+#[test]
+fn source_style_xml_markers_classify_styles_bytes_like_open() {
+    for (inner, expected) in [
+        (
+            r#"<cellXfs><xf/><xf numFmtId="2"><extLst><ext uri="keep"/></extLst></xf><xf xr:uid="keep" xmlns:xr="urn:revision"/><xf><alignment horizontal="center"/></xf></cellXfs>"#,
+            vec![1, 2],
+        ),
+        ("<cellXfs><xf/></cellXfs>", Vec::new()),
+    ] {
+        let xml = format!("<styleSheet>{inner}</styleSheet>");
+        let classified = crate::source_style_xml_markers(xml.as_bytes()).unwrap();
+        assert_eq!(classified, expected);
+        let opened = parse_workbook(&package_styled("<sheetData/>", Some(inner), None)).unwrap();
+        let opened_markers: Vec<_> = (0..opened.styles.cell_xfs.len() as u32)
+            .filter(|&index| opened.styles.xf_has_extra_xml(index))
+            .collect();
+        assert_eq!(classified, opened_markers);
+    }
+}
+
+#[test]
+fn alternate_content_inside_an_xf_marks_it_extra() {
+    let inner = concat!(
+        r#"<cellXfs><xf/><xf numFmtId="2">"#,
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+        r#"<mc:Choice Requires="x14"><alignment horizontal="center"/></mc:Choice>"#,
+        r#"<mc:Fallback><alignment horizontal="left"/></mc:Fallback>"#,
+        r#"</mc:AlternateContent></xf></cellXfs>"#,
+    );
+    let xml = format!("<styleSheet>{inner}</styleSheet>");
+    assert_eq!(
+        crate::source_style_xml_markers(xml.as_bytes()).unwrap(),
+        vec![1]
+    );
+    let opened = parse_workbook(&package_styled("<sheetData/>", Some(inner), None)).unwrap();
+    assert!(opened.styles.xf_has_extra_xml(1));
+    assert!(!opened.styles.xf_has_extra_xml(0));
+}
+
 /// a full styles fixture exercising every pool, including the gray125
 /// convention fill.
 const STYLED: &str = r#"

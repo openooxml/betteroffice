@@ -9,6 +9,121 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
+export declare class PptxDocument {
+  free(): void
+  static openReplayBaseline(source: Uint8Array, clientId?: number | undefined | null, initialUpdate?: Uint8Array | undefined | null): PptxDocument
+  static openPeerDeckJson(source: Uint8Array, identityJson: string, initialUpdate?: Uint8Array | undefined | null): PptxDocument
+  static openCollaborative(bytes: Uint8Array, clientId: number): PptxDocument
+  static openCollaborativeFromUpdate(update: Uint8Array, clientId: number, source?: Uint8Array | undefined | null): PptxDocument
+  peerHydrationJson(fontsJson: string): string
+  registerPeerFontsJson(fontsJson: string): void
+  adoptPeerIdentity(): void
+  replayJson(envelope: string): string
+  proposeJson(args: string): string
+  listProposalsJson(): string
+  previewProposalJson(args: string): string
+  acceptProposalJson(args: string): string
+  rejectProposalJson(args: string): string
+  get clientId(): number
+  snapshotJson(): string
+  sessionMetadataJson(): string
+  documentVersion(): string
+  readContentJson(request: string): string
+  readCommandContentJson(request: string): string
+  findTextJson(request: string): string
+  validateEditsJson(request: string): string
+  applyEditsJson(request: string): string
+  exportStructuredJson(options: string): string
+  exportMarkdownJson(options: string): string
+  searchTextJson(args: string): string
+  storyJson(args: string): string
+  storyFormattingJson(args: string): string
+  anchorCaretJson(args: string): string
+  resolveCaretAnchorJson(args: string): string
+  mediaBytes(partPath: string): Uint8Array
+  saveBytes(): Uint8Array
+  encodeStateVector(): Uint8Array
+  encodeStateAsUpdate(): Uint8Array
+  encodeDiff(remoteStateVector: Uint8Array): Uint8Array
+  setCollaborative(): void
+  applyUpdateJson(update: Uint8Array): string
+  startUpdateObservation(): void
+  clearUpdateObservation(): void
+  drainUpdateEvent(): Uint8Array
+  insertTextJson(args: string): string
+  insertTextProfiledJson(args: string): string
+  deleteTextJson(args: string): string
+  deleteTextProfiledJson(args: string): string
+  formatTextJson(args: string): string
+  setParagraphAlignmentJson(args: string): string
+  addCommentJson(args: string): string
+  replyToCommentJson(args: string): string
+  setCommentPositionJson(args: string): string
+  setCommentStatusJson(args: string): string
+  removeCommentJson(args: string): string
+  setCommentFlavorJson(args: string): string
+  commentsJson(): string
+  insertParagraphBreakJson(args: string): string
+  setStoryParagraphsJson(args: string): string
+  insertTableRowJson(args: string): string
+  checkTableEditJson(args: string): void
+  deleteTableRowJson(args: string): string
+  insertTableColumnJson(args: string): string
+  deleteTableColumnJson(args: string): string
+  insertSlideJson(args: string): string
+  duplicateSlideJson(args: string): string
+  insertSlideProfiledJson(args: string): string
+  deleteSlideJson(args: string): string
+  setSlideLayoutJson(args: string): string
+  setSlideNotesJson(args: string): string
+  moveSlideJson(args: string): string
+  addTextBoxJson(args: string): string
+  addTextBoxProfiledJson(args: string): string
+  addShapeJson(args: string): string
+  addPictureJson(args: string): string
+  removeShapeJson(args: string): string
+  bringShapeToFrontJson(args: string): string
+  sendShapeToBackJson(args: string): string
+  bringShapeForwardJson(args: string): string
+  sendShapeBackwardJson(args: string): string
+  moveShapeJson(args: string): string
+  moveShapeProfiledJson(args: string): string
+  resizeShapeJson(args: string): string
+  setShapeRectJson(args: string): string
+  setShapeFillJson(args: string): string
+  setShapeStrokeJson(args: string): string
+  setShapeAdjustJson(args: string): string
+  undoCaptureMode(): string
+  setUndoCaptureMode(mode: string): void
+  addUndoBoundary(): void
+  undoJson(): string
+  undoReceiptJson(): string
+  redoReceiptJson(): string
+  undoProfiledJson(): string
+  redoJson(): string
+  canUndo(): boolean
+  canRedo(): boolean
+  static version(): string
+}
+
+export declare class PptxRenderer {
+  constructor()
+  free(): void
+  registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
+  registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number
+  saveBytes(document: PptxDocument): Uint8Array
+  layoutSlideJson(document: PptxDocument, slideIndex: number): string
+  layoutSlideProfiledJson(document: PptxDocument, slideIndex: number): string
+  hitTestJson(x: number, y: number): string
+  setActiveSlide(document: PptxDocument, id: string, key: string): boolean
+  snapshotWithLayoutKeysJson(document: PptxDocument): string
+  slideLayoutKey(document: PptxDocument, slideIndex: number): string
+  hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string
+  requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
+  layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
+  layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
+}
+
 export declare class Presentation {
   get author(): string
   set author(author: string)
@@ -89,6 +204,16 @@ export interface CommentReplyInput {
   created: string
 }
 
+export declare function compileSlideJson(slideJson: string): string
+
+export declare function decodeTiffPng(data: Uint8Array): Uint8Array
+
+export declare function engineVersion(): string
+
+export declare function exportPptxMarkdownJson(data: Uint8Array, options: string): string
+
+export declare function exportPptxStructuredJson(data: Uint8Array, options: string): string
+
 export interface FontFace {
   family: string
   data: Buffer
@@ -110,12 +235,20 @@ export interface OpenPresentationOptions {
   origin?: string
 }
 
+export declare function parsePptxJson(data: Uint8Array): string
+
+export declare function parsePptxJsonWithoutMedia(data: Uint8Array): string
+
 export interface RenderedSlide {
   data: Buffer
   width: number
   height: number
   skippedImages: number
 }
+
+export declare function rendererVersion(): string
+
+export declare function renderPptxMarkdownJson(content: string, options: string): string
 
 export interface RenderSlideOptions {
   scale?: number

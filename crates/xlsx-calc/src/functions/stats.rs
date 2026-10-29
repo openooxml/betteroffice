@@ -8,6 +8,7 @@ use xlsx_model::{CellRef, CellValue, ErrorValue, SheetId};
 use crate::eval::{
     Area, EvalContext, as_area, bound_area, err, evaluate, num, parse_cached, union_areas,
 };
+use crate::fmath;
 use crate::parser::{Expr, parse_formula};
 
 use super::criteria::{self, Criterion};
@@ -1246,7 +1247,7 @@ pub(crate) fn norm_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if cumulative {
         finite(0.5 * erfc(-z * std::f64::consts::FRAC_1_SQRT_2))
     } else {
-        finite((-0.5 * z * z).exp() / (sd * (2.0 * std::f64::consts::PI).sqrt()))
+        finite(fmath::exp(-0.5 * z * z) / (sd * (2.0 * std::f64::consts::PI).sqrt()))
     }
 }
 
@@ -1343,7 +1344,7 @@ fn erfc(x: f64) -> f64 {
 fn scaled_exp(y: f64) -> f64 {
     let grid = (y * 16.0).trunc() / 16.0;
     let delta = (y - grid) * (y + grid);
-    (-grid * grid).exp() * (-delta).exp()
+    fmath::exp(-grid * grid) * fmath::exp(-delta)
 }
 
 /// AVERAGEA(value, ...): the mean with text as zero and logicals as one/zero.
@@ -1393,8 +1394,8 @@ pub(crate) fn geomean(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Num);
     }
     // the logs keep a long product from overflowing before the root shrinks it
-    let mean_log = nums.iter().map(|x| x.ln()).sum::<f64>() / nums.len() as f64;
-    finite(mean_log.exp())
+    let mean_log = nums.iter().map(|x| fmath::ln(*x)).sum::<f64>() / nums.len() as f64;
+    finite(fmath::exp(mean_log))
 }
 
 /// HARMEAN(number, ...): the reciprocal of the mean reciprocal; every value

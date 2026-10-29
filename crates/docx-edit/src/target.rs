@@ -32,6 +32,8 @@ use crate::{
     PPR_INS, RawOp, StoryRange, map_string, story_ref,
 };
 
+pub use docx_parse::image::DrawingProperties;
+
 /// Paragraphs one read may return.
 const READ_PARAGRAPH_LIMIT: usize = 65_536;
 /// UTF-16 units of text one read may return.
@@ -123,6 +125,127 @@ pub enum AtomKind {
 pub struct TextAtom {
     pub offset: u32,
     pub kind: AtomKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<DrawingProperties>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drawings: Vec<DrawingProperties>,
+}
+
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
+fn drawing_properties<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+) -> Option<DrawingProperties> {
+    let map = map?;
+    let payload = ["docPr", "title", "alt", "wrapType"]
+        .into_iter()
+        .filter_map(|key| match map.get(txn, key) {
+            Some(Out::Any(value)) => Some((key.to_owned(), value)),
+            _ => None,
+        })
+        .collect();
+    drawing_from_payload(&payload, kind == "image")
+}
+
+pub(crate) fn drawing_from_payload(
+    payload: &HashMap<String, Any>,
+    image: bool,
+) -> Option<DrawingProperties> {
+    let Any::Map(properties) = payload.get("docPr")? else {
+        return None;
+    };
+    let text = |key: &str| match properties.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let live = |key: &str| match payload.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if image {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
+    };
+    let wrap = if image {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
+    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
+    let placement = match (wrap.as_deref(), text("placement").as_deref()) {
+        (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+        (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
+        _ => docx_parse::image::DrawingPlacement::Inline,
+    };
+    let drawing_type = match text("type").as_deref() {
+        Some("picture") => docx_parse::image::DrawingType::Picture,
+        Some("shape") => docx_parse::image::DrawingType::Shape,
+        Some("textBox") => docx_parse::image::DrawingType::TextBox,
+        Some("group") => docx_parse::image::DrawingType::Group,
+        Some("chart") => docx_parse::image::DrawingType::Chart,
+        Some("diagram") => docx_parse::image::DrawingType::Diagram,
+        _ => docx_parse::image::DrawingType::Other,
+    };
+    Some(DrawingProperties {
+        doc_pr_id: text("docPrId"),
+        name: text("name"),
+        title,
+        descr,
+        hidden: flag("hidden"),
+        decorative: flag("decorative"),
+        placement,
+        drawing_type,
+    })
+}
+
+fn control_drawings<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+    view: EditTextView,
+) -> Vec<DrawingProperties> {
+    if kind != "sdt" {
+        return Vec::new();
+    }
+    let Some(Out::Any(Any::Array(content))) = map.and_then(|map| map.get(txn, "content")) else {
+        return Vec::new();
+    };
+    let mut pending: Vec<&Any> = content.iter().rev().collect();
+    let mut drawings = Vec::new();
+    while let Some(item) = pending.pop() {
+        let Any::Map(item) = item else {
+            continue;
+        };
+        let attrs = match item.get("attrs") {
+            Some(Any::Map(attrs)) => Some(attrs),
+            _ => None,
+        };
+        let active = |key| {
+            attrs
+                .and_then(|attrs| attrs.get(key))
+                .is_some_and(|value| *value != Any::Null)
+        };
+        if !visible(view, active(INS), active(DEL)) {
+            continue;
+        }
+        let Some(Any::Map(payload)) = item.get("payload") else {
+            continue;
+        };
+        if matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "sdt") {
+            if let Some(Any::Array(content)) = payload.get("content") {
+                pending.extend(content.iter().rev());
+            }
+        } else if let Some(drawing) = drawing_from_payload(
+            payload,
+            matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "image"),
+        ) {
+            drawings.push(drawing);
+        }
+    }
+    drawings
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -285,10 +408,6 @@ impl Mark {
 
     pub fn section(&self) -> bool {
         self.has("sectPr") || self.has("sectionBreakType")
-    }
-
-    pub fn numbering(&self) -> bool {
-        self.has("numPr")
     }
 
     /// The source runs retained for save carry tracked formatting changes.
@@ -790,6 +909,8 @@ impl StoryView {
                         current.atoms.push(TextAtom {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
+                            drawing: drawing_properties(&kind, map.as_ref(), txn),
+                            drawings: control_drawings(&kind, map.as_ref(), txn, view),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);

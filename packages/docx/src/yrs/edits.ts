@@ -27,6 +27,7 @@ export type {
 
 import type { DocxContentControlSelector } from './contentControls';
 import type { DocxAnchor } from './readTypes';
+import type { DocxDrawing } from '../types/content/run';
 
 import type { DocxStoryInfoKind } from './stories';
 
@@ -224,10 +225,17 @@ export type DocxAtomKind =
   | 'field'
   | 'other';
 
+export type { DocxDrawing } from '../types/content/run';
+
 /** One U+FFFC in projected text that stands for an inline atom. */
 export interface DocxTextAtom {
   offset: number;
   kind: DocxAtomKind;
+  /** The drawing's `wp:docPr` properties, on atoms whose embed carries them. */
+  drawing?: DocxDrawing;
+  /** Drawings inside content-control atoms in the requested view;
+   * drawings inside field results are not listed. */
+  drawings?: DocxDrawing[];
 }
 
 /** Numbering in the requested view, counted from the start of the root story. */

@@ -5,6 +5,7 @@ use ooxml_drawingml::GeometryPathCommand;
 
 use crate::CustomGeometryPath;
 use crate::drawing::{GuideValue, evaluate_guide_formula, guide_operand, standard_guide_values};
+use crate::fmath;
 use crate::xml::{ParseBudget, XmlElement};
 
 const MAX_CUSTOM_PATH_COMMANDS: usize = 16_384;
@@ -212,7 +213,7 @@ fn normalized_point(x: f64, y: f64, width: f64, height: f64) -> Option<(f64, f64
 fn ellipse_angle(angle: f64, rx: f64, ry: f64) -> f64 {
     let turns = (angle / TAU).floor();
     let angle = angle.rem_euclid(TAU);
-    (rx * angle.sin()).atan2(ry * angle.cos()).rem_euclid(TAU) + turns * TAU
+    fmath::atan2(rx * fmath::sin(angle), ry * fmath::cos(angle)).rem_euclid(TAU) + turns * TAU
 }
 
 fn arc_to_cubics(
@@ -252,17 +253,26 @@ fn arc_to_cubics(
         return None;
     }
     let (rx, ry) = normalized_point(rx, ry, width, height)?;
-    let center = (current.0 - rx * start.cos(), current.1 - ry * start.sin());
+    let center = (
+        current.0 - rx * fmath::cos(start),
+        current.1 - ry * fmath::sin(start),
+    );
     let step = sweep / count as f64;
-    let alpha = 4.0 / 3.0 * (step / 4.0).tan();
+    let alpha = 4.0 / 3.0 * fmath::tan(step / 4.0);
     let mut commands = Vec::with_capacity(count);
     let mut from = current;
     for index in 0..count {
         let a = start + step * index as f64;
         let b = a + step;
-        let to = (center.0 + rx * b.cos(), center.1 + ry * b.sin());
-        let cp1 = (from.0 - alpha * rx * a.sin(), from.1 + alpha * ry * a.cos());
-        let cp2 = (to.0 + alpha * rx * b.sin(), to.1 - alpha * ry * b.cos());
+        let to = (center.0 + rx * fmath::cos(b), center.1 + ry * fmath::sin(b));
+        let cp1 = (
+            from.0 - alpha * rx * fmath::sin(a),
+            from.1 + alpha * ry * fmath::cos(a),
+        );
+        let cp2 = (
+            to.0 + alpha * rx * fmath::sin(b),
+            to.1 - alpha * ry * fmath::cos(b),
+        );
         if [cp1.0, cp1.1, cp2.0, cp2.1, to.0, to.1]
             .iter()
             .any(|v| !v.is_finite())

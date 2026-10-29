@@ -102,14 +102,14 @@ returns `{ bytes, recovery: true }`.
 
 ## Toolbar
 
-The toolbar composition API is experimental. Use `toolbar` to supply controls connected to the
-editor's command store. See
+The toolbar composition API can change in minor releases. Use `toolbar` to supply controls
+connected to the editor's command store. See
 [Compose the XLSX toolbar](https://docs.betteroffice.dev/docs/javascript#compose-the-xlsx-toolbar)
 for built-in parts, custom controls, and command results.
 
 ## Plugins and edit batches
 
-The plugin API is experimental and may change in minor releases. Plugins contribute panels,
+The plugin API can change in minor releases. Plugins contribute panels,
 overlays, and commands through restricted clients; their read and edit
 clients support version-checked operations. See
 [Host XLSX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-xlsx-editor-plugins)

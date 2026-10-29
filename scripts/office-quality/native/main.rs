@@ -130,13 +130,72 @@ fn region_request(package: &Value) -> Value {
         })
         .map(|style| style["styleId"].clone())
         .collect();
+    let doc_default_size = package["styles"]["docDefaults"]["rPr"]["fontSize"]
+        .as_f64()
+        .unwrap_or(20.0);
+    let mut chain_sizes = serde_json::Map::new();
+    let mut hyperlink_sizes = serde_json::Map::new();
+    for style in &styles {
+        let hyperlink = style["type"] == "character"
+            && ["styleId", "name"].iter().any(|key| {
+                matches!(
+                    style[key]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "hyperlink" | "followedhyperlink"
+                )
+            });
+        if style["type"] != "paragraph" && !hyperlink {
+            continue;
+        }
+        let Some(style_id) = style["styleId"].as_str() else {
+            continue;
+        };
+        let mut size = None;
+        let mut seen: Vec<&str> = Vec::new();
+        let mut current = Some(*style);
+        while let Some(current_style) = current {
+            let Some(current_id) = current_style["styleId"].as_str() else {
+                break;
+            };
+            if seen.contains(&current_id) {
+                break;
+            }
+            seen.push(current_id);
+            if let Some(found) = current_style["rPr"]["fontSize"].as_f64() {
+                size = Some(found);
+                break;
+            }
+            current = current_style["basedOn"]
+                .as_str()
+                .and_then(|id| styles.iter().find(|style| style["styleId"] == id).copied());
+        }
+        if hyperlink {
+            if let Some(size) = size {
+                hyperlink_sizes.insert(style_id.to_owned(), json!(size / 2.0));
+            }
+        } else {
+            let resolved = size.unwrap_or(doc_default_size);
+            chain_sizes.insert(style_id.to_owned(), json!(resolved / 2.0));
+        }
+    }
+    let mut render_env = json!({"themeColors": package["theme"]["colorScheme"],
+        "defaultTabStopTwips": package["settings"]["defaultTabStop"],
+        "defaultParagraphStyleId": default_style, "tocStyleIds": toc});
+    if package["styles"].is_object() {
+        render_env["paragraphStyleFontSizes"] = json!(chain_sizes);
+        if !hyperlink_sizes.is_empty() {
+            render_env["hyperlinkStyleFontSizes"] = json!(hyperlink_sizes);
+        }
+        render_env["docDefaultFontSize"] = json!(doc_default_size / 2.0);
+    }
     json!({
         "bodyStory": "body", "options": {"pageGap": 24},
         "regions": {"sections": sections, "settings": package["settings"], "watermark": final_properties["watermark"]},
         "notes": {"contents": notes},
-        "renderEnv": {"themeColors": package["theme"]["colorScheme"],
-            "defaultTabStopTwips": package["settings"]["defaultTabStop"],
-            "defaultParagraphStyleId": default_style, "tocStyleIds": toc}
+        "renderEnv": render_env
     })
 }
 

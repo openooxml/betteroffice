@@ -34,3 +34,6 @@ required-features = ["svg"]
 [[test]]
 name = "malformed"
 required-features = ["svg"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libm.workspace = true

@@ -282,6 +282,13 @@ pub enum Primitive {
     Decoration(DecorationPrimitive),
 }
 
+/// One browser text cluster at an offset from its run's pen origin.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct CanvasTextCluster {
+    pub text: String,
+    pub offset: Number,
+}
+
 /// Everything a primitive carries about the document content it came from:
 /// its position range, block and paragraph identity, enclosing table cell,
 /// content-control ancestry, revision and comment state, and the per-class
@@ -442,6 +449,10 @@ pub struct DocAttrs {
     /// so the fallback keeps the measured face instead of generic sans-serif.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_font: Option<String>,
+    /// Positioned browser text clusters, boxed to keep primitives compact.
+    #[allow(clippy::box_collection)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_clusters: Option<Box<Vec<CanvasTextCluster>>>,
     /// Text/GlyphRun-only member: modern w14 text effects payload
     /// (glow/shadow/reflection/textFill/textOutline), passed through losslessly
     /// from `RunFormatting.modernEffects`.
@@ -606,6 +617,9 @@ pub struct HighlightSliceMetadata {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ChartA11yAttrs {
     pub label: String,
+    /// The placed chart box every primitive of the chart paints inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<Box<ContentFrame>>,
 }
 
 /// The grid position of the cell a primitive paints inside.
@@ -4689,6 +4703,11 @@ fn text_substitute_scale(
 ) -> Option<Number> {
     let ratio = fonts.and_then(|fonts| {
         let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+        if ooxml_text::word_fonts::requested_line_metrics(family)
+            .is_some_and(|metrics| metrics.east_asian)
+        {
+            return None;
+        }
         let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
         let font = *chain.first()?;
         if fonts.store.family_widths(font).ok()?.is_none()
@@ -4703,6 +4722,105 @@ fn text_substitute_scale(
         (ratio.is_finite() && ratio > 0.0 && (ratio - 1.0).abs() > 1e-3).then_some(ratio)
     });
     ratio.and_then(Number::from_f64)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_canvas_clusters(
+    fonts: Option<&ShapeFonts<'_>>,
+    text: &str,
+    fmt: &RunFormattingIn,
+    bidi_level: u8,
+    authoritative: bool,
+    word_spacing: f64,
+    auto_space: ooxml_text::AutoSpace,
+) -> Option<Vec<CanvasTextCluster>> {
+    let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
+    if !ooxml_text::word_fonts::requested_line_metrics(family)?.east_asian {
+        return None;
+    }
+    let fonts = fonts?;
+    let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
+    let font = *chain.first()?;
+    fonts.store.family_widths(font).ok()??;
+    let text = if fmt.all_caps == Some(true) {
+        text.to_uppercase()
+    } else {
+        text.to_owned()
+    };
+    if text
+        .chars()
+        .any(|ch| !fonts.store.covers(font, ch).unwrap_or(false))
+    {
+        return None;
+    }
+    let size = effective_font_px_of(fmt);
+    let language = fmt.language.as_ref().and_then(|language| {
+        if ooxml_text::level_is_rtl(bidi_level) {
+            language.bidi.as_deref().or(language.latin.as_deref())
+        } else {
+            language.east_asia.as_deref().or(language.latin.as_deref())
+        }
+    });
+    let glyphs = ooxml_text::shape::shape_with_properties(
+        fonts.store,
+        font,
+        &text,
+        size as f32,
+        &kern_features_of(fmt, size),
+        shape_direction_for_level(bidi_level),
+        language,
+    )
+    .ok()?;
+    let mut advances = std::collections::BTreeMap::<usize, f64>::new();
+    let mut order = Vec::new();
+    for glyph in glyphs {
+        let offset = glyph.cluster as usize;
+        *advances.entry(offset).or_insert_with(|| {
+            order.push(offset);
+            0.0
+        }) += f64::from(glyph.x_advance);
+    }
+    let bounds: Vec<_> = advances
+        .keys()
+        .copied()
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let breaks: std::collections::HashSet<_> = ooxml_text::break_opportunities(&text)
+        .into_iter()
+        .map(|boundary| boundary.byte_index)
+        .collect();
+    let horizontal = fmt.horizontal_scale.unwrap_or(100.0) / 100.0;
+    let mut pen = 0.0;
+    let mut clusters = Vec::new();
+    for start in order {
+        let index = bounds.binary_search(&start).ok()?;
+        let end = *bounds.get(index + 1)?;
+        let cluster = text.get(start..end)?;
+        clusters.push(CanvasTextCluster {
+            text: cluster.to_owned(),
+            offset: px(pen),
+        });
+        pen += if fmt.small_caps == Some(true) {
+            painted_text_width(fonts, font, cluster, fmt, bidi_level, authoritative)?
+        } else {
+            advances[&start]
+        };
+        if horizontal > 0.0 {
+            pen +=
+                word_spacing * cluster.chars().filter(|&ch| ch == ' ').count() as f64 / horizontal;
+            if end < text.len() && !breaks.contains(&end) {
+                pen += fmt.letter_spacing.unwrap_or(0.0) / horizontal;
+            }
+            if !ooxml_text::level_is_rtl(bidi_level)
+                && let (Some(left), Some(right)) =
+                    (cluster.chars().next_back(), text[end..].chars().next())
+            {
+                pen += f64::from(auto_space.extra_px(left, right, size as f32, size as f32))
+                    / horizontal;
+            }
+        }
+    }
+    Some(clusters)
 }
 
 fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
@@ -6099,15 +6217,15 @@ pub(crate) fn emit_paragraph_fragment(
     let indent = attrs.and_then(|a| a.indent).unwrap_or_default();
 
     // rtl paragraphs mirror the two indent sides
-    let ind_l = indent.left.unwrap_or(0.0).max(0.0);
-    let ind_r = indent.right.unwrap_or(0.0).max(0.0);
+    let ind_l = indent.left.unwrap_or(0.0);
+    let ind_r = indent.right.unwrap_or(0.0);
     let (indent_left, indent_right) = if is_rtl {
         (ind_r, ind_l)
     } else {
         (ind_l, ind_r)
     };
-    let hanging = indent.hanging.unwrap_or(0.0).max(0.0);
-    let first_line = indent.first_line.unwrap_or(0.0).max(0.0);
+    let hanging = indent.hanging.unwrap_or(0.0);
+    let first_line = indent.first_line.unwrap_or(0.0);
 
     let block_ref = BlockRef::of(&frag.block_id);
     let pmark_revision = attrs.and_then(|a| {
@@ -6172,7 +6290,7 @@ pub(crate) fn emit_paragraph_fragment(
                 origin_y,
                 frag.width,
                 frag.height,
-                if !is_rtl && indent_left > 0.0 {
+                if !is_rtl && indent_left != 0.0 {
                     indent_left - hanging
                 } else {
                     indent_left
@@ -6501,6 +6619,16 @@ pub(crate) fn line_text_insets(
     has_list_marker: bool,
     overrun: f64,
 ) -> (f64, f64) {
+    if indent_left < 0.0 || hanging < 0.0 || first_line < 0.0 {
+        let text_indent = if !is_first_line {
+            0.0
+        } else if has_list_marker && hanging > 0.0 {
+            overrun
+        } else {
+            first_line - hanging
+        };
+        return (indent_left, text_indent);
+    }
     let has_hanging = hanging > 0.0;
     let has_first_line = first_line > 0.0;
     let mut pad_left = indent_left;
@@ -7640,6 +7768,17 @@ fn emit_text_segment(
     if !emitted_glyphs {
         let mut text_attrs = attrs.clone();
         text_attrs.modern_effects = fmt.modern_effects.clone().map(Box::new);
+        text_attrs.canvas_clusters = text_canvas_clusters(
+            shape,
+            text,
+            fmt,
+            bidi_level,
+            exact_advance,
+            word_spacing.as_ref().map(num_f64).unwrap_or(0.0),
+            auto_space,
+        )
+        .filter(|clusters| !clusters.is_empty())
+        .map(Box::new);
         prims.push(Primitive::Text(TextRunPrimitive {
             text: text.to_string(),
             x: px(x),
@@ -9585,13 +9724,6 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(block.pm_end);
     attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups).map(Box::new);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs {
-        label: chart_aria_label(&chart),
-    });
-    attrs.aria_label = block.chart.title.clone();
-    attrs.aria_description = block.chart.description.clone();
-    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
-
     let width = if frag.width > 0.0 {
         frag.width
     } else {
@@ -9602,6 +9734,18 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
+    attrs.chart = Some(ChartA11yAttrs {
+        label: chart_aria_label(&chart),
+        frame: Some(Box::new(ContentFrame {
+            x: Some(px(frag.x)),
+            y: Some(px(frag.y)),
+            w: Some(px(width)),
+            h: Some(px(height)),
+        })),
+    });
+    attrs.aria_label = block.chart.title.clone();
+    attrs.aria_description = block.chart.description.clone();
+    attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
 
     plot_chart_into(
         &chart,
@@ -11643,6 +11787,17 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                 }
                 rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
             }
+        }
+        if let Some(ContentFrame {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+        }) = doc_attrs_mut(primitive)
+            .and_then(|attrs| attrs.chart.as_mut())
+            .and_then(|chart| chart.frame.as_deref_mut())
+        {
+            rect(x, y, w, h);
         }
     }
 }
@@ -17320,5 +17475,65 @@ mod tests {
             (child["x"].as_i64(), child["y"].as_i64()),
             (Some(145), Some(125))
         );
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_the_chart_frame_with_its_primitives() {
+        let attrs = DocAttrs {
+            chart: Some(ChartA11yAttrs {
+                label: "Chart".to_owned(),
+                frame: Some(Box::new(ContentFrame {
+                    x: Some(px(10.0)),
+                    y: Some(px(20.0)),
+                    w: Some(px(40.0)),
+                    h: Some(px(30.0)),
+                })),
+            }),
+            ..DocAttrs::default()
+        };
+        let mut prims = vec![
+            Primitive::Rect(RectPrimitive {
+                x: px(10.0),
+                y: px(20.0),
+                w: px(40.0),
+                h: px(30.0),
+                fill: "#000000".to_owned(),
+                attrs: attrs.clone(),
+            }),
+            Primitive::Rect(RectPrimitive {
+                x: px(15.0),
+                y: px(25.0),
+                w: px(10.0),
+                h: px(5.0),
+                fill: "#ffffff".to_owned(),
+                attrs,
+            }),
+        ];
+        rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), 90.0);
+        let Primitive::Rect(rect) = &prims[0] else {
+            unreachable!()
+        };
+        let expected = (
+            Some(rect.x.clone()),
+            Some(rect.y.clone()),
+            Some(rect.w.clone()),
+            Some(rect.h.clone()),
+        );
+        assert_ne!(expected.0, Some(px(10.0)));
+        for primitive in &prims {
+            let Primitive::Rect(RectPrimitive { attrs, .. }) = primitive else {
+                unreachable!()
+            };
+            let frame = attrs.chart.as_ref().unwrap().frame.as_ref().unwrap();
+            assert_eq!(
+                (
+                    frame.x.clone(),
+                    frame.y.clone(),
+                    frame.w.clone(),
+                    frame.h.clone()
+                ),
+                expected
+            );
+        }
     }
 }

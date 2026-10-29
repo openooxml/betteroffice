@@ -53,7 +53,6 @@
 extern crate self as docx_edit;
 
 use std::cell::RefCell;
-#[cfg(feature = "wasm")]
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -128,6 +127,7 @@ mod update_chunks;
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
+pub mod session;
 
 pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
@@ -179,10 +179,10 @@ pub use stories::{
     AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,
 };
 pub use target::{
-    AtomKind, EditTextView, FindTextRequest, FindTextResponse, ParagraphList, ParagraphTarget,
-    ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse, ReadStoriesRequest,
-    ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch, TextPosition, TextRange,
-    TextTarget,
+    AtomKind, DrawingProperties, EditTextView, FindTextRequest, FindTextResponse, ParagraphList,
+    ParagraphTarget, ParagraphText, ReadParagraphsRequest, ReadParagraphsResponse,
+    ReadStoriesRequest, ReadStoriesResponse, SearchScope, StoryText, TextAtom, TextMatch,
+    TextPosition, TextRange, TextTarget,
 };
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
@@ -865,7 +865,6 @@ impl EditingDoc {
         self.metadata.lock().unwrap().clone()
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn rebase_comment_writes(&self, mut written: HashSet<(String, Option<String>)>) {
         let Some(source) = self.source_metadata() else {
             return;
@@ -1159,7 +1158,6 @@ impl EditingDoc {
 
     /// Records that the stories now hold exactly what seeding the retained source and its
     /// installed media writes, as a fresh seed of that package would.
-    #[cfg(feature = "wasm")]
     pub(crate) fn mark_seeded(&self) {
         self.seeded_epoch
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -1171,7 +1169,6 @@ impl EditingDoc {
     }
 
     /// Whether the replica holds nothing yet: no content, local or remote, and no deletions.
-    #[cfg(feature = "wasm")]
     pub(crate) fn holds_nothing(&self) -> bool {
         self.doc.transact().state_vector().is_empty()
     }

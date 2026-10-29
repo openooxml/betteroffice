@@ -59,11 +59,13 @@ test('a failed remote apply preserves the original trap without reentering wasm'
   } finally { session?.destroy(); create.mockRestore(); }
 });
 
-test('d0_last_update_unsubscribe_detaches_native_observer_and_can_resubscribe', async () => {
+test('d0_last_update_unsubscribe_detaches_native_observation_and_can_resubscribe', async () => {
+  const queue: Uint8Array[] = [];
   const raw = {
     set_local_lowering() {},
-    set_update_observer: mock((_listener: (update: Uint8Array, origin: number) => void) => {}),
-    clear_update_observer: mock(() => {}),
+    start_update_event_observation: mock(() => {}),
+    drain_update_event: mock(() => queue.shift() ?? new Uint8Array()),
+    clear_update_event_observation: mock(() => { queue.length = 0; }),
     free() {},
   };
   const create = spyOn(wasm, 'createEditSession')
@@ -73,36 +75,34 @@ test('d0_last_update_unsubscribe_detaches_native_observer_and_can_resubscribe', 
     session = await createResidentEngineSession();
     const first = session.onUpdate(() => {});
     const second = session.onUpdate(() => {});
-    expect(raw.set_update_observer).toHaveBeenCalledTimes(1);
+    expect(raw.start_update_event_observation).toHaveBeenCalledTimes(1);
     first();
-    expect(raw.clear_update_observer).not.toHaveBeenCalled();
+    expect(raw.clear_update_event_observation).not.toHaveBeenCalled();
     second();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(1);
     second();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(1);
     const third = session.onUpdate(() => {});
-    expect(raw.set_update_observer).toHaveBeenCalledTimes(2);
+    expect(raw.start_update_event_observation).toHaveBeenCalledTimes(2);
     session.destroy();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(2);
     third();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(2);
   } finally {
     session?.destroy();
     create.mockRestore();
   }
 }, 15_000);
 
-test('d0_self_unsubscribe_detaches_native_observer_after_callback_returns', async () => {
-  type UpdateObserver = (update: Uint8Array, origin: number) => void;
-  let observer: UpdateObserver | null = null;
-  let borrowed = false;
+test('d0_self_unsubscribe_detaches_native_observation_after_dispatch_returns', async () => {
+  const queue: Uint8Array[] = [];
+  let observing = false;
   const raw = {
     set_local_lowering() {},
-    set_update_observer: mock((listener: UpdateObserver) => { observer = listener; }),
-    clear_update_observer: mock(() => {
-      if (borrowed) throw new Error('recursive use of an object detected');
-      observer = null;
-    }),
+    start_update_event_observation: mock(() => { observing = true; }),
+    drain_update_event: mock(() => queue.shift() ?? new Uint8Array()),
+    clear_update_event_observation: mock(() => { observing = false; queue.length = 0; }),
+    encode_state_vector: mock(() => new Uint8Array([1])),
     free() {},
   };
   const create = spyOn(wasm, 'createEditSession')
@@ -111,29 +111,25 @@ test('d0_self_unsubscribe_detaches_native_observer_after_callback_returns', asyn
   try {
     session = await createResidentEngineSession();
     const release = session.onUpdate(() => { release(); });
-    const dispatch = raw.set_update_observer.mock.calls[0]![0];
-    borrowed = true;
-    try {
-      dispatch(new Uint8Array([1]), 0);
-    } catch {} finally {
-      borrowed = false;
-    }
-    expect(raw.clear_update_observer).not.toHaveBeenCalled();
+    queue.push(new Uint8Array([0, 1]));
+    session.encodeStateVector();
+    expect(raw.clear_update_event_observation).not.toHaveBeenCalled();
     await Promise.resolve();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
-    expect(observer).toBeNull();
-    expect(raw.clear_update_observer.mock.results[0]!.type).toBe('return');
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(1);
+    expect(observing).toBe(false);
+    expect(raw.clear_update_event_observation.mock.results[0]!.type).toBe('return');
 
     const second = session.onUpdate(() => { second(); });
-    raw.set_update_observer.mock.calls[1]![0](new Uint8Array([2]), 1);
+    queue.push(new Uint8Array([1, 2]));
+    session.encodeStateVector();
     const third = session.onUpdate(() => {});
     await Promise.resolve();
-    expect(observer).not.toBeNull();
-    expect(raw.set_update_observer).toHaveBeenCalledTimes(2);
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(1);
+    expect(observing).toBe(true);
+    expect(raw.start_update_event_observation).toHaveBeenCalledTimes(2);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(1);
     third();
-    expect(observer).toBeNull();
-    expect(raw.clear_update_observer).toHaveBeenCalledTimes(2);
+    expect(observing).toBe(false);
+    expect(raw.clear_update_event_observation).toHaveBeenCalledTimes(2);
   } finally {
     session?.destroy();
     create.mockRestore();

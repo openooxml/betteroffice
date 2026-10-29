@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::GeometryPathCommand;
+use crate::fmath;
 
 mod presets;
 
@@ -191,7 +192,7 @@ pub fn preset_geometry_to_path(
                 HEXAGON_VERTICAL_FACTOR,
                 HEXAGON_VERTICAL_FACTOR,
             );
-            let rise = 0.5 * vertical_factor * std::f64::consts::FRAC_PI_3.sin();
+            let rise = 0.5 * vertical_factor * fmath::sin(std::f64::consts::FRAC_PI_3);
             polygon(&[
                 (adjustment, 0.5 - rise),
                 (1.0 - adjustment, 0.5 - rise),
@@ -468,7 +469,7 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
             .map(|i| {
                 let a = -std::f64::consts::PI / 2.0
                     + i as f64 * std::f64::consts::PI * 2.0 / sides as f64;
-                (0.5 + a.cos() * 0.5, 0.5 + a.sin() * 0.5)
+                (0.5 + fmath::cos(a) * 0.5, 0.5 + fmath::sin(a) * 0.5)
             })
             .collect::<Vec<_>>(),
     )
@@ -511,7 +512,10 @@ fn star(preset: StarPreset, adjustment: Option<f64>) -> Vec<GeometryPathCommand>
                 let a = -std::f64::consts::PI / 2.0
                     + i as f64 * std::f64::consts::PI / preset.points as f64;
                 let scale = if i % 2 == 0 { 1.0 } else { inner };
-                (0.5 + a.cos() * rx * scale, ry + a.sin() * ry * scale)
+                (
+                    0.5 + fmath::cos(a) * rx * scale,
+                    ry + fmath::sin(a) * ry * scale,
+                )
             })
             .collect::<Vec<_>>(),
     )
@@ -544,7 +548,7 @@ fn ooxml_angle(units: f64) -> f64 {
 
 /// The distance from an ellipse's centre to its outline along a polar angle.
 fn polar_radius(wr: f64, hr: f64, angle: f64) -> f64 {
-    let extent = (hr * angle.cos()).hypot(wr * angle.sin());
+    let extent = fmath::hypot(hr * fmath::cos(angle), wr * fmath::sin(angle));
     if extent > 0.0 { wr * hr / extent } else { 0.0 }
 }
 
@@ -557,20 +561,20 @@ fn elliptical_parameter(angle: f64, wr: f64, hr: f64, frame: Frame) -> f64 {
     if wr < 0.0 || hr < 0.0 || (wr <= radius_tolerance && hr <= radius_tolerance) {
         return angle;
     }
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = fmath::sin_cos(angle);
     let tolerance = f64::EPSILON * angle.abs().max(1.0);
     if cos.abs() <= tolerance
         || (sin.abs() <= tolerance && (angle.abs() > FRAC_PI_2 || hr <= radius_tolerance))
     {
         return angle;
     }
-    let offset = (wr * sin).atan2(hr * cos) - angle;
+    let offset = fmath::atan2(wr * sin, hr * cos) - angle;
     angle + offset - TAU * (offset / TAU).round()
 }
 
 fn elliptical_point(angle: f64, wr: f64, hr: f64, frame: Frame) -> (f64, f64) {
     let parameter = elliptical_parameter(angle, wr, hr, frame);
-    (wr * parameter.cos(), hr * parameter.sin())
+    (wr * fmath::cos(parameter), hr * fmath::sin(parameter))
 }
 
 /// The shape frame in shortest-side units, so ECMA-376's `ss` is 1 and `w`/`h` are at least 1.
@@ -657,11 +661,11 @@ impl Outline {
     fn arc_to(mut self, wr: f64, hr: f64, start: f64, sweep: f64) -> Self {
         let first = elliptical_parameter(start, wr, hr, self.frame);
         let last = elliptical_parameter(start + sweep, wr, hr, self.frame);
-        let cx = self.cursor.0 - wr * first.cos();
-        let cy = self.cursor.1 - hr * first.sin();
+        let cx = self.cursor.0 - wr * fmath::cos(first);
+        let cy = self.cursor.1 - hr * fmath::sin(first);
         let tolerance = self.frame.radius_tolerance(wr, hr);
         if wr.min(hr) >= 0.0 && wr.min(hr) <= tolerance {
-            let (x, y) = (cx + wr * last.cos(), cy + hr * last.sin());
+            let (x, y) = (cx + wr * fmath::cos(last), cy + hr * fmath::sin(last));
             let (from_x, from_y) = self.cursor;
             return self.cubic_to(from_x, from_y, x, y, x, y);
         }
@@ -676,14 +680,14 @@ impl Outline {
             } else {
                 (((quadrant - SEGMENT_SLACK).ceil() - 1.0) * FRAC_PI_2).max(last)
             };
-            let alpha = 4.0 / 3.0 * ((to - from) / 4.0).tan();
-            let start_point = (cx + wr * from.cos(), cy + hr * from.sin());
-            let end_point = (cx + wr * to.cos(), cy + hr * to.sin());
+            let alpha = 4.0 / 3.0 * fmath::tan((to - from) / 4.0);
+            let start_point = (cx + wr * fmath::cos(from), cy + hr * fmath::sin(from));
+            let end_point = (cx + wr * fmath::cos(to), cy + hr * fmath::sin(to));
             self = self.cubic_to(
-                start_point.0 - alpha * wr * from.sin(),
-                start_point.1 + alpha * hr * from.cos(),
-                end_point.0 + alpha * wr * to.sin(),
-                end_point.1 - alpha * hr * to.cos(),
+                start_point.0 - alpha * wr * fmath::sin(from),
+                start_point.1 + alpha * hr * fmath::cos(from),
+                end_point.0 + alpha * wr * fmath::sin(to),
+                end_point.1 - alpha * hr * fmath::cos(to),
                 end_point.0,
                 end_point.1,
             );
@@ -731,11 +735,11 @@ fn no_smoking(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryP
     let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
     let dr = pin(adjustments.get("adj").copied(), 0.1875, 0.5);
     let (iwd2, ihd2) = (wd2 - dr, hd2 - dr);
-    let diagonal = frame.h.atan2(frame.w);
-    let half_gap = (dr / 2.0).atan2(polar_radius(iwd2, ihd2, diagonal));
+    let diagonal = fmath::atan2(frame.h, frame.w);
+    let half_gap = fmath::atan2(dr / 2.0, polar_radius(iwd2, ihd2, diagonal));
     let (start, sweep) = (diagonal - half_gap, 2.0 * half_gap - PI);
     let reach = polar_radius(iwd2, ihd2, start);
-    let (dx, dy) = (reach * start.cos(), reach * start.sin());
+    let (dx, dy) = (reach * fmath::cos(start), reach * fmath::sin(start));
     Outline::new(frame)
         .move_to(0.0, hd2)
         .arc_to(wd2, hd2, PI, TAU)
@@ -785,9 +789,9 @@ fn math_multiply(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Geomet
     let (w, h) = (frame.w, frame.h);
     let (hc, vc) = (w / 2.0, h / 2.0);
     let th = pin(adjustments.get("adj1").copied(), 0.2352, ARM_FRACTION);
-    let angle = h.atan2(w);
-    let (sa, ca, ta) = (angle.sin(), angle.cos(), angle.tan());
-    let arm = w.hypot(h) * (1.0 - ARM_FRACTION);
+    let angle = fmath::atan2(h, w);
+    let (sa, ca, ta) = (fmath::sin(angle), fmath::cos(angle), fmath::tan(angle));
+    let arm = fmath::hypot(w, h) * (1.0 - ARM_FRACTION);
     let (xm, ym) = (ca * arm / 2.0, sa * arm / 2.0);
     let (dx, dy) = (sa * th / 2.0, ca * th / 2.0);
     let (xa, ya) = (xm - dx, ym + dy);
@@ -956,11 +960,11 @@ fn cloud_callout(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<Geomet
     let dx_pos = w * callout_offset(adjustments.get("adj1").copied(), -0.208_33);
     let dy_pos = h * callout_offset(adjustments.get("adj2").copied(), 0.625);
     let (x_pos, y_pos) = (hc + dx_pos, vc + dy_pos);
-    let pointer = dy_pos.atan2(dx_pos);
-    let edge = (hc * pointer.sin()).atan2(vc * pointer.cos());
-    let g6 = hc + hc * edge.cos() - x_pos;
-    let g7 = vc + vc * edge.sin() - y_pos;
-    let span = g6.hypot(g7);
+    let pointer = fmath::atan2(dy_pos, dx_pos);
+    let edge = fmath::atan2(hc * fmath::sin(pointer), vc * fmath::cos(pointer));
+    let g6 = hc + hc * fmath::cos(edge) - x_pos;
+    let g7 = vc + vc * fmath::sin(edge) - y_pos;
+    let span = fmath::hypot(g6, g7);
     let (ux, uy) = if span > 0.0 {
         (g6 / span, g7 / span)
     } else {
@@ -995,12 +999,12 @@ fn wedge_ellipse_callout(
     let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
     let dx_pos = frame.w * callout_offset(adjustments.get("adj1").copied(), -0.208_33);
     let dy_pos = frame.h * callout_offset(adjustments.get("adj2").copied(), 0.625);
-    let pointer = (dy_pos * frame.w).atan2(dx_pos * frame.h);
+    let pointer = fmath::atan2(dy_pos * frame.w, dx_pos * frame.h);
     let gap = ooxml_angle(TAIL_HALF_WIDTH);
-    let on_edge = |angle: f64| (wd2 * angle.cos(), hd2 * angle.sin());
+    let on_edge = |angle: f64| (wd2 * fmath::cos(angle), hd2 * fmath::sin(angle));
     let (dx1, dy1) = on_edge(pointer + gap);
     let (dx2, dy2) = on_edge(pointer - gap);
-    let (lead, trail) = (dy1.atan2(dx1), dy2.atan2(dx2));
+    let (lead, trail) = (fmath::atan2(dy1, dx1), fmath::atan2(dy2, dx2));
     let sweep = if trail > lead {
         trail - lead
     } else {
@@ -1481,7 +1485,7 @@ mod tests {
     #[test]
     fn star_inner_radius_is_twice_adj_times_the_outer() {
         let v = star_vertices("star8", Some(0.25));
-        let radius = |(x, y): (f64, f64)| (x - 0.5).hypot(y - 0.5);
+        let radius = |(x, y): (f64, f64)| fmath::hypot(x - 0.5, y - 0.5);
         assert_close(radius(v[0]), 0.5);
         assert_close(radius(v[1]), 0.25);
     }
@@ -1493,7 +1497,7 @@ mod tests {
             star_vertices("star5", Some(0.5))
         );
         let v = star_vertices("star8", Some(0.5));
-        assert_close((v[1].0 - 0.5).hypot(v[1].1 - 0.5), 0.5);
+        assert_close(fmath::hypot(v[1].0 - 0.5, v[1].1 - 0.5), 0.5);
         let v = star_vertices("star8", Some(-0.1));
         assert_close(v[1].0, 0.5);
         assert_close(v[1].1, 0.5);
@@ -1614,7 +1618,7 @@ mod tests {
             assert_eq!(elliptical_parameter(axis, wr, hr, frame), axis);
         }
         let tiny = 1.45e-16;
-        let expected = (wr * tiny).atan2(hr);
+        let expected = fmath::atan2(wr * tiny, hr);
         assert!(expected > 1e-4);
         assert!((elliptical_parameter(tiny, wr, hr, frame) - expected).abs() < 1e-12);
     }
@@ -1720,7 +1724,7 @@ mod tests {
         let midpoint_x = ((1.0 - radius) + 3.0 * cp1x + 3.0 * cp2x + x) / 8.0;
         let midpoint_y = (3.0 * cp1y + 3.0 * cp2y + y) / 8.0;
         assert_close(
-            (midpoint_x - (1.0 - radius)).hypot(midpoint_y - radius),
+            fmath::hypot(midpoint_x - (1.0 - radius), midpoint_y - radius),
             radius,
         );
     }
