@@ -627,6 +627,19 @@ function lightVariantOf(
 }
 
 /**
+ * The bundled face for a lighter member of a family we carry, such as
+ * `Calibri Light`, at its own weight whatever weight the run claims; undefined
+ * for any other name.
+ */
+export function resolveLightVariantFace(
+  family: string,
+  _bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  return lightVariantOf(family, italic);
+}
+
+/**
  * Whether a family name reads as a typewriter face. A monospaced document was
  * laid out against a fixed pitch, so a proportional substitute rewraps every
  * line of it; Courier New's clone keeps the pitch even where the shapes differ.

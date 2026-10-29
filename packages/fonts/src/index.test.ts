@@ -10,6 +10,7 @@ import {
   resolveBundledFamilyFace,
   resolveDigitAdvance,
   resolveLastResortFace,
+  resolveLightVariantFace,
   resolveGlyphFallbackFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
@@ -113,6 +114,17 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
+  });
+
+  test('light variants resolve only for families we bundle', () => {
+    expect(resolveLightVariantFace('Calibri Light', false, false)?.file).toBe('Carlito-Regular.ttf');
+    expect(resolveLightVariantFace(' calibri light ', true, true)?.file).toBe('Carlito-Italic.ttf');
+    expect(resolveLightVariantFace('Segoe UI Semilight', false, false)?.family).toBe('Selawik');
+    expect(resolveLightVariantFace('Calibri', false, false)).toBeUndefined();
+    expect(resolveLightVariantFace('BIZ UD明朝 Medium', false, false)).toBeUndefined();
+    expect(resolveLightVariantFace('Unknown Light', false, false)).toBeUndefined();
+    expect(createFontProvider().resolveLightVariant?.('Calibri Light', true, false)).toBeFunction();
+    expect(createFontProvider().resolveLightVariant?.('Wingdings', false, false)).toBeUndefined();
   });
 
   test('Word substitutes Arial for an unknown sans family, PowerPoint Calibri', () => {
