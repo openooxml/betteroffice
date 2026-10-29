@@ -9,6 +9,7 @@ import { createWopiTransport, type WopiTransport } from "./transport";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
 const COMPOSITION_ACTIVE_MESSAGE = "Finish typing before saving or closing the document.";
+const LOCKED_ELSEWHERE_MESSAGE = "This file is being edited elsewhere. You are viewing a live read-only copy.";
 
 /** Records page progress for diagnostics. */
 export function wopiDebug(patch: Record<string, unknown>): void {
@@ -92,12 +93,13 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [conflictName, setConflictName] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(
-    recoveryName ? `Your edits were saved as ${recoveryName}.` : config.viewOnlyReason === "lockedElsewhere" ? "This file is being edited elsewhere. You are viewing a live read-only copy." : null,
+    recoveryName ? `Your edits were saved as ${recoveryName}.` : config.viewOnlyReason === "lockedElsewhere" ? LOCKED_ELSEWHERE_MESSAGE : null,
   );
   const [closed, setClosed] = useState(false);
   const [readOnly, setReadOnly] = useState(!loaded.join.canWrite);
   const writable = useRef(loaded.join.canWrite);
   const [localRecovery, setLocalRecovery] = useState<{ bytes: Uint8Array; name: string } | null>(null);
+  const closeRecovery = useRef<"pending" | "downloaded" | null>(null);
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const editorApi = useRef<EditorApi | null>(null);
   const transportRef = useRef<WopiTransport | null>(null);
@@ -151,18 +153,21 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     finishClose(config, bridge, window, () => setClosed(true));
   }, [bridge, config]);
 
-  const offerLocalRecovery = useCallback((bytes: Uint8Array) => {
+  const offerLocalRecovery = useCallback((bytes: Uint8Array, beforeClose = false) => {
     const suffix = ` (recovered ${new Date().toISOString().replace(/[:.]/g, "-")})`;
     const dot = config.fileName.lastIndexOf(".");
     const name = dot > 0 ? `${config.fileName.slice(0, dot)}${suffix}${config.fileName.slice(dot)}` : `${config.fileName}${suffix}.${config.format}`;
     setLocalRecovery({ bytes, name });
-    setBanner("This session has ended. Download your recovered document before reloading the page to continue editing.");
+    setBanner(beforeClose
+      ? "Download your recovered document to preserve your unsent edits and finish closing."
+      : "This session has ended. Download your recovered document before reloading the page to continue editing.");
   }, [config.fileName, config.format]);
 
   const recover = useCallback((kind: "baseline" | "local") => {
     if (recoveryController.current) return;
     const controller = new AbortController();
     recoveryController.current = controller;
+    if (compositionActive.current && editorContainer.current) editorContainer.current.inert = false;
     let serialized: Uint8Array | null = null;
     setRecoveryFailed(false);
     setBanner(kind === "baseline" ? "Preserving local edits before reopening the document..." : "This session has ended. Checking for local edits...");
@@ -219,18 +224,6 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     recover("baseline");
   }, [lifetime, recover]);
 
-  const downloadRecovery = useCallback(() => {
-    if (!localRecovery) return;
-    const url = URL.createObjectURL(new Blob([localRecovery.bytes.slice().buffer], { type: "application/octet-stream" }));
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = localRecovery.name;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [localRecovery]);
-
   const requestSave = useCallback(async (options: SaveOptions = {}): Promise<void> => {
     if (sessionEnded.current || finalSaved.current) throw new Error("sessionEnded");
     if (rejoining.current) throw new Error("rejoinRequired: Recovery must finish before saving or closing.");
@@ -283,6 +276,21 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       finalSaved: finalSaved.current,
       onFinalSaved: () => { finalSaved.current = true; },
       canWrite: () => writable.current,
+      preserveLocalWork: async () => {
+        if (closeRecovery.current) return closeRecovery.current === "downloaded";
+        if (!editorApi.current?.hasPendingUpdates() && !transportRef.current?.hasUnacknowledgedUpdates()) return true;
+        const result = await recoverDocument(editorApi.current, {
+          signal: lifetime.signal,
+          hasActiveComposition: () => compositionActive.current,
+          hasUnacknowledgedUpdates: () => transportRef.current?.hasUnacknowledgedUpdates() ?? false,
+        });
+        lifetime.signal.throwIfAborted();
+        if (!result) return true;
+        closeRecovery.current = "pending";
+        offerLocalRecovery(result.bytes, true);
+        setSaveState("idle");
+        return false;
+      },
       hasActiveComposition: () => compositionActive.current,
       hasPendingResync: () => writable.current && (transportRef.current?.hasPendingResync() ?? true),
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
@@ -304,7 +312,23 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     }, completeClose).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
     return pending;
-  }, [api, completeClose, handleClosed, lifetime, endSession]);
+  }, [api, completeClose, handleClosed, lifetime, endSession, offerLocalRecovery]);
+
+  const downloadRecovery = useCallback(() => {
+    if (!localRecovery) return;
+    const url = URL.createObjectURL(new Blob([localRecovery.bytes.slice().buffer], { type: "application/octet-stream" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = localRecovery.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    if (closeRecovery.current === "pending") {
+      closeRecovery.current = "downloaded";
+      void close().catch(() => {});
+    }
+  }, [close, localRecovery]);
 
   useEffect(() => {
     mounted.current = true;
@@ -353,10 +377,16 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       } else if (event.type === "viewOnly") {
         setWritable(false);
         if (event.reason === "lockedElsewhere") {
-          setBanner("This file is being edited elsewhere. You are viewing a live read-only copy.");
+          setBanner(LOCKED_ELSEWHERE_MESSAGE);
         }
+      } else if (event.type === "snapshot") {
+        setWritable(event.canWrite);
+        setBanner((message) => event.viewOnlyReason === "lockedElsewhere"
+          ? LOCKED_ELSEWHERE_MESSAGE
+          : message === LOCKED_ELSEWHERE_MESSAGE ? null : message);
       } else if (event.type === "writable") {
         setWritable(event.canWrite);
+        setBanner((message) => message === LOCKED_ELSEWHERE_MESSAGE ? null : message);
       }
     }, { baselineGeneration: loaded.join.baselineGeneration }).catch(() => undefined);
     return () => {

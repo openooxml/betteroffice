@@ -199,7 +199,7 @@ test("Close emits a terminal event before a delayed Unlock completes", async () 
   const s = await setup(async () => { entered(); await gate; });
   const response = await fetch(`${s.base}/api/session/events`, { headers: { ...s.headers, "X-WOPI-Baseline-Generation": String(s.session.baselineGeneration) } });
   const reader = response.body!.getReader();
-  expect(new TextDecoder().decode((await reader.read()).value)).toContain(": connected");
+  expect(new TextDecoder().decode((await reader.read()).value)).toContain("event: snapshot");
   const closing = fetch(`${s.base}/api/session/close`, { method: "POST", headers: s.headers });
   try {
     await unlocking;

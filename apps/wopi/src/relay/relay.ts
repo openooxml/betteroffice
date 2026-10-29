@@ -120,6 +120,18 @@ export class CollabRelay {
       resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
       resolved.session.on("userInvalidated", ({ userId }) => this.closeUser(userId, 4401, "unauthorized"));
       resolved.session.on("rejoinRequired", () => this.#closeRoom(resolved.session, 4409, "rejoin from source"));
+      resolved.session.on("writable", () => {
+        const replica = resolved.session.replica;
+        if (!replica || resolved.session.viewOnly) return;
+        for (const state of [...(this.#rooms.get(resolved.session.fileKey) ?? [])]) {
+          if (!state.user.canWrite || !this.#authorize(state)) continue;
+          try {
+            this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
+          } catch {
+            this.#close(state, 1011, "sync failed");
+          }
+        }
+      });
       resolved.session.on("replicaUpdate", ({ update }) => {
         this.#broadcastAll(resolved.session, encodeUpdateFrame(update));
       });

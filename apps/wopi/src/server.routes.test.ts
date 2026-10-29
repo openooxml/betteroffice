@@ -57,7 +57,7 @@ test("baseline replacement between join and attachment rejects stale sockets and
       ...auth(viewer), "X-WOPI-Baseline-Generation": String(latest.baselineGeneration),
     } }));
     const events = matching.body!.getReader();
-    try { expect(new TextDecoder().decode((await events.read()).value)).toBe(": connected\n\n"); }
+    try { expect(new TextDecoder().decode((await events.read()).value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n'); }
     finally { await events.cancel(); }
   } finally { external.destroy(); }
 });
@@ -346,7 +346,8 @@ describe("session API", () => {
       } finally { clearTimeout(timeout); }
     };
     try {
-      for (const reader of readers) expect(await nextEvent(reader)).toBe(": connected\n\n");
+      expect(await nextEvent(readers[0]!)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+      expect(await nextEvent(readers[1]!)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
       expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
       expect(await (await request("join", viewer.user.id)).json()).toMatchObject({ canWrite: false });
       const file = h.host.files.get("file1")!;
@@ -374,6 +375,68 @@ describe("session API", () => {
       expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
     } finally {
       await Promise.all(readers.map((reader) => reader.cancel()));
+      session.abandon();
+    }
+  });
+
+  test.each(["first attachment", "reconnection"])("event streams snapshot permission changes missed before %s", async (attachment) => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "writer");
+    addToken(h, TOKEN_B, "viewer", { canWrite: false });
+    const writer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "edit" });
+    const viewer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "view" });
+    const session = writer.session;
+    const generation = session.baselineGeneration;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const request = (path: string, userId: string) => handler(new Request(`https://office.example/api/session/${path}`, {
+      headers: { Authorization: `Bearer ${userId}`, [BASELINE_GENERATION_HEADER]: String(generation) },
+    }));
+    const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+    const snapshot = async (userId: string) => {
+      const reader = (await request("events", userId)).body!.getReader();
+      readers.push(reader);
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      return new TextDecoder().decode(first.value);
+    };
+    try {
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+      if (attachment === "reconnection") {
+        expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+        await readers.pop()!.cancel();
+      }
+      const file = h.host.files.get("file1")!;
+      file.lock = "other-app-lock";
+      file.lockExpiresAt = h.clock.t + 30 * 60000;
+      for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":"lockLost"}\n\n');
+      expect(await snapshot(viewer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":"lockLost"}\n\n');
+      for (const reader of readers.splice(0)) await reader.cancel();
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(session.baselineGeneration).toBe(generation);
+      expect(await snapshot(writer.user.id)).toBe('event: snapshot\ndata: {"canWrite":true,"viewOnlyReason":null}\n\n');
+      expect(await snapshot(viewer.user.id)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
+      const client = await openTestClient(writer.joinPayload, session.sourceBytes!, 990451);
+      try {
+        client.edit("snapshot-live-event ", 0);
+        expect(session.applyUpdate(writer.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(true);
+        expect((await session.requestSave(writer.user.id)).saved).toBe(true);
+      } finally { client.destroy(); }
+      expect(new TextDecoder().decode((await readers.at(-2)!.read()).value)).toContain("event: saved\n");
+    } finally {
+      for (const reader of readers) await reader.cancel();
       session.abandon();
     }
   });
@@ -631,7 +694,7 @@ describe("session API", () => {
         expect(response.headers.get("content-type")).toContain("text/event-stream");
         const reader = response.body!.getReader();
         readers.push(reader);
-        expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
       }
       external.edit("sse-replacement-baseline ", 0);
       const file = h.host.files.get("file1")!;
@@ -662,7 +725,7 @@ describe("session API", () => {
       readers.push(freshReader);
       const connected = await freshReader.read();
       expect(connected.done).toBe(false);
-      expect(new TextDecoder().decode(connected.value)).toBe(": connected\n\n");
+      expect(new TextDecoder().decode(connected.value)).toBe('event: snapshot\ndata: {"canWrite":false,"viewOnlyReason":null}\n\n');
       writerClient = await openTestClient(writer.joinPayload, session.sourceBytes!, 990351);
       expect(writerClient.contains("sse-replacement-baseline")).toBe(true);
       writerClient.edit("sse-replacement-live ", 1);

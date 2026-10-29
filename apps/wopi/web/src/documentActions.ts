@@ -36,6 +36,7 @@ interface CloseDocumentOptions extends SaveDocumentOptions {
   whenClosed?: Promise<void>;
   finalSaved?: boolean;
   onFinalSaved?(): void;
+  preserveLocalWork?(): Promise<boolean>;
   setInputBlocked(blocked: boolean): void;
   onFailure?(error: unknown): void;
 }
@@ -187,6 +188,10 @@ export async function closeDocument(
     if (!saved) {
       if (options.canWrite?.() !== false) {
         await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+      } else if (options.preserveLocalWork) {
+        if (!await options.preserveLocalWork()) return;
+      } else if (editor?.hasPendingUpdates()) {
+        throw new Error("localRecoveryRequired");
       }
       saved = true;
       options.onFinalSaved?.();

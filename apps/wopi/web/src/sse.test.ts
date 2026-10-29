@@ -12,6 +12,16 @@ describe("SseParser", () => {
 });
 
 describe("toSessionEvent", () => {
+  test("maps effective writability snapshots and rejects snapshots without a boolean permission", () => {
+    expect(toSessionEvent({ event: "snapshot", data: '{"canWrite":false,"viewOnlyReason":"lockLost"}' })).toEqual({
+      type: "snapshot", canWrite: false, viewOnlyReason: "lockLost",
+    });
+    expect(toSessionEvent({ event: "snapshot", data: '{"canWrite":true,"viewOnlyReason":null}' })).toEqual({
+      type: "snapshot", canWrite: true, viewOnlyReason: null,
+    });
+    expect(toSessionEvent({ event: "snapshot", data: '{"viewOnlyReason":"lockLost"}' })).toBeNull();
+  });
+
   test("recognizes a replacement baseline event", () => {
     expect(toSessionEvent({ event: "rejoinRequired", data: '{"reason":"sourceChanged"}' })).toEqual({
       type: "rejoinRequired", reason: "sourceChanged",

@@ -34,6 +34,9 @@ import type {
 import { createYrsSession } from "../../../../packages/docx/src/yrs";
 import { openWorkbook } from "../../../../packages/xlsx/src/wasm/loader";
 import { openPresentation } from "../../../../packages/pptx/src/wasm/loader";
+import { createWopiTransport } from "../../web/src/transport";
+import { saveDocument } from "../../web/src/documentActions";
+import { SessionApi } from "../../web/src/api";
 
 beforeAll(async () => {
   await initEngines();
@@ -1015,6 +1018,64 @@ async function providerClient(
 }
 
 describe("real CollaborationProvider clients", () => {
+  test("lock recovery resyncs a socket attached while read-only so Save includes its pending state", async () => {
+    const s = setup("xlsx");
+    const handle = await joinPage(s, TOKENS[0]!);
+    const session = s.h.registry.list()[0]!;
+    const generation = session.baselineGeneration;
+    const file = s.h.host.files.get("file1")!;
+    file.lock = "other-app-lock";
+    file.lockExpiresAt = s.h.clock.t + 30 * 60000;
+    for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+      session.heartbeat(handle);
+      await s.h.clock.advance(30000);
+    }
+    expect(session.viewOnlyReason).toBe("lockLost");
+    const workbook = openWorkbook(session.sourceBytes!.slice(), { collaborative: true, clientId: 980201 });
+    workbook.applyUpdate(session.replica!.joinPayload().initialUpdate.slice());
+    workbook.editCell(0, 25, 0, "pending during lock loss");
+    const transport = createWopiTransport({ handle, baselineGeneration: generation, origin: s.base });
+    transport.noteLocalUpdate();
+    const provider = new XlsxProvider(workbook as never, transport);
+    const requests: Uint8Array[] = [];
+    const unsubscribe = transport.onEvent((event) => {
+      if (event.type === "message" && decodeMessages(event.data).some((message) => message.type === "sync-step-1")) requests.push(event.data);
+    });
+    try {
+      provider.connect();
+      await waitFor(() => provider.synced, "read-only socket receives server state");
+      expect(transport.hasPendingResync()).toBe(true);
+      expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+      expect(requests).toHaveLength(0);
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(handle);
+        await s.h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(session.baselineGeneration).toBe(generation);
+      const api = new SessionApi(handle, (input, init) => fetch(`${s.base}${input}`, init));
+      await saveDocument({ flushPendingInput: async () => {}, hasPendingUpdates: () => provider.pendingBytes > 0 }, api, {
+        canWrite: () => !session.viewOnly,
+        hasPendingResync: () => transport.hasPendingResync(),
+        captureBarrier: () => transport.captureSaveBarrier(),
+        inputTimeoutMs: 500,
+      });
+      expect(requests).toHaveLength(1);
+      expect(transport.hasPendingResync()).toBe(false);
+      await waitFor(() => !transport.hasUnacknowledgedUpdates(), "pending state acknowledged");
+      const saved = await openFreshClient("xlsx", file.bytes, 980301);
+      try { expect(saved.contains("pending during lock loss")).toBe(true); }
+      finally { saved.destroy(); }
+    } finally {
+      unsubscribe();
+      provider.destroy();
+      workbook.dispose();
+      session.abandon();
+    }
+  });
+
   for (const format of ["docx", "xlsx", "pptx"] as Format[]) {
     test(`${format} provider converges with a frame client through the relay`, async () => {
       const s = setup(format);

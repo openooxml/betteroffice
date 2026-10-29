@@ -41,6 +41,7 @@ export class SseParser {
 
 /** Session events understood by the page. */
 export type SessionEvent =
+  | { type: "snapshot"; canWrite: boolean; viewOnlyReason: string | null }
   | { type: "saved"; itemVersion: string | null }
   | { type: "saveFailed"; kind: string }
   | { type: "conflict"; copyName: string }
@@ -59,6 +60,10 @@ export function toSessionEvent(raw: SseEvent): SessionEvent | null {
     return null;
   }
   switch (raw.event) {
+    case "snapshot":
+      return typeof data.canWrite === "boolean"
+        ? { type: "snapshot", canWrite: data.canWrite, viewOnlyReason: typeof data.viewOnlyReason === "string" ? data.viewOnlyReason : null }
+        : null;
     case "saved":
       return { type: "saved", itemVersion: typeof data.itemVersion === "string" ? data.itemVersion : null };
     case "saveFailed":

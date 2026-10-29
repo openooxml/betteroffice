@@ -519,9 +519,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         end();
         return;
       }
-      try {
-        ctrl.enqueue(encoder.encode(": connected\n\n"));
-      } catch {}
+      send("snapshot", { canWrite: session.getUser(userId)?.canWrite === true && !session.viewOnly, viewOnlyReason: session.viewOnlyReason });
       heartbeat = setInterval(() => {
         if (cleaned || !authorized()) return;
         try {
