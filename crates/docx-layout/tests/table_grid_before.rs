@@ -32,7 +32,7 @@ fn shared_grid_table(leading_skip: bool) -> Value {
     second["id"] = json!("second");
     second["blocks"] = json!([{
         "kind": "paragraph", "id": "shared-content",
-        "runs": [{"kind": "text", "text": "Visible"}]
+        "runs": [{"kind": "text", "text": "Visible", "fontSize": 10}]
     }]);
     let mut partial = table["rows"][0].clone();
     partial["id"] = json!("partial");
