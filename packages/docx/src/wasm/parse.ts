@@ -9,7 +9,7 @@ import wasmInit, { initSync } from './generated/parse/docx_parse.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 import { residentEngine } from './residentEngine';
 
-const state = createWasmModuleState({
+export const parseWasmState = createWasmModuleState({
   label: 'docx-parse',
   preloadName: 'preloadParseWasm',
   assetUrl: () => new URL('./generated/parse/docx_parse_bg.wasm', import.meta.url),
@@ -32,11 +32,9 @@ type ParseExports = Pick<
 function parserGlue(): ParseExports {
   const engine = residentEngine();
   if (engine?.state.status() === 'ready') return engine.glue as ParseExports;
-  state.ensure();
+  parseWasmState.ensure();
   return parseModule;
 }
-
-let parserPreloaded = false;
 
 /** Load + instantiate the parser wasm (browser path). Idempotent. */
 export function preloadParseWasm(input?: WasmAsyncInput): Promise<void> {
@@ -44,7 +42,7 @@ export function preloadParseWasm(input?: WasmAsyncInput): Promise<void> {
   if (input === undefined && engine && engine.state.status() !== 'idle') {
     return engine.state.preload();
   }
-  return state.preload(input).then(() => { parserPreloaded = true; });
+  return parseWasmState.preload(input);
 }
 
 export const PARAGRAPH_PATCH_WRITER_VERSION = 1;
@@ -56,7 +54,7 @@ export function paragraphPatchWriterVersionWire(): number | null | undefined {
     paragraphPatchWriterVersion?: () => number;
   }).paragraphPatchWriterVersion;
   if (typeof capability !== 'function') return undefined;
-  if (!engineReady && !parserPreloaded) return null;
+  if (!engineReady && parseWasmState.status() !== 'ready') return null;
   return capability();
 }
 

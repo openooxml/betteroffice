@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { editWasmModule, editWasmState } from './edit';
 import { wasmModuleMemories } from './loadWasmAsset';
+import { closeDisplayList, hitTestRegionsByHandle, openDisplayList, preloadLayoutWasm } from './layout';
 import { preloadOpcWasm, rezipContainer, unzipContainer } from './opc';
 import {
   PARAGRAPH_PATCH_WRITER_VERSION,
@@ -17,7 +18,7 @@ const lightLabels = () => wasmModuleMemories().filter(
   ({ label }) => label === 'ooxml-opc' || label === 'docx-parse'
 );
 
-test('OPC and parser preloads reuse the resident engine compile and route calls to it', async () => {
+test('layout, OPC and parser calls reuse the initialized resident engine', async () => {
   expect(editWasmState.status()).toBe('idle');
   const compiling = editWasmModule();
   expect(editWasmState.status()).toBe('loading');
@@ -27,6 +28,13 @@ test('OPC and parser preloads reuse the resident engine compile and route calls 
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   expect(editWasmState.status()).toBe('ready');
   expect(editWasmState.sharedModule()).toBe(compiling);
+  await preloadLayoutWasm();
+  const handle = openDisplayList('{"pages":[]}');
+  try {
+    expect(hitTestRegionsByHandle(handle, 0, 0, 0)).toBe('null');
+  } finally {
+    closeDisplayList(handle);
+  }
 
   const bytes = rezipContainer(routingDocxEntries);
   expect(unzipContainer(bytes)).toEqual(routingDocxEntries);
