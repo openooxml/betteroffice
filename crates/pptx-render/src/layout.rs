@@ -12200,13 +12200,15 @@ mod tests {
 
     #[test]
     fn named_japanese_clusters_use_composed_kana_advances() {
-        const NOTO_SANS_JP: &[u8] =
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        let font = betteroffice_fonts::decode(
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+            None,
+            64 << 20,
+        )
+        .unwrap();
         for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
             let mut renderer = SlideRenderer::new();
-            renderer
-                .register_font(family, false, false, NOTO_SANS_JP)
-                .unwrap();
+            renderer.register_font(family, false, false, &font).unwrap();
             let face = renderer
                 .resolve_face(family, false, false, &mut SubstitutionLog::default())
                 .unwrap();

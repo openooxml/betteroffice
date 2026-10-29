@@ -218,17 +218,16 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  if (isLatinFont(face.file) || INTL_FILES.has(face.file)) {
-    return loadPackedFontBytes(
+  const bytes = isLatinFont(face.file) || INTL_FILES.has(face.file) || CJK_FILES.has(face.file)
+    ? loadPackedFontBytes(
       face,
       (dependency) => assetUrl(dependency, baseUrl),
       undefined,
       baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl),
       undefined,
       runtime,
-    );
-  }
-  const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+    )
+    : assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
   return bytes.catch((error) => {
     if (!(error instanceof MissingCjkAddonError)) throw error;

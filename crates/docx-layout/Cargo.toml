@@ -40,6 +40,7 @@ zmij = "1"
 js-sys = "0.3"
 
 [dev-dependencies]
+betteroffice-fonts.workspace = true
 # the glyph-run emission tests build an explicit FontStore (register the
 # Liberation fixture) and drive build_display_list_json_with_fonts directly
 ooxml-text.workspace = true
