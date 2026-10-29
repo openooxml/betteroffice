@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import { openDocx, type DocumentToolError, type DocxAgentDocument } from '../src';
+import { openDocx, type DocumentToolError, type DocxAgentDocument, type DocxAgentEdit } from '../src';
 import * as commentOutput from '../src/comment-output';
 import { docxEditSchema } from '../src/docx-schema';
 import { COMMENT_COMPANIONS, EXISTING_COMMENT, commentFixture, editFixture } from './fixture';
@@ -32,8 +32,8 @@ function withoutComments(xml: string, ids: readonly string[]) {
   return xml;
 }
 
-async function fixture(story = 'body') {
-  const zip = await JSZip.loadAsync(await commentFixture());
+async function fixture(story = 'body', companions?: readonly string[]) {
+  const zip = await JSZip.loadAsync(await commentFixture({ companions }));
   const comments = await zip.file('word/comments.xml')!.async('string');
   zip.file('word/comments.xml', comments.replace('</w:comments>', [
     EXISTING_COMMENT.replace('w:id="0"', 'w:id="1"').replace('1A2B3C4D', '11223344').replace('Keep this note.', 'Reply note.'),
@@ -41,6 +41,7 @@ async function fixture(story = 'body') {
     '</w:comments>',
   ].join('')));
   for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
+    if (!zip.file(`word/${name}.xml`)) continue;
     const xml = await zip.file(`word/${name}.xml`)!.async('string');
     const reply = entry.replace('1A2B3C4D', '11223344').replace('2ECC71AA', 'AABBCCDD')
       .replace('w15:done="0"', 'w15:done="0" w15:paraIdParent="1A2B3C4D"');
@@ -282,24 +283,109 @@ test('delete_comment accepts a legacy comment without paragraph ids', async () =
   expect((await open(await doc.export())).list({ story: 'comments' }).total).toBe(0);
 });
 
-test('delete_comment removes replies created earlier in the session', async () => {
-  const doc = await open(await commentFixture());
-  const reply = await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up' }] });
-  expect((await doc.edit({ version: reply.version, edits: [{ op: 'delete_comment', comment: '0' }] })).results[0].deleted)
-    .toEqual(['0', reply.results[0].comment!]);
-  expect((await open(await doc.export())).list({ story: 'comments' }).total).toBe(0);
+for (const companions of [[], COMMENT_COMPANIONS.map(([name]) => name)]) {
+  test(`delete_comment removes replies created in an earlier batch with ${companions.length} source companions`, async () => {
+    const doc = await open(await commentFixture({ companions }));
+    const reply = await doc.edit({ version: doc.list().version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up' }] });
+    expect((await doc.edit({ version: reply.version, edits: [{ op: 'delete_comment', comment: '0' }] })).results[0].deleted)
+      .toEqual(['0', reply.results[0].comment!]);
+    expect((await open(await doc.export())).list({ story: 'comments' }).total).toBe(0);
+  });
+
+  for (const op of ['add_comment', 'reply_comment', 'resolve_comment'] as const) {
+    for (const deleteFirst of [false, true]) {
+      test(`delete_comment refuses ${op} ${deleteFirst ? 'after' : 'before'} deletion with ${companions.length} source companions`, async () => {
+        const doc = await open(await fixture('body', companions));
+        const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+        const other: DocxAgentEdit = op === 'add_comment'
+          ? { op, match: match.match, author: 'Editor', text: 'Correct anchor' }
+          : op === 'reply_comment' ? { op, comment: '0', author: 'Editor', text: 'Follow up' }
+            : { op, comment: '0', done: true };
+        const deletion: DocxAgentEdit = { op: 'delete_comment', comment: '0' };
+        const version = doc.list().version;
+        const state = doc.session.encodeState();
+        const comments = doc.list({ story: 'comments' });
+        const before = await JSZip.loadAsync(await doc.export());
+        const error = await refusal(doc.edit({ version, edits: [
+          { op: 'format_text', match: match.match, italic: true },
+          ...(deleteFirst ? [deletion, other] : [other, deletion]),
+        ] }));
+        expect(error.code).toBe('INVALID_ARGUMENT');
+        expect(error.message).toContain('delete_comment cannot be combined with other comment operations');
+        expect(error.message).toContain('run it in its own docx_edit call');
+        expect(doc.session.encodeState()).toEqual(state);
+        expect(doc.list().version).toBe(version);
+        expect(doc.list({ story: 'comments' })).toEqual(comments);
+        const saved = await JSZip.loadAsync(await doc.export());
+        const paths = Object.keys(before.files).filter(path => !before.files[path].dir).sort();
+        expect(Object.keys(saved.files).filter(path => !saved.files[path].dir).sort()).toEqual(paths);
+        for (const path of paths) {
+          expect(await saved.file(path)!.async('uint8array')).toEqual(await before.file(path)!.async('uint8array'));
+        }
+      });
+    }
+  }
+
+  test(`delete_comment then add_comment in consecutive batches survives reopening with ${companions.length} source companions`, async () => {
+    const doc = await open(await fixture('body', companions));
+    const deleted = await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: '0' }] });
+    expect(deleted.results[0]).toMatchObject({ deleted: companions.length ? ['0', '1'] : ['0'] });
+    const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+    await doc.edit({ version: deleted.version, edits: [
+      { op: 'add_comment', match: match.match, author: 'Editor', text: 'Correct anchor' },
+    ] });
+    const comments = (await open(await doc.export())).list({ story: 'comments' }).items;
+    expect(comments.map(comment => comment.text).sort()).toEqual(companions.length
+      ? ['Correct anchor', 'Other note.'] : ['Correct anchor', 'Other note.', 'Reply note.']);
+  });
+}
+
+test('delete_comment refuses mixed comment batches before planning any edit', async () => {
+  const doc = await open(await fixture());
+  const version = doc.list().version;
+  const state = doc.session.encodeState();
+  const error = await refusal(doc.edit({ version, edits: [
+    { op: 'format_text', match: 'missing', italic: true },
+    { op: 'resolve_comment', comment: 'missing' },
+    { op: 'delete_comment', comment: 'missing' },
+  ] }));
+  expect(error.code).toBe('INVALID_ARGUMENT');
+  expect(error.message).toContain('run it in its own docx_edit call');
+  expect(doc.session.encodeState()).toEqual(state);
+  expect(doc.list().version).toBe(version);
 });
 
-test('delete_comment followed by add_comment is atomic and survives reopening', async () => {
+for (const deleteFirst of [false, true]) {
+  test(`delete_comment refuses raw replace_comment_text input ${deleteFirst ? 'after' : 'before'} deletion`, async () => {
+    const doc = await open(await fixture());
+    const version = doc.list().version;
+    const state = doc.session.encodeState();
+    const edits: DocxAgentEdit[] = [
+      { op: 'delete_comment', comment: '0' },
+      { op: 'replace_comment_text', comment: '0', text: 'Changed note.' } as unknown as DocxAgentEdit,
+    ];
+    const error = await refusal(doc.edit({ version, edits: deleteFirst ? edits : edits.reverse() }));
+    expect(error.code).toBe('INVALID_ARGUMENT');
+    expect(error.message).toContain('run it in its own docx_edit call');
+    expect(doc.session.encodeState()).toEqual(state);
+    expect(doc.list().version).toBe(version);
+  });
+}
+
+test('several delete_comment operations can share a batch with a text format edit', async () => {
   const doc = await open(await fixture());
   const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
   const receipt = await doc.edit({ version: doc.list().version, edits: [
+    { op: 'delete_comment', comment: '1' },
+    { op: 'format_text', match: match.match, italic: true },
     { op: 'delete_comment', comment: '0' },
-    { op: 'add_comment', match: match.match, author: 'Editor', text: 'Correct anchor' },
   ] });
-  expect(receipt.results[0]).toMatchObject({ deleted: ['0', '1'] });
-  const comments = (await open(await doc.export())).list({ story: 'comments' }).items;
-  expect(comments.map(comment => comment.text).sort()).toEqual(['Correct anchor', 'Other note.']);
+  expect(receipt.results[0]).toMatchObject({ comment: '1', deleted: ['1'] });
+  expect(receipt.results[2]).toMatchObject({ comment: '0', deleted: ['0'] });
+  const reopened = await open(await doc.export());
+  const paragraph = reopened.list().items.find(paragraph => paragraph.text.startsWith('Revenue grew'))!;
+  expect(reopened.read(paragraph.ref).runs.some(run => run.formatting.italic)).toBe(true);
+  expect(reopened.list({ story: 'comments' }).items.map(comment => comment.id)).toEqual(['2']);
 });
 
 test('delete_comment preserves other edits in the same batch', async () => {

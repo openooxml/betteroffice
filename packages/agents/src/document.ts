@@ -312,6 +312,10 @@ export class DocxAgentDocument {
   /** Applies 1–32 direct edits on a fork, then commits them as one undo step; any failure applies none. */
   async edit(input: DocxAgentBatch) {
     this.index();
+    if (Array.isArray(input?.edits) && input.edits.some(edit => edit?.op === 'delete_comment')
+      && input.edits.some(edit => ['add_comment', 'reply_comment', 'resolve_comment', 'replace_comment_text'].includes(edit?.op))) {
+      throw new DocumentToolError('INVALID_ARGUMENT', 'delete_comment cannot be combined with other comment operations in one batch; run it in its own docx_edit call.');
+    }
     const parsed = docxBatchSchema.safeParse(input);
     if (!parsed.success) throw new DocumentToolError('INVALID_ARGUMENT', 'Use the docx_edit schema: version and 1–32 edits.', { issues: parsed.error.issues.map(issue => ({ path: issue.path, message: issue.message })) });
     const { version, edits } = parsed.data;
@@ -638,7 +642,8 @@ export class DocxAgentDocument {
         if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment')) {
           failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'delete_comment');
           try {
-            const source = await this.checkCommentPart(!edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment'));
+            const deletingComments = edits.some(edit => edit.op === 'delete_comment');
+            const source = await this.checkCommentPart(deletingComments);
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
             const seeded = new Set((draft.materializeDocx()?.package.document.comments ?? []).map(comment => String(comment.id)));
             const comments = draft.listComments();
@@ -651,7 +656,7 @@ export class DocxAgentDocument {
             let identities = new Map(this.commentSaveIdentities);
             let baseline: Uint8Array;
             let previous: typeof comments | undefined;
-            if (edits.some(edit => edit.op === 'delete_comment')) {
+            if (deletingComments) {
               const kept = await this.fork(draft.clientId);
               try {
                 for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
