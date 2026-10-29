@@ -12,5 +12,12 @@ export interface DefaultFontPayload {
 export const defaultFontInstaller = 'pptxDefaultFontInstaller';
 
 export type DefaultFontInstallation = {
-  [defaultFontInstaller]?: (faces: readonly DefaultFontFace[]) => Promise<void>;
+  [defaultFontInstaller]?: (
+    faces: readonly DefaultFontFace[], allowed?: (family: string) => boolean,
+  ) => Promise<readonly DefaultFontFace[] | void>;
 };
+
+export interface DefaultFontInstallRequest {
+  id: number;
+  faces: DefaultFontFace[];
+}

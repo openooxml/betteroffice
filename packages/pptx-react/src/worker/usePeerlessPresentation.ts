@@ -153,6 +153,7 @@ export function usePeerlessPresentation(
     const vanished = new Set<string>();
     const pendingMedia = new Map<string, ArrayBuffer>();
     const installedFonts: FontFace[] = [];
+    const suppliedFamilies = new Set(fonts.map((font) => font.family.trim().toLowerCase()));
     const disposers: (() => void)[] = [];
     const failureListeners = new Set<() => void>();
     const visualListeners = new Set<() => void>();
@@ -376,8 +377,9 @@ export function usePeerlessPresentation(
         fonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
-      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0]) =>
-        installDefaultFonts(faces, installedFonts, current, warnFonts) }));
+      }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
+        installDefaultFonts(faces, installedFonts, current, warnFonts,
+          (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
       void owner.ready.then((client) => {
@@ -561,6 +563,7 @@ export function usePeerlessPresentation(
           },
           async installFont(face) {
             require();
+            suppliedFamilies.add(face.family.trim().toLowerCase());
             await installFonts([face], installedFonts, current, warnFonts);
             require();
           },

@@ -380,25 +380,7 @@ impl SlideRenderer {
             run.style.italic,
             cfg!(target_arch = "wasm32"),
         );
-        if let [(0, None)] = pieces.as_slice() {
-            out.push(run);
-            return;
-        }
-        for (position, (start, face)) in pieces.iter().enumerate() {
-            let end = pieces
-                .get(position + 1)
-                .map_or(run.text.len(), |(next, _)| *next);
-            let mut style = run.style.clone();
-            if let Some(face) = face {
-                style.family = face.family.clone();
-                style.face = face.clone();
-            }
-            out.push(ResolvedRun {
-                text: run.text[*start..end].to_owned(),
-                start: run.start + utf16_len(&run.text[..*start]),
-                style,
-            });
-        }
+        split_coverage_pieces(run, pieces, out);
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -4069,6 +4051,13 @@ fn chart_text_primitive(
         shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
+    let mut utf16_offsets = vec![0; text.text.len() + 1];
+    let mut utf16_end = 0;
+    for (index, character) in text.text.char_indices() {
+        utf16_offsets[index] = utf16_end;
+        utf16_end += character.len_utf16() as u32;
+    }
+    utf16_offsets[text.text.len()] = utf16_end;
     let box_x = safe_geometry(text.x as f32);
     let box_w = safe_geometry(text.width as f32);
     let align = match text.align {
@@ -4089,7 +4078,7 @@ fn chart_text_primitive(
                     .zip(&offsets)
                     .map(|(glyph, offset)| PositionedGlyph {
                         glyph_id: glyph.glyph_id,
-                        cluster: utf16_len(&text.text[..start + glyph.cluster as usize]),
+                        cluster: utf16_offsets[start + glyph.cluster as usize],
                         x: x + offset,
                         advance: glyph.x_advance,
                         x_offset: glyph.x_offset,
@@ -4098,8 +4087,8 @@ fn chart_text_primitive(
                     .collect();
                 PositionedTextRun {
                     text: text.text[start..end].to_owned(),
-                    start: utf16_len(&text.text[..start]),
-                    end: utf16_len(&text.text[..end]),
+                    start: utf16_offsets[start],
+                    end: utf16_offsets[end],
                     x: x + piece_x,
                     width: (piece_end - piece_x).max(0.0),
                     font_id: piece_face.id.to_u32(),
@@ -4117,7 +4106,7 @@ fn chart_text_primitive(
         )
         .collect();
     let width = advance.max(0.0);
-    let end = utf16_len(text.text);
+    let end = utf16_end;
     Ok(Primitive::TextBox {
         text_shadow: None,
         object_id: text.object_id,
@@ -6806,8 +6795,39 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
+fn split_coverage_pieces(
+    run: ResolvedRun,
+    pieces: Vec<(usize, Option<FontFace>)>,
+    out: &mut Vec<ResolvedRun>,
+) {
+    if let [(0, None)] = pieces.as_slice() {
+        out.push(run);
+        return;
+    }
+    let mut offset = run.start;
+    for (position, (start, face)) in pieces.iter().enumerate() {
+        let end = pieces
+            .get(position + 1)
+            .map_or(run.text.len(), |(next, _)| *next);
+        let text = &run.text[*start..end];
+        let mut style = run.style.clone();
+        if let Some(face) = face {
+            style.family = face.family.clone();
+            style.face = face.clone();
+        }
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start: offset,
+            style,
+        });
+        offset += utf16_len(text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    include!("layout_coverage_tests.rs");
+
     use ooxml_drawingml::ThemeColorScheme;
     use std::collections::BTreeSet;
 

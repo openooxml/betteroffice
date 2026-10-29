@@ -11,6 +11,7 @@ export function createCommandDefaultFonts(
   collect: (slideId?: string) => RequestedFace[],
   register: (face: DefaultFontFace) => void,
   settled: (faces: DefaultFontFace[]) => void,
+  install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
@@ -46,7 +47,10 @@ export function createCommandDefaultFonts(
           ?? source.resolveFamily(face.family, face.bold, face.italic);
         if (!load) return undefined;
         const bytes = await load();
-        return { ...face, bytes };
+        if (disposed || finished || families.has(face.family.trim().toLowerCase())) return undefined;
+        const loaded = { ...face, bytes };
+        if (install && !(await install([loaded])).length) return undefined;
+        return loaded;
       }).then(finish, () => finish());
     });
     pending.set(id, task);

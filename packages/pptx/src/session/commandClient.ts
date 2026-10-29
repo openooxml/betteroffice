@@ -8,7 +8,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { createWorkerEditSession } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
-import type { DefaultFontInstallation, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationSharedAdapter,
   type PresentationSharedAck, type PresentationSharedMethods, type PresentationSharedOpenResult } from './commandSharedAdapter';
 import { presentationSharedInputs, type PresentationSharedInput } from './commandSharedInput';
@@ -92,8 +92,16 @@ async function createCommandClient(
 
   const transportErrors = new Set<(error: unknown) => void>();
   const outstandingCalls = new Set<number>();
+  const suppliedFamilies = new Set(options.fonts?.map((face) => face.family.trim().toLowerCase()));
   const guarded: SessionTransport = {
     post(message, transfer) {
+      if (installDefaultFonts && isClientMessage(message) && message.kind === 'call' &&
+        (message.method === 'command' || message.method === 'edit')) {
+        const command = message.args[0] as PresentationCommandEnvelope | undefined;
+        if (command?.kind === 'registerFont' && typeof command.payload?.font?.family === 'string') {
+          suppliedFamilies.add(command.payload.font.family.trim().toLowerCase());
+        }
+      }
       const call = isClientMessage(message) && message.kind === 'call' ? message.id : undefined;
       if (call !== undefined) outstandingCalls.add(call);
       try { transport.post(message, transfer); } catch (error) {
@@ -105,9 +113,6 @@ async function createCommandClient(
       }
     },
     listen(listener) {
-      const queued: unknown[] = [];
-      let installing = false;
-      let draining = false;
       const deliver = (message: unknown) => {
         if (isHostMessage(message) && (message.kind === 'reply' || message.kind === 'event' && message.name === 'ack')) {
           const output = (message as typeof message & { collabPipe?: PipeOutputBatch<PptxPresencePeer>[] }).collabPipe;
@@ -117,28 +122,27 @@ async function createCommandClient(
         }
         listener(message);
       };
-      function receive(message: unknown): void {
-        const payload = isHostMessage(message) && message.kind === 'reply' && message.ok ? message.value
-          : isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts' ? message.payload : undefined;
-        const faces = (payload as DefaultFontPayload | undefined)?.defaultFonts;
-        if (!faces?.length || !installDefaultFonts) { deliver(message); return; }
-        installing = true;
-        void installDefaultFonts(faces).then(() => {
-          installing = false;
-          draining = true;
-          try {
-            deliver(message);
-            while (!installing && queued.length) receive(queued.shift());
-          } finally { draining = false; }
-        }).catch((error: unknown) => {
-          installing = false;
-          queued.length = 0;
-          for (const callback of [...transportErrors]) callback(error);
-        });
-      }
       return transport.listen((message) => {
-        if (installing || draining) queued.push(message);
-        else receive(message);
+        if (!isHostMessage(message) || message.kind !== 'event' || message.name !== 'defaultFontInstall') {
+          deliver(message); return;
+        }
+        const request = message.payload as DefaultFontInstallRequest;
+        const allowed = (family: string) => !suppliedFamilies.has(family.trim().toLowerCase());
+        const faces = request.faces.filter((face) => allowed(face.family));
+        let finished = false;
+        const finish = (installed: ReadonlyArray<(typeof faces)[number]>) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          const indices = request.faces.flatMap((face, index) => allowed(face.family) && installed.includes(face) ? [index] : []);
+          try { transport.post({ protocol: 1, kind: 'pptx-default-fonts-installed', id: request.id, installed: indices }); }
+          catch {}
+        };
+        const timer = setTimeout(() => finish([]), 5000);
+        try {
+          if (!installDefaultFonts) finish(faces);
+          else void installDefaultFonts(faces, allowed).then((installed) => finish(installed ?? faces), () => finish([]));
+        } catch { finish([]); }
       });
     },
     onError(listener) {
@@ -325,6 +329,8 @@ async function createCommandClient(
             return reply.then((ack) => {
               if (ack.throughSeq >= latestSharedAck!.throughSeq) latestSharedAck = ack;
               const projected = adapter!.ack(ack);
+              const faces = (ack as DefaultFontPayload).defaultFonts;
+              if (faces?.length) Object.assign(projected, { defaultFonts: faces });
               const output = pipeAcks.get(ack);
               if (output) {
                 pipeAcks.set(projected, output);

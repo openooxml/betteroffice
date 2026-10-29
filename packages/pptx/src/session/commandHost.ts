@@ -46,6 +46,8 @@ const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
+export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
     ? bytes.buffer : bytes.slice().buffer;
@@ -59,6 +61,7 @@ export interface PresentationCommandHostOptions {
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
   onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
+  installDefaultFonts?(faces: readonly DefaultFontFace[]): Promise<readonly DefaultFontFace[]>;
 }
 
 export interface PresentationCommandRegistration {
@@ -115,7 +118,10 @@ export function registerPresentationCommandHandlers(
   let disposed = false;
   let opening = false;
   let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
-  let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts>> | undefined;
+  let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
+  let cancelDefaultFontImport: (() => void) | undefined;
+  let gatingFonts = false;
+  const gatedDefaultFonts: DefaultFontFace[] = [];
   let requestedFonts: ((slideId?: string) => Omit<DefaultFontFace, 'bytes'>[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -173,27 +179,44 @@ export function registerPresentationCommandHandlers(
   function requestDefaultFonts(slideId?: string): DefaultFontFace[] | Promise<DefaultFontFace[]> {
     if (!hasDefaultFonts(slideId)) return [];
     if (defaultFonts) return defaultFonts.load(slideId);
-    creatingDefaultFonts ??= import('./commandDefaultFonts').then(({ createCommandDefaultFonts }) => {
-      defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts!,
-        (face) => presentation().registerFont({ ...face, bytes: new Uint8Array(face.bytes) }),
-        (faces) => {
-          if (!faces.length || disposed) return;
-          layouts.clear();
-          for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
-          for (const [id, revision] of revisions) revisions.set(id, revision + 1);
-          if (!opening && options.onDefaultFonts) {
-            const result = ack([], [...revisions.keys()]);
-            options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
-              [...result.transfer, ...faces.map((face) => face.bytes)]));
-          }
-        });
-      if (disposed) defaultFonts.dispose();
-      return defaultFonts;
+    creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
+      let finished = false;
+      const finish = (fonts?: ReturnType<typeof createCommandDefaultFonts>) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cancelDefaultFontImport = undefined;
+        if (!fonts) {
+          requestedFonts = undefined;
+          if (fontTimer !== undefined) clearTimeout(fontTimer);
+          fontTimer = undefined;
+          fontSlides.clear();
+          collectDeckFonts = false;
+        }
+        resolve(fonts);
+      };
+      const timer = setTimeout(() => finish(), 5000);
+      cancelDefaultFontImport = () => finish();
+      void commandDefaultFontModule.load().then(({ createCommandDefaultFonts }) => {
+        if (finished || disposed || !requestedFonts) { finish(); return; }
+        defaultFonts = createCommandDefaultFonts(suppliedFonts, requestedFonts,
+          (face) => presentation().registerFont({ ...face, bytes: new Uint8Array(face.bytes) }),
+          (faces) => {
+            if (!faces.length || disposed) return;
+            layouts.clear();
+            for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
+            for (const [id, revision] of revisions) revisions.set(id, revision + 1);
+            if (gatingFonts) { gatedDefaultFonts.push(...faces); return; }
+            if (!opening && options.onDefaultFonts) {
+              const result = ack([], [...revisions.keys()]);
+              options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces },
+                [...result.transfer, ...faces.map((face) => face.bytes)]));
+            }
+          }, options.installDefaultFonts);
+        finish(defaultFonts);
+      }).catch(() => finish());
     });
-    return creatingDefaultFonts.then((fonts) => fonts.load(slideId), () => {
-      requestedFonts = undefined;
-      return [];
-    });
+    return creatingDefaultFonts.then((fonts) => fonts?.load(slideId) ?? []);
   }
 
   function loadDefaultFonts(slideIds?: readonly string[]): void {
@@ -378,6 +401,8 @@ export function registerPresentationCommandHandlers(
 
   function sharedAck(result: TransferResult<PresentationCommandAck>): TransferResult<PresentationSharedAck> {
     const value = projection.ack(result.value, retainedBasis?.version);
+    const faces = (result.value as DefaultFontPayload).defaultFonts;
+    if (faces?.length) Object.assign(value, { defaultFonts: faces });
     value.outcomes = value.outcomes.map((outcome) => outcome.reason === 'stale-basis' && sharedReasons.has(outcome.seq)
       ? { ...outcome, reason: sharedReasons.get(outcome.seq) } : outcome);
     return transferable(value, result.transfer);
@@ -1373,7 +1398,7 @@ export function registerPresentationCommandHandlers(
     return start !== end || text.length > 0;
   }
 
-  function runCommand(command: PresentationCommandEnvelope): TransferResult<PresentationCommandAck> {
+  function runCommand(command: PresentationCommandEnvelope): TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
     presentation();
     if (command.kind !== 'activateSlide') refreshTopology();
     if (!matches(command) || !Number.isSafeInteger(command.seq) || command.seq < 1) return ack();
@@ -1442,10 +1467,22 @@ export function registerPresentationCommandHandlers(
       }
       if (committed && requestedFonts) loadDefaultFonts(admitted.kind === 'remote' || admitted.kind === 'history' || admitted.kind === 'invoke'
         ? undefined : dirtySlideIds);
-      const result = ack([outcome], dirtySlideIds, admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
-        admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
-      if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
-      return result;
+      const publish = () => {
+        gatingFonts = false;
+        const faces = gatedDefaultFonts.splice(0);
+        const result = ack([outcome], faces.length ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
+          admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
+          admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
+        if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
+        return faces.length ? transferable({ ...result.value, defaultFonts: faces },
+          [...result.transfer, ...faces.map((face) => face.bytes)]) : result;
+      };
+      if (activeSlideId !== previous.activeSlideId && activeSlideId !== null && hasDefaultFonts(activeSlideId)) {
+        gatingFonts = true;
+        const loading = requestDefaultFonts(activeSlideId);
+        if (loading instanceof Promise) return loading.then(publish);
+      }
+      return publish();
     } catch (error) {
       if (version !== previous.version) versions.delete(version);
       version = previous.version;
@@ -1523,14 +1560,6 @@ export function registerPresentationCommandHandlers(
     },
     command(_: null, command: PresentationCommandEnvelope):
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
-      if (requestedFonts && (fontTimer !== undefined || (!defaultFonts && creatingDefaultFonts !== undefined) || defaultFonts?.isLoading())) {
-        const slideId = command.kind === 'activateSlide' ? command.payload?.slideId
-          : command.kind === 'setSelection' ? command.payload?.selection?.slideId : undefined;
-        if (slideId !== undefined && matches(command) && slideIndices.has(slideId)) {
-          const loading = requestDefaultFonts(slideId);
-          if (loading instanceof Promise) return loading.then(() => runCommand(command));
-        }
-      }
       return runCommand(command);
     },
     edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
@@ -1636,6 +1665,7 @@ export function registerPresentationCommandHandlers(
     if (disposed) return;
     disposed = true;
     if (fontTimer !== undefined) clearTimeout(fontTimer);
+    cancelDefaultFontImport?.();
     defaultFonts?.dispose(); defaultFonts = undefined;
     requestedFonts = undefined;
     suppliedFonts.length = 0;
