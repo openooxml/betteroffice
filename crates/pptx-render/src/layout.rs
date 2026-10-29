@@ -12,7 +12,8 @@ use ooxml_drawingml::{
     style_outline, style_reference_color,
 };
 use ooxml_text::family_metrics::{
-    FamilyMetrics, family_advance, family_metrics, runs_at_own_widths,
+    FamilyMetrics, family_advance, family_cluster_advance, family_composed_kana_advance,
+    family_metrics, runs_at_own_widths,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -3446,12 +3447,7 @@ fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox
 /// have widths but no face for. `None` for anything the table cannot measure,
 /// which keeps the substitute's own advance.
 fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
-    let metrics = style.face.widths?;
-    let mut total = 0.0;
-    for character in text.chars() {
-        total += family_advance(metrics, character)?;
-    }
-    Some(total * size_px)
+    family_cluster_advance(style.face.widths?, text).map(|advance| advance * size_px)
 }
 
 /// Optional ligatures are off once glyphs are tracked apart or advanced by the
@@ -4536,9 +4532,11 @@ fn shape_face(
     if face.id.to_u32() != BROWSER_FONT_ID {
         return shape(fonts, face.id, text, size_px, features);
     }
-    Ok(text
-        .char_indices()
-        .map(|(index, character)| ShapedGlyph {
+    let mut glyphs = Vec::new();
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let first = glyphs.len();
+        glyphs.push(ShapedGlyph {
             glyph_id: 0,
             cluster: index as u32,
             x_advance: face
@@ -4548,8 +4546,24 @@ fn shape_face(
                 * size_px,
             x_offset: 0.0,
             y_offset: 0.0,
-        })
-        .collect())
+        });
+        if let Some(&(_, mark)) = characters.peek()
+            && let Some(advance) = face
+                .widths
+                .and_then(|metrics| family_composed_kana_advance(metrics, character, mark))
+        {
+            characters.next();
+            glyphs.push(ShapedGlyph {
+                glyph_id: 0,
+                cluster: index as u32,
+                x_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            glyphs[first].x_advance = advance * size_px;
+        }
+    }
+    Ok(glyphs)
 }
 
 fn add_shaped_segment(
@@ -11707,6 +11721,203 @@ mod tests {
             assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
             pen += family_advance(metrics, character).unwrap() * size;
         }
+    }
+
+    #[test]
+    fn named_japanese_clusters_use_composed_kana_advances() {
+        const NOTO_SANS_JP: &[u8] =
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(family, false, false, NOTO_SANS_JP)
+                .unwrap();
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            let metrics = family_metrics(&family.to_lowercase(), false, false).unwrap();
+            for (text, composed) in [("か\u{3099}中", 'が'), ("は\u{309a}中", 'ぱ')] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                let size = points_to_px(paragraph.runs[0].style.font_size_pt);
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let expected = (family_advance(metrics, composed).unwrap() + 1.0) * size;
+                assert_eq!(lines.len(), 1);
+                assert!((lines[0].width - expected).abs() < 1e-3, "{family} {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_japanese_faces_keep_decomposed_kana_in_one_cluster() {
+        let renderer = SlideRenderer::new();
+        for family in [
+            "MS UI Gothic",
+            "MS PGothic",
+            "ＭＳ Ｐゴシック",
+            "MS PMincho",
+            "ＭＳ Ｐ明朝",
+        ] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+            let metrics = family_metrics(&family.to_lowercase(), false, false).unwrap();
+            for (decomposed, composed) in [
+                ("か\u{3099}", 'が'),
+                ("き\u{3099}", 'ぎ'),
+                ("は\u{309a}", 'ぱ'),
+                ("ヒ\u{309a}", 'ピ'),
+            ] {
+                let mut paragraph = paragraph(&renderer, "l", decomposed);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                paragraph.runs[0].style.font_size_pt = 12.0;
+                paragraph.runs[0].style.line_font_size_pt = 12.0;
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let expected = family_advance(metrics, composed).unwrap() * 16.0;
+                assert_eq!(lines.len(), 1);
+                assert!(
+                    (lines[0].width - expected).abs() < 1e-3,
+                    "{family} {decomposed}"
+                );
+                assert!(!lines[0].caret_stops.iter().any(|stop| stop.position == 1));
+                let glyphs = shape_face(&renderer.fonts, &face, decomposed, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), 2);
+                assert!(glyphs.iter().all(|glyph| glyph.cluster == 0));
+                assert!((glyphs[0].x_advance - expected).abs() < 1e-3);
+                assert_eq!(glyphs[1].x_advance, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_fixed_japanese_faces_keep_decomposed_kana_scalar_widths() {
+        let renderer = SlideRenderer::new();
+        for family in ["MS Gothic", "ＭＳ ゴシック", "MS Mincho", "ＭＳ 明朝"] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+            for text in ["か\u{3099}", "は\u{309a}", "ヒ\u{309a}"] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                paragraph.runs[0].style.font_size_pt = 12.0;
+                paragraph.runs[0].style.line_font_size_pt = 12.0;
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].width, 16.0, "{family} {text}");
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), 2);
+                assert_eq!(glyphs[0].cluster, 0);
+                assert_eq!(glyphs[1].cluster, 3);
+                assert!(glyphs.iter().all(|glyph| glyph.x_advance == 8.0));
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_faces_preserve_scalar_advances_outside_kana_voicing() {
+        let renderer = SlideRenderer::new();
+        for family in ["MS UI Gothic", "MS Mincho", "MS Gothic", "Aptos"] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            for text in [
+                "x\u{0301}x",
+                "x\u{1ab0}x",
+                "x\u{20d0}x",
+                "x\u{fe20}x",
+                "x\u{0301}\u{1ab0}x",
+                "\u{0301}\u{1ab0}",
+                "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}",
+                "👩\u{200d}💻",
+                "\u{fe0f}",
+                "\u{200d}",
+                "か\u{fe0f}",
+                "か\u{0301}",
+                "あ\u{3099}",
+                "あ\u{309a}",
+                "ｶ\u{3099}",
+                "x\u{3099}",
+                "x\u{309a}",
+                "\u{3099}\u{309a}",
+                "あ\u{309b}",
+                "あ\u{309c}",
+            ] {
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), text.chars().count(), "{family} {text}");
+                for (glyph, (index, character)) in glyphs.iter().zip(text.char_indices()) {
+                    let expected = face
+                        .widths
+                        .and_then(|metrics| family_advance(metrics, character))
+                        .unwrap_or(0.5)
+                        * 16.0;
+                    assert_eq!(glyph.cluster as usize, index, "{family} {text}");
+                    assert_eq!(glyph.x_advance, expected, "{family} {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_aptos_keeps_emoji_variation_selector_widths() {
+        let renderer = SlideRenderer::new();
+        let face = renderer
+            .resolve_face("Aptos", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+        let text = "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}";
+        let mut paragraph = paragraph(&renderer, "l", text);
+        paragraph.runs[0].style.face = face;
+        paragraph.runs[0].style.family = "Aptos".to_owned();
+        paragraph.runs[0].style.font_size_pt = 12.0;
+        paragraph.runs[0].style.line_font_size_pt = 12.0;
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].width, 48.0);
     }
 
     #[test]

@@ -2463,8 +2463,9 @@ test('recovery update leaves client state and can be taken only once', async () 
     });
   } };
   try {
-    client = await createPresentationCommandClient(await deck(), host.options, transport);
+    client = await createPresentationCommandClient(await deck(), { ...host.options, collaboration: true }, transport);
     expect(openedUpdate).toBeInstanceOf(ArrayBuffer);
+    expect(client.state.recoveryBaseline).toBe('update');
     expect('recoveryUpdate' in client.state).toBe(false);
     expect(client.takeRecoveryUpdate?.()).toBe(openedUpdate);
     expect(client.takeRecoveryUpdate?.()).toBeUndefined();
@@ -2472,6 +2473,25 @@ test('recovery update leaves client state and can be taken only once', async () 
     await client.dispatch(insert(selection(target), 'accepted'));
     expect('recoveryUpdate' in client.state).toBe(false);
   } finally { await client?.dispose(); host.dispose(); }
+});
+
+for (const mode of ['source', 'initialUpdate', 'collaboration'] as const) test(`open exports recovery state only for ${mode} baseline requirements`, async () => {
+  const host = await engineHost();
+  const bytes = await deck(['alpha']);
+  await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+  const seed = wasm.openPresentation(bytes);
+  const initialUpdate = seed.encodeStateAsUpdate();
+  seed.dispose();
+  const encoded = spyOn(host.Document.prototype, 'encodeStateAsUpdate');
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+  try {
+    const state = await rpc.call.openCommandEditor(bytes.slice().buffer, { ...host.options,
+      ...(mode === 'initialUpdate' ? { initialUpdate } : {}), collaboration: mode === 'collaboration' });
+    expect(encoded).toHaveBeenCalledTimes(mode === 'source' ? 0 : 1);
+    expect(state.recoveryBaseline).toBe(mode === 'source' ? 'source' : 'update');
+    expect(Boolean(state.recoveryUpdate)).toBe(mode !== 'source');
+    expect(state.recoveryEngine).toBe(host.Document.version());
+  } finally { encoded.mockRestore(); await rpc.dispose(); host.dispose(); }
 });
 
 test('normal checkpoints omit recovery updates and only rebase encodes the whole state', async () => {

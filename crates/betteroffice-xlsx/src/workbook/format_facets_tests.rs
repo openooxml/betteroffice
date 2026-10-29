@@ -58,6 +58,303 @@ fn format_value(workbook: &Workbook, address: &str) -> Value {
     serde_json::to_value(workbook.model().styles.cell_format(style)).unwrap()
 }
 
+#[test]
+fn source_style_xml_markers_restore_idempotently() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2"><extLst><ext uri="keep"/></extLst></xf>"#,
+        r#"<c r="A1" s="1"><v>7</v></c>"#,
+        false,
+    );
+    let classified = source_style_xml_markers(&source).unwrap();
+    assert!(classified.xf_has_extra_xml(1));
+    let mut restored: Stylesheet =
+        serde_json::from_value(serde_json::to_value(&classified).unwrap()).unwrap();
+    assert!(!restored.has_xf_xml_markers());
+    restored.inherit_xf_xml_markers(&classified);
+    assert!(restored.xf_has_extra_xml(1));
+    let clean = source_style_xml_markers(&package("<xf/>", "", false)).unwrap();
+    assert!(clean.has_xf_xml_markers());
+    assert!(!clean.xf_has_extra_xml(0));
+    restored.inherit_xf_xml_markers(&clean);
+    assert!(restored.xf_has_extra_xml(1));
+}
+
+#[test]
+fn source_styles_part_name_matches_open_resolution() {
+    assert_eq!(xlsx_parse::styles_part_name(None).unwrap(), "xl/styles.xml");
+    assert_eq!(
+        xlsx_parse::styles_part_name(Some(b"<Relationships/>")).unwrap(),
+        "xl/styles.xml"
+    );
+    for (target, expected) in [
+        ("styles.xml", "xl/styles.xml"),
+        ("customStyles.xml", "xl/customStyles.xml"),
+        ("./styles/../customStyles.xml", "xl/customStyles.xml"),
+        ("../customStyles.xml", "customStyles.xml"),
+        ("/custom/styles.xml", "custom/styles.xml"),
+    ] {
+        let rels = format!(
+            r#"<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="{target}"/></Relationships>"#
+        );
+        assert_eq!(
+            xlsx_parse::styles_part_name(Some(rels.as_bytes())).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn source_style_xml_markers_ignore_unreadable_sources() {
+    assert!(source_style_xml_markers(b"invalid zip").is_none());
+    let source = package("<xf/>", "", false);
+    for (name, xml) in [
+        ("xl/styles.xml", None),
+        (
+            "xl/styles.xml",
+            Some("<styleSheet><cellXfs><xf/></styleSheet>"),
+        ),
+        (
+            "xl/styles.xml",
+            Some(r#"<styleSheet><cellXfs><xf numFmtId="&unknown;"/></cellXfs></styleSheet>"#),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            Some("<Relationships><Relationship></Relationships>"),
+        ),
+    ] {
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        parts.retain(|(path, _)| path != name);
+        if let Some(xml) = xml {
+            parts.push((name.to_string(), xml.as_bytes().to_vec()));
+        }
+        assert!(source_style_xml_markers(&ooxml_opc::rezip_parts(&parts).unwrap()).is_none());
+    }
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    parts.retain(|(name, _)| name != "xl/_rels/workbook.xml.rels");
+    let styles = source_style_xml_markers(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert!(styles.has_xf_xml_markers());
+    assert!(!styles.xf_has_extra_xml(0));
+}
+
+#[test]
+fn captured_sort_keeps_default_and_extended_source_xfs() {
+    let default_xf = r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>"#;
+    let extended_xf = r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"><extLst><ext uri="{6E1A2B3C-4D5E-4F60-8A9B-0C1D2E3F4A5B}"><x:keep xmlns:x="urn:protected-sort" value="kept"/></ext></extLst></xf>"#;
+    let bytes = package(
+        &format!("{default_xf}<xf numFmtId=\"2\"/><xf numFmtId=\"14\"/>{extended_xf}"),
+        r#"<c r="A1" s="3"><v>7</v></c><c r="B1"><v>8</v></c><c r="C1" s="0"><v>9</v></c>"#,
+        false,
+    );
+    for collaborative in [false, true] {
+        for plain_source in ["B1", "C1"] {
+            for move_values in [false, true] {
+                let mut workbook = open_identical(&bytes, collaborative, None);
+                let capture = |address| {
+                    serde_json::to_value(
+                        workbook
+                            .capture_format(SheetId(0), CellRange::new(r(address), r(address)))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                };
+                let plain = capture(plain_source);
+                let extended = capture("A1");
+                let mut payload = Vec::new();
+                if move_values {
+                    payload.extend([
+                        json!({"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 0},
+                            "cell": {"value": {"kind": "number", "value": if plain_source == "B1" { 8 } else { 9 }}, "formula": null}}),
+                        json!({"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 1},
+                            "cell": {"value": {"kind": "number", "value": 7}, "formula": null}}),
+                    ]);
+                }
+                payload.push(json!({"type": "applyRangeFormat", "sheet": 0,
+                    "range": {"start": {"row": 0, "col": 0}, "end": {"row": 0, "col": 1}},
+                    "format": {"rows": 1, "columns": 2,
+                        "formats": [plain["formats"][0], extended["formats"][0]],
+                        "sourceStyles": [plain["sourceStyles"][0], extended["sourceStyles"][0]],
+                        "sourceFormats": [plain["sourceFormats"][0], extended["sourceFormats"][0]]}}));
+                let ops: Vec<Op> = serde_json::from_value(json!(payload)).unwrap();
+                assert!(workbook.apply_ops(ops, options()).unwrap().applied);
+                let expected_plain = (plain_source == "C1").then_some(0);
+                assert_eq!(
+                    workbook.model().sheets[0].cell(r("A1")).unwrap().style,
+                    expected_plain,
+                    "{collaborative}: {plain_source}: {move_values}"
+                );
+                assert_eq!(
+                    workbook.model().sheets[0].cell(r("B1")).unwrap().style,
+                    Some(3)
+                );
+                let saved = workbook.save().unwrap();
+                assert_eq!(part(&saved, "xl/styles.xml"), part(&bytes, "xl/styles.xml"));
+                let reopened = Workbook::open(&saved).unwrap();
+                assert_eq!(
+                    reopened.model().sheets[0].cell(r("A1")).unwrap().style,
+                    expected_plain
+                );
+                assert_eq!(
+                    reopened.model().sheets[0].cell(r("B1")).unwrap().style,
+                    Some(3)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn painting_an_unstyled_cell_keeps_the_destination_cell_xml() {
+    let bytes = package(
+        r#"<xf/><xf numFmtId="4"/>"#,
+        r#"<c r="A1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    for collaborative in [false, true] {
+        let mut workbook = open_identical(&bytes, collaborative, None);
+        let captured = workbook
+            .capture_format(SheetId(0), CellRange::new(r("A1"), r("A1")))
+            .unwrap();
+        assert_eq!(captured.source_styles, vec![None]);
+        assert!(
+            !workbook
+                .apply_format(
+                    SheetId(0),
+                    CellRange::new(r("B1"), r("B1")),
+                    captured,
+                    options(),
+                )
+                .unwrap()
+                .applied
+        );
+        assert_eq!(
+            workbook.model().sheets[0].cell(r("B1")).unwrap().style,
+            None
+        );
+        assert_eq!(
+            part(&workbook.save().unwrap(), "xl/worksheets/sheet1.xml"),
+            part(&bytes, "xl/worksheets/sheet1.xml")
+        );
+    }
+}
+
+#[test]
+fn painting_a_missing_cell_in_a_styled_row_keeps_the_row_xf() {
+    let row_xf = r#"<xf numFmtId="2" fontId="0"><extLst><ext uri="row-source"/></extLst></xf>"#;
+    let source = package(
+        &format!("<xf/>{row_xf}"),
+        r#"<c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (name, bytes) in &mut parts {
+        if name == "xl/worksheets/sheet1.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    "</sheetData>",
+                    r#"<row r="2" s="1" customFormat="1"/></sheetData>"#,
+                )
+                .into_bytes();
+        }
+    }
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    for collaborative in [false, true] {
+        let mut workbook = open_identical(&bytes, collaborative, None);
+        let captured = workbook
+            .capture_format(SheetId(0), CellRange::new(r("A2"), r("A2")))
+            .unwrap();
+        assert_eq!(captured.source_styles, vec![Some(1)]);
+        workbook
+            .apply_format(
+                SheetId(0),
+                CellRange::new(r("B1"), r("B1")),
+                captured,
+                options(),
+            )
+            .unwrap();
+        assert_eq!(
+            workbook.model().sheets[0].cell(r("B1")).unwrap().style,
+            Some(1)
+        );
+        let saved = workbook.save().unwrap();
+        assert_eq!(part(&saved, "xl/styles.xml"), part(&bytes, "xl/styles.xml"));
+        assert_eq!(
+            Workbook::open(&saved).unwrap().model().sheets[0]
+                .cell(r("B1"))
+                .unwrap()
+                .style,
+            Some(1)
+        );
+    }
+}
+
+#[test]
+fn facet_interning_avoids_xfs_with_extra_xml() {
+    for (attributes, children) in [
+        ("", "<extLst><ext uri=\"extra-style\"/></extLst>"),
+        ("", "<unknown value=\"extra-style\"/>"),
+        ("", "<!--extra-style-->"),
+        (" custom=\"extra-style\"", ""),
+        ("", "<alignment custom=\"extra-style\"/>"),
+        ("", "<protection custom=\"extra-style\"/>"),
+    ] {
+        for size in [2, 128] {
+            for has_clean in [false, true] {
+                let extra = format!(r#"<xf numFmtId="2"{attributes}>{children}</xf>"#);
+                let fillers = (2..size)
+                    .map(|index| format!(r#"<xf numFmtId="{}"/>"#, index + 10))
+                    .collect::<String>();
+                let clean = if !has_clean {
+                    ""
+                } else if children.starts_with("<protection") {
+                    "<xf numFmtId=\"2\"><protection locked=\"1\" hidden=\"0\"/></xf>"
+                } else {
+                    "<xf numFmtId=\"2\"/>"
+                };
+                let bytes = package(
+                    &format!("<xf/>{extra}{fillers}{clean}"),
+                    r#"<c r="A1" s="1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+                    false,
+                );
+                let mut workbook = Workbook::open(&bytes).unwrap();
+                let mut styles = workbook.model().styles.clone();
+                let format = styles.cell_format(Some(1));
+                let index = styles.intern_cell_format(&format).unwrap().unwrap();
+                assert_ne!(index, 1, "{size}: {has_clean}: {attributes}: {children}");
+                assert_eq!(index, size);
+                assert_eq!(styles.intern_cell_format(&format).unwrap(), Some(index));
+                workbook
+                    .apply_ops(
+                        vec![Op::ApplyRangeFormat {
+                            sheet: SheetId(0),
+                            range: CellRange::new(r("B1"), r("B1")),
+                            format: CapturedFormat {
+                                rows: 1,
+                                columns: 1,
+                                formats: vec![format],
+                                kept: Vec::new(),
+                                source_styles: Vec::new(),
+                                source_formats: Vec::new(),
+                            },
+                        }],
+                        options(),
+                    )
+                    .unwrap();
+                let saved = workbook.save().unwrap();
+                let saved_styles = part(&saved, "xl/styles.xml");
+                assert_eq!(saved_styles.matches("extra-style").count(), 1);
+                assert_eq!(
+                    Workbook::open(&saved).unwrap().model().sheets[0]
+                        .cell(r("B1"))
+                        .unwrap()
+                        .style,
+                    Some(index)
+                );
+            }
+        }
+    }
+}
+
 fn preserved(attributes: &str, children: &str, key: &str, expected: Value) {
     let (bytes, raw_xf) = source(attributes, children, false);
     for collaborative in [false, true] {

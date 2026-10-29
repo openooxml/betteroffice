@@ -46,7 +46,7 @@ async function openWithAcceptedChanges() {
   return doc;
 }
 
-for (const op of ['add_comment', 'reply_comment', 'resolve_comment'] as const) {
+for (const op of ['add_comment', 'reply_comment', 'resolve_comment', 'replace_comment_text'] as const) {
   test(`${op} after an accepted header and body change keeps both changes`, async () => {
     const doc = await openWithAcceptedChanges();
     const before = await doc.export();
@@ -55,7 +55,9 @@ for (const op of ['add_comment', 'reply_comment', 'resolve_comment'] as const) {
       ? { op, match: doc.grep({ query: 'Revenue grew steadily' }).matches[0].match, author: 'Editor', text: 'New note', date: '2026-10-01T00:00:00Z' }
       : op === 'reply_comment'
         ? { op, comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }
-        : { op, comment: '0' };
+        : op === 'resolve_comment'
+          ? { op, comment: '0' }
+          : { op, comment: '0', find: 'Keep', replace: 'Retain' };
     expect((await doc.edit({ version: doc.list().version, edits: [edit] })).applied).toBe(true);
     const bytes = await doc.export();
     expect(await part(bytes, 'word/header1.xml')).toBe(await part(before, 'word/header1.xml'));
@@ -64,7 +66,8 @@ for (const op of ['add_comment', 'reply_comment', 'resolve_comment'] as const) {
     const comments = reopened.list({ story: 'comments', limit: 100 }).items;
     if (op === 'add_comment') expect(comments.find(comment => comment.text.startsWith('New note'))).toMatchObject({ parentId: null, author: 'Editor' });
     else if (op === 'reply_comment') expect(comments.find(comment => comment.text.startsWith('Follow up'))).toMatchObject({ parentId: '0', author: 'Editor' });
-    else expect(comments.find(comment => comment.id === '0')!.done).toBe(true);
+    else if (op === 'resolve_comment') expect(comments.find(comment => comment.id === '0')!.done).toBe(true);
+    else expect(comments.find(comment => comment.id === '0')!.text).toStartWith('Retain this note.');
   });
 }
 
@@ -86,11 +89,11 @@ test('comment verification still refuses a header change made by the current bat
   const before = await doc.export();
   const version = doc.list().version;
   const original = commentOutput.verifyCommentOutput;
-  const verify = spyOn(commentOutput, 'verifyCommentOutput').mockImplementationOnce(async (source, bytes, added, expected, baseline) => {
+  const verify = spyOn(commentOutput, 'verifyCommentOutput').mockImplementationOnce(async (source, bytes, added, expected, textEdited, baseline) => {
     expect(baseline).toBeDefined();
     const zip = await JSZip.loadAsync(bytes);
     zip.file('word/header1.xml', (await zip.file('word/header1.xml')!.async('string')).replace('Review header approved.', 'Corrupted header.'));
-    await original(source, await zip.generateAsync({ type: 'uint8array' }), added, expected, baseline);
+    await original(source, await zip.generateAsync({ type: 'uint8array' }), added, expected, textEdited, baseline);
   });
   try {
     const error = await refusal(doc.edit({ version, edits: [{ op: 'reply_comment', comment: '0', author: 'Editor', text: 'Follow up', date: '2026-10-01T00:00:00Z' }] }));

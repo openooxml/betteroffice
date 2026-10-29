@@ -126,6 +126,7 @@ chains return an error.
   list. `docx_edit::EngineSession` provides document lowering, measurement and
   retained layout.
 
-Pre-1.0: the API may change between minor versions.
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

@@ -4217,10 +4217,16 @@ test('a shared collaboration update keeps the existing join path', async () => {
 }, 40_000);
 
 test('main-thread layout fallback opens the pending replica before measuring it', async () => {
-  const { result } = renderHook(useHarness, { initialProps });
-  await waitFor(() => expect(result.current.host).not.toBeNull());
+  installWorker({ holdState: true });
+  let hostPublished!: () => void;
+  const published = new Promise<void>((resolve) => { hostPublished = resolve; });
+  const { result } = renderHook(useHarness, { initialProps: { ...initialProps, onHostDocument: () => hostPublished() } });
+  await act(async () => { await published; });
+  expect(result.current.host).not.toBeNull();
+  expect(result.current.mainOpens).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
   act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
-  await waitFor(() => expect(result.current.pipeline.layout).not.toBeNull());
+  expect(result.current.pipeline.layout).not.toBeNull();
   expect(result.current.mainOpens).toEqual([true]);
   expect(result.current.core.replicaReady).toBe(true);
   expect(result.current.core.session?.hasStory('body')).toBe(true);
@@ -4316,7 +4322,9 @@ test('read-only handoff fallback requests a new frame and restores queries', asy
   await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
   expect(result.current.renderer.queries!.pageCount()).toBeGreaterThan(0);
   expect(result.current.renderer.queries!.pageBounds(0)).not.toBeNull();
-  expect(await result.current.renderer.resolveQueries()).toMatchObject({ queries: result.current.renderer.queries });
+  const resolved = await result.current.renderer.resolveQueries();
+  expect(resolved?.queries.isReady()).toBe(true);
+  await waitFor(() => expect(result.current.renderer.queries).toBe(resolved!.queries));
   expect(result.current.errors).toEqual([]);
 });
 

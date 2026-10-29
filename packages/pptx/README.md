@@ -66,8 +66,8 @@ All entry points below are exported from `@betteroffice/pptx`.
 | `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
 | `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
 
-`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an experimental asynchronous
-worker session.
+`openPresentationSession(bytes, options?)` from `@betteroffice/pptx/worker` opens an asynchronous
+worker session; its API can change in minor releases.
 
 `openPresentation` accepts `fonts`, `fallbackFonts`, `clientId`, and `initialUpdate`. Fallback fonts
 supply glyphs missing from a run's own face. When opening from a collaboration update, retain the
