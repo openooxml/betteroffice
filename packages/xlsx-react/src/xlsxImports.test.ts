@@ -10,8 +10,17 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const STATIC_GZIP_BUDGET = 116_000;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
-  'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx']
-  .map((path) => `packages/xlsx-react/src/${path}`);
+  'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx',
+  'worker/LegacyXlsxWorkerEditor.tsx', 'worker/useEditableSessionWorkbook.ts', 'worker/createWorkerEditorApi.ts',
+  'worker/WorkerPaintSource.ts', 'commands/useWorkerXlsxCommands.ts', 'viewer/sessionGeometry.ts',
+  'worker/XlsxPeerlessWorkerEditor.tsx', 'worker/usePeerlessSessionWorkbook.ts', 'worker/PeerlessWorkerPaintSource.ts',
+  'worker/PeerlessWorkerSurface.tsx', 'worker/PeerlessWorkerInputs.tsx', 'worker/WorkerDraftController.ts',
+  'worker/WorkerPresentationStore.ts', 'worker/createAsyncEditorApi.ts', 'commands/peerlessWorkerInputCoordinator.ts',
+  'commands/usePeerlessWorkerXlsxCommands.ts', 'plugins/createPeerlessPluginDocument.ts', 'plugins/createPeerlessPluginClients.ts']
+  .map((path) => `packages/xlsx-react/src/${path}`).concat([
+    'packages/xlsx/src/session/client.ts', 'packages/xlsx/src/session/replay.ts',
+    'packages/xlsx/src/session/clientRecovery.ts', 'shared/office-session/commands/session.ts',
+  ]);
 
 test('default editor static chunks exclude the legacy and in-thread editors', async () => {
   const result = await build({
@@ -58,7 +67,7 @@ function modulePath(from: string, specifier: string): string {
 test('deferred editors have no runtime imports back into the editor shell', () => {
   const seen = new Set<string>();
   const visit = (path: string): void => {
-    expect(relative(root, path)).not.toBe('packages/xlsx-react/src/XlsxEditor.tsx');
+    expect(relative(root, path)).not.toMatch(/^packages\/xlsx-react\/src\/(?:XlsxEditor|worker\/XlsxWorkerEditor)\.tsx$/);
     if (seen.has(path)) return;
     seen.add(path);
     const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
@@ -82,7 +91,7 @@ test('deferred editors have no runtime imports back into the editor shell', () =
     };
     walk(source);
   };
-  for (const path of ['LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx']) {
+  for (const path of ['LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx', 'worker/LegacyXlsxWorkerEditor.tsx']) {
     seen.clear();
     visit(resolve(root, `packages/xlsx-react/src/${path}`));
     expect(seen.has(resolve(root, 'packages/xlsx-react/src/viewer/XlsxSessionViewer.tsx'))).toBe(path === 'LegacyXlsxEditor.tsx');

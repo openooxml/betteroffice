@@ -6,7 +6,7 @@ import type {
 import { XlsxEditorContent } from './XlsxEditorContent';
 import { warnXlsxEngine, type XlsxEngineWarning } from './engineWarnings';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
-import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
+import { LegacyXlsxWorkerEditor } from './worker/LegacyXlsxWorkerEditor';
 import type { EditableSessionWorkbookProps } from './worker/useEditableSessionWorkbook';
 
 export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEditorProps | XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps): React.JSX.Element {
@@ -23,6 +23,6 @@ export function LegacyXlsxEditor(props: GeneralEditorSessionProps | XlsxLegacyEd
   if (choice !== session || choice.editor !== editor) setChoice({ ...session, editor });
   useEffect(() => { if (session.reason && session.reason !== 'in-thread') warnXlsxEngine(session.reason); }, [session.reason]);
   return session.reason ? <XlsxEditorContent {...props as Omit<XlsxInThreadEditorProps, 'file'> & { file?: Uint8Array }} />
-    : editor ? <XlsxWorkerEditor {...props as EditableSessionWorkbookProps} />
+    : editor ? <LegacyXlsxWorkerEditor {...props as EditableSessionWorkbookProps} />
     : <XlsxSessionViewer {...props as XlsxWorkerViewerProps & { file?: Uint8Array }} />;
 }

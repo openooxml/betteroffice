@@ -34,6 +34,7 @@ const workerEditor = mock((props: MarkerProps) => {
     data-read-only={props.readOnly ?? false} data-plugins={props.plugins?.length ?? 0} data-backend={backend} />;
 });
 mock.module('./worker/XlsxWorkerEditor', () => ({ XlsxWorkerEditor: workerEditor }));
+mock.module('./worker/LegacyXlsxWorkerEditor', () => ({ LegacyXlsxWorkerEditor: workerEditor }));
 mock.module('./viewer/XlsxSessionViewer', () => ({
   XlsxSessionViewer: (props: MarkerProps) => <div data-testid="worker-viewer"
     data-read-only={props.readOnly} data-plugins={props.plugins?.length ?? 0} />,

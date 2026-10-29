@@ -29,6 +29,7 @@ import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import { XlsxWorkerEditor, xlsxPeerlessEditorLoader } from './XlsxWorkerEditor';
+import { LegacyXlsxWorkerEditor } from './LegacyXlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -4546,7 +4547,7 @@ describe('workbook worker editor', () => {
     }));
     Object.assign(host.sessionMethods, { cellGeometry });
     let api!: XlsxWorkerEditorApi;
-    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+    const view = render(<LegacyXlsxWorkerEditor file={file} showToolbar={false}
       onReady={(ready) => { api = ready; }} />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
