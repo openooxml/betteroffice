@@ -1266,6 +1266,8 @@ let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
 let openedViaSource = false;
 let openedParsed = false;
+let saveWasmPreloadTimer: ReturnType<typeof setTimeout> | null = null;
+let saveWasmPreload: Promise<void> | null = null;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -1949,6 +1951,7 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
     pendingUpdates = [];
     const before = session.proposalEngine.version();
     try {
+      await preloadSaveWasm();
       const projection = commandHost ? session.commentProjection(request.commentsSource !== 'host') : null;
       editorSaves.commentIds = projection?.sessionIds;
       const comments = request.commentsSource === 'host' ? request.comments : projection?.comments ?? request.comments;
@@ -3334,6 +3337,7 @@ function asciiProposalFontsUnchanged(
  * showing the old pages, for a document that replaces it page for page.
  */
 function destroySession(keepSurfaces = false): void {
+  cancelSaveWasmPreload();
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
@@ -3818,6 +3822,40 @@ function schedulePipeOutput(): void {
   }, 0);
 }
 
+function cancelSaveWasmPreload(): void {
+  if (saveWasmPreloadTimer !== null) clearTimeout(saveWasmPreloadTimer);
+  saveWasmPreloadTimer = null;
+}
+
+function preloadSaveWasm(): Promise<void> {
+  cancelSaveWasmPreload();
+  if (!saveWasmPreload) {
+    saveWasmPreload = Promise.all([
+      import('../docx/wasm').then((wasm) => wasm.preloadOpcWasm()),
+      import('../docx/parseWasm').then((wasm) => wasm.preloadParseWasm()),
+    ]).then(() => {}, (error: unknown) => {
+      saveWasmPreload = null;
+      throw error;
+    });
+  }
+  return saveWasmPreload;
+}
+
+function canPreloadSaveWasm(): boolean {
+  return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
+    (!!openedSource || openedParsed) && !trap && !projectionFailure;
+}
+
+function scheduleSaveWasmPreload(): void {
+  if (saveWasmPreloadTimer !== null || saveWasmPreload || !canPreloadSaveWasm()) return;
+  const owner = session;
+  saveWasmPreloadTimer = setTimeout(() => {
+    saveWasmPreloadTimer = null;
+    if (session !== owner || !canPreloadSaveWasm()) return;
+    void preloadSaveWasm().catch(() => {});
+  }, 0);
+}
+
 function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
@@ -3827,4 +3865,6 @@ function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
     memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
+  if (response.ok && (response.frame || response.commandInitial?.frame || response.commandAck?.frame ||
+    response.commandFrame?.frame)) scheduleSaveWasmPreload();
 }

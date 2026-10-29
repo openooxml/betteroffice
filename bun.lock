@@ -264,6 +264,9 @@
         "tsup": "^8.5.1",
         "typescript": "^6.0.3",
       },
+      "optionalDependencies": {
+        "@betteroffice/xlsx-native": "workspace:^",
+      },
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
