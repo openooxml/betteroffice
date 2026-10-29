@@ -206,7 +206,7 @@ pub fn layout_to_canonical_json(input: &str) -> Result<String, LayoutError> {
 /// wasm wrapper over [`layout_to_json`].
 #[wasm_bindgen]
 pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
-    layout_to_json(input).map_err(|e| JsValue::from_str(&e))
+    with_module_fonts(|| layout_to_json(input)).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Builds a display list from a `{ measured, options, layout }` JSON envelope,
@@ -554,12 +554,12 @@ pub fn update_resident_display_list_incremental_partial_cached_shifts_observed(
 /// [`build_display_list_value`] and keep the typed result.
 #[wasm_bindgen]
 pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    build_display_list_value(input)
-        .and_then(|display_list| {
+    with_module_fonts(|| {
+        build_display_list_value(input).and_then(|display_list| {
             serde_json::to_string(&display_list).map_err(|e| format!("serialize: {e}"))
         })
-        .map_err(|e| JsValue::from_str(&e))
+    })
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
@@ -747,9 +747,7 @@ pub fn range_rects_region_by_handle(
 type SharedFontStore = std::rc::Rc<std::cell::RefCell<ooxml_text::FontStore>>;
 
 thread_local! {
-    /// The module's own measurement font store, used when no [`MeasureFonts`]
-    /// exists. WASM is single-threaded, so a thread_local doubles as the
-    /// module-global store; native tests get one per test thread.
+    /// Measurement fonts for free exports outside an entered session.
     static MODULE_FONTS: SharedFontStore = SharedFontStore::default();
     /// The entered [`MeasureFonts`], if any.
     static ENTERED_FONTS: std::cell::RefCell<Option<SharedFontStore>> =
@@ -758,16 +756,14 @@ thread_local! {
     static SESSION_FONTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn module_fonts_usable() -> Result<(), String> {
-    if ENTERED_FONTS.with(|entered| entered.borrow().is_none())
-        && SESSION_FONTS.with(std::cell::Cell::get) > 0
-    {
-        return Err(
-            "measurement fonts belong to an open editing session; use the session's font methods"
-                .to_string(),
-        );
+fn with_module_fonts<T>(run: impl FnOnce() -> T) -> T {
+    if ENTERED_FONTS.with(|entered| entered.borrow().is_some()) {
+        return run();
     }
-    Ok(())
+    let store = MODULE_FONTS.with(std::rc::Rc::clone);
+    let previous = ENTERED_FONTS.with(|entered| entered.replace(Some(store)));
+    let _scope = MeasureFontsScope(previous);
+    run()
 }
 
 /// Runs `read` against the entered measurement font store, else the module's
@@ -788,8 +784,8 @@ fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontS
 }
 
 /// A measurement font store of one session's own. Its ids start at zero and
-/// stay valid whatever other stores register or clear. While any is alive,
-/// fonts may only be used inside [`MeasureFonts::enter`].
+/// stay valid whatever other stores register or clear. Internal font access
+/// requires [`MeasureFonts::enter`] while any session store is alive.
 pub struct MeasureFonts(SharedFontStore);
 
 impl Default for MeasureFonts {
@@ -838,8 +834,7 @@ impl Drop for MeasureFontsScope {
 /// error at this boundary, mirroring `FontStore::register`.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    register_measure_font_bytes(bytes).map_err(|e| JsValue::from_str(&e))
+    with_module_fonts(|| register_measure_font_bytes(bytes)).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Register a measurement view of `base` carrying the vertical metrics and
@@ -850,13 +845,21 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// this one store, so a widened view measures and paints at one pitch.
 #[wasm_bindgen]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
+    with_module_fonts(|| register_substitute_measure_font_id(base, requested_family))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Registers a substitute view in the current measurement font store.
+pub fn register_substitute_measure_font_id(
+    base: u32,
+    requested_family: &str,
+) -> Result<u32, String> {
     with_measure_fonts(|store| {
         store
             .borrow_mut()
             .register_named_substitute(ooxml_text::FontId::from_u32(base), requested_family)
             .map(|id| id.to_u32())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| e.to_string())
     })
 }
 
@@ -873,8 +876,7 @@ pub fn clear_measure_fonts() {
 /// re-register before the next `measure_paragraph_json`.
 #[wasm_bindgen(js_name = clear_measure_fonts)]
 pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    clear_measure_fonts();
+    with_module_fonts(clear_measure_fonts);
     Ok(())
 }
 
@@ -953,8 +955,7 @@ pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Opt
 /// must fall back to browser measurement for that block.
 #[wasm_bindgen]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    measure_paragraph_json_resident(input).map_err(|e| JsValue::from_str(&e))
+    with_module_fonts(|| measure_paragraph_json_resident(input)).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Native/resident-engine form of [`measure_paragraph_json`]. Keeping the
@@ -1047,18 +1048,20 @@ pub(crate) fn min_content_width_typed_resident(
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
 #[wasm_bindgen]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
-    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
-    // Glyph ids are u16 in the sfnt spec; a value past that is out of range for
-    // any font, so reject at the boundary rather than truncating.
-    let glyph_id = u16::try_from(glyph_id).map_err(|_| {
-        JsValue::from_str(&format!("glyph id {glyph_id} out of range for this font"))
-    })?;
+    with_module_fonts(|| outline_glyph_json_resident(font_id, glyph_id))
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Reads a glyph outline from the current measurement font store.
+pub fn outline_glyph_json_resident(font_id: u32, glyph_id: u32) -> Result<String, String> {
+    let glyph_id = u16::try_from(glyph_id)
+        .map_err(|_| format!("glyph id {glyph_id} out of range for this font"))?;
     with_measure_fonts(|store| {
         store
             .borrow()
             .outline_glyph_json(ooxml_text::FontId::from_u32(font_id), glyph_id)
     })
-    .map_err(|e| JsValue::from_str(&e.to_string()))
+    .map_err(|e| e.to_string())
 }
 
 /// [`ooxml_text::echo_glyph_set`] against the resident font store, as JSON.
@@ -1068,7 +1071,6 @@ pub fn echo_glyph_set_json(
     kern: bool,
     alphabet: &str,
 ) -> Result<String, String> {
-    module_fonts_usable()?;
     if !size.is_finite() || size <= 0.0 {
         return Err(format!("echo glyph size {size} is not positive"));
     }
@@ -1255,22 +1257,111 @@ mod tests {
         assert!(holds(1));
     }
 
+    fn font_measurement_input(font_id: u32) -> String {
+        serde_json::json!({
+            "block": {"kind": "paragraph", "runs": [{"kind": "text", "text": "Font stores"}]},
+            "maxWidth": 400.0,
+            "fontChains": {"liberation sans|0|0": [font_id]},
+            "defaults": {"fontSize": 12.0, "fontFamily": "Liberation Sans"}
+        })
+        .to_string()
+    }
+
     #[test]
-    fn module_fonts_usable_requires_enter_while_a_session_owns_fonts() {
-        assert_eq!(module_fonts_usable(), Ok(()));
-        let fonts = MeasureFonts::default();
-        let expected = Err(
-            "measurement fonts belong to an open editing session; use the session's font methods"
-                .to_string(),
-        );
-        assert_eq!(module_fonts_usable(), expected);
+    fn free_font_exports_use_module_fonts_beside_an_unentered_session() {
+        clear_measure_fonts_wasm().unwrap();
+        let session = MeasureFonts::default();
+        let (session_generation, session_measurement, session_outline) = {
+            let _scope = session.enter();
+            assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(0));
+            (
+                measure_fonts_generation(),
+                measure_paragraph_json_resident(&font_measurement_input(0)).unwrap(),
+                outline_glyph_json_resident(0, 36).unwrap(),
+            )
+        };
+        assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
+        let module_id = with_module_fonts(measure_store_id);
+        assert_ne!(module_id, session_generation.0);
+        assert_eq!(with_module_fonts(measure_fonts_generation), (module_id, 1));
+        let substitute = register_substitute_measure_font(0, "Segoe UI Light").unwrap();
+        assert_eq!(substitute, 1);
+        let measured = measure_paragraph_json(&font_measurement_input(substitute)).unwrap();
+        assert!(!measured.is_empty());
+        assert_eq!(outline_glyph_json(0, 36).unwrap(), session_outline);
+        clear_measure_fonts_wasm().unwrap();
+        assert_ne!(with_module_fonts(measure_store_id), module_id);
+        assert_eq!(with_module_fonts(measure_fonts_generation).1, 0);
         {
-            let _fonts = fonts.enter();
-            assert_eq!(module_fonts_usable(), Ok(()));
+            let _scope = session.enter();
+            assert_eq!(measure_fonts_generation(), session_generation);
+            assert_eq!(
+                measure_paragraph_json_resident(&font_measurement_input(0)).unwrap(),
+                session_measurement
+            );
+            assert_eq!(outline_glyph_json_resident(0, 36).unwrap(), session_outline);
+            assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(1));
         }
-        assert_eq!(module_fonts_usable(), expected);
-        drop(fonts);
-        assert_eq!(module_fonts_usable(), Ok(()));
+        assert!(ENTERED_FONTS.with(|entered| entered.borrow().is_none()));
+    }
+
+    #[test]
+    fn free_font_exports_preserve_an_entered_session_store() {
+        clear_measure_fonts_wasm().unwrap();
+        assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
+        let module_generation = measure_fonts_generation();
+        let module_measurement = measure_paragraph_json(&font_measurement_input(0)).unwrap();
+        let module_outline = outline_glyph_json(0, 36).unwrap();
+        let session = MeasureFonts::default();
+        {
+            let _scope = session.enter();
+            let session_id = measure_store_id();
+            assert_ne!(session_id, module_generation.0);
+            assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
+            assert_eq!(measure_fonts_generation(), (session_id, 1));
+            assert_eq!(
+                register_substitute_measure_font(0, "Segoe UI Light").unwrap(),
+                1
+            );
+            assert_eq!(measure_fonts_generation(), (session_id, 2));
+            let input = font_measurement_input(1);
+            assert_eq!(
+                measure_paragraph_json(&input).unwrap(),
+                measure_paragraph_json_resident(&input).unwrap()
+            );
+            assert_eq!(
+                outline_glyph_json(1, 36).unwrap(),
+                outline_glyph_json_resident(1, 36).unwrap()
+            );
+            clear_measure_fonts_wasm().unwrap();
+            assert_ne!(measure_store_id(), session_id);
+            assert_eq!(measure_fonts_generation().1, 0);
+            assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
+        }
+        assert_eq!(
+            with_module_fonts(measure_fonts_generation),
+            module_generation
+        );
+        assert_eq!(
+            measure_paragraph_json(&font_measurement_input(0)).unwrap(),
+            module_measurement
+        );
+        assert_eq!(outline_glyph_json(0, 36).unwrap(), module_outline);
+        clear_measure_fonts_wasm().unwrap();
+    }
+
+    #[test]
+    fn module_font_scope_restores_after_a_panic() {
+        let session = MeasureFonts::default();
+        let result = std::panic::catch_unwind(|| {
+            with_module_fonts(|| panic!("scope unwind"));
+        });
+        assert!(result.is_err());
+        assert!(ENTERED_FONTS.with(|entered| entered.borrow().is_none()));
+        let _scope = session.enter();
+        let id = measure_store_id();
+        with_module_fonts(|| assert_eq!(measure_store_id(), id));
+        assert_eq!(measure_store_id(), id);
     }
 
     fn options_json() -> serde_json::Value {
