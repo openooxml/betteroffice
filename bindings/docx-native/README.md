@@ -23,8 +23,8 @@ keep the Rust parser defaults.
 return structured content and Markdown content objects. `revisionView` is
 required (`accepted`, `original`, or `markup`); `stories`, `includeFormatting`,
 `maxBlocks`, and `maxBytes` are optional. Both read the current document state.
-The synchronous `renderDocxMarkdown(content, { maxBytes }?)` free function renders
-structured content to a Markdown string.
+The `renderDocxMarkdown(content, { maxBytes }?)` free function returns a promise
+of a Markdown string.
 
 `document.listContentControls(options?)` lists controls, and
 `document.findContentControls(query, options?)` finds exact matches by `id`
@@ -34,7 +34,7 @@ structured content to a Markdown string.
 Exports and control reads resolve with content directly, without a session
 version or `ok` envelope. Refusals reject with an `Error` whose `message` is the
 failure message and whose `failure` property contains `code`, `message`, and
-`target`. The Markdown renderer throws the same error for a refusal.
+`target`. The Markdown renderer rejects with the same error for a refusal.
 
 `document.save({ now })` accepts `now` as an alias of `timestamp`. Supplying
 different values for both rejects with a `TypeError`.

@@ -7,7 +7,7 @@ use betteroffice_docx::{
     structured::ExportFailure,
 };
 use napi::bindgen_prelude::{AsyncTask, Buffer, JsObjectValue, Task, ToNapiValue, TypeName};
-use napi::{Env, Error, JsTypeError, Result, ValueType, sys};
+use napi::{Env, Error, JsTypeError, Result, Status, ValueType, sys};
 use napi_derive::napi;
 
 fn error(reason: impl ToString) -> Error {
@@ -352,6 +352,14 @@ where
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output)
     }
+
+    fn reject(&mut self, env: Env, reason: Error) -> Result<Self::JsValue> {
+        if reason.status == Status::InvalidArg {
+            Err(Error::from(JsTypeError::from(reason).into_unknown(env)))
+        } else {
+            Err(reason)
+        }
+    }
 }
 
 pub struct OpenTask {
@@ -377,6 +385,32 @@ impl Task for OpenTask {
             origin: self.origin,
             timestamp: self.timestamp.clone(),
         })
+    }
+}
+
+pub struct RenderMarkdownTask {
+    content: serde_json::Value,
+    options: Option<serde_json::Value>,
+}
+
+impl Task for RenderMarkdownTask {
+    type Output = ReadValue;
+    type JsValue = ReadValue;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let content = serde_json::from_value(std::mem::take(&mut self.content)).map_err(error)?;
+        let options =
+            serde_json::from_value(self.options.take().unwrap_or_else(|| serde_json::json!({})))
+                .map_err(error)?;
+        read_value(
+            betteroffice_docx::render_docx_markdown(&content, &options)
+                .map(|content| serde_json::to_value(content.markdown)),
+            "DocxExportError",
+        )
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
     }
 }
 
@@ -717,7 +751,6 @@ impl DocxDocument {
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn save(
         &self,
-        env: Env,
         options: Option<SaveDocumentOptions>,
     ) -> Result<AsyncTask<PendingTask<Buffer>>> {
         let options = options.unwrap_or(SaveDocumentOptions {
@@ -729,11 +762,12 @@ impl DocxDocument {
         if let (Some(timestamp), Some(now)) = (&options.timestamp, &options.now)
             && timestamp != now
         {
-            let reason = Error::from(
-                JsTypeError::from(error("now and timestamp must match when both are provided"))
-                    .into_unknown(env),
-            );
-            return self.worker.submit(move |_| Err(reason));
+            return self.worker.submit(|_| {
+                Err(Error::new(
+                    Status::InvalidArg,
+                    "now and timestamp must match when both are provided",
+                ))
+            });
         }
         let options = SaveOptions {
             now: options
@@ -780,22 +814,12 @@ pub fn open_document(
 }
 
 /// Input has the same shape as DocxStructuredContent from @betteroffice/docx.
-#[napi]
+#[napi(ts_return_type = "Promise<string>")]
 pub fn render_docx_markdown(
-    env: Env,
     #[napi(ts_arg_type = "unknown")] content: serde_json::Value,
     #[napi(ts_arg_type = "DocxMarkdownOptions | undefined | null")] options: Option<
         serde_json::Value,
     >,
-) -> Result<String> {
-    let content = serde_json::from_value(content).map_err(error)?;
-    let options =
-        serde_json::from_value(options.unwrap_or_else(|| serde_json::json!({}))).map_err(error)?;
-    match betteroffice_docx::render_docx_markdown(&content, &options) {
-        Ok(content) => Ok(content.markdown),
-        Err(betteroffice_docx::Error::Export(failure)) => {
-            Err(refusal_error(env, failure, "DocxExportError")?)
-        }
-        Err(reason) => Err(error(reason)),
-    }
+) -> AsyncTask<RenderMarkdownTask> {
+    AsyncTask::new(RenderMarkdownTask { content, options })
 }

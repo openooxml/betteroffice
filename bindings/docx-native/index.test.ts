@@ -108,8 +108,10 @@ describe('@betteroffice/docx-native', () => {
     })) as DocxMarkdownContent;
     expect(markdown.markdown).toContain('Structured export');
     expect(markdown.anchors.length).toBeGreaterThan(0);
-    expect(renderDocxMarkdown(content)).toBe(markdown.markdown);
-    expect(renderDocxMarkdown(content, { maxBytes: 8_388_608 })).toBe(markdown.markdown);
+    const rendering = renderDocxMarkdown(content);
+    expect(rendering).toBeInstanceOf(Promise);
+    expect(await rendering).toBe(markdown.markdown);
+    expect(await renderDocxMarkdown(content, { maxBytes: 8_388_608 })).toBe(markdown.markdown);
     const truncated = (await document.exportStructured({
       revisionView: 'accepted',
       maxBlocks: 1,
@@ -138,18 +140,26 @@ describe('@betteroffice/docx-native', () => {
       expect(refused.message).toBe(refused.failure.message);
     }
     const content = await document.exportStructured({ revisionView: 'accepted' });
-    try {
-      renderDocxMarkdown(content, { maxBytes: 16 });
-      throw new Error('expected a Markdown refusal');
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      expect(error).toMatchObject({
-        name: 'DocxExportError',
-        failure: { code: 'invalid-options', target: null },
-      });
-      const refused = error as Error & { failure: { message: string } };
-      expect(refused.message).toBe(refused.failure.message);
-    }
+    const rendering = renderDocxMarkdown(content, { maxBytes: 16 });
+    expect(rendering).toBeInstanceOf(Promise);
+    const refused = await rendering.catch((error) => error);
+    expect(refused).toBeInstanceOf(Error);
+    expect(refused).toMatchObject({
+      name: 'DocxExportError',
+      failure: { code: 'invalid-options', target: null },
+    });
+    expect(refused.message).toBe(refused.failure.message);
+  });
+
+  test('rejects malformed Markdown content and options asynchronously', async () => {
+    const malformedContent = renderDocxMarkdown({ schemaVersion: 2 });
+    expect(malformedContent).toBeInstanceOf(Promise);
+    await expect(malformedContent).rejects.toThrow();
+    const document = await openDocument(exportFixture);
+    const content = await document.exportStructured({ revisionView: 'accepted' });
+    const malformedOptions = renderDocxMarkdown(content, { maxBytes: -1 });
+    expect(malformedOptions).toBeInstanceOf(Promise);
+    await expect(malformedOptions).rejects.toThrow();
   });
 
   test('lists and finds content controls with optional story filters', async () => {
@@ -251,7 +261,10 @@ describe('@betteroffice/docx-native', () => {
     const properties = await zip.file('docProps/core.xml')!.async('string');
     expect(properties).toContain(now);
     expect(properties).toContain('Native alias test');
-    await expect(document.save({ timestamp: document.timestamp, now })).rejects.toBeInstanceOf(TypeError);
+    const conflict = document.save({ timestamp: document.timestamp, now });
+    expect(conflict).toBeInstanceOf(Promise);
+    await expect(conflict).rejects.toBeInstanceOf(TypeError);
+    await expect(conflict).rejects.toThrow('now and timestamp must match when both are provided');
     expect(document.timestamp).toBe('2000-01-01T00:00:00.000Z');
     await expectSavedPartsEqual(timestamp, await document.save({ ...options, timestamp: now }));
   });

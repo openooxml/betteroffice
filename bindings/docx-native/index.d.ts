@@ -138,7 +138,7 @@ export interface OpenDocumentOptions {
 }
 
 /** Input has the same shape as DocxStructuredContent from @betteroffice/docx. */
-export declare function renderDocxMarkdown(content: unknown, options?: DocxMarkdownOptions | undefined | null): string
+export declare function renderDocxMarkdown(content: unknown, options?: DocxMarkdownOptions | undefined | null): Promise<string>
 
 export interface RenderedPage {
   data: Buffer
