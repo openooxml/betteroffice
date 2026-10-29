@@ -1162,10 +1162,49 @@ test('background font acknowledgements invalidate thumbnails without a document 
   expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);
   const structural = mock(() => {});
   store.subscribeStructure(structural);
-  client.ack(0, { dirtySlideIds: ['other'], outcomes: [] });
+  const defaultFonts = [{ family: 'Calibri', bold: false, italic: false, bytes: new ArrayBuffer(1) }];
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts } as Partial<PresentationCommandAck>);
   expect(store.getSnapshot().thumbnails.has('other')).toBe(false);
   expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);
   expect(structural).toHaveBeenCalledTimes(1);
+  store.dispose();
+});
+
+test('empty acknowledgements at the applied seq keep painted thumbnails', () => {
+  const { client, store } = setup();
+  expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);
+  const cached = store.getSnapshot().thumbnails.get('other');
+  const structural = mock(() => {});
+  store.subscribeStructure(structural);
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [] });
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [] });
+  expect(store.getSnapshot().thumbnails.get('other')).toBe(cached);
+  expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(false);
+  expect(structural).not.toHaveBeenCalled();
+  store.dispose();
+});
+
+test('a font landing invalidates painted thumbnails once and a later landing again', () => {
+  const { client, store } = setup();
+  const paint = () => expect(store.installThumbnail(frame('other', 7, 0, { slideId: 'other', slideIndex: 1 }))).toBe(true);
+  const face = { family: 'Calibri', bold: false, italic: false, bytes: new ArrayBuffer(1) };
+  paint();
+  const structural = mock(() => {});
+  store.subscribeStructure(structural);
+  const landing = [face];
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts: landing } as Partial<PresentationCommandAck>);
+  expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);
+  expect(structural).toHaveBeenCalledTimes(1);
+  const repainted = frame('other', 8, 0, { slideId: 'other', slideIndex: 1 });
+  expect(store.installThumbnail(repainted)).toBe(true);
+  const cached = store.getSnapshot().thumbnails.get('other');
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts: landing } as Partial<PresentationCommandAck>);
+  expect(store.getSnapshot().thumbnails.get('other')).toBe(cached);
+  expect(structural).toHaveBeenCalledTimes(1);
+  client.ack(0, { dirtySlideIds: ['other'], outcomes: [], defaultFonts: [face] } as Partial<PresentationCommandAck>);
+  expect(store.getSnapshot().thumbnails.has('other')).toBe(false);
+  expect(store.getSnapshot().dirtyThumbnailIds.has('other')).toBe(true);
+  expect(structural).toHaveBeenCalledTimes(2);
   store.dispose();
 });
 
