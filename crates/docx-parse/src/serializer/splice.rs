@@ -2396,6 +2396,121 @@ mod tests {
     }
 
     #[test]
+    fn precise_fallback_ids_ignore_an_inherited_default_word_namespace() {
+        use crate::paragraph_patch::{Attrs, UnitV1, result_sha256, unit_sha256};
+        use quick_xml::NsReader;
+        use quick_xml::events::Event;
+        use quick_xml::name::{Namespace, ResolveResult};
+
+        let host = "<w:p><w:r><w:t>Host</w:t></w:r></w:p>";
+        let source = body(host)
+            .replace(W14_NAMESPACE, "urn:other")
+            .replace(
+                "<w:document ",
+                &format!("<w:document xmlns=\"{W14_NAMESPACE}\" "),
+            );
+        let patched = host.replace("Host", "Edited Host");
+        let projected = patched.replace("<w:p>", "<w:p w14:paraId=\"00000001\">");
+        let recorded = RecordedParagraphs {
+            written: HashMap::from([(0, projected.clone())]),
+            order: vec![Some(0)],
+            ..RecordedParagraphs::default()
+        };
+        let seed = vec![UnitV1::Text {
+            text: "Host".to_owned(),
+            attrs: Attrs::new(),
+        }];
+        let result = vec![UnitV1::Text {
+            text: "Edited Host".to_owned(),
+            attrs: Attrs::new(),
+        }];
+        let part: S13SplicedPart = serde_json::from_value(json!({
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0], "changed": [0], "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "p0",
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{
+                    "from": 0, "to": 0,
+                    "insert": [{"text": "Edited ", "attrs": {}, "inherit": {}}],
+                    "donor": {"kind": "at", "at": 0}
+                }],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&result, &Attrs::new())
+            }]
+        }))
+        .unwrap();
+        let patches = BTreeMap::from([(0, patched)]);
+        let serialized = body(&projected);
+        assert!(
+            splice_story_part(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &patches,
+                &mut Vec::new(),
+            )
+            .is_none()
+        );
+        assert!(
+            splice_source_direct(
+                &source,
+                &serialized,
+                &recorded,
+                &part,
+                &BTreeMap::new(),
+                &patches,
+            )
+            .is_none()
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": [{
+                "type": "paragraph", "sourceOrdinal": 0, "paraId": "00000001",
+                "content": [{"type": "run", "content": [{"type": "text", "text": "Edited Host"}]}]
+            }]},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [part]}
+        }))
+        .unwrap();
+        let saved = write_docx_s13(request, &package(&source)).unwrap();
+        let saved = String::from_utf8(document_part(&saved)).unwrap();
+        assert!(saved.starts_with(source.split_once("<w:body>").unwrap().0));
+        assert!(saved.contains(">Edited Host</w:t>"));
+        assert!(!saved.contains("xmlns:="));
+        assert!(!saved.contains(" :paraId="));
+        let mut reader = NsReader::from_str(&saved);
+        let mut ids = 0;
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(element) if element.name().as_ref() == b"w:p" => {
+                    for attribute in element.attributes() {
+                        let attribute = attribute.unwrap();
+                        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                        if local.as_ref() == b"paraId" {
+                            assert_eq!(
+                                namespace,
+                                ResolveResult::Bound(Namespace(W14_NAMESPACE.as_bytes()))
+                            );
+                            assert_eq!(attribute.value.as_ref(), b"00000001");
+                            ids += 1;
+                        }
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert_eq!(ids, 1);
+        assert_eq!(
+            paragraph_occurrences(&saved).unwrap()[0].para_id.as_deref(),
+            Some("00000001")
+        );
+    }
+
+    #[test]
     fn precise_fallback_ids_do_not_rebind_copied_source_content() {
         use quick_xml::NsReader;
         use quick_xml::events::Event;

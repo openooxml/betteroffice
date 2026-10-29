@@ -519,6 +519,16 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
+    fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        let xml = String::from_utf8(package.read(position).ok()?).ok()?;
+        let start = part.occurrence(ordinal)?.tag.start;
+        let paragraph = &xml[start..];
+        let span = docx_parse::serializer::element_span(paragraph, &[])?;
+        Some(paragraph[span].to_owned())
+    }
+
     pub(crate) fn new(
         package_sha256: String,
         bytes: PackageBytes,
@@ -2929,11 +2939,13 @@ impl EditingDoc {
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
+                        let source_paragraph = || source.paragraph_xml(part, ordinal);
                         let context = crate::paragraph_patch_plan::PatchContext {
                             ordinal,
                             session_key: key,
                             story,
                             metadata: metadata.as_deref(),
+                            source_paragraph: Some(&source_paragraph),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };

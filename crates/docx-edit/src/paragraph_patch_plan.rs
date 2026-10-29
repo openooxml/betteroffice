@@ -16,6 +16,7 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
+    pub source_paragraph: Option<&'a dyn Fn() -> Option<String>>,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -499,7 +500,11 @@ impl Alignment {
     }
 }
 
-fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
+fn alignment(
+    before: &[Token],
+    after: &[Token],
+    context: &PatchContext<'_>,
+) -> Result<Vec<(usize, usize)>, &'static str> {
     const WORK_LIMIT: usize = 4_000_000;
     let shared_prefix = before
         .iter()
@@ -536,7 +541,13 @@ fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &
             if !homogeneous_replacement(
                 &before[shared_prefix..old_end],
                 &after[shared_prefix..new_end],
-            ) {
+            ) || !context
+                .source_paragraph
+                .and_then(|load| load())
+                .is_some_and(|source| {
+                    homogeneous_source_replacement(&source, before, shared_prefix..old_end)
+                })
+            {
                 return Err("ambiguous: nonunique content alignment");
             }
             return Ok((0..shared_prefix)
@@ -576,6 +587,116 @@ fn homogeneous_replacement(before: &[Token], after: &[Token]) -> bool {
         && homogeneous(after)
         && !subsequence(before, after)
         && !subsequence(after, before)
+}
+
+fn homogeneous_source_replacement(
+    source: &str,
+    before: &[Token],
+    range: std::ops::Range<usize>,
+) -> bool {
+    fn visit<'a>(
+        source: &'a str,
+        element: &docx_parse::XmlElement,
+        path: &mut Vec<u32>,
+        before: &[Token],
+        range: &std::ops::Range<usize>,
+        cursor: &mut usize,
+        properties: &mut Option<&'a str>,
+    ) -> Option<()> {
+        if *cursor >= range.end {
+            return Some(());
+        }
+        match element.name.as_str() {
+            "w:p" | "w:hyperlink" | "w:smartTag" => {
+                for (index, child) in element.child_elements().enumerate() {
+                    path.push(index as u32);
+                    visit(source, child, path, before, range, cursor, properties)?;
+                    path.pop();
+                }
+            }
+            "w:r" => {
+                let start = *cursor;
+                for child in element.child_elements() {
+                    if *cursor >= range.end {
+                        break;
+                    }
+                    let text = match child.name.as_str() {
+                        "w:rPr" => continue,
+                        "w:t" => child.text_content(),
+                        "w:tab" => "\t".to_owned(),
+                        "w:softHyphen" => "\u{ad}".to_owned(),
+                        "w:noBreakHyphen" => "\u{2011}".to_owned(),
+                        "w:drawing" | "w:pict" => {
+                            if before.get(*cursor)?.is_text() {
+                                return None;
+                            }
+                            *cursor += 1;
+                            continue;
+                        }
+                        _ if child.local_name() == "AlternateContent" => {
+                            if before.get(*cursor)?.is_text() {
+                                return None;
+                            }
+                            *cursor += 1;
+                            continue;
+                        }
+                        _ => return None,
+                    };
+                    for value in text.chars() {
+                        if *cursor >= range.end {
+                            break;
+                        }
+                        if before.get(*cursor)?.content != Content::Text(value) {
+                            return None;
+                        }
+                        *cursor += 1;
+                    }
+                }
+                if start < range.end && range.start < *cursor {
+                    let rpr = element
+                        .child_elements()
+                        .enumerate()
+                        .find(|(_, child)| child.name == "w:rPr");
+                    let raw = if let Some((index, _)) = rpr {
+                        path.push(index as u32);
+                        let span = docx_parse::serializer::element_span(source, path)?;
+                        path.pop();
+                        &source[span]
+                    } else {
+                        ""
+                    };
+                    if properties.is_some_and(|previous| previous != raw) {
+                        return None;
+                    }
+                    *properties = Some(raw);
+                }
+            }
+            "w:pPr" | "w:proofErr" | "w:smartTagPr" | "w:bookmarkStart" | "w:bookmarkEnd"
+            | "w:commentRangeStart" | "w:commentRangeEnd" | "w:permStart" | "w:permEnd" => {}
+            _ => return None,
+        }
+        Some(())
+    }
+    let limits = docx_parse::xml::ParseLimits::default();
+    let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+    let Ok(document) = docx_parse::xml::parse_xml(source.as_bytes(), "", &mut budget) else {
+        return false;
+    };
+    let Some(root) = document.root() else {
+        return false;
+    };
+    let mut cursor = 0;
+    let matched = visit(
+        source,
+        root,
+        &mut Vec::new(),
+        before,
+        &range,
+        &mut cursor,
+        &mut None,
+    )
+    .is_some();
+    matched && cursor == range.end
 }
 
 fn middle_alignment(before: &[Token], after: &[Token]) -> Option<Vec<(usize, usize)>> {
@@ -1120,7 +1241,7 @@ pub(crate) fn diff_paragraph_v1(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = alignment(&old, &new)
+    let retained = alignment(&old, &new, &context)
         .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
     let donors = DonorIndex::new(&old);
     let offsets = &donors.offsets;
@@ -1461,6 +1582,7 @@ mod tests {
             session_key: "p1",
             story: "body",
             metadata: None,
+            source_paragraph: None,
             seeded_markers: &[],
             live_markers: &[],
         }
@@ -1520,7 +1642,23 @@ mod tests {
             }
             let mut after = before.clone();
             after[0].content = SegmentContent::Text("Title ".to_owned());
-            let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+            let source = || {
+                let drawing = if drawing {
+                    "<w:r><w:drawing/></w:r>"
+                } else {
+                    ""
+                };
+                Some(format!("<w:p><w:r><w:t>Caption </w:t></w:r>{drawing}</w:p>"))
+            };
+            let patch = diff_paragraph_v1(
+                &before,
+                &after,
+                PatchContext {
+                    source_paragraph: Some(&source),
+                    ..context()
+                },
+            )
+            .unwrap();
             assert_eq!(patch.text_edits.len(), 1);
             let edit = &patch.text_edits[0];
             assert_eq!((edit.from, edit.to), (0, 7));

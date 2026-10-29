@@ -557,7 +557,9 @@ fn paragraph_id_edit(
         None => (insert(format!(" w14:paraId=\"{id}\"")), true),
         Some(_) => {
             let bound = scopes.0.iter().rev().flatten().find(|(prefix, uri)| {
-                *uri == W14_NAMESPACE && scopes.resolve(prefix) == Some(W14_NAMESPACE)
+                !prefix.is_empty()
+                    && *uri == W14_NAMESPACE
+                    && scopes.resolve(prefix) == Some(W14_NAMESPACE)
             });
             match bound {
                 Some((prefix, _)) => (insert(format!(" {prefix}:paraId=\"{id}\"")), false),
