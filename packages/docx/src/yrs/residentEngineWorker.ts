@@ -109,7 +109,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -1284,6 +1284,8 @@ interface SaveWarmup {
 let saveWarmup: SaveWarmup | null = null;
 const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
+const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
+const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -1597,7 +1599,9 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
   if (trappedIds.has(id)) return;
   trappedIds.add(id);
   trap = error;
-  const failed = editFailedAllocationBytes();
+  let memory: ReturnType<typeof wasmModuleMemories> = [];
+  try { memory = wasmModuleMemories(); } catch {}
+  const failed = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
   reply({
     id,
     ok: false,
@@ -1607,7 +1611,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
         : `Document worker trapped: ${error.message}`,
     terminal: true,
     ...(failed > 0 ? { outOfMemory: true } : {}),
-  });
+  }, [], memory);
 }
 
 async function handle(request: ScheduledRequest): Promise<void> {
@@ -3903,7 +3907,7 @@ function cancelSaveWarmup(): void {
   saveWarmupTimer = null;
   if (!saveWarmup) return;
   saveWarmup.cancelled = true;
-  saveWarmup.reject?.(new Error('Save warmup cancelled'));
+  saveWarmup.reject?.(trap ?? new Error('Save warmup cancelled'));
 }
 
 function interruptSaveWarmup(type: string): void {
@@ -3920,13 +3924,31 @@ function interruptSaveWarmup(type: string): void {
 
 function saveWarmupCurrent(attempt: SaveWarmup): boolean {
   return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
-    canPreloadSaveWasm();
+    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+}
+
+function saveWarmupHasHeadroom(): boolean {
+  const configured = openedDocument?.heapLimitBytes;
+  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
+  try {
+    memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+    return false;
+  }
+  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
+    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
+  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
+  const live = memory?.liveBytes;
+  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
+    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
 }
 
 function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!saveWarmupCurrent(attempt)) {
-      reject(new Error('Save warmup cancelled'));
+      reject(trap ?? new Error('Save warmup cancelled'));
       return;
     }
     attempt.reject = reject;
@@ -3936,10 +3958,10 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
       run: () => {
         attempt.reject = undefined;
         if (saveWarmupCurrent(attempt)) resolve();
-        else reject(new Error('Save warmup cancelled'));
+        else reject(trap ?? new Error('Save warmup cancelled'));
         return 'done';
       },
-      cancel: () => reject(new Error('Save warmup cancelled')),
+      cancel: () => reject(trap ?? new Error('Save warmup cancelled')),
       fail: reject,
     });
   });
@@ -3947,13 +3969,13 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
 
 function scheduleSaveWarmup(): void {
   if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
-    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm()) return;
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
   const owner = saveWarmupOwner;
   const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
     saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
   saveWarmupTimer = setTimeout(() => {
     saveWarmupTimer = null;
-    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished) return;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
     const attempt: SaveWarmup = { owner, cancelled: false };
     saveWarmup = attempt;
     void yieldSaveWarmup(attempt).then(async () => {
@@ -3963,7 +3985,11 @@ function scheduleSaveWarmup(): void {
       if (!saveWarmupCurrent(attempt)) return;
       await warmResidentSave(() => yieldSaveWarmup(attempt));
       if (!attempt.cancelled) saveWarmupFinished = true;
-    }).catch(() => {
+    }).catch((error: unknown) => {
+      if (error instanceof WebAssembly.RuntimeError) {
+        trapped(0, error);
+        return;
+      }
       if (!attempt.cancelled && session === owner) saveWarmupFinished = true;
     }).finally(() => {
       if (saveWarmup !== attempt) return;
@@ -3973,7 +3999,11 @@ function scheduleSaveWarmup(): void {
   }, delay);
 }
 
-function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
+function reply(
+  response: DocxEngineWorkerResponse,
+  transfer: Transferable[] = [],
+  memory?: ReturnType<typeof wasmModuleMemories>
+): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
@@ -3981,5 +4011,5 @@ function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []
   const { transfer: piped = [], ...collabUpdates } = drained ?? {};
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
-    memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
+    memory: memory ?? wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
 }

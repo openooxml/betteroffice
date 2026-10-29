@@ -6,6 +6,7 @@ export async function warmResidentSave(yieldSave: () => Promise<void>): Promise<
   const source = new Uint8Array(await createEmptyDocx());
   await yieldSave();
   const synthetic = createResidentSaveWarmupSession();
+  let trapped = false;
   try {
     await yieldSave();
     const hostJson = synthetic.openDocx(source);
@@ -16,7 +17,10 @@ export async function warmResidentSave(yieldSave: () => Promise<void>): Promise<
     synthetic.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'warm');
     await yieldSave();
     await synthetic.save(source, hostJson, undefined, [], { full: false }, undefined, yieldSave);
+  } catch (error) {
+    trapped = error instanceof WebAssembly.RuntimeError;
+    throw error;
   } finally {
-    synthetic.destroy();
+    if (!trapped) synthetic.destroy();
   }
 }

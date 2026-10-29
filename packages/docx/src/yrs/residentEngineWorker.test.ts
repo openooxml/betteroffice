@@ -81,7 +81,7 @@ beforeAll(async () => {
     './residentSaveWarmup': 'export const warmResidentSave = (yieldSave) => testHarness.warmSave(yieldSave);',
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
-    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.memories;',
+    '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.memories;',
     './residentCommandViewProjection':
       'export const projectCommandEchoContext = (input) => testHarness.projectEchoContext?.(input);',
     '../layout/render/frameDelta': `
@@ -533,7 +533,7 @@ const COMMAND_INIT: DocxCommandInitRequest = {
   fonts: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, extras: '{}',
 };
 
-async function commandWorker() {
+async function commandWorker(options: { heapLimitBytes?: number } = {}) {
   const w = worker();
   let terminated = false;
   const posted: DocxEngineWorkerRequest[] = [];
@@ -602,7 +602,7 @@ async function commandWorker() {
     };
   });
   const client = new ResidentEngineWorkerClient(port);
-  await client.open(new Uint8Array([1]));
+  await client.open(new Uint8Array([1]), options);
   return {
     w, client, posted, replies,
     get terminated() { return terminated; },
@@ -2428,6 +2428,7 @@ describe('resident display page release', () => {
 describe('document worker warmup', () => {
   const SAVE_WARMUP_IDLE_MS = 300;
   const SAVE_WARMUP_INPUT_IDLE_MS = 600;
+  const SAVE_WARMUP_HEAP_LIMIT_BYTES = 512 * 1024 * 1024;
   const timers = new Map<number, { callback: () => void; ms: number }>();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -2483,8 +2484,8 @@ describe('document worker warmup', () => {
     expect(until()).toBe(true);
   }
 
-  async function preparedSaveWorker() {
-    const arm = await commandWorker();
+  async function preparedSaveWorker(options: { heapLimitBytes?: number } = { heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES }) {
+    const arm = await commandWorker(options);
     arm.w.harness.now = () => now;
     await arm.client.commandInit(COMMAND_INIT);
     arm.client.prepareSave();
@@ -2494,7 +2495,7 @@ describe('document worker warmup', () => {
   }
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
-    const { w, client } = await commandWorker();
+    const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
     w.harness.now = () => now;
     const loading = deferred();
     w.harness.preloadSave.mockImplementation(async () => loading.promise);
@@ -2711,6 +2712,134 @@ describe('document worker warmup', () => {
       advanceTimers(10_000);
       expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
     } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([[128, 65], [512, 385]])('save warmup skips low headroom with limit=%s MiB and live=%s MiB', async (limitMiB, liveMiB) => {
+    const { w, client } = await preparedSaveWorker({ heapLimitBytes: limitMiB * 1024 * 1024 });
+    w.harness.memories[0].liveBytes = liveMiB * 1024 * 1024;
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('an uncapped session checks the wasm32 ceiling, near ceiling=%s', async (nearCeiling) => {
+    const { w, client } = await preparedSaveWorker({});
+    w.harness.memories[0].liveBytes = nearCeiling ? 2 ** 32 - 64 * 1024 * 1024 : 100;
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(nearCeiling ? 0 : 1);
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('an uncapped session honors a lower declared memory maximum', async () => {
+    const { w, client } = await preparedSaveWorker({});
+    Object.assign(w.harness.memories[0], { maximumBytes: 128 * 1024 * 1024, liveBytes: 65 * 1024 * 1024 });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each(['unlimited', 'no-module', 'no-live-bytes', 'invalid-live-bytes', 'unreadable-stats'])('save warmup skips unavailable headroom: %s', async (missing) => {
+    const options = {
+      heapLimitBytes: missing === 'unlimited' ? Infinity : SAVE_WARMUP_HEAP_LIMIT_BYTES,
+    };
+    const { w, client } = await preparedSaveWorker(options);
+    const memories = w.harness.memories;
+    if (missing === 'no-module') w.harness.memories = [];
+    if (missing === 'no-live-bytes') Object.assign(memories[0], { liveBytes: undefined });
+    if (missing === 'invalid-live-bytes') memories[0].liveBytes = NaN;
+    if (missing === 'unreadable-stats') Object.defineProperty(w.harness, 'memories', {
+      configurable: true, get() { throw new Error('unreadable memory stats'); },
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => !w.harness.saveWarmupState!().active);
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      expect(w.harness.saveWarmupState!().attempts).toBe(0);
+    } finally {
+      Object.defineProperty(w.harness, 'memories', { configurable: true, writable: true, value: memories });
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('save warmup stops before a phase after headroom drops, queued=%s', async (queued) => {
+    const { w, client } = await preparedSaveWorker();
+    const after = mock(() => {});
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      await yieldSave();
+      const next = queued ? yieldSave() : null;
+      w.harness.memories[0].liveBytes = 385 * 1024 * 1024;
+      await (next ?? yieldSave());
+      after();
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      expect(after).not.toHaveBeenCalled();
+      expect(await client.revisionCount()).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test.each([false, true])('a save warmup runtime error terminates the worker through the trap path, oom=%s', async (oom) => {
+    const { w, client, replies } = await preparedSaveWorker();
+    w.harness.warmSave.mockImplementation(async () => {
+      if (oom) w.harness.memories[0].failedAllocationBytes = 64;
+      throw new WebAssembly.RuntimeError('warmup unreachable');
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      await settleWarmup(() => replies.some((reply) => !reply.ok && reply.terminal === true));
+      expect(replies.find((reply) => !reply.ok && reply.terminal)).toMatchObject({
+        id: 0, ok: false, terminal: true,
+        error: oom
+          ? 'Document worker ran out of memory allocating 64 bytes: warmup unreachable'
+          : 'Document worker trapped: warmup unreachable',
+        ...(oom ? { outOfMemory: true } : {}),
+      });
+      expect(client.commandFailure).toMatchObject({ code: oom ? 'out-of-memory' : 'trap' });
+      expect(await w.send({ type: 'revisionCount' })).toMatchObject({ ok: false, terminal: true });
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+    } finally {
+      client.destroy();
+    }
+  });
+
+  test('a runtime error reading warmup headroom still reports a terminal trap', async () => {
+    const { w, client, replies } = await preparedSaveWorker();
+    const memories = w.harness.memories;
+    Object.defineProperty(w.harness, 'memories', {
+      configurable: true, get() { throw new WebAssembly.RuntimeError('headroom unreachable'); },
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+      expect(replies.at(-1)).toMatchObject({
+        id: 0, ok: false, terminal: true, memory: [],
+        error: 'Document worker trapped: headroom unreachable',
+      });
+      expect(client.commandFailure).toMatchObject({ code: 'trap' });
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(w.harness, 'memories', { configurable: true, writable: true, value: memories });
       client.destroy();
     }
   });

@@ -8,6 +8,7 @@ import { createEditSession, preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createResidentEngineSession } from './residentEngineSession';
+import * as residentEngineSession from './residentEngineSession';
 import { saveResidentDocument, type ResidentSaveRecord } from './residentSave';
 import { warmResidentSave } from './residentSaveWarmup';
 import * as parseWasm from '../docx/parseWasm';
@@ -123,6 +124,24 @@ it('disposes the synthetic session when a save warmup phase is cancelled', async
     create.mockRestore();
     writer.mockRestore();
     restoreFree?.();
+  }
+});
+
+it('preserves a save warmup runtime error without entering scratch cleanup', async () => {
+  const synthetic = residentEngineSession.createResidentSaveWarmupSession();
+  const failure = new WebAssembly.RuntimeError('warmup unreachable');
+  const create = spyOn(residentEngineSession, 'createResidentSaveWarmupSession').mockReturnValue(synthetic);
+  const save = spyOn(synthetic, 'save').mockRejectedValueOnce(failure);
+  const destroy = spyOn(synthetic, 'destroy').mockImplementation(() => { throw new Error('unsafe cleanup'); });
+  try {
+    await expect(warmResidentSave(async () => {})).rejects.toBe(failure);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+  } finally {
+    create.mockRestore();
+    save.mockRestore();
+    destroy.mockRestore();
+    synthetic.destroy();
   }
 });
 

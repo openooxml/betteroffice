@@ -26,7 +26,7 @@ export interface InProcessResidentWorker extends ResidentEngineWorkerPort {
 }
 
 const STUBS: Record<string, string> = {
-  '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
+  '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.wasmModuleMemories();',
   './residentEngineSession':
     'export const createResidentEngineSession = (heapLimitBytes, clientId) => testHarness.createSession(heapLimitBytes, clientId);',
   './wasm/index': `
