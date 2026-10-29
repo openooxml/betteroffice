@@ -12,13 +12,17 @@ environment in
 
 ```sh
 /tmp/fontpack-venv/bin/pip install zstandard==0.25.0
-/tmp/fontpack-venv/bin/python crates/fontpack/tests/fixtures/make_fixtures.py
+/tmp/fontpack-venv/bin/python crates/betteroffice-fonts/tests/fixtures/make_fixtures.py
 ```
 
-Commit the six font files, two `.source.sha256` sidecars and three checksum-bearing
-`.zst` fixtures beside this script. Each sidecar contains the lowercase hexadecimal
-SHA-256 of the exact source TTF bytes followed by a newline.
+Commit the six font files, two `.source.sha256` sidecars and five checksum-bearing
+`.zst` fixtures beside this script. Each sidecar lists the SHA-256 of the TTF,
+`.uw2` and `.woff2` files in `sha256sum` format.
 The Regular frame has no dictionary, the Bold `.ttf.zst` frame
 uses the Regular `.uw2` as its raw dictionary, and the Bold `.nodict.zst` frame
-is independent. Rust tests also compress the `.uw2` files in memory.
+is independent. The Regular `.sfnt.zst` frame contains its exact TTF without a
+dictionary; the Bold `.sfnt.zst` frame contains its exact TTF with the Regular
+TTF as its raw-content dictionary. Rust tests compare reconstructed woff2t fonts
+with wuff's decode of the matching `.woff2` when `build` is enabled.
+Rust tests also compress the `.uw2` files in memory.
 TypeScript woff2t tests only require the built wasm decoder.

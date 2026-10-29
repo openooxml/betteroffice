@@ -37,6 +37,14 @@ export declare class Document {
 }
 export type DocxDocument = Document
 
+export interface DecodedFontFace {
+  font: Uint8Array
+  payload?: Uint8Array
+}
+
+/** Decodes one font pack face using this engine's linked decoder. */
+export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
+
 export interface DocumentStructure {
   bodyParagraphs: number
   bodyTables: number

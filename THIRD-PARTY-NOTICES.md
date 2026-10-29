@@ -173,13 +173,14 @@ It is used only by tests.
 
 ## Zstandard decoder
 
-`vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
+`crates/betteroffice-fonts/vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
 `facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
-It is compiled into the internal `fontpack` crate and its standalone wasm decoder.
+It is compiled into the `betteroffice-fonts` crate, linked into every engine
+and the standalone wasm decoder.
 
 Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
-License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
+License: BSD-3-Clause (`crates/betteroffice-fonts/vendor/zstd/LICENSE`). The same upstream notice is
 included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt` for decoder
 redistribution.
 

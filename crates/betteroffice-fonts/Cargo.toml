@@ -1,18 +1,22 @@
 [package]
-name = "fontpack"
+name = "betteroffice-fonts"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "Apache-2.0 AND BSD-3-Clause"
 homepage.workspace = true
 repository.workspace = true
-publish = false
-description = "Internal font pack encoder and standalone zstd decoder."
+publish = ["crates-io"]
+description = "Font pack decoder (zstd and woff2t) shared by every BetterOffice engine; the pack builder is behind the `build` feature."
+readme = "README.md"
+keywords = ["fonts", "zstd", "woff2", "ooxml"]
+categories = ["compression", "parser-implementations"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "fontpack"
+path = "src/bin/fontpack.rs"
 required-features = ["build"]
 
 [features]

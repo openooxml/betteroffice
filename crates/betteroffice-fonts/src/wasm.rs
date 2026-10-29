@@ -6,7 +6,7 @@ use core::slice;
 use crate::{Codec, DecodeError, allocator, decode_face};
 
 #[cfg(target_feature = "atomics")]
-compile_error!("fontpack's standalone decoder requires wasm without atomics");
+compile_error!("the standalone font decoder requires wasm without atomics");
 
 struct Output(UnsafeCell<Option<Vec<u8>>>);
 
@@ -24,14 +24,14 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fp_alloc(len: usize) -> *mut u8 {
-    allocator::malloc(len)
+    allocator::FONTPACK_malloc(len)
 }
 
 #[unsafe(no_mangle)]
 /// # Safety
 /// `bytes` must be null or a live `fp_alloc` allocation.
 pub unsafe extern "C" fn fp_free(bytes: *mut u8, _len: usize) {
-    unsafe { allocator::free(bytes) };
+    unsafe { allocator::FONTPACK_free(bytes) };
 }
 
 fn valid_range(bytes: *const u8, len: usize) -> bool {

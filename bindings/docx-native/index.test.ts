@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-import { openDocument } from './index.js';
+import { decodeFontFace, openDocument } from './index.js';
+import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 const fixture = readFileSync(
   new URL('../../apps/demo/public/betteroffice-demo.docx', import.meta.url)
@@ -20,6 +21,23 @@ const font = readFileSync(
 );
 
 describe('@betteroffice/docx-native', () => {
+  test('linked font decoder returns known answers and shared errors', () => {
+    expect(typeof decodeFontFace).toBe('function');
+    for (const entry of fontCases()) {
+      const decoded = decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+      expectFontFace(decoded, entry);
+      for (const bytes of [decoded.font, decoded.payload].filter((value) => value !== undefined)) {
+        expect(bytes).toBeInstanceOf(Uint8Array);
+        expect(Buffer.isBuffer(bytes)).toBe(false);
+        expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
+      }
+    }
+    for (const entry of fontErrorCases()) {
+      expect(() => decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput))
+        .toThrow(new Error(entry.message));
+    }
+  });
+
   test('opens, inspects, lays out, renders, and saves a document', async () => {
     const document = await openDocument(fixture, { author: 'Node test' });
 

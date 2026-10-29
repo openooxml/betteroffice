@@ -19,3 +19,12 @@ Copyright 2013 The Carlito Project Authors, with Reserved Font Name "Carlito".
 License: SIL Open Font License, Version 1.1 — the full text is distributed with
 this package as `licenses/Carlito-OFL.txt`. The OFL applies to the font asset
 only, not to this package's code.
+
+---
+
+## Zstandard decoder
+
+The decompression-only amalgamation of `facebook/zstd` v1.5.7 is compiled into
+the extension through the `betteroffice-fonts` crate to decode compressed font
+packs. Copyright (c) Meta Platforms, Inc. and affiliates. License: BSD-3-Clause
+(`licenses/BSD-3-Clause-Zstandard.txt`).

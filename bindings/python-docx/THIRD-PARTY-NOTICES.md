@@ -7,3 +7,8 @@ on crates.io. The package's own code is Apache-2.0.
 
 Document text is measured and rasterized with fonts the caller registers
 through `register_font`, so no face is compiled into the wheel.
+
+The extension also links the Zstandard decoder (`facebook/zstd` v1.5.7, decompression
+only) through the `betteroffice-fonts` crate to decode compressed font packs.
+Copyright (c) Meta Platforms, Inc. and affiliates. It is distributed under the
+BSD-3-Clause license in `licenses/BSD-3-Clause-Zstandard.txt`.

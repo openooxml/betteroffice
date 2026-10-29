@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Read, edit, and lay out PPTX presentations. Rust engine, no PowerPoint and no LibreOffice."
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md", "licenses/BSD-3-Clause-Zstandard.txt"]
 requires-python = ">=3.9"
 authors = [{ name = "OpenOOXML" }]
 keywords = [

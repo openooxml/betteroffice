@@ -7,6 +7,33 @@ use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
 
+#[napi(object)]
+pub struct DecodedFontFace {
+    pub font: Uint8Array,
+    pub payload: Option<Uint8Array>,
+}
+
+/// Decodes one font pack face using this engine's linked decoder.
+#[napi(
+    js_name = "decodeFontFace",
+    ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
+    ts_return_type = "DecodedFontFace"
+)]
+pub fn decode_font_face(
+    bytes: Uint8Array,
+    codec: String,
+    dict: Option<Uint8Array>,
+    max_output: Option<f64>,
+) -> Result<DecodedFontFace> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
+            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+    Ok(DecodedFontFace {
+        font: Uint8Array::new(decoded.font),
+        payload: decoded.payload.map(Uint8Array::new),
+    })
+}
+
 fn byte_result(env: Env, bytes: Vec<u8>) -> Result<Uint8Array> {
     let mut buffer = ArrayBuffer::copy_from(&env, &bytes)?;
     unsafe { buffer.as_mut() }.copy_from_slice(&bytes);

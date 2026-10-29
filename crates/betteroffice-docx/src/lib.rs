@@ -1,5 +1,8 @@
 //! Typed facade for opening, editing, laying out, and saving DOCX files.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+
 mod document;
 mod error;
 #[cfg(feature = "raster")]

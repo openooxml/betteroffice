@@ -12,6 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+betteroffice-fonts = { path = "../../crates/betteroffice-fonts" }
 betteroffice-pptx = { path = "../../crates/betteroffice-pptx", features = ["raster"] }
 betteroffice-pptx-engine = { path = "../../crates/pptx-engine" }
 getrandom = "0.3"

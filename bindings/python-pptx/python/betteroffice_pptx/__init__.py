@@ -46,6 +46,7 @@ from .exports import (
 from .proposals import Proposal, ProposalChange, ProposalPreview
 
 from ._betteroffice_pptx import (
+    decode_font_face,
     AdjustEdit,
     CollaborativeStateError,
     Comment,
@@ -83,6 +84,7 @@ from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
 __all__ = [
+    "decode_font_face",
     "AdjustEdit",
     "CollaborativeStateError",
     "Comment",

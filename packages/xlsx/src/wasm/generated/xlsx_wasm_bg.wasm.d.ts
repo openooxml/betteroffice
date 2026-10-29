@@ -1,5 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
+export const FONTPACK_calloc: (a: number, b: number) => number;
+export const FONTPACK_free: (a: number) => void;
+export const FONTPACK_malloc: (a: number) => number;
 export const __externref_table_alloc: () => number;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
@@ -11,6 +14,7 @@ export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_start: () => void;
 export const allocationFailure: () => number;
+export const decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const displayListCellLimit: () => number;
 export const exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

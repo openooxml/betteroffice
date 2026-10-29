@@ -88,6 +88,21 @@ def main():
         frame = compressor.compress(payload)
         (DIRECTORY / f"Synthetic-{style}.{suffix}").write_bytes(frame)
 
+    regular_sfnt = (DIRECTORY / "Synthetic-Regular.ttf").read_bytes()
+    for style, dictionary in [("Regular", None), ("Bold", regular_sfnt)]:
+        payload = (DIRECTORY / f"Synthetic-{style}.ttf").read_bytes()
+        raw_dict = (
+            zstd.ZstdCompressionDict(dictionary, dict_type=zstd.DICT_TYPE_RAWCONTENT)
+            if dictionary else None
+        )
+        params = zstd.ZstdCompressionParameters.from_level(
+            19, source_size=len(payload), dict_size=len(dictionary or b""),
+            window_log=20, write_checksum=1, write_content_size=1, write_dict_id=0,
+        )
+        compressor = zstd.ZstdCompressor(compression_params=params, dict_data=raw_dict)
+        frame = compressor.compress(payload)
+        (DIRECTORY / f"Synthetic-{style}.sfnt.zst").write_bytes(frame)
+
 
 if __name__ == "__main__":
     main()

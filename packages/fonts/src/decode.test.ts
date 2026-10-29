@@ -241,7 +241,7 @@ describe('internal font decoder', () => {
 });
 
 function fixture(name: string): Uint8Array<ArrayBuffer> {
-  return new Uint8Array(readFileSync(new URL(`../../../crates/fontpack/tests/fixtures/${name}`, import.meta.url)));
+  return new Uint8Array(readFileSync(new URL(`../../../crates/betteroffice-fonts/tests/fixtures/${name}`, import.meta.url)));
 }
 
 function trappingDecoder(): Uint8Array<ArrayBuffer> {

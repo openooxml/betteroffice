@@ -1,5 +1,8 @@
 //! Typed facade for opening, editing, calculating, rendering, and saving XLSX files.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+
 mod authority;
 mod error;
 mod move_range;

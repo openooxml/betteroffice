@@ -16,6 +16,7 @@ default = []
 raster = ["dep:pptx-raster"]
 
 [dependencies]
+betteroffice-fonts = { workspace = true }
 pptx-edit.workspace = true
 pptx-parse.workspace = true
 pptx-raster = { workspace = true, optional = true }

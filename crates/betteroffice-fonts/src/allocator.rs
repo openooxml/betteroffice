@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use alloc::alloc::{Layout, alloc, dealloc};
 use core::ptr;
 
@@ -39,7 +41,7 @@ fn layout(size: usize) -> Option<Layout> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn malloc(size: usize) -> *mut u8 {
+pub extern "C" fn FONTPACK_malloc(size: usize) -> *mut u8 {
     let Some(layout) = layout(size) else {
         return ptr::null_mut();
     };
@@ -54,11 +56,11 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
+pub extern "C" fn FONTPACK_calloc(count: usize, size: usize) -> *mut u8 {
     let Some(len) = count.checked_mul(size) else {
         return ptr::null_mut();
     };
-    let bytes = malloc(len);
+    let bytes = FONTPACK_malloc(len);
     if !bytes.is_null() {
         unsafe { ptr::write_bytes(bytes, 0, len) };
     }
@@ -68,7 +70,7 @@ pub extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 /// # Safety
 /// `bytes` must be null or a live allocation from this module.
-pub unsafe extern "C" fn free(bytes: *mut u8) {
+pub unsafe extern "C" fn FONTPACK_free(bytes: *mut u8) {
     if bytes.is_null() {
         return;
     }
