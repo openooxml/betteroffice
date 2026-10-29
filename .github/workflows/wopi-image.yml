@@ -2,7 +2,8 @@ name: WOPI image
 
 # Pull requests and main pushes build and smoke test the image without
 # pushing. Publishing happens only through workflow_call from release.yml
-# after packages publish, and only when WOPI_IMAGE_PUBLISH is true.
+# after packages publish, only when WOPI_IMAGE_PUBLISH is true, and only after
+# a required reviewer approves the ghcr-wopi-image environment.
 # The image version is the version field of apps/wopi/package.json: that
 # package stays private and is never published to npm, so bump its version
 # there to change the version tag below. A version tag that already exists
@@ -116,6 +117,7 @@ jobs:
   publish:
     name: Publish WOPI image
     if: ${{ inputs.publish && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true' }}
+    environment: ghcr-wopi-image
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:

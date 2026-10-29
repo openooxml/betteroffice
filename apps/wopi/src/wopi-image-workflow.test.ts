@@ -247,6 +247,15 @@ describe("wopi-image workflow", () => {
     }
   });
 
+  test("publishes only after approval of the ghcr-wopi-image environment", () => {
+    const workflow = loadWorkflow(wopiWorkflowPath);
+    const jobs = workflow.jobs as Record<string, { environment?: unknown; permissions?: { packages?: string } }>;
+    expect(jobs.publish!.environment).toBe("ghcr-wopi-image");
+    for (const [name, job] of Object.entries(jobs)) {
+      if (job.permissions?.packages === "write" && name !== "publish") throw new Error(`${name} has packages: write`);
+    }
+  });
+
   test("keeps permissions minimal per job", () => {
     const workflow = loadWorkflow(wopiWorkflowPath);
     expect(workflow.permissions).toEqual({ contents: "read" });
