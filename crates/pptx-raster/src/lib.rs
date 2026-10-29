@@ -45,6 +45,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
+use ooxml_raster::encode_png;
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
     GradientType, ImageCrop, ImageDestination, ImageTile, Paint as SlidePaint, Primitive,
@@ -331,22 +332,6 @@ fn surface_dimension(value: f32, scale: f32, label: &str) -> Result<u32, String>
         return Err(format!("{label} must be finite and positive"));
     }
     Ok((scaled.ceil() as u32).max(1))
-}
-
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
 }
 
 struct Painter<'a, 'b> {
@@ -1160,31 +1145,7 @@ fn frame_rect(x: f32, y: f32, w: f32, h: f32) -> Result<Rect, String> {
 /// scales by the box before it is placed — the same mapping `buildPath` does in
 /// the canvas backend.
 fn geometry_path(commands: &[GeometryPathCommand], x: f32, y: f32, w: f32, h: f32) -> Option<Path> {
-    if commands.is_empty() {
-        return None;
-    }
-    let px = |value: f64| x + value as f32 * w;
-    let py = |value: f64| y + value as f32 * h;
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match *command {
-            GeometryPathCommand::Move { x, y } => builder.move_to(px(x), py(y)),
-            GeometryPathCommand::Line { x, y } => builder.line_to(px(x), py(y)),
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(px(cpx), py(cpy), px(x), py(y))
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => builder.cubic_to(px(cp1x), py(cp1y), px(cp2x), py(cp2y), px(x), py(y)),
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder.finish()
+    ooxml_raster::path_from_commands(commands, |px, py| (x + px as f32 * w, y + py as f32 * h))
 }
 
 fn shader_paint(
@@ -1481,11 +1442,7 @@ impl ImageBudget {
             (data, size, (size.width() as f32, size.height() as f32))
         };
         pptx_render::apply_image_effects(&mut data, effects);
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         Some(DecodedImage {
             pixmap: Arc::new(Pixmap::from_vec(data, size)?),
             intrinsic,
@@ -1559,31 +1516,9 @@ pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
         return Ok(Color::TRANSPARENT);
     }
     if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
+        return ooxml_raster::parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
     }
     Err(format!("bad color: {value}"))
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let expanded;
-    let hex = match hex.len() {
-        3 | 4 => {
-            expanded = hex
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => hex,
-        _ => return None,
-    };
-    let byte = |index: usize| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok();
-    Some(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
 }
 
 #[cfg(test)]
@@ -3297,5 +3232,25 @@ mod tests {
         let mut budget = ImageBudget::default();
         let (_, size) = budget.decode_raster(&gif).expect("ordinary gif decodes");
         assert_eq!((size.width(), size.height()), (64, 64));
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_hex_and_transparent_grammar() {
+        for value in ["#abc", "#abcd", "#abcdef", "#abcdef01", "TRANSPARENT"] {
+            assert!(parse_color(value).is_ok());
+        }
+        for value in ["rgba(1,2,3,0.5)", "rgb(1,2,3)", "#ggg", "red"] {
+            assert_eq!(parse_color(value), Err(format!("bad color: {value}")));
+        }
+    }
+
+    #[test]
+    fn empty_geometry_stays_absent() {
+        assert!(geometry_path(&[], 1.0, 2.0, 3.0, 4.0).is_none());
     }
 }

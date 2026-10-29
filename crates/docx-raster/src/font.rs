@@ -755,25 +755,7 @@ fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
     if commands.is_empty() {
         return Ok(None);
     }
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match *command {
-            PathCmd::MoveTo { x, y } => builder.move_to(x, y),
-            PathCmd::LineTo { x, y } => builder.line_to(x, y),
-            PathCmd::QuadTo { cx, cy, x, y } => builder.quad_to(cx, cy, x, y),
-            PathCmd::CubicTo {
-                c1x,
-                c1y,
-                c2x,
-                c2y,
-                x,
-                y,
-            } => builder.cubic_to(c1x, c1y, c2x, c2y, x, y),
-            PathCmd::Close => builder.close(),
-        }
-    }
-    builder
-        .finish()
+    ooxml_raster::outline_path(commands)
         .map(Some)
         .ok_or_else(|| "glyph outline has no drawable commands".to_string())
 }
@@ -1042,5 +1024,19 @@ mod tests {
         let upem = fonts.metrics(ids[0]).expect("metrics").units_per_em;
         assert_eq!(refilled.upem, f32::from(upem));
         assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn outline_keeps_empty_and_undrawable_results() {
+        assert!(outline_path(&[]).unwrap().is_none());
+        assert_eq!(
+            outline_path(&[PathCmd::MoveTo { x: 0.0, y: 0.0 }]).unwrap_err(),
+            "glyph outline has no drawable commands"
+        );
     }
 }

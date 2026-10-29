@@ -20,12 +20,13 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use ooxml_raster::{encode_png, parse_css_color as parse_color};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
-    LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
-    RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
+    Color, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin, LinearGradient, Mask,
+    Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point, RadialGradient, Rect,
+    SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use font::{FontSpecCache, PaintContext};
@@ -1574,11 +1575,7 @@ impl<'c> PageImages<'c> {
             return Decode::Refused;
         };
         let mut data = decoded.into_rgba8().into_raw();
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         match Pixmap::from_vec(data, size) {
             Some(pixmap) => Decode::Decoded(pixmap),
             None => Decode::Refused,
@@ -2578,22 +2575,22 @@ impl ClipSurface {
 }
 
 fn clipped_to_target(clip: FRect, width: u32, height: u32) -> Option<FRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(FRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| FRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 pub(crate) fn primitive_visual_transform(
@@ -2710,80 +2707,6 @@ pub(crate) fn color_with_opacity(value: &str, opacity: f32) -> Result<Color, Str
     Ok(color)
 }
 
-fn parse_color(value: &str) -> Result<Color, String> {
-    if value.eq_ignore_ascii_case("transparent") {
-        return Ok(Color::TRANSPARENT);
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgb(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, false).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgba(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, true).ok_or_else(|| format!("bad color: {value}"));
-    }
-    Err(format!("bad color: {value}"))
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let expanded;
-    let hex = match hex.len() {
-        3 | 4 => {
-            expanded = hex
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => hex,
-        _ => return None,
-    };
-    let byte = |index: usize| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok();
-    Some(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
-}
-
-fn parse_rgb_function(body: &str, alpha: bool) -> Option<Color> {
-    let values = body.split(',').map(str::trim).collect::<Vec<_>>();
-    if values.len() != if alpha { 4 } else { 3 } {
-        return None;
-    }
-    let channel = |value: &str| -> Option<u8> {
-        if let Some(percent) = value.strip_suffix('%') {
-            let value = percent.parse::<f32>().ok()?.clamp(0.0, 100.0);
-            Some((value * 2.55).round() as u8)
-        } else {
-            Some(value.parse::<f32>().ok()?.clamp(0.0, 255.0).round() as u8)
-        }
-    };
-    let alpha = if alpha {
-        if let Some(percent) = values[3].strip_suffix('%') {
-            (percent.parse::<f32>().ok()?.clamp(0.0, 100.0) * 2.55).round() as u8
-        } else {
-            (values[3].parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8
-        }
-    } else {
-        255
-    };
-    Some(Color::from_rgba8(
-        channel(values[0])?,
-        channel(values[1])?,
-        channel(values[2])?,
-        alpha,
-    ))
-}
-
 fn mix_color(left: Color, right: Color, amount: f32) -> Color {
     let amount = amount.clamp(0.0, 1.0);
     Color::from_rgba(
@@ -2804,22 +2727,6 @@ fn ensure_keys(
         return Err(format!("unsupported {context} field: {key}"));
     }
     Ok(())
-}
-
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(data)
 }
 
 #[cfg(test)]
@@ -2973,5 +2880,23 @@ mod tests {
         let mut page = PageImages::new(&mut cache);
         let mut charge = ImageCharge::default();
         assert!(matches!(page.decode(&gif, &mut charge), Decode::Decoded(_)));
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_css_forms_and_error_text() {
+        assert_eq!(
+            parse_color("rgba(1,2,3,0.5)"),
+            Ok(Color::from_rgba8(1, 2, 3, 128))
+        );
+        assert_eq!(
+            parse_color("#abcd"),
+            Ok(Color::from_rgba8(170, 187, 204, 221))
+        );
+        assert_eq!(parse_color("red"), Err("bad color: red".to_string()));
     }
 }

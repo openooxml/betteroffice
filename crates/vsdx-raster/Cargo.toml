@@ -15,14 +15,15 @@ categories = ["rendering", "graphics"]
 name = "vsdx_raster"
 
 [dependencies]
+ooxml-raster.workspace = true
 ooxml-drawingml.workspace = true
 ooxml-text.workspace = true
 vsdx-parse.workspace = true
 vsdx-render.workspace = true
 tiny-skia = "0.12"
-png = "0.18"
 rustybuzz = "0.20"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [dev-dependencies]
+png = "0.18"
 serde_json = "1"

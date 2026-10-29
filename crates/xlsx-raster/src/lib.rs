@@ -285,19 +285,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
         }
     }
 
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
+    ooxml_raster::encode_png(pixmap, w, h)
 }
 
 /// paint a line honoring its dash/double style; a `double` without a rail width
@@ -515,65 +503,29 @@ impl ClipSurface {
 }
 
 fn clipped_to_target(clip: DlRect, width: u32, height: u32) -> Option<DlRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(DlRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| DlRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 fn build_path(commands: &[GeometryPathCommand]) -> Result<Path, String> {
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match command {
-            GeometryPathCommand::Move { x, y } => {
-                builder.move_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Line { x, y } => {
-                builder.line_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(
-                    path_coord(*cpx)?,
-                    path_coord(*cpy)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => {
-                builder.cubic_to(
-                    path_coord(*cp1x)?,
-                    path_coord(*cp1y)?,
-                    path_coord(*cp2x)?,
-                    path_coord(*cp2y)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder
-        .finish()
-        .ok_or_else(|| "path has no drawable commands".to_string())
+    ooxml_raster::try_path_from_commands(commands, |x, y| {
+        Ok::<_, String>((path_coord(x)?, path_coord(y)?))
+    })?
+    .ok_or_else(|| "path has no drawable commands".to_string())
 }
 
 fn path_coord(value: f64) -> Result<f32, String> {
@@ -592,19 +544,7 @@ fn parse_color(s: &str) -> Result<Color, String> {
     if hex.len() != 6 && hex.len() != 8 {
         return Err(format!("bad color: {s}"));
     }
-    let byte = |i: usize| {
-        hex.as_bytes()
-            .get(i..i + 2)
-            .and_then(|pair| std::str::from_utf8(pair).ok())
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .ok_or_else(|| format!("bad color: {s}"))
-    };
-    Ok(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
+    ooxml_raster::parse_hex_color(hex).ok_or_else(|| format!("bad color: {s}"))
 }
 
 #[cfg(test)]
@@ -1356,5 +1296,41 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(trace, fixture.trace);
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_long_hex_only_grammar() {
+        for value in ["#abcdef", "#abcdef01"] {
+            assert!(parse_color(value).is_ok());
+        }
+        for value in [
+            "#abc",
+            "#abcd",
+            "transparent",
+            "rgb(1,2,3)",
+            "abcdef",
+            "#gggggg",
+        ] {
+            assert_eq!(parse_color(value), Err(format!("bad color: {value}")));
+        }
+    }
+
+    #[test]
+    fn path_keeps_empty_and_non_finite_errors() {
+        assert_eq!(
+            build_path(&[]).unwrap_err(),
+            "path has no drawable commands"
+        );
+        for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+            assert_eq!(
+                build_path(&[GeometryPathCommand::Move { x: value, y: 0.0 }]).unwrap_err(),
+                "path contains a non-finite coordinate"
+            );
+        }
     }
 }
