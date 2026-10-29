@@ -200,6 +200,52 @@ describe("apps/wopi/Dockerfile", () => {
     expect(source).toContain("wasm32-unknown-unknown");
   });
 
+  test("build tools select pinned downloads for each build architecture", () => {
+    const build = stages(readDockerfile())[0]!.join("\n");
+    expect(build).toMatch(/^ARG BUILDARCH$/m);
+    for (const tool of [
+      {
+        name: "wasm-pack",
+        variable: "wasm_pack",
+        url: "https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-${wasm_pack_arch}-unknown-linux-musl.tar.gz",
+        amd64: "c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a",
+        arm64: "e17ef0806381c3a0acb9c9ddad643a49facaa5a2ecf657a421d4d8f3357a24b7",
+      },
+      {
+        name: "binaryen",
+        variable: "binaryen",
+        url: "https://github.com/WebAssembly/binaryen/releases/download/version_132/binaryen-version_132-${binaryen_arch}-linux.tar.gz",
+        amd64: "195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572",
+        arm64: "c58562417836c5d0493d89bdefc434933bdc097db641b483df86bcfa557a107f",
+      },
+    ]) {
+      const instruction = build.split(/^RUN /m).find((run) => run.includes(`-o /tmp/${tool.name}.tar.gz`))!;
+      expect(instruction).toMatch(/^case "\$BUILDARCH" in \\/);
+      expect(instruction).toContain(`amd64) ${tool.variable}_arch=x86_64; ${tool.variable}_sha256=${tool.amd64} ;;`);
+      expect(instruction).toContain(`arm64) ${tool.variable}_arch=aarch64; ${tool.variable}_sha256=${tool.arm64} ;;`);
+      expect(instruction).toContain('*) echo "Unsupported build architecture: $BUILDARCH" >&2; exit 1 ;;');
+      expect(instruction).toContain(`"${tool.url}"`);
+      expect(instruction).toContain(`echo "\${${tool.variable}_sha256}  /tmp/${tool.name}.tar.gz" | sha256sum -c -`);
+    }
+  });
+
+  test("runtime code and assets are root owned and read only before switching to bun", () => {
+    const all = stages(readDockerfile());
+    const runtime = all[all.length - 1]!;
+    for (const line of runtime.filter((line) => /^COPY\s/i.test(line))) {
+      expect(line).toContain("--chown=root:root");
+    }
+    const text = runtime.join("\n").replace(/[ \t]*\\\n[ \t]*/g, " ");
+    expect(text).not.toContain("--chown=bun");
+    expect(text).toContain("chown -R root:root /app && chmod -R a-w /app");
+    expect(text).toContain("mkdir -p /data && chown bun:bun /data");
+    expect(text).toMatch(/^USER bun$/m);
+    const permissions = text.indexOf("chmod -R a-w /app");
+    expect(text.lastIndexOf("\nCOPY ")).toBeLessThan(permissions);
+    expect(text.indexOf("bun install --production")).toBeLessThan(permissions);
+    expect(permissions).toBeLessThan(text.indexOf("\nUSER bun\n"));
+  });
+
   test("runtime stage is non-root with port, volume, proof key default and healthcheck", () => {
     const source = readDockerfile();
     const all = stages(source);
@@ -219,12 +265,16 @@ describe("apps/wopi/Dockerfile", () => {
       .map((line) => line.trim());
     for (const entry of [
       "packages/*/src/wasm/generated/**",
+      "**/.env",
+      "**/.env.*",
       "**/.dev.vars",
       "**/.next",
       "**/.open-next",
       "**/.wrangler",
       "**/.cargo-target",
       "fuzz",
+      "data",
+      "apps/wopi/data",
       "crates/*/tests/fixtures/**",
     ]) {
       expect(lines).toContain(entry);
