@@ -226,6 +226,8 @@ describe('XlsxEditor engine dispatch', () => {
         restorers.push(() => load.mockRestore(), () => errors.mockRestore());
         const onError = mock((_error: Error) => { throw new Error('Host callback failed'); });
         const ready = mock(() => {});
+        const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
+          : { file, experimentalWorkerOpen: false as const };
         const failed = render(<StrictMode>
           {engine === 'legacy'
             ? <XlsxEditor file={file} {...{ [LEGACY_SYNC_API]: true as const }} onReady={ready} onError={onError} />
