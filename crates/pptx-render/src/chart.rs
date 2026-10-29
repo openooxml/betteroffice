@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect, PlotSink,
-    PlotTextAlign, chart_aria_label, plot_chart_into,
+    CHART_FONT_FAMILY, ChartSpace, PlotChart, PlotDataLabels, PlotFill, PlotFont, PlotOp, PlotRect,
+    PlotSink, PlotTextAlign, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -66,49 +66,50 @@ pub(crate) fn chart_primitive<'a>(
     })
 }
 
-/// visits chart fonts with zero text advances so labels remain unsplit.
 pub(crate) fn visit_chart_fonts(
     space: &ChartSpace,
     default_font: &str,
-    rect: PlotRect,
-    remaining: &mut usize,
-    visit: &mut dyn FnMut(&PlotFont),
+    visit: &mut dyn FnMut(&str, bool, bool),
 ) {
-    struct FontSink<'a> {
-        remaining: &'a mut usize,
-        visit: &'a mut dyn FnMut(&PlotFont),
-    }
-
-    impl PlotSink for FontSink<'_> {
-        fn turns_text(&self) -> bool {
-            true
-        }
-
-        fn accepts_more(&mut self) -> bool {
-            *self.remaining > 0
-        }
-
-        fn measure_text(&mut self, _: &str, font: &PlotFont) -> Option<f64> {
-            if self.accepts_more() {
-                (self.visit)(font);
-            }
-            Some(0.0)
-        }
-
-        fn push_op(&mut self, op: PlotOp) -> bool {
-            if !self.accepts_more() {
-                return false;
-            }
-            *self.remaining -= 1;
-            if let PlotOp::Text { font, .. } = op {
-                (self.visit)(&font);
-            }
-            true
-        }
-    }
-
     let chart = plot_model_with_font(space, default_font);
-    plot_chart_into(&chart, rect, &mut FontSink { remaining, visit });
+    let mut collect = |style: PlotTextStyle<'_>, bold| {
+        let family = style
+            .font
+            .or(chart.text.chart.font)
+            .filter(|font| !font.is_empty())
+            .unwrap_or(CHART_FONT_FAMILY);
+        let bold = style.bold.or(chart.text.chart.bold).unwrap_or(bold);
+        let italic = style.italic.or(chart.text.chart.italic).unwrap_or(false);
+        visit(family, bold, italic);
+    };
+    collect(PlotTextStyle::default(), false);
+    if chart.title.is_some_and(|title| !title.is_empty()) {
+        collect(chart.text.title, true);
+    }
+    if chart
+        .legend
+        .is_some_and(|legend| legend.visible != Some(false))
+    {
+        collect(chart.text.legend, false);
+    }
+    for axis in &chart.axes {
+        collect(axis.text, false);
+    }
+    for series in chart.series.iter().chain(
+        chart
+            .plot_groups
+            .iter()
+            .flat_map(|group| group.series.iter()),
+    ) {
+        for labels in series.labels.iter().chain(
+            series
+                .points
+                .iter()
+                .filter_map(|point| point.labels.as_ref()),
+        ) {
+            collect(labels.text, false);
+        }
+    }
 }
 
 fn plot_model_with_font<'a>(space: &'a ChartSpace, default_font: &'a str) -> PlotChart<'a> {

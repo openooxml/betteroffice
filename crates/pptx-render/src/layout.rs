@@ -446,7 +446,6 @@ impl SlideRenderer {
                 },
                 requests: &mut requests,
                 shape_count: 0,
-                chart_budget: MAX_CHART_PRIMITIVES,
             };
             for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
                 walker.parsed_shape(shape, &stable_id, Space::root())?;
@@ -1110,7 +1109,6 @@ struct FontRequestWalker<'a, 'b> {
     scope: TextScope<'a>,
     requests: &'b mut FontRequests,
     shape_count: usize,
-    chart_budget: usize,
 }
 
 impl FontRequestWalker<'_, '_> {
@@ -1309,14 +1307,13 @@ impl FontRequestWalker<'_, '_> {
                     crate::chart::visit_chart_fonts(
                         &part.chart,
                         &default_font,
-                        PlotRect {
-                            x: f64::from(rect.x),
-                            y: f64::from(rect.y),
-                            w: f64::from(rect.w),
-                            h: f64::from(rect.h),
+                        &mut |family, bold, italic| {
+                            self.requests.record(RequestedFontFace {
+                                family: resolve_font_family(scope.theme, family),
+                                bold,
+                                italic,
+                            });
                         },
-                        &mut self.chart_budget,
-                        &mut |font| self.requests.record(chart_font_request(scope.theme, font)),
                     );
                 }
             }

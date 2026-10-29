@@ -624,49 +624,50 @@ fn chart_fonts_agree_with_layout() {
     })));
 }
 
-#[test]
-fn narrow_chart_requests_may_be_a_superset_of_layout() {
+fn narrow_chart() -> pptx_parse::ChartSpace {
     use pptx_parse::{ChartAxis, ChartPlotGroup, ChartSeries, ChartSpace, ChartTextProperties};
 
-    let session = chart_session(
-        ChartSpace {
-            chart_type: "column".to_owned(),
-            axis_list: Some(vec![
-                ChartAxis {
-                    id: Some("category".to_owned()),
-                    axis_type: "category".to_owned(),
-                    text: Some(ChartTextProperties {
-                        font: Some("Category Face".to_owned()),
-                        ..ChartTextProperties::default()
-                    }),
-                    ..ChartAxis::default()
-                },
-                ChartAxis {
-                    id: Some("value".to_owned()),
-                    axis_type: "value".to_owned(),
-                    number_format: Some("$#,##0.00".to_owned()),
-                    text: Some(ChartTextProperties {
-                        font: Some("Value Face".to_owned()),
-                        ..ChartTextProperties::default()
-                    }),
-                    ..ChartAxis::default()
-                },
-            ]),
-            plot_groups: vec![ChartPlotGroup {
-                chart_type: Some("column".to_owned()),
-                axis_ids: vec!["category".to_owned(), "value".to_owned()],
-                series: vec![ChartSeries {
-                    categories: (0..10).map(|index| format!("Category {index}")).collect(),
-                    values: vec![1_000_000.0; 10],
-                    color: "#112233".to_owned(),
-                    ..ChartSeries::default()
-                }],
-                ..ChartPlotGroup::default()
+    ChartSpace {
+        chart_type: "column".to_owned(),
+        axis_list: Some(vec![
+            ChartAxis {
+                id: Some("category".to_owned()),
+                axis_type: "category".to_owned(),
+                text: Some(ChartTextProperties {
+                    font: Some("Category Face".to_owned()),
+                    ..ChartTextProperties::default()
+                }),
+                ..ChartAxis::default()
+            },
+            ChartAxis {
+                id: Some("value".to_owned()),
+                axis_type: "value".to_owned(),
+                number_format: Some("$#,##0.00".to_owned()),
+                text: Some(ChartTextProperties {
+                    font: Some("Value Face".to_owned()),
+                    ..ChartTextProperties::default()
+                }),
+                ..ChartAxis::default()
+            },
+        ]),
+        plot_groups: vec![ChartPlotGroup {
+            chart_type: Some("column".to_owned()),
+            axis_ids: vec!["category".to_owned(), "value".to_owned()],
+            series: vec![ChartSeries {
+                categories: (0..10).map(|index| format!("Category {index}")).collect(),
+                values: vec![1_000_000.0; 10],
+                color: "#112233".to_owned(),
+                ..ChartSeries::default()
             }],
-            ..ChartSpace::default()
-        },
-        952_500,
-    );
+            ..ChartPlotGroup::default()
+        }],
+        ..ChartSpace::default()
+    }
+}
+
+#[test]
+fn narrow_chart_requests_may_be_a_superset_of_layout() {
+    let session = chart_session(narrow_chart(), 952_500);
     let collected = faces(&Renderer::new(), &session, None);
     let collected = collected
         .as_array()
@@ -687,6 +688,50 @@ fn narrow_chart_requests_may_be_a_superset_of_layout() {
     assert!(collected.contains("category face"));
     assert!(requested.contains("value face"));
     assert!(!requested.contains("category face"));
+}
+
+#[test]
+fn chart_font_collection_continues_after_the_plot_budget() {
+    use pptx_parse::{ChartSpace, ChartTextProperties, GraphicFrameData, ShapeNode};
+
+    let original = chart_session(narrow_chart(), 952_500);
+    let mut package = original.package().clone();
+    let ShapeNode::GraphicFrame(frame) = &package.slides[0].shapes[0] else {
+        panic!("expected a chart frame")
+    };
+    let mut frame = frame.clone();
+    for id in 3..5_002 {
+        frame.base.id = id;
+        package.slides[0]
+            .shapes
+            .push(ShapeNode::GraphicFrame(frame.clone()));
+    }
+    let mut late = package.charts[0].clone();
+    late.part_path = "ppt/charts/late.xml".to_owned();
+    late.chart = ChartSpace {
+        chart_type: "column".to_owned(),
+        title: Some("Late title".to_owned()),
+        title_text: Some(ChartTextProperties {
+            font: Some("Late Face".to_owned()),
+            ..ChartTextProperties::default()
+        }),
+        ..ChartSpace::default()
+    };
+    frame.base.id = 5_002;
+    frame.data = GraphicFrameData::Chart {
+        relationship_id: "late".to_owned(),
+        part_path: Some(late.part_path.clone()),
+    };
+    package.charts.push(late);
+    package.slides[0]
+        .shapes
+        .push(ShapeNode::GraphicFrame(frame));
+    let session =
+        DeckSession::from_package_with_source(package, b"font chart budget", 17104).unwrap();
+    let collected = faces(&Renderer::new(), &session, None);
+    assert!(collected.as_array().unwrap().contains(&json!({
+        "family":"Late Face","bold":true,"italic":false,
+    })));
 }
 
 #[test]
