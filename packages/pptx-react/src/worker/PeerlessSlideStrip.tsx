@@ -32,15 +32,20 @@ const Preview = memo(function Preview({ frame, run, fit, previewFit, current }: 
         toolbar: { target: null, storedMarks: {}, formatting: null, alignment: null,
           hyperlink: null, table: null, canEditText: false } },
       thumbnails: new Map(), dirtyThumbnailIds: new Set<string>() };
-    painter.paintFrame(frame, view);
-    void painter.whenPainted().catch(() => {});
-    resume.current = async (current) => {
-      if (!await painter.whenPainted() && current() && valid()) {
-        painter.paintFrame(frame, view);
-        await painter.whenPainted();
-      }
+    let alive = true;
+    const paint = () => {
+      painter.paintFrame(frame, view);
+      const completion = painter.whenPainted();
+      return completion.then((painted) => {
+        if (painted && alive && painter.whenPainted() === completion) painter.freeze();
+      });
     };
-    return () => { resume.current = null; painter.dispose(); };
+    void paint().catch(() => {});
+    resume.current = async (current) => {
+      const completion = painter.whenPainted();
+      if (!await completion && current() && valid() && painter.whenPainted() === completion) await paint();
+    };
+    return () => { alive = false; resume.current = null; painter.dispose(); };
   }, [frame, run, fit.scale, fit.dpr]);
   useEffect(() => {
     let alive = true;

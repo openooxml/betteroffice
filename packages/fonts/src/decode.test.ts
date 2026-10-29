@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import * as nodeZlib from 'node:zlib';
 import fontsPackage from '../package.json';
-import { decodeFontBytes } from './decode';
+import { decodeFontBytes, decodeFontFace } from './decode';
 
 interface Zlib {
   zstdCompressSync?: (
@@ -63,10 +64,14 @@ function compress(bytes: Uint8Array, dictionary?: Uint8Array): Uint8Array {
 }
 
 describe('internal font decoder', () => {
+  test.skipIf(process.env.CI === undefined)('decoder wasm is built in CI', () => {
+    expect(hasWasm).toBe(true);
+  });
+
   test('unsupported manifest codecs fail before decoding or passthrough', async () => {
     for (const bytes of [hello, helloFrame]) {
-      await expect(decodeFontBytes(bytes, undefined, { codec: 'woff2t+zstd' }))
-        .rejects.toThrow('Unsupported font face codec: woff2t+zstd');
+      await expect(decodeFontBytes(bytes, undefined, { codec: 'woff2t' }))
+        .rejects.toThrow('Unsupported font face codec: woff2t');
       await expect(decodeFontBytes(bytes, undefined, { codec: '' }))
         .rejects.toThrow('Unsupported font face codec');
     }
@@ -193,6 +198,52 @@ describe('internal font decoder', () => {
       expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
     });
 
+    test.skipIf(!hasWasm)('a trapping wasm instance is discarded and the next decode reloads it', async () => {
+      const trapUrl = new URL('https://font-decoder.invalid/trap-recovery.wasm');
+      const trapModule = trappingDecoder();
+      const originalFetch = globalThis.fetch;
+      let loads = 0;
+      const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== trapUrl.href) return originalFetch(input, init);
+        loads++;
+        const bytes = loads === 1 ? trapModule : new Uint8Array(readFileSync(wasmUrl));
+        return Promise.resolve(new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } }));
+      }) as typeof fetch);
+      try {
+        await expect(decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl }))
+          .rejects.toThrow('Font face could not be decoded');
+        expect(loads).toBe(1);
+        expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl })))
+          .toEqual(hello);
+        expect(loads).toBe(2);
+        const corrupt = helloFrame.slice();
+        corrupt[corrupt.length - 1] ^= 1;
+        await expect(decodeFontBytes(corrupt, undefined, { wasmUrl: trapUrl })).rejects.toThrow('checksum');
+        expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl: trapUrl })))
+          .toEqual(hello);
+        expect(loads).toBe(2);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    test.skipIf(!hasWasm)('without native zstd or wasmUrl the default decoder url loads the built wasm', async () => {
+      const deployment = mkdtempSync(join(tmpdir(), 'fonts-decoder-'));
+      try {
+        copyFileSync(new URL('./decode.ts', import.meta.url), join(deployment, 'decode.ts'));
+        mkdirSync(join(deployment, 'decoder'));
+        copyFileSync(wasmUrl, join(deployment, 'decoder/fontpack.wasm'));
+        const { decodeFontBytes: decode } = await import(pathToFileURL(join(deployment, 'decode.ts')).href);
+        expect(new Uint8Array(await decode(helloFrame))).toEqual(hello);
+        const corrupt = helloFrame.slice();
+        corrupt[corrupt.length - 1] ^= 1;
+        await expect(decode(corrupt)).rejects.toThrow('Font face checksum failed');
+      } finally {
+        rmSync(deployment, { recursive: true, force: true });
+      }
+    });
+
     test.skipIf(!hasWasm)('bundled published entry loads custom assets with the shipped decoder', async () => {
       const deployment = mkdtempSync(join(tmpdir(), 'fonts-bundle-'));
       const originalFetch = globalThis.fetch;
@@ -274,5 +325,174 @@ describe('internal font decoder', () => {
       const wrong = new Uint8Array(dict.length);
       await expect(decodeFontBytes(frame, wrong, { wasmUrl })).rejects.toThrow(/corrupt|dictionary|checksum/);
     });
+  });
+});
+
+function fixture(name: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(readFileSync(new URL(`../../../crates/fontpack/tests/fixtures/${name}`, import.meta.url)));
+}
+
+function trappingDecoder(): Uint8Array<ArrayBuffer> {
+  function leb(value: number): number[] {
+    const bytes: number[] = [];
+    do {
+      const byte = value & 127;
+      value >>>= 7;
+      bytes.push(byte | (value === 0 ? 0 : 128));
+    } while (value !== 0);
+    return bytes;
+  }
+  function section(id: number, bytes: number[]): number[] {
+    return [id, ...leb(bytes.length), ...bytes];
+  }
+  const names = [
+    'fp_alloc', 'fp_free', 'fp_decode', 'fp_decode_face',
+    'fp_out_ptr', 'fp_out_len', 'fp_out_free',
+    'fp_payload_ptr', 'fp_payload_len', 'fp_payload_free',
+  ];
+  const exports = [1 + names.length, 6, ...new TextEncoder().encode('memory'), 2, 0];
+  for (const name of names) {
+    const bytes = new TextEncoder().encode(name);
+    exports.push(...leb(bytes.length), ...bytes, 0, 0);
+  }
+  return new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    ...section(1, [1, 96, 1, 127, 1, 127]),
+    ...section(3, [1, 0]),
+    ...section(5, [1, 0, 1]),
+    ...section(7, exports),
+    ...section(10, [1, 3, 0, 0, 11]),
+  ]);
+}
+
+function glyphCount(font: ArrayBuffer): number {
+  const bytes = new Uint8Array(font);
+  expect(bytes.subarray(0, 4)).toEqual(new Uint8Array([0, 1, 0, 0]));
+  const data = new DataView(font);
+  for (let index = 0; index < data.getUint16(4); index++) {
+    const record = 12 + index * 16;
+    if (data.getUint32(record) === 0x6d617870) {
+      return data.getUint16(data.getUint32(record + 8) + 4);
+    }
+  }
+  throw new Error('Missing maxp table');
+}
+
+describe('internal woff2t font decoder', () => {
+  const woff2t = { wasmUrl, codec: 'woff2t+zstd' };
+
+  test('woff2t inputs above 64 MiB are refused before the decoder sees them', async () => {
+    const oversized = new Uint8Array(64 * 1024 * 1024 + 1);
+    await expect(decodeFontFace(helloFrame, oversized, { ...woff2t, maxOutput: 0x7fffffff }))
+      .rejects.toThrow('too large');
+  });
+
+  test.skipIf(!hasWasm)('reconstructs synthetic faces and returns the raw dictionary payload', async () => {
+    const regularFrame = fixture('Synthetic-Regular.ttf.zst');
+    const boldFrame = fixture('Synthetic-Bold.ttf.zst');
+    const regular = await decodeFontFace(regularFrame, undefined, woff2t);
+    expect(new Uint8Array(regular.payload!)).toEqual(fixture('Synthetic-Regular.uw2'));
+    expect(glyphCount(regular.font)).toBe(5);
+    const bold = await decodeFontFace(boldFrame, regular.payload, woff2t);
+    const independent = await decodeFontFace(fixture('Synthetic-Bold.nodict.zst'), undefined, woff2t);
+    expect(new Uint8Array(bold.font)).toEqual(new Uint8Array(independent.font));
+    expect(new Uint8Array(bold.payload!)).toEqual(fixture('Synthetic-Bold.uw2'));
+    expect(glyphCount(bold.font)).toBe(glyphCount(new Uint8Array(fixture('Synthetic-Bold.ttf')).buffer));
+    expect(new Uint8Array(await decodeFontBytes(boldFrame, regular.payload, woff2t)))
+      .toEqual(new Uint8Array(bold.font));
+    expect(bold.font).not.toBe(bold.payload);
+    expect(new Uint8Array(regular.font)).not.toEqual(new Uint8Array(regular.payload!));
+  });
+
+  test.skipIf(!hasWasm)('wrong dictionaries, checksum errors and reconstruction failures release outputs', async () => {
+    const regularFrame = fixture('Synthetic-Regular.ttf.zst');
+    const boldFrame = fixture('Synthetic-Bold.ttf.zst');
+    const wrong = new Uint8Array(fixture('Synthetic-Regular.uw2').length);
+    await expect(decodeFontFace(boldFrame, wrong, woff2t)).rejects.toThrow(/corrupt|dictionary|checksum/);
+    await expect(decodeFontFace(boldFrame, undefined, woff2t)).rejects.toThrow(/corrupt|dictionary|checksum/);
+    const regularFont = await decodeFontBytes(regularFrame, undefined, woff2t);
+    await expect(decodeFontFace(boldFrame, regularFont, woff2t)).rejects.toThrow(/corrupt|dictionary|checksum/);
+    const corrupt = regularFrame.slice();
+    corrupt[corrupt.length - 1] ^= 1;
+    await expect(decodeFontFace(corrupt, undefined, woff2t)).rejects.toThrow('checksum');
+    await expect(decodeFontFace(helloFrame, undefined, woff2t)).rejects.toThrow('WOFF2 reconstruction');
+    expect(glyphCount((await decodeFontFace(regularFrame, undefined, woff2t)).font)).toBe(5);
+  });
+
+  test.skipIf(!hasWasm)('bounds both the transformed payload and reconstructed font', async () => {
+    const frame = fixture('Synthetic-Regular.ttf.zst');
+    const payload = fixture('Synthetic-Regular.uw2');
+    await expect(decodeFontFace(frame, undefined, { ...woff2t, maxOutput: payload.length - 1 }))
+      .rejects.toThrow('too large');
+    const decoded = await decodeFontFace(frame, undefined, woff2t);
+    expect(decoded.font.byteLength).toBeGreaterThan(payload.length);
+    await expect(decodeFontFace(frame, undefined, { ...woff2t, maxOutput: decoded.font.byteLength - 1 }))
+      .rejects.toThrow('WOFF2 reconstruction');
+  });
+
+  test.skipIf(!hasWasm)('font and payload buffers remain owned across calls and transfers', async () => {
+    const frame = fixture('Synthetic-Regular.ttf.zst');
+    const [first, second] = await Promise.all([
+      decodeFontFace(frame, undefined, woff2t),
+      decodeFontFace(frame, undefined, woff2t),
+    ]);
+    expect(first.font).not.toBe(second.font);
+    expect(first.payload).not.toBe(second.payload);
+    structuredClone(first.font, { transfer: [first.font] });
+    structuredClone(first.payload!, { transfer: [first.payload!] });
+    expect(glyphCount(second.font)).toBe(5);
+    const bold = await decodeFontFace(fixture('Synthetic-Bold.ttf.zst'), second.payload, woff2t);
+    expect(glyphCount(bold.font)).toBe(5);
+    const plain = await decodeFontFace(helloFrame, undefined, { wasmUrl, codec: 'zstd' });
+    expect(new Uint8Array(plain.font)).toEqual(hello);
+    expect(plain.payload).toBeUndefined();
+  });
+
+  test.skipIf(!hasWasm)('raw ABI clears both output cells on errors and legacy decodes', async () => {
+    const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
+    const wasm = instance.exports as unknown as {
+      memory: WebAssembly.Memory;
+      fp_alloc(len: number): number;
+      fp_free(ptr: number, len: number): void;
+      fp_decode(...args: number[]): number;
+      fp_decode_face(...args: number[]): number;
+      fp_out_ptr(): number;
+      fp_out_len(): number;
+      fp_out_free(): void;
+      fp_payload_ptr(): number;
+      fp_payload_len(): number;
+      fp_payload_free(): void;
+    };
+    const frame = fixture('Synthetic-Regular.ttf.zst');
+    const ptr = wasm.fp_alloc(frame.length) >>> 0;
+    expect(ptr).not.toBe(0);
+    try {
+      new Uint8Array(wasm.memory.buffer, ptr, frame.length).set(frame);
+      expect(wasm.fp_decode_face(ptr, frame.length, 0, 0, 65536, 1)).toBe(0);
+      expect(wasm.fp_out_len()).toBeGreaterThan(0);
+      expect(wasm.fp_payload_len()).toBe(fixture('Synthetic-Regular.uw2').length);
+      expect(wasm.fp_decode_face(ptr, frame.length, 0, 0, 65536, 2)).toBe(-6);
+      expect(wasm.fp_out_ptr()).toBe(0);
+      expect(wasm.fp_payload_ptr()).toBe(0);
+      expect(wasm.fp_decode_face(ptr, frame.length, 0, 0, 65536, 1)).toBe(0);
+      expect(wasm.fp_decode(ptr, frame.length, 0, 0, 65536)).toBe(0);
+      expect(wasm.fp_out_len()).toBe(fixture('Synthetic-Regular.uw2').length);
+      expect(wasm.fp_payload_len()).toBe(0);
+      expect(wasm.fp_decode_face(ptr, 1, 0, 0, 65536, 1)).toBe(-1);
+      expect(wasm.fp_out_len()).toBe(0);
+      expect(wasm.fp_payload_len()).toBe(0);
+    } finally {
+      wasm.fp_out_free();
+      wasm.fp_payload_free();
+      wasm.fp_free(ptr, frame.length);
+    }
+  });
+
+  test('recognized woff2t codec preserves passthrough ownership', async () => {
+    const source = new Uint8Array([0, 1, 0, 0, 5]);
+    const result = await decodeFontFace(source, undefined, { codec: 'woff2t+zstd' });
+    expect(new Uint8Array(result.font)).toEqual(source);
+    expect(result.font).not.toBe(source.buffer);
+    expect(result.payload).toBeUndefined();
   });
 });

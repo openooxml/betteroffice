@@ -28,13 +28,31 @@ interface Decoder {
     dictLen: number,
     maxOutput: number,
   ): number;
+  fp_decode_face(
+    srcPtr: number,
+    srcLen: number,
+    dictPtr: number,
+    dictLen: number,
+    maxOutput: number,
+    codec: number,
+  ): number;
   fp_out_ptr(): number;
   fp_out_len(): number;
   fp_out_free(): void;
+  fp_payload_ptr(): number;
+  fp_payload_len(): number;
+  fp_payload_free(): void;
+}
+
+interface DecoderInstance {
+  wasm: Decoder;
+  failed: boolean;
+  invalidate(): void;
 }
 
 const DEFAULT_MAX_OUTPUT = 64 * 1024 * 1024;
-const instances = new Map<string, Promise<Decoder>>();
+const WOFF2T_MAX_OUTPUT = 64 * 1024 * 1024;
+const instances = new Map<string, Promise<DecoderInstance>>();
 
 function builtinModule<T>(name: string): T | undefined {
   const proc = (
@@ -141,7 +159,11 @@ async function instantiate(url: URL): Promise<Decoder> {
   const exports = instance.exports;
   if (
     !(exports.memory instanceof WebAssembly.Memory) ||
-    ['fp_alloc', 'fp_free', 'fp_decode', 'fp_out_ptr', 'fp_out_len', 'fp_out_free'].some(
+    [
+      'fp_alloc', 'fp_free', 'fp_decode', 'fp_decode_face',
+      'fp_out_ptr', 'fp_out_len', 'fp_out_free',
+      'fp_payload_ptr', 'fp_payload_len', 'fp_payload_free',
+    ].some(
       (name) => typeof exports[name] !== 'function',
     )
   ) {
@@ -150,11 +172,21 @@ async function instantiate(url: URL): Promise<Decoder> {
   return exports as unknown as Decoder;
 }
 
-function decoder(url: URL): Promise<Decoder> {
+function decoder(url: URL): Promise<DecoderInstance> {
   const key = url.href;
   const cached = instances.get(key);
   if (cached) return cached;
-  const promise = instantiate(url);
+  const promise = instantiate(url).then((wasm) => {
+    const instance: DecoderInstance = {
+      wasm,
+      failed: false,
+      invalidate() {
+        instance.failed = true;
+        if (instances.get(key) === promise) instances.delete(key);
+      },
+    };
+    return instance;
+  });
   instances.set(key, promise);
   promise.catch(() => {
     if (instances.get(key) === promise) instances.delete(key);
@@ -176,38 +208,63 @@ function wasmError(code: number): Error {
       return new Error('Cannot allocate memory for font face');
     case -9:
       return new Error('Font face has no content checksum');
+    case -10:
+      return new Error('Font face WOFF2 reconstruction failed');
     default:
       return corrupt();
   }
 }
 
 function decodeWasm(
-  wasm: Decoder,
+  instance: DecoderInstance,
   bytes: Uint8Array,
   dict: Uint8Array | undefined,
   maxOutput: number,
   expectedSize: number,
-): ArrayBuffer {
+  codec: 'zstd' | 'woff2t+zstd',
+): { font: ArrayBuffer; payload?: ArrayBuffer } {
+  const { wasm } = instance;
+  function invoke<T>(call: () => T): T {
+    try {
+      return call();
+    } catch {
+      instance.invalidate();
+      throw new Error('Font face could not be decoded');
+    }
+  }
   let srcPtr = 0;
   let dictPtr = 0;
   try {
-    srcPtr = wasm.fp_alloc(bytes.length) >>> 0;
+    srcPtr = invoke(() => wasm.fp_alloc(bytes.length)) >>> 0;
     if (!srcPtr) throw wasmError(-7);
     new Uint8Array(wasm.memory.buffer, srcPtr, bytes.length).set(bytes);
     if (dict?.length) {
-      dictPtr = wasm.fp_alloc(dict.length) >>> 0;
+      dictPtr = invoke(() => wasm.fp_alloc(dict.length)) >>> 0;
       if (!dictPtr) throw wasmError(-7);
       new Uint8Array(wasm.memory.buffer, dictPtr, dict.length).set(dict);
     }
-    const code = wasm.fp_decode(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput);
+    const code = invoke(() => codec === 'zstd'
+      ? wasm.fp_decode(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput)
+      : wasm.fp_decode_face(srcPtr, bytes.length, dictPtr, dict?.length ?? 0, maxOutput, 1));
     if (code !== 0) throw wasmError(code);
-    const len = wasm.fp_out_len() >>> 0;
-    if (len !== expectedSize) throw corrupt();
-    return copy(new Uint8Array(wasm.memory.buffer, wasm.fp_out_ptr() >>> 0, len));
+    const len = invoke(() => wasm.fp_out_len()) >>> 0;
+    if (len > maxOutput) throw wasmError(-3);
+    const font = copy(new Uint8Array(wasm.memory.buffer, invoke(() => wasm.fp_out_ptr()) >>> 0, len));
+    if (codec === 'zstd') {
+      if (len !== expectedSize) throw corrupt();
+      return { font };
+    }
+    const payloadLen = invoke(() => wasm.fp_payload_len()) >>> 0;
+    if (payloadLen !== expectedSize) throw corrupt();
+    const payload = copy(new Uint8Array(wasm.memory.buffer, invoke(() => wasm.fp_payload_ptr()) >>> 0, payloadLen));
+    return { font, payload };
   } finally {
-    wasm.fp_out_free();
-    if (dictPtr) wasm.fp_free(dictPtr, dict?.length ?? 0);
-    if (srcPtr) wasm.fp_free(srcPtr, bytes.length);
+    if (!instance.failed) {
+      invoke(() => wasm.fp_out_free());
+      invoke(() => wasm.fp_payload_free());
+      if (dictPtr) invoke(() => wasm.fp_free(dictPtr, dict?.length ?? 0));
+      if (srcPtr) invoke(() => wasm.fp_free(srcPtr, bytes.length));
+    }
   }
 }
 
@@ -216,23 +273,36 @@ export async function decodeFontBytes(
   dict?: ArrayBuffer | Uint8Array,
   options?: { maxOutput?: number; wasmUrl?: URL; codec?: string },
 ): Promise<ArrayBuffer> {
-  if (options?.codec !== undefined && options.codec !== 'zstd') {
-    throw new Error(`Unsupported font face codec: ${options.codec}`);
+  return (await decodeFontFace(bytes, dict, options)).font;
+}
+
+export async function decodeFontFace(
+  bytes: ArrayBuffer | Uint8Array,
+  dict?: ArrayBuffer | Uint8Array,
+  options?: { maxOutput?: number; wasmUrl?: URL; codec?: string },
+): Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }> {
+  const codec = options?.codec ?? 'zstd';
+  if (codec !== 'zstd' && codec !== 'woff2t+zstd') {
+    throw new Error(`Unsupported font face codec: ${codec}`);
   }
   const input = view(bytes);
   if (
     input.length < 4 ||
     input[0] !== 0x28 || input[1] !== 0xb5 || input[2] !== 0x2f || input[3] !== 0xfd
   ) {
-    return copy(input);
+    return { font: copy(input) };
   }
-  const maxOutput = options?.maxOutput ?? DEFAULT_MAX_OUTPUT;
-  if (!Number.isSafeInteger(maxOutput) || maxOutput < 0 || maxOutput > 0x7fffffff) {
+  const requested = options?.maxOutput ?? DEFAULT_MAX_OUTPUT;
+  if (!Number.isSafeInteger(requested) || requested < 0 || requested > 0x7fffffff) {
     throw new Error('Font face maxOutput must be an integer from 0 to 2147483647');
   }
+  const maxOutput = codec === 'woff2t+zstd' ? Math.min(requested, WOFF2T_MAX_OUTPUT) : requested;
   const expectedSize = contentSize(input, maxOutput);
   const dictionary = dict === undefined ? undefined : view(dict);
-  const zlib = builtinModule<NodeZlibLike>('node:zlib');
+  if (codec === 'woff2t+zstd' && (input.length > maxOutput || (dictionary?.length ?? 0) > maxOutput)) {
+    throw new Error('Font face is too large for maxOutput');
+  }
+  const zlib = codec === 'woff2t+zstd' ? undefined : builtinModule<NodeZlibLike>('node:zlib');
   if (typeof zlib?.zstdDecompressSync === 'function') {
     try {
       const buffer = builtinModule<NodeBufferLike>('node:buffer');
@@ -241,12 +311,14 @@ export async function decodeFontBytes(
         maxOutputLength: Math.max(1, maxOutput),
       });
       if (output.byteLength !== expectedSize) throw corrupt();
-      return copy(output);
+      return { font: copy(output) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const wasm = await decoder(options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url));
-  return decodeWasm(wasm, input, dictionary, maxOutput, expectedSize);
+  const url = options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url);
+  let instance = await decoder(url);
+  while (instance.failed) instance = await decoder(url);
+  return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);
 }

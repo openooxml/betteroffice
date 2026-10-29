@@ -921,7 +921,7 @@ fn write_child(
     let fragment = if let Some(fragment) = sparse_fragment(parent, child, &change.attributes)? {
         fragment
     } else {
-        let qualified = qualified(child);
+        let qualified = qualified(child)?;
         let mut writer = XmlWriter::with_capacity(64);
         if change.attributes.len() == 1 && change.attributes.contains_key("w:val") {
             if let Some(value) = &change.attributes["w:val"] {
@@ -1234,10 +1234,11 @@ fn patch_attributes(
     Ok(whole[node.span.start..end].to_owned())
 }
 
-fn qualified(child: &str) -> &'static str {
-    match child {
+fn qualified(child: &str) -> Result<&'static str, Failure> {
+    Ok(match child {
         "rPr" => "w:rPr",
         "pPr" => "w:pPr",
+        "pStyle" => "w:pStyle",
         "rFonts" => "w:rFonts",
         "b" => "w:b",
         "bCs" => "w:bCs",
@@ -1264,6 +1265,29 @@ fn qualified(child: &str) -> &'static str {
         "widowControl" => "w:widowControl",
         "pageBreakBefore" => "w:pageBreakBefore",
         "contextualSpacing" => "w:contextualSpacing",
-        _ => unreachable!("checked property name"),
+        _ => {
+            return Err(Failure::new(
+                PatchErrorCode::UnsupportedKey,
+                format!("key:{child}"),
+            ));
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_property_elements_return_an_unsupported_error() {
+        let mut changes = Change::default();
+        set(
+            &mut changes,
+            "unsupportedProperty",
+            "w:val",
+            Some("1".to_owned()),
+        );
+        let error = write_container("", "pPr", &changes).unwrap_err();
+        assert_eq!(error.code, PatchErrorCode::UnsupportedKey);
     }
 }

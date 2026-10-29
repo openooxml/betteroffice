@@ -195,6 +195,7 @@ mod tests {
             ..ParagraphFormatting::default()
         });
         let numbering = NumberingDefinitions {
+            first_picture_bullet: None,
             abstract_nums: vec![AbstractNumbering {
                 abstract_num_id: 4.0,
                 multi_level_type: Some("multilevel".to_owned()),
@@ -226,6 +227,7 @@ mod tests {
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"></w:numbering>"
         );
         let numbering = NumberingDefinitions {
+            first_picture_bullet: None,
             abstract_nums: vec![AbstractNumbering {
                 abstract_num_id: 0.0,
                 multi_level_type: None,
@@ -256,6 +258,7 @@ mod tests {
         attacked_level.suffix = Some(attack.to_owned());
         attacked_level.lvl_jc = Some(attack.to_owned());
         let numbering = NumberingDefinitions {
+            first_picture_bullet: None,
             abstract_nums: vec![AbstractNumbering {
                 abstract_num_id: 0.0,
                 multi_level_type: Some(attack.to_owned()),
@@ -286,6 +289,7 @@ mod tests {
             ..ParagraphFormatting::default()
         });
         let original = NumberingDefinitions {
+            first_picture_bullet: None,
             abstract_nums: vec![AbstractNumbering {
                 abstract_num_id: 0.0,
                 multi_level_type: Some("singleLevel".to_owned()),
