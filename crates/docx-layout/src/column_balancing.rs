@@ -28,6 +28,7 @@
 //! snapped height is not actually shorter than the region.
 
 use crate::hooks::row_keep_chains;
+use crate::line_fit::trailing_leading;
 use crate::measure_blocks::measured_section_break_marks;
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
@@ -53,10 +54,17 @@ pub trait ColumnBalancePaginator {
 /// both measured from the top of the range.
 struct SectionBalance {
     total_height: f64,
-    legal_breaks: Vec<f64>,
+    legal_breaks: Vec<ColumnBreak>,
+    fit_height: f64,
     /// No repeated table header or keep-with-next paragraph or row chain, so
     /// placement fills columns exactly as `content_packs` models them.
     packs_exactly: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ColumnBreak {
+    advance: f64,
+    fit: f64,
 }
 
 /// Stacks the range and collects its legal breaks, or `None` when the range
@@ -68,6 +76,7 @@ fn get_balanced_section_height(
     section_marks: &[bool],
 ) -> Option<SectionBalance> {
     let mut total_height = 0.0_f64;
+    let mut fit_height = 0.0_f64;
     let mut has_content = false;
     let mut legal_breaks = Vec::new();
     let mut packs_exactly = true;
@@ -85,23 +94,35 @@ fn get_balanced_section_height(
                 let line_height = line.line_height + line.float_skip_before.unwrap_or(0.0);
                 measured_line_height += line_height;
                 total_height += line_height;
+                fit_height = total_height - trailing_leading(block, line);
                 let lines_after = measure.lines.len() - line_index - 1;
                 let legal_inside = block.attrs.as_ref().and_then(|attrs| attrs.keep_lines)
                     != Some(true)
                     && line_index >= 1
                     && lines_after >= 2;
                 if legal_inside {
-                    legal_breaks.push(total_height);
+                    legal_breaks.push(ColumnBreak {
+                        advance: total_height,
+                        fit: fit_height,
+                    });
                 }
             }
             if !is_empty_paragraph(block) {
                 total_height += (measure.total_height - measured_line_height).max(0.0);
             }
             total_height += get_spacing_after(block);
+            fit_height = total_height
+                - measure
+                    .lines
+                    .last()
+                    .map_or(0.0, |line| trailing_leading(block, line));
             if block.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true) {
                 packs_exactly = false;
             } else {
-                legal_breaks.push(total_height);
+                legal_breaks.push(ColumnBreak {
+                    advance: total_height,
+                    fit: fit_height,
+                });
             }
             has_content = has_content || !measure.lines.is_empty();
             continue;
@@ -123,18 +144,30 @@ fn get_balanced_section_height(
                 }
                 for row in &table.rows {
                     total_height += row.height;
-                    legal_breaks.push(total_height);
+                    fit_height = total_height;
+                    legal_breaks.push(ColumnBreak {
+                        advance: total_height,
+                        fit: fit_height,
+                    });
                 }
                 has_content = has_content || !table.rows.is_empty();
             }
             BlockExtent::Image(image) => {
                 total_height += image.height;
-                legal_breaks.push(total_height);
+                fit_height = total_height;
+                legal_breaks.push(ColumnBreak {
+                    advance: total_height,
+                    fit: fit_height,
+                });
                 has_content = true;
             }
             BlockExtent::TextBox(text_box) => {
                 total_height += text_box.height;
-                legal_breaks.push(total_height);
+                fit_height = total_height;
+                legal_breaks.push(ColumnBreak {
+                    advance: total_height,
+                    fit: fit_height,
+                });
                 has_content = true;
             }
             _ => return None,
@@ -145,6 +178,7 @@ fn get_balanced_section_height(
         Some(SectionBalance {
             total_height,
             legal_breaks,
+            fit_height,
             packs_exactly,
         })
     } else {
@@ -154,20 +188,25 @@ fn get_balanced_section_height(
 
 /// Whether `columns` columns of `height`, each filled to the furthest legal
 /// break that fits, reach the end of the content.
-fn content_packs(legal_breaks: &[f64], total_height: f64, columns: usize, height: f64) -> bool {
+fn content_packs(
+    legal_breaks: &[ColumnBreak],
+    fit_height: f64,
+    columns: usize,
+    height: f64,
+) -> bool {
     let mut start = 0.0_f64;
     for _ in 0..columns {
         let limit = start + height + BOUNDARY_SLACK_PX;
-        if total_height <= limit {
+        if fit_height <= limit {
             return true;
         }
         match legal_breaks
             .iter()
             .rev()
             .copied()
-            .find(|boundary| *boundary > start && *boundary <= limit)
+            .find(|boundary| boundary.advance > start && boundary.fit <= limit)
         {
-            Some(boundary) => start = boundary,
+            Some(boundary) => start = boundary.advance,
             None => return false,
         }
     }
@@ -179,7 +218,8 @@ fn content_packs(legal_breaks: &[f64], total_height: f64, columns: usize, height
 fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator: &mut P,
     total_content_height: f64,
-    legal_breaks: &[f64],
+    legal_breaks: &[ColumnBreak],
+    fit_height: f64,
     packs_exactly: bool,
 ) {
     let columns = paginator.columns();
@@ -202,21 +242,16 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     let packs_exactly = packs_exactly && paginator.deferred_spacing() == 0.0;
     let half_way = legal_breaks
         .iter()
-        .copied()
+        .map(|boundary| boundary.advance)
         .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
         .find(|height| {
             packs_exactly
-                && content_packs(
-                    legal_breaks,
-                    total_content_height,
-                    columns.count as usize,
-                    *height,
-                )
+                && content_packs(legal_breaks, fit_height, columns.count as usize, *height)
         });
     let balanced_height = half_way.unwrap_or_else(|| {
         legal_breaks
             .iter()
-            .copied()
+            .map(|boundary| boundary.advance)
             .find(|boundary| *boundary >= ceiled)
             .unwrap_or(ceiled)
     });
@@ -253,6 +288,7 @@ pub(crate) fn balance_terminal_continuous_text_columns_with_marks<P: ColumnBalan
             paginator,
             balance.total_height,
             &balance.legal_breaks,
+            balance.fit_height,
             balance.packs_exactly,
         );
     }
@@ -446,6 +482,26 @@ mod tests {
             paginator.set_calls,
             vec![100.0 + (36.8 + 36.8 + 40.0) + BOUNDARY_SLACK_PX]
         );
+    }
+
+    #[test]
+    fn trailing_leading_can_make_the_fractional_balance_target_pack() {
+        let measured: Vec<MeasuredBlock> = [36.8, 36.8, 40.0, 40.0, 66.4]
+            .iter()
+            .map(|height| {
+                let mut paragraph = text_paragraph("item", 1, *height);
+                if *height == 40.0
+                    && let BlockExtent::Paragraph(extent) = &mut paragraph.measure
+                {
+                    extent.lines[0].ascent = 26.88;
+                    extent.lines[0].descent = 6.72;
+                }
+                paragraph
+            })
+            .collect();
+        let mut paginator = MockPaginator::new(3.0, 100.0, 300.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![100.0 + 73.6 + BOUNDARY_SLACK_PX]);
     }
 
     fn attr_paragraph(lines: &[f64], total_height: f64, attrs: ParagraphAttrs) -> MeasuredBlock {
