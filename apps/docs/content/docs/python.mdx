@@ -137,7 +137,7 @@ markdown = document.export_markdown(revision_view="markup")["markdown"]
 ```
 
 Omitted and unsupported content is listed in `diagnostics`; unusable limits raise
-`ExportError`. Python exports do not yet generate page maps; the JavaScript
+`ExportError`. Python exports do not generate page maps; the JavaScript
 packages attach them from a layout of the current document.
 
 `list_content_controls` lists the document's content controls as a dict in the
@@ -151,10 +151,10 @@ named = document.find_content_controls({"kind": "tag", "tag": "customer.name"})
 
 Each control carries its tag, alias, type, lock, placement, anchor and current
 `value`. Filling controls needs a JavaScript editing session and is not available
-from Python yet.
+from Python.
 
-Comparing two DOCX files into tracked changes is not available from Python yet;
-the JavaScript package's `compareDocx` offers it today.
+Comparing two DOCX files into tracked changes is not available from Python;
+the JavaScript package's `compareDocx` offers it.
 
 ## PPTX
 

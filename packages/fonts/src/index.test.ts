@@ -39,6 +39,20 @@ describe('resolution', () => {
     expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
   });
 
+  test('MS Japanese spellings resolve to the bundled Japanese face in every style', () => {
+    for (const family of [
+      'MS Mincho', 'ＭＳ 明朝', 'MS Gothic', 'ＭＳ ゴシック',
+      'MS PMincho', 'ＭＳ Ｐ明朝', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS UI Gothic',
+    ]) {
+      expect(resolveMetricCompatFamily(` ${family.toUpperCase()} `)).toBe('Noto Sans JP');
+      for (const bold of [false, true]) {
+        for (const italic of [false, true]) {
+          expect(resolveMetricCompatFace(family, bold, italic)?.file).toBe('NotoSansJP-Regular.otf');
+        }
+      }
+    }
+  });
+
   for (const [family, regular, boldFile] of [
     ['Segoe UI', 'Regular', 'Bold'],
     ['Segoe UI Light', 'Light', 'Light'],
