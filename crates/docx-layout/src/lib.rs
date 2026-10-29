@@ -68,6 +68,7 @@
 mod anchor;
 pub mod canonical;
 mod extent_key;
+mod fmath;
 pub mod hooks;
 mod line_fit;
 pub mod page_flow;
