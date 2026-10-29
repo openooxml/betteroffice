@@ -46,8 +46,8 @@ Text anchors are `PptxAnchor::Range` batch targets.
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.
 
-Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
-in minor releases and are listed in the changelog, and deprecations are announced before removal.
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
 
 ## Saving
 

@@ -418,8 +418,8 @@ The heavy operations release the GIL while they run (`open`, `open_path`,
 
 ## Compatibility
 
-Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
-in minor releases and are listed in the changelog, and deprecations are announced before removal.
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
 
 Saving patches edited XML,
 preserves untouched parts and rebuilds the ZIP container.

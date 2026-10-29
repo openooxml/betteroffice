@@ -230,8 +230,8 @@ documents genuinely proceed in parallel.
 
 ## Compatibility
 
-Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
-in minor releases and are listed in the changelog, and deprecations are announced before removal.
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
 
 Text replacement preserves
 paragraph and run formatting.
