@@ -605,6 +605,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leading_inline_box: Option<LeadingInlineBox>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -699,6 +701,13 @@ pub struct ParagraphAttrs {
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_del: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LeadingInlineBox {
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

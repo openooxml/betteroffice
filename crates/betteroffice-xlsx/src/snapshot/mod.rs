@@ -124,3 +124,22 @@ impl SnapshotProgress {
         self.ready
     }
 }
+
+pub(crate) fn source_full_precision(
+    source: Option<&ooxml_opc::SourceContainer>,
+) -> SnapshotResult<bool> {
+    let Some(source) = source else {
+        return Ok(true);
+    };
+    let parts = ooxml_opc::unzip_parts_where(
+        source.as_bytes(),
+        ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES,
+        |name| name.trim_start_matches('/') == "xl/workbook.xml",
+    )
+    .map_err(SnapshotError::new)?;
+    let Some((_, workbook_xml)) = parts.first() else {
+        return Ok(true);
+    };
+    xlsx_parse::workbook_full_precision(workbook_xml)
+        .map_err(|failure| SnapshotError::new(failure.to_string()))
+}

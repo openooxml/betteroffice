@@ -13,11 +13,23 @@
 //! a-z weighted by English letter frequency plus one space per 5.1 letters.
 //! Without a table, `advance_scale` stays `1.0` unless that ratio was measured
 //! against the substitute the host supplies.
+//! East Asian tables keep outlines and untabulated advances at scale `1.0`.
 //!
 //! A family Word has no face for carries its substitute's metrics, taken from
 //! the document's `w:altName` or identified against Word's reference render.
 
 use crate::font_store::RequestedLineMetrics;
+
+/// Canonical spelling of an already lowercased and trimmed Word family.
+pub(crate) fn requested_family_name(family: &str) -> &str {
+    match family {
+        "ｍｓ 明朝" => "ms mincho",
+        "ｍｓ ｐ明朝" => "ms pmincho",
+        "ｍｓ ゴシック" => "ms gothic",
+        "ｍｓ ｐゴシック" => "ms pgothic",
+        _ => family,
+    }
+}
 
 const fn ea(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> RequestedLineMetrics {
     RequestedLineMetrics {
@@ -92,13 +104,9 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         &[
             "ms mincho",
             "ms pmincho",
-            "ｍｓ 明朝",
-            "ｍｓ ｐ明朝",
             "ms gothic",
             "ms pgothic",
             "ms ui gothic",
-            "ｍｓ ゴシック",
-            "ｍｓ ｐゴシック",
         ],
         JIS_256,
     ),
@@ -301,10 +309,11 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
 /// normalization hosts apply to a `w:rFonts` name.
 pub fn requested_line_metrics(family: &str) -> Option<RequestedLineMetrics> {
     let key = family.trim().to_lowercase();
+    let key = requested_family_name(&key);
     EAST_ASIAN_FACES
         .iter()
         .chain(LATIN_FACES)
-        .find(|(names, _)| names.contains(&key.as_str()))
+        .find(|(names, _)| names.contains(&key))
         .map(|&(_, metrics)| metrics)
 }
 
@@ -381,6 +390,23 @@ mod tests {
         assert_eq!(requested_line_metrics("  ms mincho "), expected);
         assert_eq!(requested_line_metrics("MS MINCHO"), expected);
         assert_eq!(requested_line_metrics("ＭＳ 明朝"), expected);
+    }
+
+    #[test]
+    fn japanese_requested_spellings_share_the_canonical_line_metrics() {
+        for (family, alias) in [
+            ("MS Mincho", "  ＭＳ 明朝  "),
+            ("MS PMincho", "ＭＳ Ｐ明朝"),
+            ("MS Gothic", "ＭＳ ゴシック"),
+            ("MS PGothic", "ＭＳ Ｐゴシック"),
+            ("MS UI Gothic", "  ms UI Gothic  "),
+        ] {
+            assert_eq!(requested_line_metrics(alias), Some(JIS_256), "{alias}");
+            assert_eq!(
+                requested_line_metrics(alias),
+                requested_line_metrics(family)
+            );
+        }
     }
 
     /// Bundled families keep the metric-compatible face's own metrics, Word's
