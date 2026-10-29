@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fontpack::Codec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -19,6 +20,7 @@ struct Options {
     pack: String,
     version: String,
     level: i32,
+    codec: Codec,
 }
 
 #[derive(Serialize)]
@@ -47,6 +49,15 @@ struct Source {
     family: String,
     regular: bool,
     bytes: Vec<u8>,
+    payload: Option<Vec<u8>>,
+    reference: Option<Vec<u8>>,
+    codec: Codec,
+}
+
+impl Source {
+    fn payload(&self) -> &[u8] {
+        self.payload.as_deref().unwrap_or(&self.bytes)
+    }
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -58,14 +69,23 @@ fn options() -> Result<Options> {
     if args.next().as_deref() != Some(std::ffi::OsStr::new("build")) {
         return Err(invalid(concat!(
             "usage: fontpack build --src <dir> --out <dir> ",
-            "--pack <name> --version <semver> [--level 19]"
+            "--pack <name> --version <semver> [--level 19] [--codec zstd|woff2t]"
         ))
         .into());
     }
     let mut values = BTreeMap::<String, OsString>::new();
     while let Some(arg) = args.next() {
         let key = arg.into_string().map_err(|_| invalid("invalid option"))?;
-        if !["--src", "--out", "--pack", "--version", "--level"].contains(&key.as_str()) {
+        if ![
+            "--src",
+            "--out",
+            "--pack",
+            "--version",
+            "--level",
+            "--codec",
+        ]
+        .contains(&key.as_str())
+        {
             return Err(invalid(format!("unknown option {key}")).into());
         }
         let value = args
@@ -98,12 +118,23 @@ fn options() -> Result<Options> {
         .transpose()?
         .unwrap_or_else(|| "19".to_owned())
         .parse()?;
+    let codec = values
+        .remove("--codec")
+        .map(|value| value.into_string().map_err(|_| invalid("invalid codec")))
+        .transpose()?
+        .unwrap_or_else(|| "zstd".to_owned());
+    let codec = match codec.as_str() {
+        "zstd" => Codec::Zstd,
+        "woff2t" => Codec::Woff2tZstd,
+        _ => return Err(invalid("codec must be zstd or woff2t").into()),
+    };
     Ok(Options {
         src,
         out,
         pack,
         version,
         level,
+        codec,
     })
 }
 
@@ -133,11 +164,50 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
         if family.is_empty() {
             return Err(invalid(format!("empty family in {file}")).into());
         }
+        let bytes = fs::read(&path)?;
+        let (payload, reference) = if options.codec == Codec::Woff2tZstd {
+            if !extension.eq_ignore_ascii_case("ttf") {
+                return Err(invalid(format!("woff2t requires TTF glyf/loca faces: {file}")).into());
+            }
+            glyph_count(&bytes)?;
+            let payload = fs::read(path.with_extension("uw2"))?;
+            let standard = fs::read(path.with_extension("woff2"))?;
+            let regenerate = "regenerate companions with scripts/fonts/woff2-transform.py";
+            let hash_path = path.with_extension("source.sha256");
+            let recorded = fs::read_to_string(hash_path).map_err(|error| {
+                invalid(format!(
+                    "cannot read source SHA-256 for {file}: {error}; {regenerate}"
+                ))
+            })?;
+            let expected = [
+                (bytes.as_slice(), file.clone()),
+                (payload.as_slice(), format!("{stem}.uw2")),
+                (standard.as_slice(), format!("{stem}.woff2")),
+            ]
+            .map(|(data, name)| format!("{:x}  {name}", Sha256::digest(data)));
+            if !recorded
+                .lines()
+                .map(str::trim_end)
+                .eq(expected.iter().map(String::as_str))
+            {
+                return Err(
+                    invalid(format!("source SHA-256 mismatch for {file}; {regenerate}")).into(),
+                );
+            }
+            let reference = wuff::decompress_woff2(&standard)
+                .map_err(|error| invalid(format!("invalid reference WOFF2 for {file}: {error}")))?;
+            (Some(payload), Some(reference))
+        } else {
+            (None, None)
+        };
         files.push(Source {
             file,
             family: family.to_owned(),
             regular: style == "Regular",
-            bytes: fs::read(path)?,
+            bytes,
+            payload,
+            reference,
+            codec: options.codec,
         });
     }
     files.sort_by(|left, right| left.file.cmp(&right.file));
@@ -145,6 +215,53 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
         return Err(invalid("source directory has no TTF or OTF faces").into());
     }
     Ok(files)
+}
+
+fn glyph_count(bytes: &[u8]) -> Result<u16> {
+    if !bytes.starts_with(b"\0\x01\0\0") {
+        return Err(invalid("woff2t requires TTF glyf/loca faces").into());
+    }
+    let count = bytes
+        .get(4..6)
+        .ok_or_else(|| invalid("truncated sfnt header"))?;
+    let count = u16::from_be_bytes([count[0], count[1]]) as usize;
+    let mut glyphs = None;
+    let mut glyf = false;
+    let mut loca = false;
+    for index in 0..count {
+        let record = bytes
+            .get(12 + index * 16..28 + index * 16)
+            .ok_or_else(|| invalid("truncated sfnt directory"))?;
+        let offset = u32::from_be_bytes(record[8..12].try_into()?) as usize;
+        let length = u32::from_be_bytes(record[12..16].try_into()?) as usize;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("invalid sfnt table range"))?;
+        let table = bytes
+            .get(offset..end)
+            .ok_or_else(|| invalid("truncated sfnt table"))?;
+        match &record[..4] {
+            b"glyf" => glyf = true,
+            b"loca" => loca = true,
+            b"CFF " | b"CFF2" => return Err(invalid("woff2t does not support CFF faces").into()),
+            b"maxp" => {
+                let value = table.get(4..6).ok_or_else(|| invalid("truncated maxp"))?;
+                glyphs = Some(u16::from_be_bytes([value[0], value[1]]));
+            }
+            _ => {}
+        }
+    }
+    if !glyf || !loca {
+        return Err(invalid("woff2t requires TTF glyf/loca faces").into());
+    }
+    glyphs.ok_or_else(|| invalid("sfnt has no maxp glyph count").into())
+}
+
+fn dictionary_payload<'a>(source: &Source, dict: Option<&'a Source>) -> Result<Option<&'a [u8]>> {
+    if dict.is_some_and(|dict| source.codec != dict.codec) {
+        return Err(invalid("face and dictionary codecs must match").into());
+    }
+    Ok(dict.map(Source::payload))
 }
 
 fn compress(bytes: &[u8], dict: Option<&[u8]>, level: i32) -> Result<Vec<u8>> {
@@ -241,6 +358,10 @@ fn staging_dir(parent: &Path, name: &str) -> Result<PathBuf> {
     Err(io::Error::other("cannot create a unique staging directory").into())
 }
 
+fn verify_limit(parts: &[&[u8]]) -> usize {
+    parts.iter().map(|part| part.len()).max().unwrap_or(0)
+}
+
 fn write_pack(
     options: &Options,
     sources: &[Source],
@@ -250,13 +371,26 @@ fn write_pack(
     let mut faces = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         let dictionary = dictionaries[index].map(|index| &sources[index]);
-        let dict = dictionary.map(|source| source.bytes.as_slice());
-        let encoded = compress(&source.bytes, dict, options.level)?;
-        let decoded = fontpack::decode(&encoded, dict, source.bytes.len())?;
-        if decoded != source.bytes {
+        let dict = dictionary_payload(source, dictionary)?;
+        let encoded = compress(source.payload(), dict, options.level)?;
+        let expected = source.reference.as_deref().unwrap_or(&source.bytes);
+        let limit = verify_limit(&[
+            expected,
+            source.bytes.as_slice(),
+            source.payload(),
+            dict.unwrap_or_default(),
+            encoded.as_slice(),
+        ]);
+        let decoded = fontpack::decode_face(&encoded, dict, source.codec, limit)?;
+        if decoded.font != expected {
             return Err(
                 io::Error::other(format!("round-trip mismatch for {}", source.file)).into(),
             );
+        }
+        if source.codec == Codec::Woff2tZstd
+            && glyph_count(&decoded.font)? != glyph_count(&source.bytes)?
+        {
+            return Err(invalid(format!("glyph count mismatch for {}", source.file)).into());
         }
         let file = format!("{}.zst", source.file);
         fs::write(staging.join(&file), &encoded)?;
@@ -264,10 +398,10 @@ fn write_pack(
             file,
             source: source.file.clone(),
             family: source.family.clone(),
-            codec: "zstd",
+            codec: source.codec.as_str(),
             encoded_length: encoded.len(),
-            byte_length: source.bytes.len(),
-            sha256: format!("{:x}", Sha256::digest(&decoded)),
+            byte_length: decoded.font.len(),
+            sha256: format!("{:x}", Sha256::digest(&decoded.font)),
             dict: dictionary.map(|source| format!("{}.zst", source.file)),
         });
     }
@@ -291,5 +425,44 @@ fn main() -> ExitCode {
             eprintln!("fontpack: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Source, dictionary_payload, verify_limit};
+    use fontpack::Codec;
+
+    fn source(codec: Codec) -> Source {
+        Source {
+            file: "Synthetic-Regular.ttf".to_owned(),
+            family: "Synthetic".to_owned(),
+            regular: true,
+            bytes: vec![1],
+            payload: (codec == Codec::Woff2tZstd).then(|| vec![2]),
+            reference: None,
+            codec,
+        }
+    }
+
+    #[test]
+    fn dictionary_codec_must_match_face() {
+        let plain = source(Codec::Zstd);
+        let transformed = source(Codec::Woff2tZstd);
+        assert!(dictionary_payload(&plain, Some(&transformed)).is_err());
+        assert!(dictionary_payload(&transformed, Some(&plain)).is_err());
+        assert_eq!(
+            dictionary_payload(&transformed, Some(&transformed)).unwrap(),
+            Some(&[2][..])
+        );
+    }
+
+    #[test]
+    fn verify_limit_covers_a_dictionary_larger_than_the_face() {
+        let face = [0u8; 10];
+        let dict = [0u8; 40];
+        let frame = [0u8; 12];
+        assert_eq!(verify_limit(&[&face, &face, &face, &dict, &frame]), 40);
+        assert_eq!(verify_limit(&[&face, &face, &face, &[], &[0u8; 50]]), 50);
     }
 }

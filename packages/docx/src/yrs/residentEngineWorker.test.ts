@@ -974,7 +974,7 @@ test('d0_replacement_save_preserves_restored_header_and_new_body_edits', async (
   }
 }, 15_000);
 
-test('d0_callback_destroy_defers_native_cleanup_and_free_once', async () => {
+test('d0_drain_destroy_defers_native_cleanup_and_free_once', async () => {
   const nativeCreate = editWasm.createEditSession;
   const rawSessions: ReturnType<typeof nativeCreate>[] = [];
   const create = spyOn(editWasm, 'createEditSession').mockImplementation((...args) => {
@@ -988,7 +988,7 @@ test('d0_callback_destroy_defers_native_cleanup_and_free_once', async () => {
     engines.push(...arm.engines);
     const engine = engines[0]!;
     const raw = rawSessions[0]!;
-    const clear = spyOn(raw, 'clear_update_observer');
+    const clear = spyOn(raw, 'clear_update_event_observation');
     const free = spyOn(raw, 'free');
     let updates = 0;
     try {

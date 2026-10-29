@@ -27,8 +27,42 @@ use core::fmt;
 mod allocator;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
+mod woff2t;
 
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Codec {
+    Zstd,
+    Woff2tZstd,
+}
+
+impl Codec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Zstd => "zstd",
+            Self::Woff2tZstd => "woff2t+zstd",
+        }
+    }
+}
+
+impl core::str::FromStr for Codec {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "zstd" => Ok(Self::Zstd),
+            "woff2t+zstd" => Ok(Self::Woff2tZstd),
+            _ => Err("unsupported font face codec"),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Decoded {
+    pub font: Vec<u8>,
+    pub payload: Option<Vec<u8>>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -42,6 +76,7 @@ pub enum DecodeError {
     Truncated,
     TrailingData,
     AllocationFailed,
+    Woff2Reconstruction,
 }
 
 #[cfg(any(
@@ -70,6 +105,7 @@ impl fmt::Display for DecodeError {
             Self::Truncated => f.write_str("font face is truncated"),
             Self::TrailingData => f.write_str("font face must contain exactly one zstd frame"),
             Self::AllocationFailed => f.write_str("cannot allocate memory for font face"),
+            Self::Woff2Reconstruction => f.write_str("font face WOFF2 reconstruction failed"),
         }
     }
 }
@@ -201,9 +237,108 @@ pub fn decode_or_passthrough<'a>(
     }
 }
 
+pub fn decode_face(
+    frame: &[u8],
+    dict: Option<&[u8]>,
+    codec: Codec,
+    max_output: usize,
+) -> Result<Decoded, DecodeError> {
+    let max_output = face_limit(codec, max_output);
+    if codec == Codec::Woff2tZstd
+        && (frame.len() > max_output || dict.is_some_and(|dict| dict.len() > max_output))
+    {
+        return Err(DecodeError::TooLarge {
+            size: frame.len().max(dict.map_or(0, <[u8]>::len)) as u64,
+            max: max_output,
+        });
+    }
+    let payload = decode(frame, dict, max_output)?;
+    match codec {
+        Codec::Zstd => Ok(Decoded {
+            font: payload,
+            payload: None,
+        }),
+        Codec::Woff2tZstd => {
+            let font = reconstruct_woff2t(&payload, max_output)?;
+            Ok(Decoded {
+                font,
+                payload: Some(payload),
+            })
+        }
+    }
+}
+
+pub const WOFF2T_MAX_OUTPUT: usize = 64 << 20;
+
+fn face_limit(codec: Codec, max_output: usize) -> usize {
+    match codec {
+        Codec::Zstd => max_output,
+        Codec::Woff2tZstd => max_output.min(WOFF2T_MAX_OUTPUT),
+    }
+}
+
+fn reconstruct_woff2t(payload: &[u8], max_output: usize) -> Result<Vec<u8>, DecodeError> {
+    woff2t::validate(payload, max_output)?;
+    let mut identity_error = None;
+    let result = wuff::decompress_woff2_with_custom_brotli(payload, &mut |data, expected| {
+        if data.len() != expected || expected > max_output {
+            return Err(wuff::WuffErr::GenericError.into());
+        }
+        let mut bytes = Vec::new();
+        if bytes.try_reserve_exact(data.len()).is_err() {
+            identity_error = Some(DecodeError::AllocationFailed);
+            return Err(wuff::WuffErr::GenericError.into());
+        }
+        bytes.extend_from_slice(data);
+        Ok(bytes)
+    });
+    let font = result.map_err(|_| identity_error.unwrap_or(DecodeError::Woff2Reconstruction))?;
+    if font.len() > max_output {
+        return Err(DecodeError::TooLarge {
+            size: font.len() as u64,
+            max: max_output,
+        });
+    }
+    Ok(font)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ZSTD_MAGIC, decode};
+    use super::{Codec, DecodeError, WOFF2T_MAX_OUTPUT, ZSTD_MAGIC, decode, decode_face};
+
+    #[test]
+    fn woff2t_faces_are_capped_whatever_the_caller_allows() {
+        let size = (WOFF2T_MAX_OUTPUT + 1) as u32;
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.push(0xa4);
+        frame.extend_from_slice(&size.to_le_bytes());
+        frame.extend_from_slice(&[0x09, 0x00, 0x00, 0x41, 0, 0, 0, 0]);
+        assert!(matches!(
+            decode_face(&frame, None, Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
+        ));
+        assert!(!matches!(
+            decode_face(&frame, None, Codec::Zstd, 300 << 20),
+            Err(DecodeError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn woff2t_inputs_larger_than_the_cap_are_rejected_before_decoding() {
+        let oversized = vec![0u8; WOFF2T_MAX_OUTPUT + 1];
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.extend_from_slice(&[0x24, 0x01, 0x09, 0x00, 0x00, 0x41, 0, 0, 0, 0]);
+        assert!(matches!(
+            decode_face(&frame, Some(&oversized), Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
+        ));
+        let mut big_frame = frame.clone();
+        big_frame.resize(WOFF2T_MAX_OUTPUT + 1, 0);
+        assert!(matches!(
+            decode_face(&big_frame, None, Codec::Woff2tZstd, 300 << 20),
+            Err(DecodeError::TooLarge { max, .. }) if max == WOFF2T_MAX_OUTPUT
+        ));
+    }
 
     #[test]
     fn arbitrary_headers_never_panic() {
