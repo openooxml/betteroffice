@@ -444,6 +444,7 @@ const UNSIGNED_FIELDS = new Set([
   'modernEffects',
   'strokePaint',
   'substituteScale',
+  'canvasClusters',
   'textBodyProperties',
 ]);
 let unmatchedSignatures = 0;
