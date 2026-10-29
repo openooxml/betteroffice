@@ -1,7 +1,7 @@
 {
   "fixture": "packages/xlsx/test-fixtures/sample.xlsx",
   "calculation": { "nowSerial": 45000.75, "randSeed": 42 },
-  "note": "All targets open recalculated with nowSerial; TS and Rust also set randSeed. Python has no seed, and the fixture and edits contain no volatile functions. Arguments such as <version:1> refer to first-seen result versions. Undo and redo record applied; historyState records the history flags and depths.",
+  "note": "All targets open recalculated with nowSerial; TS and Rust also set randSeed. Python has no seed, and the fixture and edits contain no volatile functions. Arguments such as <version:1> refer to first-seen result versions. Undo and redo record applied and sorted changed/limitedCells lists, using A1 on the active sheet and SheetName!A1 otherwise; historyState records the history flags and depths.",
   "steps": [
     { "op": "sheetNames", "args": {} },
     { "op": "version", "args": {} },

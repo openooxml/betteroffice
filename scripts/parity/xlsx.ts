@@ -4,6 +4,7 @@ import {
   engineBackend,
   initWasm,
   openWorkbook,
+  type EditResult,
   type WorkbookCalculationContext,
   type XlsxEditRequest,
   type XlsxExportOptions,
@@ -12,6 +13,14 @@ import {
   type XlsxReadRequest
 } from '../../packages/xlsx/src/index';
 import type { Format } from './harness';
+
+function mutationResult({ applied, changed = [], limitedCells = [] }: EditResult) {
+  return {
+    applied,
+    changed: [...changed].sort(),
+    limitedCells: [...limitedCells].sort()
+  };
+}
 
 export const xlsx: Format = {
   engineBackend,
@@ -33,8 +42,8 @@ export const xlsx: Format = {
         validateEdits: (args) => workbook.validateEdits(args as unknown as XlsxEditRequest),
         applyEdits: (args) => workbook.applyEdits(args as unknown as XlsxEditRequest),
         historyState: () => workbook.historyState(),
-        undo: () => workbook.undo().applied,
-        redo: () => workbook.redo().applied,
+        undo: () => mutationResult(workbook.undo()),
+        redo: () => mutationResult(workbook.redo()),
         exportStructured: (args) => workbook.exportStructured(args as XlsxExportOptions),
         exportMarkdown: (args) => workbook.exportMarkdown(args.options as XlsxExportOptions, args.markdownOptions as XlsxMarkdownOptions),
         save: () => workbook.save()

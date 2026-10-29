@@ -755,7 +755,13 @@
   },
   {
     "op": "undo",
-    "result": true
+    "result": {
+      "applied": true,
+      "changed": [
+        "D3"
+      ],
+      "limitedCells": []
+    }
   },
   {
     "op": "readCells",
@@ -845,7 +851,13 @@
   },
   {
     "op": "redo",
-    "result": true
+    "result": {
+      "applied": true,
+      "changed": [
+        "D3"
+      ],
+      "limitedCells": []
+    }
   },
   {
     "op": "readCells",

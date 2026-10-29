@@ -4,6 +4,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 from betteroffice_xlsx import Workbook
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -40,6 +42,14 @@ def history_state(workbook):
     }
 
 
+def mutation_result(result):
+    return {
+        "applied": result.applied,
+        "changed": sorted(result.changed),
+        "limitedCells": sorted(result.limited),
+    }
+
+
 def export_options(args):
     return {EXPORT_OPTIONS[key]: value for key, value in args.items()}
 
@@ -63,8 +73,8 @@ def run():
         "validateEdits": lambda args: workbook.validate_edits(args),
         "applyEdits": lambda args: workbook.apply_edits(args),
         "historyState": lambda args: history_state(workbook),
-        "undo": lambda args: workbook.undo(now_serial=now_serial).applied,
-        "redo": lambda args: workbook.redo(now_serial=now_serial).applied,
+        "undo": lambda args: mutation_result(workbook.undo(now_serial=now_serial)),
+        "redo": lambda args: mutation_result(workbook.redo(now_serial=now_serial)),
         "exportStructured": lambda args: workbook.export_structured(**export_options(args)),
         "exportMarkdown": lambda args: workbook.export_markdown(
             **export_options(args["options"]), markdown_options=args["markdownOptions"]
@@ -102,6 +112,58 @@ def run():
     return results
 
 
+def assert_json_equal(expected, actual, path="$"):
+    if type(expected) is bool or type(actual) is bool:
+        if type(expected) is bool and type(actual) is bool and expected == actual:
+            return
+    elif type(expected) in (int, float) and type(actual) in (int, float):
+        if expected == actual:
+            return
+    elif isinstance(expected, dict) and isinstance(actual, dict):
+        if expected.keys() == actual.keys():
+            for key in sorted(expected):
+                assert_json_equal(expected[key], actual[key], f"{path}[{json.dumps(key)}]")
+            return
+    elif isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) == len(actual):
+            for index, (expected_item, actual_item) in enumerate(zip(expected, actual)):
+                assert_json_equal(expected_item, actual_item, f"{path}[{index}]")
+            return
+    elif type(expected) is type(actual) and expected == actual:
+        return
+    raise AssertionError(
+        f"JSON mismatch at {path}\n"
+        f"- expected: {json.dumps(expected, indent=2, ensure_ascii=False)}\n"
+        f"+ actual: {json.dumps(actual, indent=2, ensure_ascii=False)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "expected,actual,path",
+    [
+        (True, 1, "$"),
+        (1, True, "$"),
+        (False, 0.0, "$"),
+        (0.0, False, "$"),
+        ({"result": [True]}, {"result": [1]}, '$["result"][0]'),
+        ({"result": [1, 2]}, {"result": [2, 1]}, '$["result"][0]'),
+        ({"result": [1]}, {"result": []}, '$["result"]'),
+        ({"result": {"value": 1}}, {"result": {"other": 1}}, '$["result"]'),
+    ],
+)
+def test_json_comparison_reports_mismatch_path(expected, actual, path):
+    with pytest.raises(AssertionError) as error:
+        assert_json_equal(expected, actual)
+    assert f"JSON mismatch at {path}\n" in str(error.value)
+
+
+def test_json_comparison_accepts_equal_numbers_and_booleans():
+    assert_json_equal(
+        {"numbers": [1, 2.5], "booleans": [True, False], "empty": None},
+        {"empty": None, "booleans": [True, False], "numbers": [1.0, 2.5]},
+    )
+
+
 def test_scripted_api_parity_matches_shared_golden():
     actual = run()
     expected_path = PARITY / "expected.json"
@@ -110,10 +172,4 @@ def test_scripted_api_parity_matches_shared_golden():
             json.dumps(actual, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
-    assert len(actual) == len(expected), "Parity step count differs"
-    for index, (actual_step, expected_step) in enumerate(zip(actual, expected)):
-        assert actual_step == expected_step, (
-            f"Parity step {index} ({actual_step['op']}) differs\n"
-            f"- expected: {json.dumps(expected_step, indent=2, ensure_ascii=False)}\n"
-            f"+ actual: {json.dumps(actual_step, indent=2, ensure_ascii=False)}"
-        )
+    assert_json_equal(expected, actual)

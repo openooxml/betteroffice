@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use betteroffice_xlsx::{CalculationOptions, Workbook};
+use betteroffice_xlsx::{CalculationOptions, CellAddress, MutationResult, Workbook};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -59,6 +59,22 @@ fn is_version(value: &str) -> bool {
     })
 }
 
+fn mutation_result(workbook: &Workbook, result: MutationResult) -> Value {
+    let addresses = |cells: &[CellAddress]| {
+        let mut addresses: Vec<_> = cells
+            .iter()
+            .map(|address| workbook.format_address(*address))
+            .collect();
+        addresses.sort();
+        addresses
+    };
+    json!({
+        "applied": result.applied,
+        "changed": addresses(&result.changed),
+        "limitedCells": addresses(&result.limited_cells),
+    })
+}
+
 fn execute(
     workbook: &mut Workbook,
     op: &str,
@@ -77,8 +93,14 @@ fn execute(
         "validateEdits" => wire(workbook.validate_edits_json(&args.to_string())),
         "applyEdits" => wire(workbook.apply_edits_json(&args.to_string())),
         "historyState" => json!(workbook.history_state()),
-        "undo" => json!(workbook.undo(calculation).unwrap().applied),
-        "redo" => json!(workbook.redo(calculation).unwrap().applied),
+        "undo" => {
+            let result = workbook.undo(calculation).unwrap();
+            mutation_result(workbook, result)
+        }
+        "redo" => {
+            let result = workbook.redo(calculation).unwrap();
+            mutation_result(workbook, result)
+        }
         "exportStructured" => wire(workbook.export_structured_json(&args.to_string())),
         "exportMarkdown" => wire(workbook.export_markdown_json(
             &args["options"].to_string(),
