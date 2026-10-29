@@ -101,6 +101,29 @@ pub const MAX_DISPLAY_CELLS: u64 = 250_000;
 pub const MAX_PIXMAP_DIM: u32 = 16_384;
 pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
 
+fn source_style_xml_markers(source: &[u8]) -> Option<Stylesheet> {
+    let rels =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == "xl/_rels/workbook.xml.rels"
+        })
+        .ok()?;
+    let path =
+        xlsx_parse::styles_part_name(rels.first().map(|(_, bytes)| bytes.as_slice())).ok()?;
+    let parts =
+        ooxml_opc::unzip_parts_where(source, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES, |name| {
+            name.trim_start_matches('/') == path.trim_start_matches('/')
+        })
+        .ok()?;
+    let (_, bytes) = parts.first()?;
+    let markers = xlsx_parse::source_style_xml_markers(bytes).ok()?;
+    let mut styles = Stylesheet::default();
+    for index in markers {
+        styles.mark_xf_extra_xml(index);
+    }
+    styles.inherit_xf_xml_markers(&Stylesheet::default());
+    Some(styles)
+}
+
 #[must_use = "dropping the subscription stops update delivery"]
 pub struct UpdateSubscription {
     observers: Weak<Mutex<UpdateObservers>>,
@@ -1601,13 +1624,11 @@ impl Workbook {
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        let mut defaults =
+            xlsx_model::workbook::ColumnDefaults::new(&self.model.sheets[sheet.0 as usize]);
         let source_styles: Vec<_> = formats
             .iter()
-            .map(|(at, _)| {
-                self.model.sheets[sheet.0 as usize]
-                    .cell(*at)
-                    .and_then(|cell| cell.style)
-            })
+            .map(|(at, _)| defaults.effective_style(*at))
             .collect();
         Ok(CapturedFormat {
             rows: rows as u32,

@@ -1530,6 +1530,246 @@ fn cell_styles(saved: &[u8]) -> [Option<u32>; 3] {
 }
 
 #[test]
+fn marked_xfs_keep_main_snapshot_bytes_and_record_tags() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2"/><xf numFmtId="2" xr:uid="keep" xmlns:xr="urn:revision"><extLst><ext uri="snapshot-style"/></extLst></xf>"#,
+        r#"<c r="A1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let mut worker = Workbook::open(&source).unwrap();
+    let fixed_snapshot = |workbook: &Workbook| {
+        let mut encoder = WorkbookSnapshotEncoder::new(workbook, Some(context()), budget).unwrap();
+        encoder.snapshot_id = 17;
+        let (_, _, payload) = unframe(encoder.header.as_ref().unwrap()).unwrap();
+        let mut reader = Reader::new(payload);
+        let mut header = SnapshotHeader::decode(reader.bytes().unwrap()).unwrap();
+        header.snapshot_id = 17;
+        let mut writer = Writer::new();
+        writer.bytes(&header.encode());
+        writer.raw(reader.rest());
+        encoder.header = Some(frame(ChunkKind::Header, 0, &writer.into_bytes()));
+        let mut chunks = Vec::new();
+        while let Some(chunk) = encoder.next(workbook).unwrap() {
+            chunks.push(chunk);
+        }
+        chunks
+    };
+    assert!(worker.model().styles.xf_has_extra_xml(2));
+    let marked = fixed_snapshot(&worker);
+    let marked_recovery = worker.recovery_checkpoint(0, Some(context())).unwrap();
+    let mut styles = serde_json::to_value(&worker.model.styles).unwrap();
+    styles.as_object_mut().unwrap().remove("xfs_with_extra_xml");
+    worker.model.styles = serde_json::from_value(styles).unwrap();
+    worker.authority.clear_xf_xml_markers_for_test();
+    assert!(!worker.model().styles.xf_has_extra_xml(2));
+    assert_eq!(marked, fixed_snapshot(&worker));
+    assert_eq!(
+        marked_recovery,
+        worker.recovery_checkpoint(0, Some(context())).unwrap()
+    );
+    for (kind, _, payload) in decoded_snapshot(&marked) {
+        match kind {
+            ChunkKind::Model => assert!(payload[0] <= 34),
+            ChunkKind::AuthorityBase => {
+                let mut reader = Reader::new(&payload);
+                while !reader.clone().rest().is_empty() {
+                    assert!(reader.bytes().unwrap()[0] <= 27);
+                }
+            }
+            _ => {}
+        }
+    }
+    let restored = restore(&marked, budget);
+    assert_eq!(restored.model(), worker.model());
+    assert_eq!(restored.save().unwrap(), worker.save().unwrap());
+}
+
+#[test]
+fn snapshots_preserve_extra_xf_xml_for_facet_interning() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2" custom="snapshot-style"/>"#,
+        r#"<c r="A1" s="1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let worker = Workbook::open(&source).unwrap();
+    assert!(
+        serde_json::to_value(&worker.model().styles)
+            .unwrap()
+            .get("xfs_with_extra_xml")
+            .is_none()
+    );
+    let metadata_free: xlsx_model::Stylesheet =
+        serde_json::from_value(serde_json::to_value(&worker.model().styles).unwrap()).unwrap();
+    assert!(!metadata_free.xf_has_extra_xml(1));
+    let restored = restore(&encode(&worker, budget), budget);
+    for mut workbook in [worker, restored] {
+        assert!(workbook.model().styles.xf_has_extra_xml(1));
+        let format = workbook.model().styles.cell_format(Some(1));
+        let b1 = CellRef::new(0, 1);
+        workbook
+            .apply_format(
+                SheetId(0),
+                CellRange::new(b1, b1),
+                xlsx_ops::CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![format],
+                    kept: Vec::new(),
+                    source_styles: Vec::new(),
+                    source_formats: Vec::new(),
+                },
+                context(),
+            )
+            .unwrap();
+        assert_eq!(workbook.model().sheets[0].cell(b1).unwrap().style, Some(2));
+        assert_eq!(
+            part(&workbook.save().unwrap(), "xl/styles.xml")
+                .matches("snapshot-style")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn restores_follow_custom_styles_relationship_and_ignore_unreferenced_malformed_styles() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2"><extLst><ext uri="urn:keep"/></extLst></xf>"#,
+        r#"<c r="A1" s="1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (name, bytes) in &mut parts {
+        match name.as_str() {
+            "xl/styles.xml" => *name = "xl/customStyles.xml".into(),
+            "[Content_Types].xml" | "xl/_rels/workbook.xml.rels" => {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("styles.xml", "customStyles.xml")
+                    .into_bytes();
+            }
+            _ => {}
+        }
+    }
+    parts.push((
+        "xl/styles.xml".into(),
+        b"<styleSheet><cellXfs><xf/></styleSheet>".to_vec(),
+    ));
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let worker = Workbook::open(&source).unwrap();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let snapshot_restored = restore(&encode(&worker, budget), budget);
+    let checkpoint = worker.recovery_checkpoint(0, Some(context())).unwrap();
+    let (recovery_restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    for workbook in [&worker, &snapshot_restored, &recovery_restored] {
+        assert!(workbook.model().styles.xf_has_extra_xml(1));
+        assert!(!workbook.model().styles.xf_has_extra_xml(0));
+        assert!(
+            workbook
+                .authority
+                .materialize()
+                .unwrap()
+                .styles
+                .xf_has_extra_xml(1)
+        );
+        assert_eq!(workbook.model(), worker.model());
+        assert_eq!(workbook.save().unwrap(), source);
+    }
+}
+
+#[test]
+fn snapshots_ignore_malformed_source_styles_when_restoring_markers() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2"><extLst><ext uri="urn:keep"/></extLst></xf>"#,
+        r#"<c r="A1" s="1"><v>7</v></c>"#,
+        false,
+    );
+    let mut worker = Workbook::open(&source).unwrap();
+    assert!(worker.model().styles.xf_has_extra_xml(1));
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (name, bytes) in &mut parts {
+        if name == "xl/styles.xml" {
+            *bytes = b"<styleSheet><cellXfs><xf/></styleSheet>".to_vec();
+        }
+    }
+    worker.source_container = Some(ooxml_opc::SourceContainer::new(
+        ooxml_opc::rezip_parts(&parts).unwrap(),
+    ));
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let restored = restore(&encode(&worker, budget), budget);
+    assert_eq!(restored.model(), worker.model());
+    assert!(!restored.model().styles.has_xf_xml_markers());
+    assert!(!restored.model().styles.xf_has_extra_xml(1));
+    assert!(
+        !restored
+            .authority
+            .materialize()
+            .unwrap()
+            .styles
+            .has_xf_xml_markers()
+    );
+}
+
+#[test]
+fn source_free_snapshots_keep_style_markers_absent() {
+    let worker = empty_worker();
+    let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+    let restored = restore(&encode(&worker, budget), budget);
+    assert!(restored.source_container.is_none());
+    assert!(!restored.model().styles.has_xf_xml_markers());
+    assert_eq!(restored.model(), worker.model());
+}
+
+#[test]
+fn recovery_rederives_extra_xf_xml_for_derived_styles() {
+    let source = package(
+        r#"<xf/><xf numFmtId="2" custom="recovery-style"/>"#,
+        r#"<c r="A1" s="1"><v>7</v></c><c r="B1"><v>8</v></c>"#,
+        false,
+    );
+    let mut worker = Workbook::open(&source).unwrap();
+    let a1 = CellRef::new(0, 0);
+    worker
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(a1, a1),
+            xlsx_ops::StylePatch {
+                italic: Some(true),
+                ..Default::default()
+            },
+            context(),
+        )
+        .unwrap();
+    let checkpoint = worker.recovery_checkpoint(1, Some(context())).unwrap();
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    let derived = restored.model().sheets[0].cell(a1).unwrap().style.unwrap();
+    assert!(restored.model().styles.xf_has_extra_xml(1));
+    assert!(restored.model().styles.xf_has_extra_xml(derived));
+    let format = restored.model().styles.cell_format(Some(derived));
+    let b1 = CellRef::new(0, 1);
+    restored
+        .apply_format(
+            SheetId(0),
+            CellRange::new(b1, b1),
+            xlsx_ops::CapturedFormat {
+                rows: 1,
+                columns: 1,
+                formats: vec![format],
+                kept: Vec::new(),
+                source_styles: Vec::new(),
+                source_formats: Vec::new(),
+            },
+            context(),
+        )
+        .unwrap();
+    let painted = restored.model().sheets[0].cell(b1).unwrap().style.unwrap();
+    assert_ne!(painted, derived);
+    assert!(!restored.model().styles.xf_has_extra_xml(painted));
+}
+
+#[test]
 fn format_facets_released_snapshot_saves_the_source_xfs() {
     let (source, released) = released_styles();
     let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();

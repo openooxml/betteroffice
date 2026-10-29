@@ -357,8 +357,9 @@ impl FontStore {
         let owner = FontId(entry.bytes_of.unwrap_or(base.0 as usize) as u32);
         let selection = entry.metrics.os2_fs_selection;
         let family = family.trim().to_lowercase();
-        let table = family_metrics(&family, selection & (1 << 5) != 0, selection & 1 != 0);
-        let requested = crate::word_fonts::requested_line_metrics(&family).map(|mut requested| {
+        let family = crate::word_fonts::requested_family_name(&family);
+        let table = family_metrics(family, selection & (1 << 5) != 0, selection & 1 != 0);
+        let requested = crate::word_fonts::requested_line_metrics(family).map(|mut requested| {
             if table.is_some() {
                 requested.advance_scale = 1.0;
             }
@@ -384,6 +385,7 @@ impl FontStore {
             return Ok(base);
         }
         let advance_scale = match widths {
+            Some(_) if requested.is_some_and(|metrics| metrics.east_asian) => 1.0,
             Some(widths) => self.width_scale(FontId(owner as u32), widths)?,
             None => requested.map_or(1.0, |metrics| metrics.advance_scale),
         };

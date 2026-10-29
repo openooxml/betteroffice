@@ -619,6 +619,24 @@ describe('PPTX canvas replay', () => {
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
   });
 
+  test('positions proportional Japanese kana at table advances without scaling their outlines', async () => {
+    for (const family of ['MS UI Gothic', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS PMincho', 'ＭＳ Ｐ明朝']) {
+      const advance = family === 'MS UI Gothic' ? 13.056
+        : family.includes('Mincho') || family.includes('明朝') ? 14.128 : 15.056;
+      const run = syntheticPositionedRun('ああ中', [
+        [0, 40, advance], [1, 40 + advance, advance], [2, 40 + 2 * advance, 16],
+      ]);
+      run.fontFamily = family;
+      run.fontSizePx = 16;
+      run.width = 2 * advance + 16;
+      const { calls, scales } = await fittedPositionedRun(run, 16);
+      expect(calls).toEqual([
+        { text: 'あ', x: 40 }, { text: 'あ', x: 40 + advance }, { text: '中', x: 40 + 2 * advance },
+      ]);
+      expect(scales).toEqual([1, 1, 1]);
+    }
+  });
+
   test('paints named family width departures at each glyph position without scaling', async () => {
     const text = 'Recommendation 6:';
     const run = syntheticPositionedRun(text, Array.from(text, (_, index) => [index, 40 + index * 9, 8]));
@@ -685,13 +703,13 @@ describe('PPTX canvas replay', () => {
     expect(scales[0]).toBeCloseTo(1, 6);
   });
 
-  async function fittedPositionedRun(run: PositionedTextRun) {
+  async function fittedPositionedRun(run: PositionedTextRun, naturalAdvance = 8) {
     const calls: Array<{ text: string; x: number }> = [];
     const scales: number[] = [];
     let x = 0;
     let scale = 1;
     const state: Record<string, unknown> = {
-      measureText: (text: string) => ({ width: text.length * 8 }),
+      measureText: (text: string) => ({ width: text.length * naturalAdvance }),
       translate: (value: number) => { x = value; },
       scale: (value: number) => { scale = value; },
       restore: () => { x = 0; scale = 1; },

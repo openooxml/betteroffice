@@ -43,6 +43,8 @@ pub use inventory::{
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
+#[doc(hidden)]
+pub use read::styles_part_name;
 pub use read::{
     LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
     workbook_full_precision,
@@ -54,6 +56,8 @@ pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TE
 pub use save_oracle::with_legacy_save_path;
 #[cfg(feature = "test-counters")]
 pub use styles::legacy_style_reads;
+#[doc(hidden)]
+pub use styles::source_style_xml_markers;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

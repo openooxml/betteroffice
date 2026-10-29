@@ -2460,6 +2460,24 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
     !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
+    let kind = string(field(Some(field_value), "type"));
+    let key = if kind == Some("simpleField") {
+        "content"
+    } else {
+        "fieldResult"
+    };
+    array(field(Some(field_value), key))
+        .iter()
+        .filter(|child| string(field(Some(child), "type")) == Some("run"))
+        .find_map(|child| field(Some(child), "formatting"))
+        .or_else(|| {
+            (kind == Some("complexField"))
+                .then(|| field(Some(field_value), "formatting"))
+                .flatten()
+        })
+}
+
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
@@ -2472,7 +2490,6 @@ fn field_payload(
         array(field(Some(field_value), "fieldResult"))
     };
     let mut display_text = String::new();
-    let mut field_formatting = None;
     for child in runs {
         if string(field(Some(child), "type")) != Some("run") {
             continue;
@@ -2482,15 +2499,8 @@ fn field_payload(
                 display_text.push_str(string(field(Some(content), "text")).unwrap_or_default());
             }
         }
-        if field_formatting.is_none() {
-            field_formatting = field(Some(child), "formatting");
-        }
     }
-    let formatting = field_formatting.or_else(|| {
-        (kind == "complexField")
-            .then(|| field(Some(field_value), "formatting"))
-            .flatten()
-    });
+    let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
@@ -5773,7 +5783,12 @@ fn visit_story(
                     let runs = units
                         .iter()
                         .map(|unit| {
-                            json!({"text": unit_story_text(unit), "formatting": unit.direct_formatting.as_deref()})
+                            json!({
+                                "text": unit_story_text(unit),
+                                "formatting": unit.direct_formatting.as_deref(),
+                                "formatsRun": matches!(&unit.content, UnitContent::Text(_))
+                                    || matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "noteRef")
+                            })
                         })
                         .collect();
                     context
