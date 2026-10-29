@@ -281,12 +281,12 @@ impl Renderer {
             .renderer
             .layout_scoped_slide(session.package(), &preview.scope)
             .map_err(engine_error)?;
-        serde_json::to_string(&serde_json::json!({
-            "proposal": preview.proposal,
-            "snapshot": preview.snapshot,
-            "textChanges": preview.text_changes,
-            "frame": rendered.display_list,
-        }))
+        serde_json::to_string(&pptx_render::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
         .map_err(engine_error)
     }
 }
