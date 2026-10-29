@@ -142,19 +142,18 @@ describe('XlsxEditor engine dispatch', () => {
   });
 
   it('mounts the hybrid only with legacySyncApi and experimentalWorkerOpen and warns once across remounts', async () => {
-    let view!: ReturnType<typeof render>;
-    await act(async () => { view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />); });
-    expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
+    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
+    await waitFor(() => expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy'));
     view.unmount();
-    await act(async () => { render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />); });
+    const remount = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
+    await waitFor(() => expect(remount.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy'));
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
   });
 
   it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {
-    let view!: ReturnType<typeof render>;
-    await act(async () => { view = render(<XlsxEditor legacySyncApi file={file} />); });
-    expectInThread(view);
+    const view = render(<XlsxEditor legacySyncApi file={file} />);
+    await waitFor(() => expectInThread(view));
     view.rerender(<XlsxEditor legacySyncApi file={file} readOnly />);
     expectInThread(view);
     expect(mounts).not.toHaveBeenCalled();

@@ -29,6 +29,14 @@ function XlsxAsyncEditorSession(props: Omit<XlsxAsyncEditorProps, 'file'> & { fi
   return engine.reason ? <XlsxAsyncInThreadSessionLoader {...props} /> : <XlsxWorkerEditor {...props} backend="peerless" />;
 }
 
+/**
+ * `<XlsxEditor />`: the editor shell. A dpr-aware canvas paints the grid; DOM
+ * overlays (selection marquee, active-cell outline, in-cell editor) sit above it,
+ * positioned from the same display-list geometry the painter uses. A top bar
+ * holds the name box, formula bar, and save/undo/redo; an offscreen `role=grid`
+ * mirror serves screen readers. All compute lives in `@betteroffice/xlsx`; this
+ * layer is framework glue: keyboard/mouse wiring, focus flow, and DOM chrome.
+ */
 export function XlsxEditor(props: XlsxAsyncEditorProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxLegacyEditorProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;

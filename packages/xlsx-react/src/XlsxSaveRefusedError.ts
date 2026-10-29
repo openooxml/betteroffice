@@ -1,3 +1,4 @@
+/** Why a synchronous {@link XlsxEditorApi.save} did not return bytes. */
 export class XlsxSaveRefusedError extends Error {
   constructor(readonly code: 'input-pending' | 'input-failed') {
     super(
