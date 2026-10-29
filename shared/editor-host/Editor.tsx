@@ -148,6 +148,7 @@ export interface EditorProps {
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   downloadOnSave?: boolean;
   onChange(): void;
+  onLocalUpdate?(): void;
   onError(error: Error): void;
   onReady(api: EditorApi | null): void;
   onOpen(file: File): Promise<void>;
@@ -186,6 +187,7 @@ export default function Editor({
   onSaveRequest,
   downloadOnSave,
   onChange,
+  onLocalUpdate,
   onError,
   onReady,
   onOpen,
@@ -221,8 +223,8 @@ export default function Editor({
     onReplica: setPresentationReplica,
     presence: presentationPresence,
   } : undefined, [room?.id, clientId, initialUpdate, presentationPresence]);
-  const callbacks = useRef({ onSave, onChange, onError, onStatus, onReady, onViewsChange });
-  callbacks.current = { onSave, onChange, onError, onStatus, onReady, onViewsChange };
+  const callbacks = useRef({ onSave, onChange, onLocalUpdate, onError, onStatus, onReady, onViewsChange });
+  callbacks.current = { onSave, onChange, onLocalUpdate, onError, onStatus, onReady, onViewsChange };
 
   useEffect(() => {
     if (!provider || !callbacks.current.onViewsChange) return;
@@ -240,6 +242,10 @@ export default function Editor({
   useEffect(() => {
     if (!room || (file.format === "pptx" ? !presentationReplica : !replica)) return;
     const transport = createTransport ? createTransport(room.id) : createRoomTransport(relayOrigin ?? "", room.id);
+    const source = file.format === "pptx" ? presentationReplica! : replica!;
+    const unsubscribeLocal = source.onUpdate((_update, origin) => {
+      if (origin === "local") callbacks.current.onLocalUpdate?.();
+    });
     const options = { user: { name: room.name } };
     const next =
       file.format === "docx"
@@ -259,12 +265,14 @@ export default function Editor({
     return () => {
       unsubscribe();
       unsubscribeError();
+      unsubscribeLocal();
       next.destroy();
       if (providerRef.current === next) providerRef.current = null;
       setProvider(null);
     };
   }, [file.format, replica, presentationReplica, room, relayOrigin, createTransport]);
 
+  const requestSave = useCallback(() => serialization.current ? true : onSaveRequest?.(), [onSaveRequest]);
   const changed = useCallback(() => callbacks.current.onChange(), []);
   const saveBytes = useCallback(
     (bytes: Uint8Array) => callbacks.current.onSave(bytes),
@@ -430,7 +438,7 @@ export default function Editor({
         readOnly={readOnly}
         documentBuffer={file.bytes}
         downloadOnSave={downloadOnSave ?? false}
-        {...(onSaveRequest ? { onSaveRequest } : {})}
+        {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
         onSave={(buffer) => {
           if (!serialization.current) saveBytes(new Uint8Array(buffer));
         }}
@@ -463,7 +471,7 @@ export default function Editor({
       <XlsxEditor
         file={file.bytes}
         fileName={name}
-        {...(onSaveRequest ? { onSaveRequest } : {})}
+        {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
         {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
         onSave={(bytes) => {
           if (serialization.current) serialization.current.bytes = bytes;
@@ -491,7 +499,7 @@ export default function Editor({
       file={file.bytes}
       fileName={name}
       fonts={file.fonts ?? []}
-      {...(onSaveRequest ? { onSaveRequest } : {})}
+      {...(onSaveRequest ? { onSaveRequest: requestSave } : {})}
       {...(downloadOnSave !== undefined ? { downloadOnSave } : {})}
       onSave={saveBytes}
       onChange={changed}

@@ -100,6 +100,7 @@ const SECURITY_HEADERS = {
 
 export const MAX_FORM_BODY_BYTES = 64 * 1024;
 export const MAX_JSON_BODY_BYTES = 64 * 1024;
+const CLOSED_HANDLE_TTL_MS = 10 * 60 * 1000;
 
 function respond(body: string, contentType: string, status = 200): Response {
   return new Response(body, {
@@ -314,7 +315,18 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     return findByHandle(ensure().registry, handle);
   };
 
+  const closedHandles = new Map<string, number>();
+  const rememberClosed = (handle: string): void => {
+    const now = Date.now();
+    for (const [key, expiresAt] of closedHandles) if (expiresAt <= now) closedHandles.delete(key);
+    closedHandles.set(handle, now + CLOSED_HANDLE_TTL_MS);
+  };
   const handleApi = async (request: Request, url: URL): Promise<Response> => {
+    const handle = bearerHandle(request);
+    const closedUntil = handle ? closedHandles.get(handle) : undefined;
+    if (url.pathname === "/api/session/close" && request.method === "POST" && closedUntil !== undefined && closedUntil > Date.now()) {
+      return json({ closed: true }, 200, { "Cache-Control": "no-store" });
+    }
     const resolved = authenticate(request);
     if (!resolved) return typedError("unauthorized", 401);
     const { session, user } = resolved;
@@ -360,11 +372,25 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
         return typedError("saveFailed", 502);
       }
     }
+    if (path === "/api/session/recovery") {
+      if (request.method !== "POST") return typedError("methodNotAllowed", 405);
+      if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
+      const body = await readLimited(request, deps.config.maxFileBytes);
+      if (body === null) return typedError("tooLarge", 413);
+      try {
+        const result = await session.recoverCopy(user.id, body);
+        return json(result, 200, { "Cache-Control": "no-store" });
+      } catch (err) {
+        const kind = err instanceof SessionError ? err.kind : "saveFailed";
+        return typedError(kind, kind === "unknownUser" ? 401 : kind === "notAllowed" ? 403 : 502);
+      }
+    }
     if (path === "/api/session/close") {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
       const body = await readLimited(request, MAX_JSON_BODY_BYTES);
       if (body === null) return typedError("tooLarge", 413);
       if (!isSessionUserAuthorized(session, user)) return typedError("unauthorized", 401);
+      rememberClosed(user.id);
       try {
         await session.leave(user.id);
       } catch (err) {
@@ -467,6 +493,12 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
       controller?.close();
     } catch {}
   };
+  const notifyClosed = (): void => {
+    if (!cleaned) {
+      try { controller?.enqueue(encoder.encode("event: closed\ndata: {}\n\n")); } catch {}
+    }
+    end();
+  };
   const authorized = (): boolean => {
     const user = session.getUser(userId);
     if (user && isSessionUserAuthorized(session, user)) return true;
@@ -510,7 +542,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
           if (p.userId === userId) send("tokenExpiring", { expiresAt: p.expiresAt });
         }),
         session.on("userInvalidated", (p) => {
-          if (p.userId === userId) end();
+          if (p.userId === userId) notifyClosed();
         }),
         session.on("leaderChanged", (p) =>
           send("leaderChanged", {
@@ -518,10 +550,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
             previousLeaderId: p.previousLeaderId === userId ? p.previousLeaderId : null,
           }),
         ),
-        session.on("closed", () => {
-          send("closed", {});
-          end();
-        }),
+        session.on("closed", notifyClosed),
       );
     },
     cancel() {

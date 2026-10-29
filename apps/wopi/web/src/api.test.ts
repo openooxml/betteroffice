@@ -136,3 +136,28 @@ test("close forwards the request cancellation signal", async () => {
   expect(request?.method).toBe("POST");
   expect(new Headers(request?.headers).get("Authorization")).toBe("Bearer handle-1");
 });
+
+test.each([401, 404, 410])("ended event streams stop retrying with status %i", async (status) => {
+  let calls = 0;
+  const api = new SessionApi("handle", async () => { calls += 1; return new Response(null, { status }); });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30);
+  const seen: SessionEvent[] = [];
+  try {
+    await api.events(controller.signal, (event) => { seen.push(event); }, { baselineGeneration: 1, retryMs: 1 });
+    expect(calls).toBe(1);
+    expect(seen).toEqual([{ type: "closed" }]);
+  } finally { clearTimeout(timer); controller.abort(); }
+});
+
+test("recovery posts serialized bytes with a Bearer handle and returns only the copy name", async () => {
+  const bytes = Uint8Array.of(1, 2, 3);
+  const api = new SessionApi("handle", async (input, init) => {
+    expect(String(input)).toBe("/api/session/recovery");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer handle");
+    expect(new Uint8Array(await new Response(init?.body).arrayBuffer())).toEqual(bytes);
+    return Response.json({ copyName: "file (conflict recovery).xlsx", access_token: "discard" });
+  });
+  expect(await api.recover(bytes)).toEqual({ copyName: "file (conflict recovery).xlsx" });
+});

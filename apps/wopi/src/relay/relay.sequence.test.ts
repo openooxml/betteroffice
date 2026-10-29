@@ -7,7 +7,7 @@ import { UserSession } from "../session/userSession";
 import { requestOrderedSave } from "../sessionApi";
 import { encodeUpdateFrame } from "./frames";
 import { CollabRelay, type RelaySocket } from "./relay";
-import { encodeSequencedFrame } from "./sequence";
+import { decodeSequenceAck, encodeSequencedFrame } from "./sequence";
 
 function setup() {
   const server = new Doc();
@@ -20,7 +20,8 @@ function setup() {
   });
   const saved: string[] = [];
   const closeCodes: Array<number | undefined> = [];
-  const socket: RelaySocket = { send() {}, close(code) { closeCodes.push(code); } };
+  const sent: Uint8Array[] = [];
+  const socket: RelaySocket = { send(frame) { sent.push(frame); }, close(code) { closeCodes.push(code); } };
   const replica = { version: 0, encodeStateVector: () => encodeStateVector(server) };
   const session = {
     fileKey: "file", viewOnly: false, users: [user], baselineGeneration: 1,
@@ -62,7 +63,7 @@ function setup() {
   relay.attach(socket, { session: file, user }, file.baselineGeneration);
   relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }));
   return {
-    server, client, file, user, socket, relay, saved, closeCodes, connectionId,
+    server, client, file, user, socket, relay, saved, closeCodes, connectionId, sent,
     send(update: Uint8Array) {
       seq += 1;
       relay.handleMessage(socket, encodeSequencedFrame({ connectionId, seq }, encodeUpdateFrame(update)));
@@ -152,4 +153,18 @@ test("a rejected sequenced update forces resync and cannot be acknowledged by la
     applying.mockRestore();
     h.destroy();
   }
+});
+
+test("the relay acknowledges accepted document frames and withholds acknowledgement on rejection", () => {
+  const h = setup();
+  try {
+    h.client.getText("body").insert(6, " accepted");
+    h.send(encodeStateAsUpdate(h.client));
+    expect(h.sent.map(decodeSequenceAck).filter(Boolean)).toContainEqual({ connectionId: h.connectionId, seq: 1 });
+    const rejecting = spyOn(h.file, "applyUpdate").mockReturnValue({ accepted: false, reason: "causalGap" });
+    try {
+      h.send(encodeStateAsUpdate(h.client));
+      expect(h.sent.map(decodeSequenceAck).filter(Boolean)).not.toContainEqual({ connectionId: h.connectionId, seq: 2 });
+    } finally { rejecting.mockRestore(); }
+  } finally { h.destroy(); }
 });

@@ -87,6 +87,7 @@ export class SessionRegistry {
       scheduler: this.#deps.scheduler,
       journal: journalDir ? new FileJournal(journalDir, key) : null,
       maxEditorsPerFile: this.#deps.maxEditorsPerFile ?? this.#config.maxEditorsPerFile ?? 50,
+      reconnectGraceMs: this.#config.reconnectGraceMs,
       openReplica: this.#deps.openReplica,
       autosave: this.#deps.autosave,
       onClosed: (closed) => {

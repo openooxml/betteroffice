@@ -4,7 +4,7 @@ import { MAX_COLLABORATION_FRAME_BYTES } from "../../../../shared/collaboration-
 import type { FileSession } from "../session/fileSession";
 import type { SessionRegistry } from "../session/registry";
 import type { UserSession } from "../session/userSession";
-import { decodeSequencedFrame } from "./sequence";
+import { decodeSequencedFrame, encodeSequenceAck } from "./sequence";
 import {
   classifyFrame,
   encodeAwarenessFrameRaw,
@@ -423,7 +423,10 @@ export class CollabRelay {
         }
       }
     }
-    if (sequence) state.appliedSeq = sequence.seq;
+    if (sequence && !state.sequenceFailed) {
+      state.appliedSeq = sequence.seq;
+      this.#send(state, encodeSequenceAck(sequence));
+    }
   }
 
   /** Bun WebSocket handlers for this relay. */

@@ -6,7 +6,7 @@ import type { EditorApi, EditorProps, PreparedFile } from "../../../../shared/ed
 import { SessionApi } from "./api";
 import { parseWopiConfig } from "./config";
 import { PostMessageBridge } from "./postMessage";
-import { decodeSequencedFrame } from "../../src/relay/sequence";
+import { decodeSequencedFrame, encodeSequenceAck } from "../../src/relay/sequence";
 import type { WebSocketLike } from "./transport";
 import type { Loaded } from "./page";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
@@ -18,9 +18,12 @@ if (ownsDom) GlobalRegistrator.register();
 const mounts: EditorProps[] = [];
 const lifecycle: string[] = [];
 let flush = async () => {};
+let hasPendingUpdates = () => false;
+let serialize = async () => Uint8Array.of(1);
 let publish = (_update: Uint8Array) => false;
 let serverDoc: Doc;
 let attachGeneration: number | null = null;
+let acknowledge = true;
 const prepareFile = mock(async (bytes: Uint8Array, format: PreparedFile["format"]) => ({ bytes, format }));
 mock.module("../../../../shared/editor-host/Editor", () => ({
   prepareFile,
@@ -38,8 +41,8 @@ mock.module("../../../../shared/editor-host/Editor", () => ({
       });
       transport.connect();
       const api: EditorApi = {
-        hasPendingUpdates: () => false, flushPendingInput: () => flush(), whenReady: async () => {},
-        encodeStateVector: async () => Uint8Array.of(0), serialize: async () => Uint8Array.of(1),
+        hasPendingUpdates: () => hasPendingUpdates(), flushPendingInput: () => flush(), whenReady: async () => {},
+        encodeStateVector: async () => Uint8Array.of(0), serialize: () => serialize(),
         focus() {}, print() {},
       };
       props.onReady(api);
@@ -73,6 +76,7 @@ class TestSocket implements WebSocketLike {
     this.sent.push(data);
     const frame = decodeSequencedFrame(new Uint8Array(data));
     if (!frame || frame.seq === 0) return;
+    if (acknowledge) queueMicrotask(() => this.onmessage?.({ data: encodeSequenceAck(frame) }));
     const parsed = classifyFrame(frame.payload);
     if (parsed.kind !== "document") return;
     for (const message of parsed.messages) {
@@ -105,11 +109,14 @@ afterEach(() => {
   cleanup();
   serverDoc.destroy();
   attachGeneration = null;
+  acknowledge = true;
   (window as unknown as GlobalWindow).happyDOM.setURL(previousUrl);
   sockets.length = 0;
   mounts.length = 0;
   lifecycle.length = 0;
   flush = async () => {};
+  hasPendingUpdates = () => false;
+  serialize = async () => Uint8Array.of(1);
   prepareFile.mockClear();
 });
 afterAll(async () => {
@@ -124,6 +131,9 @@ async function mount(replaceBeforeAttach = false) {
   const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
   let sourceGate = Promise.resolve();
   let failSource = false;
+  let active = true;
+  let failRecovery = false;
+  const copies: Uint8Array[] = [];
   let generation = 1;
   let hostText = "";
   let closeRequest = async (_signal?: AbortSignal | null): Promise<Response> => Response.json({ closed: true });
@@ -131,6 +141,7 @@ async function mount(replaceBeforeAttach = false) {
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer same-handle");
     const path = String(input);
     calls.push(path);
+    if (!active && path.endsWith("/join")) return new Response(null, { status: 401 });
     if (path.endsWith("/source")) {
       lifecycle.push("source");
       await sourceGate;
@@ -145,13 +156,17 @@ async function mount(replaceBeforeAttach = false) {
         },
       }));
     }
+    if (path.endsWith("/recovery")) {
+      copies.push(new Uint8Array(await new Response(init?.body).arrayBuffer()));
+      return failRecovery ? new Response(null, { status: 502 }) : Response.json({ copyName: "file (conflict recovered).docx" });
+    }
     if (path.endsWith("/save")) { hostText = serverDoc.getText("body").toString(); return Response.json({ itemVersion: "2" }); }
     if (path.endsWith("/close")) return closeRequest(init?.signal);
     throw new Error(`Unexpected request: ${path}`);
   });
   const config = parseWopiConfig({
     sessionHandle: "same-handle", format: "docx", fileName: "file.docx", canWrite: true,
-    postMessageOrigin: "https://host.example", userFriendlyName: "Peer",
+    postMessageOrigin: "https://host.example", userFriendlyName: "Peer", closePostMessage: true,
   });
   const bridge = new PostMessageBridge({
     parent: { postMessage(message) { messages.push(JSON.parse(message)); } },
@@ -169,11 +184,14 @@ async function mount(replaceBeforeAttach = false) {
   if (replaceBeforeAttach) { generation = 2; attachGeneration = generation; }
   await act(async () => sockets[0]!.open());
   return {
-    calls, messages, loaded, view,
+    calls, messages, loaded, view, copies,
+    endSession() { active = false; },
+    failRecovery() { failRecovery = true; },
     get hostText() { return hostText; },
     setCloseRequest(request: typeof closeRequest) { closeRequest = request; },
     blockSource() { let release!: () => void; sourceGate = new Promise((resolve) => { release = resolve; }); return release; },
     failSource() { failSource = true; },
+    closedEvent() { streams.at(-1)!.enqueue(new TextEncoder().encode("event: closed\ndata: {}\n\n")); },
     event() { streams.at(-1)!.enqueue(new TextEncoder().encode('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n')); },
   };
 }
@@ -226,7 +244,8 @@ test.each(["socket", "event", "socket and event", "event and socket"])("%s repla
 test("rejoin rejects an in-flight host save and a late flush cannot save the replacement", async () => {
   const h = await mount();
   let release!: () => void;
-  flush = () => new Promise<void>((resolve) => { release = resolve; });
+  const pendingFlush = new Promise<void>((resolve) => { release = resolve; });
+  flush = () => pendingFlush;
   const warning = spyOn(console, "error").mockImplementation(() => {});
   try {
     await act(async () => {
@@ -245,7 +264,7 @@ test("rejoin rejects an in-flight host save and a late flush cannot save the rep
   }
 });
 
-test.each([1006, 4401])("close code %i reconnects the existing editor without refetching", async (code) => {
+test.each([1006])("close code %i reconnects the existing editor without refetching", async (code) => {
   const h = await mount();
   await act(async () => {
     sockets[0]!.drop(code);
@@ -288,7 +307,7 @@ test("deleting while disconnected then Close reports notSynced and keeps the edi
   } finally { doc.destroy(); warning.mockRestore(); }
 });
 
-test("a stalled Close restores input and clears the shared promise so another Close retries", async () => {
+test("a stalled Close keeps input blocked and a second Close skips the successful final save", async () => {
   const h = await mount();
   const signals: Array<AbortSignal | null | undefined> = [];
   h.setCloseRequest((signal) => {
@@ -317,12 +336,13 @@ test("a stalled Close restores input and clears the shared promise so another Cl
     await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
     expect(signals).toHaveLength(1);
     expect(signals[0]?.aborted).toBe(true);
-    expect(h.view.container.querySelector("main")!.inert).toBe(false);
+    expect(h.view.container.querySelector("main")!.inert).toBe(true);
     expect(h.view.getByRole("alert").textContent).toBe("closeTimeout");
     expect(h.view.getByTestId("editor")).toBeDefined();
     await act(async () => { await h.loaded.actions.close!(); });
     expect(signals).toHaveLength(2);
     expect(signals[1]).not.toBe(signals[0]);
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
     expect(h.view.queryByTestId("editor")).toBeNull();
   } finally {
     for (const timer of deadlines.keys()) cancel(timer);
@@ -385,4 +405,124 @@ test("source and join from different generations retry before preparing an edito
   expect(prepareFile).toHaveBeenCalledTimes(1);
   expect(baseline.file.bytes).toEqual(Uint8Array.of(2));
   expect(baseline.join.baselineGeneration).toBe(2);
+});
+
+test.each(["unauthorized", "rejected upgrade", "closed event"])("an ended session blocks input and stops retries after %s", async (reason) => {
+  const h = await mount();
+  await act(async () => {
+    if (reason === "closed event") {
+      h.endSession();
+      h.closedEvent();
+    } else if (reason === "unauthorized") sockets[0]!.drop(4401);
+    else {
+      sockets[0]!.drop(1006);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      h.endSession();
+      sockets[1]!.drop(1006);
+    }
+  });
+  const count = sockets.length;
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  expect(sockets).toHaveLength(count);
+  expect(h.view.container.querySelector("main")!.inert).toBe(true);
+  expect(h.view.getByRole("alert").textContent).toMatch(/session.*ended.*reload/i);
+  expect(mounts).toHaveLength(1);
+});
+
+test("own Close completes on handle invalidation while the close response is delayed", async () => {
+  const h = await mount();
+  let invalidate!: () => void;
+  const requested = new Promise<void>((resolve) => { invalidate = resolve; });
+  h.setCloseRequest(() => { invalidate(); return new Promise<Response>(() => {}); });
+  let closing!: Promise<void>;
+  await act(async () => { closing = h.loaded.actions.close!(); await requested; });
+  const container = h.view.container.querySelector("main")!;
+  expect(container.inert).toBe(true);
+  await act(async () => { sockets[0]!.drop(4401); await closing; });
+  expect(container.inert).toBe(true);
+  expect(h.view.queryByTestId("editor")).toBeNull();
+  expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+  await act(async () => { await h.loaded.actions.close!(); });
+  expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+  expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+});
+
+test.each(["socket", "event"])("%s baseline rejoin uploads pending offline work once before destroying the editor", async (reason) => {
+  const h = await mount();
+  const local = new Doc();
+  local.getText("body").insert(0, "offline edit");
+  mounts[0]!.onLocalUpdate!();
+  serialize = async () => { lifecycle.push("serialize"); return encodeStateAsUpdate(local); };
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  flush = () => gate;
+  await act(async () => {
+    if (reason === "socket") sockets[0]!.drop(4409);
+    else h.event();
+  });
+  expect(h.view.getByTestId("editor")).toBeDefined();
+  expect(h.view.container.querySelector("main")!.inert).toBe(true);
+  expect(lifecycle).not.toContain("destroy");
+  await act(async () => { sockets[0]!.drop(4409); release(); });
+  expect(h.copies).toHaveLength(1);
+  const recovered = new Doc();
+  try {
+    applyUpdate(recovered, h.copies[0]!);
+    expect(recovered.getText("body").toString()).toBe("offline edit");
+    expect(lifecycle.indexOf("serialize")).toBeLessThan(lifecycle.indexOf("destroy"));
+    expect(mounts).toHaveLength(2);
+    expect(h.view.getByRole("alert").textContent).toContain("file (conflict recovered).docx");
+  } finally { local.destroy(); recovered.destroy(); }
+});
+
+test("baseline rejoin with no pending updates does not upload a copy", async () => {
+  const h = await mount();
+  await act(async () => sockets[0]!.drop(4409));
+  expect(h.copies).toHaveLength(0);
+  expect(mounts).toHaveLength(2);
+});
+
+test("failed recovery upload preserves the old editor read-only", async () => {
+  const h = await mount();
+  h.failRecovery();
+  hasPendingUpdates = () => true;
+  await act(async () => sockets[0]!.drop(4409));
+  expect(h.copies).toHaveLength(1);
+  expect(mounts).toHaveLength(1);
+  expect(lifecycle).not.toContain("destroy");
+  expect(h.view.getByTestId("editor")).toBeDefined();
+  expect(h.view.container.querySelector("main")!.inert).toBe(true);
+  expect(h.view.getByRole("alert").textContent).toMatch(/recovery.*502/i);
+  expect(h.calls.filter((path) => path.endsWith("/source"))).toHaveLength(0);
+});
+
+test("a sent but unacknowledged edit is recovered even with an empty provider queue", async () => {
+  const h = await mount();
+  const local = new Doc();
+  local.getText("body").insert(0, "sent edit");
+  serialize = async () => encodeStateAsUpdate(local);
+  acknowledge = false;
+  try {
+    expect(publish(encodeStateAsUpdate(local))).toBe(true);
+    await act(async () => sockets[0]!.drop(4409));
+    expect(h.copies).toHaveLength(1);
+    expect(mounts).toHaveLength(2);
+  } finally { local.destroy(); }
+});
+
+test("an unacknowledged initial resync without local edits does not upload a copy", async () => {
+  acknowledge = false;
+  const h = await mount();
+  await act(async () => sockets[0]!.drop(4409));
+  expect(h.copies).toHaveLength(0);
+  expect(mounts).toHaveLength(2);
+});
+
+test("an invalid handle response after the final save completes Close", async () => {
+  const h = await mount();
+  h.setCloseRequest(async () => new Response(null, { status: 401 }));
+  await act(async () => { await h.loaded.actions.close!(); });
+  expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+  expect(h.view.queryByTestId("editor")).toBeNull();
+  expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
 });

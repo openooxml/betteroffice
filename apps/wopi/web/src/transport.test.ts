@@ -1,12 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { collabUrl, createWopiTransport, type WebSocketLike } from "./transport";
-import { decodeSequencedFrame } from "../../src/relay/sequence";
+import { decodeSequencedFrame, encodeSequenceAck } from "../../src/relay/sequence";
 import { closeDocument, saveDocument } from "./documentActions";
 import { CollaborationProvider } from "../../../../packages/xlsx/src/collaboration/provider";
 import type { CollaborationReplica } from "../../../../packages/xlsx/src/collaboration/types";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
-import { classifyFrame, encodeSyncStep1, encodeSyncStep2 } from "../../src/relay/frames";
+import { classifyFrame, encodeSyncStep1, encodeSyncStep2, encodeUpdateFrame } from "../../src/relay/frames";
 
 class FakeSocket implements WebSocketLike {
   binaryType = "";
@@ -434,4 +434,60 @@ test("backpressure polls until drained and stops polling after close or disconne
     timers.mockRestore();
     cancellations.mockRestore();
   }
+});
+
+test("sent updates remain pending until the relay acknowledges their sequence", () => {
+  const socket = new FakeSocket();
+  const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => socket });
+  transport.connect();
+  socket.readyState = 1;
+  socket.onopen?.();
+  transport.send(encodeUpdateFrame(Uint8Array.of(0, 0)));
+  expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+  const barrier = transport.captureSaveBarrier()!;
+  socket.onmessage?.({ data: encodeSequenceAck({ ...barrier, connectionId: crypto.randomUUID() }) });
+  expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+  socket.onmessage?.({ data: encodeSequenceAck(barrier) });
+  expect(transport.hasUnacknowledgedUpdates()).toBe(false);
+  transport.disconnect();
+});
+
+test("a rejected reconnect upgrade probes the handle and stops on an ended session", async () => {
+  const sockets: FakeSocket[] = [];
+  let probes = 0;
+  const seen: unknown[] = [];
+  const transport = createWopiTransport({ handle: "h", baselineGeneration: 1,
+    checkSession: async () => { probes += 1; return false; },
+    createSocket() { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+  });
+  transport.onEvent((event) => { seen.push(event); });
+  transport.connect();
+  sockets[0]!.readyState = 3;
+  sockets[0]!.onclose?.({ code: 1006 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(probes).toBe(1);
+  expect(sockets).toHaveLength(1);
+  expect(seen).toContainEqual({ type: "close", code: 4401, reason: "session ended" });
+  transport.connect();
+  expect(sockets).toHaveLength(1);
+  transport.disconnect();
+});
+
+test("offline local updates remain unacknowledged even when the provider queue is empty", () => {
+  const socket = new FakeSocket();
+  const transport = createWopiTransport({ handle: "h", baselineGeneration: 1, createSocket: () => socket });
+  transport.connect();
+  socket.readyState = 1;
+  socket.onopen?.();
+  transport.noteLocalUpdate();
+  transport.send(encodeSyncStep2(Uint8Array.of(0, 0)));
+  const barrier = transport.captureSaveBarrier()!;
+  transport.noteLocalUpdate();
+  socket.onmessage?.({ data: encodeSequenceAck(barrier) });
+  expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+  socket.readyState = 3;
+  socket.onclose?.({ code: 4409 });
+  transport.noteLocalUpdate();
+  expect(transport.hasUnacknowledgedUpdates()).toBe(true);
+  transport.disconnect();
 });

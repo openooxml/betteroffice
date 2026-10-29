@@ -6,6 +6,7 @@ export interface SocketSaveBarrier {
 export type SaveBarrier = SocketSaveBarrier;
 
 const SEQUENCE_FRAME_TYPE = 4;
+const SEQUENCE_ACK_FRAME_TYPE = 5;
 const CONNECTION_ID_BYTES = 36;
 const HEADER_BYTES = 1 + CONNECTION_ID_BYTES + 8;
 const CONNECTION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,4 +39,22 @@ export function decodeSequencedFrame(frame: Uint8Array): (SocketSaveBarrier & { 
   const barrier = { connectionId, seq };
   if (!isSocketSaveBarrier(barrier) || (seq === 0) !== (payload.byteLength === 0)) throw new Error("invalidSaveBarrier");
   return { ...barrier, payload };
+}
+
+export function encodeSequenceAck(barrier: SocketSaveBarrier): Uint8Array {
+  if (!isSocketSaveBarrier(barrier)) throw new Error("invalidSaveBarrier");
+  const frame = new Uint8Array(HEADER_BYTES);
+  frame[0] = SEQUENCE_ACK_FRAME_TYPE;
+  frame.set(new TextEncoder().encode(barrier.connectionId), 1);
+  new DataView(frame.buffer).setBigUint64(1 + CONNECTION_ID_BYTES, BigInt(barrier.seq));
+  return frame;
+}
+
+export function decodeSequenceAck(frame: Uint8Array): SocketSaveBarrier | null {
+  if (frame[0] !== SEQUENCE_ACK_FRAME_TYPE || frame.byteLength !== HEADER_BYTES) return null;
+  const barrier = {
+    connectionId: new TextDecoder().decode(frame.subarray(1, 1 + CONNECTION_ID_BYTES)),
+    seq: Number(new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getBigUint64(1 + CONNECTION_ID_BYTES)),
+  };
+  return isSocketSaveBarrier(barrier) ? barrier : null;
 }

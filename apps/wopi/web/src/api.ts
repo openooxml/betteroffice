@@ -78,8 +78,31 @@ export class SessionApi {
     return { itemVersion: typeof result.itemVersion === "string" ? result.itemVersion : null };
   }
 
+  async isActive(signal?: AbortSignal): Promise<boolean> {
+    const response = await this.#fetch("/api/session/join", { headers: this.#headers(), signal });
+    if ([401, 404, 410].includes(response.status)) return false;
+    if (response.status === 409) {
+      const failure = await response.json().catch(() => null) as { error?: { kind?: string } } | null;
+      if (failure?.error?.kind === "closed") return false;
+    }
+    if (!response.ok) throw new Error(`Could not check the session (${response.status}).`);
+    await response.arrayBuffer();
+    return true;
+  }
+
+  async recover(bytes: Uint8Array, signal?: AbortSignal): Promise<{ copyName: string }> {
+    const response = await this.#fetch("/api/session/recovery", {
+      method: "POST", headers: { ...this.#headers(), "Content-Type": "application/octet-stream" }, body: bytes as BodyInit, signal,
+    });
+    if (!response.ok) throw new Error(`Recovery copy failed (${response.status}).`);
+    const result = await response.json() as { copyName?: unknown };
+    if (typeof result.copyName !== "string" || !result.copyName) throw new Error("Invalid recovery copy response.");
+    return { copyName: result.copyName };
+  }
+
   async close(signal?: AbortSignal): Promise<void> {
     const response = await this.#fetch("/api/session/close", { method: "POST", headers: this.#headers(), signal });
+    if ([401, 404, 410].includes(response.status)) return;
     if (!response.ok) throw new Error(`Close failed (${response.status}).`);
   }
 
@@ -92,6 +115,10 @@ export class SessionApi {
         const response = await this.#fetch("/api/session/events", {
           headers: { ...this.#headers(), [BASELINE_GENERATION_HEADER]: String(options.baselineGeneration) }, signal,
         });
+        if ([401, 404, 410].includes(response.status)) {
+          onEvent({ type: "closed" });
+          return;
+        }
         if (response.ok && response.body) {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();

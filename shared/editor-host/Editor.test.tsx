@@ -16,6 +16,7 @@ interface DocxProps {
   documentBuffer: Uint8Array;
   onFirstPagePainted(): void;
   onSave(buffer: ArrayBuffer): void;
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   onError(error: Error, info?: DocxErrorInfo): void;
   mode?: "editing" | "viewing";
   readOnly?: boolean;
@@ -200,7 +201,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false) {
+async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = false, onChange = () => {}, readOnly = false, onLocalUpdate = () => {}, onSaveRequest?: () => Promise<boolean>) {
   const ready: { api?: EditorApi } = {};
   const errors: string[] = [];
   const saved: Uint8Array[] = [];
@@ -215,6 +216,8 @@ async function mount(format: "docx" | "xlsx" | "pptx" = "docx", collaborative = 
         readOnly={readOnly}
         onSave={(bytes) => saved.push(bytes)}
         onChange={onChange}
+        onLocalUpdate={onLocalUpdate}
+        onSaveRequest={onSaveRequest}
         onError={(error) => errors.push(error.message)}
         onReady={(api) => {
           if (api) ready.api = api;
@@ -729,7 +732,6 @@ test("createTransport replaces relayOrigin and receives the room id", async () =
   expect(opening?.initialUpdate).toEqual(initialUpdate);
 });
 
-
 test("presentation collaboration connects the async replica and presence provider", async () => {
   providerReplicas.length = 0;
   presentationOptions.length = 0;
@@ -792,4 +794,32 @@ test.each(["", "&peerless=0"])("docx %s waits for its first painted page", async
   } finally {
     browser.happyDOM.setURL(previous);
   }
+});
+
+test("local replica updates are reported independently of provider queues and idle document events", async () => {
+  let update!: Parameters<CollaborationReplica["onUpdate"]>[0];
+  let unsubscribed = false;
+  docxReplica = {
+    clientId: 42, encodeStateVector: () => Uint8Array.of(0), encodeStateAsUpdate: () => Uint8Array.of(0, 0), applyUpdate() {},
+    onUpdate(listener) { update = listener; return () => { unsubscribed = true; }; },
+  };
+  const local = mock(() => {});
+  const h = await mount("docx", true, () => {}, false, local);
+  update(Uint8Array.of(1), "remote");
+  expect(local).not.toHaveBeenCalled();
+  update(Uint8Array.of(2), "local");
+  expect(local).toHaveBeenCalledTimes(1);
+  h.view.unmount();
+  expect(unsubscribed).toBe(true);
+});
+
+test("serializing a recovery copy bypasses the host save request", async () => {
+  const requested = mock(async () => { throw new Error("session is rejoining"); });
+  save = async (props) => {
+    if (props.onSaveRequest && await props.onSaveRequest() !== true) return null;
+    return Uint8Array.of(7).buffer;
+  };
+  const h = await mount("docx", false, () => {}, false, () => {}, requested);
+  expect(await h.api.serialize()).toEqual(Uint8Array.of(7));
+  expect(requested).not.toHaveBeenCalled();
 });

@@ -206,7 +206,7 @@ test("a failed close request leaves the host open", async () => {
   expect(h.calls).toEqual(["flush", "sequence", "save", "close"]);
 });
 
-test.each(["timeout", "abort"])("a stalled close request restores input after %s and a retry starts a new request", async (reason) => {
+test.each(["timeout", "abort"])("a stalled close request keeps input blocked after %s and a retry starts a new request", async (reason) => {
   const h = setup();
   const signals: AbortSignal[] = [];
   const blocked: boolean[] = [];
@@ -238,7 +238,7 @@ test.each(["timeout", "abort"])("a stalled close request restores input after %s
       new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still pending"), 50); }),
     ])).toBe(reason === "timeout" ? "closeTimeout" : "rejoinRequired");
     expect(signals[0]?.aborted).toBe(true);
-    expect(blocked).toEqual([true, false]);
+    expect(blocked).toEqual([true]);
     expect(failures).toHaveLength(1);
     expect(h.calls).not.toContain("host-close");
     await closeDocument(h.editor, api, options, () => { h.calls.push("host-close"); });
@@ -333,4 +333,16 @@ test("close saves once through its captured barrier when every save triggers a r
   expect(h.isModified()).toBe(true);
   expect(captures).toBe(1);
   expect(h.calls).toEqual(["flush", "save", "close", "host-close"]);
+});
+
+test("handle invalidation after the final save completes Close without waiting for its deadline", async () => {
+  const h = setup();
+  const blocked: boolean[] = [];
+  let invalidate!: () => void;
+  const whenClosed = new Promise<void>((resolve) => { invalidate = resolve; });
+  await closeDocument(h.editor, { save: h.api.save, close: async () => { invalidate(); await new Promise<void>(() => {}); } }, {
+    ...h.closeOptions, whenClosed, closeTimeoutMs: 5, setInputBlocked: (value) => { blocked.push(value); },
+  }, () => { h.calls.push("host-close"); });
+  expect(blocked).toEqual([true]);
+  expect(h.calls.at(-1)).toBe("host-close");
 });

@@ -21,7 +21,7 @@ import {
   encodeUpdateFrame,
 } from "./frames";
 import { CollabRelay, type RelaySocket } from "./relay";
-import { encodeSequencedFrame, type SocketSaveBarrier } from "./sequence";
+import { decodeSequenceAck, encodeSequencedFrame, type SocketSaveBarrier } from "./sequence";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -121,6 +121,7 @@ class FrameClient {
       const data = event.data;
       if (typeof data === "string") return;
       const frame = new Uint8Array(data as ArrayBuffer);
+      if (decodeSequenceAck(frame)) return;
       for (const message of decodeMessages(frame)) {
         if (message.type === "sync-step-1") {
           this.send(encodeSyncStep2(this.client.encodeStateAsUpdate(message.stateVector)));
@@ -279,6 +280,8 @@ describe("collab relay", () => {
           expect(closed).toEqual([1013]);
           expect(attempts).toBe(1);
           await h.clock.drain();
+          expect(b.user.connected).toBe(true);
+          await h.clock.advance(30_000);
           expect(b.user.connected).toBe(false);
           expect(healthyFrames.some((frame) => decodeMessages(frame).some((message) => message.type === "awareness" && message.entries.some((entry) => entry.clientId === 909101 && entry.isNull)))).toBe(true);
           trigger();

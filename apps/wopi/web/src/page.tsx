@@ -50,7 +50,8 @@ export async function loadBaseline(api: SessionApi, signal?: AbortSignal): Promi
 export default function WopiApp({ loaded }: { loaded: Loaded }) {
   const [current, setCurrent] = useState<Loaded | null>(loaded);
   const [error, setError] = useState<string | null>(null);
-  const rejoin = useCallback(() => setCurrent(null), []);
+  const [recoveryName, setRecoveryName] = useState<string | null>(null);
+  const rejoin = useCallback((copyName?: string) => { setRecoveryName(copyName ?? null); setCurrent(null); }, []);
 
   useEffect(() => {
     if (current) return;
@@ -70,7 +71,7 @@ export default function WopiApp({ loaded }: { loaded: Loaded }) {
     return () => controller.abort();
   }, [current, loaded]);
 
-  if (current) return <WopiEditor loaded={current} onRejoin={rejoin} />;
+  if (current) return <WopiEditor loaded={current} onRejoin={rejoin} recoveryName={recoveryName} />;
   if (error) return <div className="wopi-error" role="alert">{error}</div>;
   return <div className="wopi-shell" role="status">Reopening document...</div>;
 }
@@ -84,12 +85,12 @@ function toWopiViews(views: EditorView[], self: EditorView, friendlyName: string
   return [...all.values()];
 }
 
-function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) {
+function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejoin(copyName?: string): void; recoveryName: string | null }) {
   const { config, api, bridge } = loaded;
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [conflictName, setConflictName] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(
-    config.viewOnlyReason === "lockedElsewhere" ? "This file is being edited elsewhere. You are viewing a live read-only copy." : null,
+    recoveryName ? `Your edits were saved as ${recoveryName}.` : config.viewOnlyReason === "lockedElsewhere" ? "This file is being edited elsewhere. You are viewing a live read-only copy." : null,
   );
   const [closed, setClosed] = useState(false);
   const [readOnly, setReadOnly] = useState(!config.canWrite);
@@ -100,24 +101,73 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
   const modified = useRef(false);
   const changeVersion = useRef(0);
   const closing = useRef<Promise<void> | null>(null);
+  const finalSaved = useRef(false);
+  const closeCompleted = useRef(false);
+  const sessionEnded = useRef(false);
+  const rejoining = useRef(false);
+  const recoveryController = useRef<AbortController | null>(null);
+  const handleClosed = useMemo(() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  }, []);
   const mounted = useRef(true);
   const lifetime = useRef(new AbortController()).current;
   const userName = displayUserName(config.userFriendlyName);
   const room = useMemo(() => ({ id: "wopi", name: userName }), [userName]);
   const views = useRef<WopiView[]>([{ ViewId: loaded.clientId, UserName: userName }]);
 
-  const rejoin = useCallback(() => {
-    if (lifetime.signal.aborted) return;
-    mounted.current = false;
-    lifetime.abort(new Error("rejoinRequired"));
+  const completeClose = useCallback(() => {
+    if (closeCompleted.current) return;
+    closeCompleted.current = true;
     transportRef.current?.disconnect();
-    transportRef.current = null;
-    editorApi.current = null;
-    onRejoin();
-  }, [lifetime, onRejoin]);
+    setClosed(true);
+    finishClose(config, bridge, window, () => setClosed(true));
+  }, [bridge, config]);
+
+  const endSession = useCallback(() => {
+    if (lifetime.signal.aborted) return;
+    sessionEnded.current = true;
+    handleClosed.resolve();
+    transportRef.current?.disconnect();
+    if (editorContainer.current) editorContainer.current.inert = true;
+    setReadOnly(true);
+    if (finalSaved.current) completeClose();
+    else setBanner("This session has ended. Reload the page to continue editing.");
+  }, [completeClose, handleClosed, lifetime]);
+
+  const rejoin = useCallback(() => {
+    if (lifetime.signal.aborted || rejoining.current) return;
+    rejoining.current = true;
+    if (editorContainer.current) editorContainer.current.inert = true;
+    setReadOnly(true);
+    lifetime.abort(new Error("rejoinRequired"));
+    const oldTransport = transportRef.current;
+    oldTransport?.disconnect();
+    const editor = editorApi.current;
+    const controller = new AbortController();
+    recoveryController.current = controller;
+    void (async () => {
+      await editor?.flushPendingInput();
+      controller.signal.throwIfAborted();
+      let copyName: string | undefined;
+      if (editor?.hasPendingUpdates() || oldTransport?.hasUnacknowledgedUpdates()) {
+        if (!editor) throw new Error("The editor is not ready to preserve local work. Reload the page to retry.");
+        const bytes = await editor.serialize();
+        controller.signal.throwIfAborted();
+        copyName = (await api.recover(bytes, controller.signal)).copyName;
+      }
+      controller.signal.throwIfAborted();
+      onRejoin(copyName);
+    })().catch((failure: unknown) => {
+      if (!mounted.current || controller.signal.aborted) return;
+      setBanner(failure instanceof Error ? failure.message : "Could not save a recovery copy. Reload the page to retry.");
+    });
+  }, [api, lifetime, onRejoin]);
 
   const requestSave = useCallback(async (options: SaveOptions = {}): Promise<void> => {
     lifetime.signal.throwIfAborted();
+    if (sessionEnded.current || finalSaved.current) throw new Error("sessionEnded");
     setSaveState("saving");
     try {
       let version = changeVersion.current;
@@ -147,35 +197,37 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
   }, [requestSave]);
 
   const close = useCallback((): Promise<void> => {
+    if (closeCompleted.current) return Promise.resolve();
     if (lifetime.signal.aborted) return Promise.reject(lifetime.signal.reason);
     if (closing.current) return closing.current;
     setSaveState("saving");
     const pending = closeDocument(editorApi.current, api, {
       signal: lifetime.signal,
+      whenClosed: handleClosed.promise,
+      finalSaved: finalSaved.current,
+      onFinalSaved: () => { finalSaved.current = true; },
       hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
       onProgress: wopiDebug,
       setInputBlocked: (blocked) => {
         if (lifetime.signal.aborted) return;
-        if (editorContainer.current) editorContainer.current.inert = blocked;
+        if (editorContainer.current) editorContainer.current.inert = blocked || sessionEnded.current;
       },
       onFailure: (error) => {
         if (lifetime.signal.aborted) return;
         setSaveState("failed");
         setBanner(error instanceof Error ? error.message : "Could not close the document.");
       },
-    }, () => {
-      setClosed(true);
-      finishClose(config, bridge, window, () => setClosed(true));
-    }).catch(() => {}).finally(() => { closing.current = null; });
+    }, completeClose).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
     return pending;
-  }, [api, bridge, config, lifetime]);
+  }, [api, completeClose, config.canWrite, handleClosed, lifetime]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      recoveryController.current?.abort();
       lifetime.abort(new Error("editorDisposed"));
     };
   }, [lifetime]);
@@ -202,7 +254,9 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
     if (lifetime.signal.aborted) controller.abort();
     void api.events(controller.signal, (event) => {
       if (lifetime.signal.aborted) return;
-      if (event.type === "rejoinRequired") {
+      if (event.type === "closed") {
+        endSession();
+      } else if (event.type === "rejoinRequired") {
         rejoin();
       } else if (event.type === "saved") {
         setSaveState("saved");
@@ -224,7 +278,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
       lifetime.signal.removeEventListener("abort", abort);
       controller.abort();
     };
-  }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin]);
+  }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin, endSession]);
 
   useEffect(() => {
     if (config.tokenExpiresAt === null) return;
@@ -240,7 +294,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
   const createTransport = useCallback(
     (_roomId: string) => {
       wopiDebug({ transportCreated: true });
-      const transport = createWopiTransport({ handle: config.sessionHandle, baselineGeneration: loaded.join.baselineGeneration, origin: window.location.origin });
+      const transport = createWopiTransport({ handle: config.sessionHandle, baselineGeneration: loaded.join.baselineGeneration, origin: window.location.origin, checkSession: () => api.isActive(lifetime.signal) });
       transportRef.current = transport;
       return {
         ...transport,
@@ -249,6 +303,9 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
         onEvent: (listener: Parameters<typeof transport.onEvent>[0]) =>
           transport.onEvent((event) => {
             if (lifetime.signal.aborted) return;
+            if (event.type === "close" && event.code === 4401) {
+              endSession();
+            }
             if (event.type === "close" && event.code === 4409) {
               rejoin();
               return;
@@ -258,7 +315,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
           }),
       };
     },
-    [config.sessionHandle, loaded.join.baselineGeneration, lifetime, rejoin],
+    [api, config.sessionHandle, loaded.join.baselineGeneration, lifetime, rejoin, endSession],
   );
 
   const onViewsChange = useCallback(
@@ -304,6 +361,7 @@ function WopiEditor({ loaded, onRejoin }: { loaded: Loaded; onRejoin(): void }) 
           downloadOnSave={false}
           onSaveRequest={onSaveRequest}
           onSave={() => undefined}
+          onLocalUpdate={() => { if (mounted.current) transportRef.current?.noteLocalUpdate(); }}
           onChange={() => {
             if (lifetime.signal.aborted) return;
             changeVersion.current += 1;

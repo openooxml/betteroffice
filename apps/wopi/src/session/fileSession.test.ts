@@ -256,7 +256,7 @@ describe("leader handoff and explicit save", () => {
 
 describe("last leave, disconnect and hold", () => {
   test("stale connection generations cannot disconnect or heartbeat the current connection", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     const a = await joinEditor(h, "tok-a");
@@ -313,7 +313,7 @@ describe("last leave, disconnect and hold", () => {
   });
 
   test("expired leaver token falls back to another valid token", async () => {
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     const a = await joinEditor(h, "tok-a");
@@ -635,6 +635,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforePut: async () => {
         if (!gated) return;
         gated = false;
@@ -704,7 +705,7 @@ describe("review fixes: expiry, fallback and departure races", () => {
   });
 
   test("disconnected users do not consume editor slots", async () => {
-    const h = makeHarness({ maxEditorsPerFile: 2 });
+    const h = makeHarness({ reconnectGraceMs: 0, maxEditorsPerFile: 2 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-b", "user-b");
     addToken(h, "tok-c", "user-c");
@@ -795,6 +796,7 @@ describe("review round 2: serialized transitions", () => {
     });
     let gated = true;
     const h = makeHarness({
+      reconnectGraceMs: 0,
       beforeUnlock: async () => {
         if (!gated) return;
         gated = false;
@@ -976,7 +978,7 @@ describe("session safety regressions", () => {
     const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
     let releaseCheck: () => void = () => {};
     const checkGate = new Promise<void>((resolve) => { releaseCheck = resolve; });
-    const h = makeHarness();
+    const h = makeHarness({ reconnectGraceMs: 0 });
     addToken(h, "tok-a", "user-a");
     addToken(h, "tok-external", "external-app");
     const a = await joinEditor(h, "tok-a");
@@ -1046,7 +1048,7 @@ describe("session safety regressions", () => {
       const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
       let enteredUnlock: () => void = () => {};
       const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
-      const h = makeHarness({ beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
+      const h = makeHarness({ reconnectGraceMs: 0, beforeUnlock: async () => { enteredUnlock(); await unlockGate; } });
       addToken(h, "tok-a", "user-a");
       const a = await joinEditor(h, "tok-a");
       const session = a.session;

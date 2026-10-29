@@ -22,6 +22,9 @@ interface SaveApi {
 
 interface CloseDocumentOptions extends SaveDocumentOptions {
   closeTimeoutMs?: number;
+  whenClosed?: Promise<void>;
+  finalSaved?: boolean;
+  onFinalSaved?(): void;
   setInputBlocked(blocked: boolean): void;
   onFailure?(error: unknown): void;
 }
@@ -114,15 +117,24 @@ export async function closeDocument(
 ): Promise<void> {
   options.setInputBlocked(true);
   const controller = new AbortController();
+  let saved = options.finalSaved ?? false;
   try {
-    await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+    if (!saved) {
+      await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+      saved = true;
+      options.onFinalSaved?.();
+    }
     options.signal?.throwIfAborted();
-    await bounded(() => api.close(controller.signal), options.closeTimeoutMs ?? 10_000, "closeTimeout", options.signal);
+    await bounded(() => {
+      const request = api.close(controller.signal);
+      return options.whenClosed ? Promise.race([request, options.whenClosed]) : request;
+    }, options.closeTimeoutMs ?? 10_000, "closeTimeout", options.signal);
+    controller.abort();
     options.signal?.throwIfAborted();
     finish();
   } catch (error) {
     controller.abort();
-    options.setInputBlocked(false);
+    if (!saved) options.setInputBlocked(false);
     options.onFailure?.(error);
     throw error;
   }
