@@ -9,6 +9,7 @@ mod format_calculation_tests;
 #[cfg(test)]
 mod format_facets_tests;
 mod geometry;
+pub(crate) mod reads;
 mod recovery;
 mod rich_text;
 #[cfg(test)]
@@ -1335,6 +1336,10 @@ impl Workbook {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(cached) = &mut *slot {
+                cached.info.auto_filter = sheet
+                    .auto_filter
+                    .as_ref()
+                    .map(|filter| filter.range.to_a1());
                 if cached.geometry_generation != Some(generation) {
                     cached.refresh_content(sheet.freeze_pane, &geometry);
                     cached.geometry_generation = Some(generation);
@@ -1359,6 +1364,10 @@ impl Workbook {
             frozen_cols: content.frozen_cols,
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
+            auto_filter: sheet
+                .auto_filter
+                .as_ref()
+                .map(|filter| filter.range.to_a1()),
         };
         *self
             .sheet_info_cache
@@ -1406,6 +1415,10 @@ impl Workbook {
             frozen_cols: content.frozen_cols,
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
+            auto_filter: sheet_ref
+                .auto_filter
+                .as_ref()
+                .map(|filter| filter.range.to_a1()),
         })
     }
 
@@ -1425,6 +1438,20 @@ impl Workbook {
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
+        let is_array_formula = sheet_ref
+            .array_formulas()
+            .any(|(_, range)| range.contains(cell))
+            .then_some(true);
+        Ok(self.cell_edit(sheet, sheet_ref, cell, is_array_formula))
+    }
+
+    fn cell_edit(
+        &self,
+        sheet: SheetId,
+        sheet_ref: &Sheet,
+        cell: CellRef,
+        is_array_formula: Option<bool>,
+    ) -> CellEdit {
         let (input, is_formula) = match sheet_ref.cell(cell) {
             Some(stored) => match &stored.formula {
                 Some(formula) => (format!("={formula}"), true),
@@ -1435,11 +1462,12 @@ impl Workbook {
             },
             None => (String::new(), false),
         };
-        Ok(CellEdit {
+        CellEdit {
             cell,
             input,
             is_formula,
-        })
+            is_array_formula,
+        }
     }
 
     /// Searches formatted cell text in sheet and row order.
@@ -1483,11 +1511,21 @@ impl Workbook {
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {
         let (rows, cols) = self.validate_bounded_range(sheet, range)?;
+        let sheet_ref = self.sheet(sheet)?;
+        let arrays: Vec<_> = sheet_ref
+            .array_formulas()
+            .filter_map(|(_, array)| array.overlaps(&range).then_some(array))
+            .collect();
         let mut cells = Vec::with_capacity(rows as usize);
         for row in range.start.row..=range.end.row {
             let mut row_cells = Vec::with_capacity(cols as usize);
             for col in range.start.col..=range.end.col {
-                row_cells.push(self.cell(sheet, CellRef::new(row, col))?);
+                let cell = CellRef::new(row, col);
+                let is_array_formula = arrays
+                    .iter()
+                    .any(|range| range.contains(cell))
+                    .then_some(true);
+                row_cells.push(self.cell_edit(sheet, sheet_ref, cell, is_array_formula));
             }
             cells.push(row_cells);
         }

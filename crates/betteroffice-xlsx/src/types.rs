@@ -38,11 +38,23 @@ pub struct CellInput {
     pub input: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CellEdit {
+    #[serde(rename = "a1", serialize_with = "serialize_cell_a1")]
     pub cell: CellRef,
     pub input: String,
     pub is_formula: bool,
+    /// Whether this cell belongs to an array formula, omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_array_formula: Option<bool>,
+}
+
+fn serialize_cell_a1<S: serde::Serializer>(
+    cell: &CellRef,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&cell.to_a1())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +63,8 @@ pub struct TextSearchMatch {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SheetInfo {
     pub sheet_ids: Vec<String>,
     pub sheet_names: Vec<String>,
@@ -62,6 +75,8 @@ pub struct SheetInfo {
     pub frozen_cols: u32,
     pub initial_scroll_x: f32,
     pub initial_scroll_y: f32,
+    /// Auto-filter range in A1 notation, or null when absent.
+    pub auto_filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
