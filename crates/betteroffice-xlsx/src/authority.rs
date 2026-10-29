@@ -34,11 +34,15 @@ use yrs::{
 mod cascade_composition_tests;
 #[cfg(test)]
 mod fingerprint_composition_tests;
+#[cfg(test)]
+mod fingerprint_lazy_tests;
+mod fingerprints;
 mod hyperlinks;
 mod merges;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
 pub(crate) mod snapshot_validation;
+use fingerprints::Fingerprints;
 pub(crate) use hyperlinks::validate_hyperlink_edit_baseline;
 use hyperlinks::{
     HYPERLINK_PREFIX, HyperlinkBaseline, HyperlinkEdits, HyperlinkProjection,
@@ -163,7 +167,7 @@ struct WorkbookBase {
     full_precision: Option<bool>,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
-    fingerprints: BTreeMap<i64, Vec<String>>,
+    fingerprints: Fingerprints,
     freeze_panes: Vec<Option<FreezePane>>,
     formats: Vec<SheetFormat>,
     col_styles: Vec<Vec<ColStyle>>,
@@ -212,10 +216,13 @@ impl WorkbookBase {
         legacy_styles: Option<&Stylesheet>,
         legacy_style_readings: &[Stylesheet],
     ) -> Result<Self, String> {
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("workbook_base");
+        }
         let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
-        let ((fingerprint, bootstrap_client_id), fingerprints) = builder.batched(|builder| {
+        let fingerprints = builder.plan(|builder| {
             let styles = FingerprintStyles::new(&model.styles);
-            let current = builder.current(if released_styles(&model.styles) {
+            builder.current(if released_styles(&model.styles) {
                 styles
             } else {
                 styles.with_written_fills()
@@ -228,8 +235,9 @@ impl WorkbookBase {
                     }
                 }
             }
-            Ok((current, fingerprints))
+            Ok(fingerprints)
         })?;
+        let (fingerprint, bootstrap_client_id, fingerprints) = builder.finish(fingerprints)?;
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -464,7 +472,7 @@ impl WorkbookBase {
             full_precision: Some(model.full_precision),
             defined_names: model.defined_names.clone(),
             fingerprint,
-            fingerprints,
+            fingerprints: fingerprints.into(),
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             formats: model.sheets.iter().map(|sheet| sheet.format).collect(),
             col_styles: model
@@ -501,9 +509,7 @@ impl WorkbookBase {
     }
 
     fn accepts_fingerprint(&self, version: i64, fingerprint: &str) -> bool {
-        self.fingerprints
-            .get(&version)
-            .is_some_and(|accepted| accepted.iter().any(|value| value == fingerprint))
+        self.fingerprints.accepts(version, fingerprint)
     }
 
     fn workbook(&self) -> WorkbookModel {
@@ -1027,6 +1033,9 @@ impl WorkbookAuthority {
             legacy_style_readings,
         )
         .map_err(AuthorityError::InvalidState)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("authority_rest");
+        }
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -1049,14 +1058,25 @@ impl WorkbookAuthority {
             updates.push(update);
             Ok(())
         };
+        xlsx_model::open_timing! {
+            let timing_seed = xlsx_model::open_timing::span("authority_seed");
+        }
         seed_in_chunks(&bootstrap, &base, model, &keys, style_entry, chunk, flush)
             .map_err(AuthorityError::InvalidState)?;
         drop(bootstrap);
+        xlsx_model::open_timing! {
+            drop(timing_seed);
+            let timing_hydrate = xlsx_model::open_timing::span("authority_hydrate");
+        }
         for update in updates {
             hydrate_local_doc(&doc, &update).map_err(AuthorityError::InvalidState)?;
             xlsx_model::progress::pulse();
         }
         let authority = Self::hydrated(doc, Arc::new(base), 0);
+        xlsx_model::open_timing! {
+            drop(timing_hydrate);
+            let _timing_projection = xlsx_model::open_timing::span("authority_projection");
+        }
         let (model, structure) = authority
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
@@ -1415,12 +1435,9 @@ impl WorkbookAuthority {
                 &legacy.styles,
             )
         {
-            let target = Arc::make_mut(&mut candidate.base);
-            for (version, accepted) in base.fingerprints {
-                for fingerprint in accepted {
-                    append_fingerprint(&mut target.fingerprints, version, fingerprint);
-                }
-            }
+            Arc::make_mut(&mut candidate.base)
+                .fingerprints
+                .merge(base.fingerprints);
         }
         let released = candidate.holds_released_reading();
         if let Err(error) = candidate.upgrade_schema_from(Some(&self.doc)) {
@@ -1604,18 +1621,13 @@ impl WorkbookAuthority {
     /// that seeded a snapshot it adopted, under any reading of the base it
     /// accepts.
     fn seed_clients(&self, state_vector: &StateVector) -> Vec<u64> {
-        let bootstraps = self
-            .base
-            .fingerprints
-            .values()
-            .flatten()
-            .filter_map(|fingerprint| fingerprint_client_id(fingerprint.as_str()))
-            .chain([self.base.bootstrap_client_id])
-            .collect::<HashSet<_>>();
         state_vector
             .iter()
             .map(|(client, _)| client.get())
-            .filter(|client| bootstraps.contains(client))
+            .filter(|client| {
+                *client == self.base.bootstrap_client_id
+                    || self.base.fingerprints.contains_client(*client)
+            })
             .collect()
     }
 
@@ -5361,6 +5373,9 @@ fn materialize_style_defaults<T: ReadTxn>(
     map: &MapRef,
     txn: &T,
 ) -> Result<(), String> {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("style_materialize");
+    }
     if let Some(Out::Any(value)) = map.get(txn, ROW_STYLES) {
         let rows = any_values(&value, "row styles")?;
         if rows.len() > xlsx_parse::MAX_ROW_STYLES {
@@ -5368,6 +5383,9 @@ fn materialize_style_defaults<T: ReadTxn>(
         }
         sheet.row_styles.clear();
         for value in rows {
+            xlsx_model::open_timing! {
+                xlsx_model::open_timing::count("style_materialize_rows", 1);
+            }
             let row = any_values(value, "row style")?;
             if row.len() != 2 {
                 return Err("invalid row style".into());
@@ -5394,6 +5412,9 @@ fn materialize_style_defaults<T: ReadTxn>(
         }
         sheet.col_styles.clear();
         for value in columns {
+            xlsx_model::open_timing! {
+                xlsx_model::open_timing::count("style_materialize_col_runs", 1);
+            }
             let run = any_values(value, "column style")?;
             if run.len() != 3 {
                 return Err("invalid column style".into());
@@ -5784,17 +5805,11 @@ impl<'a> FingerprintBuilder<'a> {
         Ok(fingerprints)
     }
 
-    /// Runs `build` once to learn the fingerprints it needs, hashes them all
-    /// in one pass over the cells, then runs it again on the results.
-    fn batched<T>(
-        &mut self,
-        mut build: impl FnMut(&mut Self) -> Result<T, String>,
-    ) -> Result<T, String> {
+    fn plan<T>(&mut self, build: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("fingerprint_plan");
+        }
         self.planned = Some(Vec::new());
-        let planning = build(self);
-        let planned = self.planned.take().unwrap_or_default();
-        planning?;
-        self.compute(planned)?;
         build(self)
     }
 
@@ -5802,37 +5817,14 @@ impl<'a> FingerprintBuilder<'a> {
         &mut self,
         planned: Vec<(FingerprintKey, FingerprintStyles<'a>)>,
     ) -> Result<(), String> {
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("fingerprint_compute");
+            xlsx_model::open_timing::count("fingerprint_planned_keys", planned.len() as u64);
+        }
         if planned.is_empty() {
             return Ok(());
         }
-        let specs = planned
-            .iter()
-            .map(|&(key, styles)| {
-                let (
-                    _,
-                    schema_version,
-                    include_defined_names,
-                    include_col_styles,
-                    include_row_styles,
-                    legacy_dimensions,
-                    reading,
-                ) = key;
-                FingerprintSpec {
-                    styles,
-                    schema_version,
-                    include_defined_names,
-                    include_col_styles,
-                    include_row_styles,
-                    legacy_dimensions: if legacy_dimensions {
-                        self.legacy_dimensions
-                    } else {
-                        &[]
-                    },
-                    reading,
-                }
-            })
-            .collect::<Vec<_>>();
-        let hashes = fingerprint_model(self.model, &specs)?;
+        let hashes = fingerprints::compute(self, &planned)?;
         for ((key, _), hash) in planned.into_iter().zip(hashes) {
             self.hashes.insert(key, hash);
         }
@@ -5899,6 +5891,7 @@ impl<'a> FingerprintBuilder<'a> {
         (include_col_styles, include_row_styles, legacy_dimensions): (bool, bool, bool),
         reading: FingerprintReading,
     ) -> Result<(String, u64), String> {
+        validate_schema_version(version)?;
         let style_index = match self.styles.iter().find(|(known, _)| {
             std::ptr::eq(known.styles, styles.styles)
                 && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
@@ -5937,10 +5930,14 @@ impl<'a> FingerprintBuilder<'a> {
             return Ok(hash.clone());
         }
         if let Some(planned) = &mut self.planned {
-            if !planned.iter().any(|(known, _)| *known == key) {
-                planned.push((key, styles));
-            }
-            return Ok((String::new(), 0));
+            let index = planned
+                .iter()
+                .position(|(known, _)| *known == key)
+                .unwrap_or_else(|| {
+                    planned.push((key, styles));
+                    planned.len() - 1
+                });
+            return Ok((index.to_string(), 0));
         }
         self.compute(vec![(key, styles)])?;
         Ok(self.hashes[&key].clone())
@@ -6226,180 +6223,6 @@ fn append_fingerprint(fingerprints: &mut BTreeMap<i64, Vec<String>>, version: i6
     }
 }
 
-/// One base fingerprint: the styles reading, schema and readings it hashes.
-struct FingerprintSpec<'a> {
-    styles: FingerprintStyles<'a>,
-    schema_version: i64,
-    include_defined_names: bool,
-    include_col_styles: bool,
-    include_row_styles: bool,
-    legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
-    reading: FingerprintReading,
-}
-
-const FINGERPRINT_CHUNK_BYTES: usize = 64 * 1024;
-
-/// Hashes every spec in a single pass over the cells, which all of them hash
-/// alike.
-fn fingerprint_model(
-    model: &WorkbookModel,
-    specs: &[FingerprintSpec<'_>],
-) -> Result<Vec<(String, u64)>, String> {
-    #[cfg(test)]
-    FINGERPRINT_PASSES.set(FINGERPRINT_PASSES.get() + 1);
-    let mut hashers = specs
-        .iter()
-        .map(|spec| {
-            validate_schema_version(spec.schema_version)?;
-            let mut hasher = Sha256::new();
-            hasher.update(fingerprint_domain(spec.schema_version, spec.reading));
-            if !model.full_precision {
-                hasher.update(b"fullPrecision=0");
-            }
-            let base = if spec.include_defined_names {
-                serde_json::to_vec(&(
-                    model.date_system,
-                    &model.defined_names,
-                    &model.shared_strings,
-                    &spec.styles,
-                ))
-            } else {
-                serde_json::to_vec(&(model.date_system, &model.shared_strings, &spec.styles))
-            }
-            .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
-            hash_bytes(&mut hasher, &base);
-            hash_u64(&mut hasher, model.sheets.len() as u64);
-            Ok(hasher)
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let has_col_styles = model
-        .sheets
-        .iter()
-        .any(|sheet| !sheet.col_styles.is_empty());
-    let hashes_col_styles = |spec: &FingerprintSpec<'_>| {
-        spec.include_col_styles && spec.schema_version >= CHARTS_SCHEMA_VERSION && has_col_styles
-    };
-    let mut shared = Vec::new();
-    for (index, sheet) in model.sheets.iter().enumerate() {
-        hash_bytes(&mut shared, sheet.name.as_bytes());
-        hash_u64(&mut shared, sheet.iter_cells().count() as u64);
-        for (at, cell) in sheet.iter_cells() {
-            xlsx_model::progress::tick();
-            hash_u32(&mut shared, at.row);
-            hash_u32(&mut shared, at.col);
-            hash_cell_value(&mut shared, &cell.value);
-            match &cell.formula {
-                Some(formula) => {
-                    shared.push(1);
-                    hash_bytes(&mut shared, formula.as_bytes());
-                }
-                None => shared.push(0),
-            }
-            match cell.style {
-                Some(style) => {
-                    shared.push(1);
-                    hash_u32(&mut shared, style);
-                }
-                None => shared.push(0),
-            }
-            if shared.len() >= FINGERPRINT_CHUNK_BYTES {
-                feed_all(&mut hashers, &mut shared);
-            }
-        }
-        hash_u64(&mut shared, sheet.merges.len() as u64);
-        for range in &sheet.merges {
-            hash_cell_ref(&mut shared, range.start);
-            hash_cell_ref(&mut shared, range.end);
-        }
-        feed_all(&mut hashers, &mut shared);
-        let hyperlinks = sheet_json(
-            specs
-                .iter()
-                .any(|spec| spec.schema_version >= HYPERLINK_SCHEMA_VERSION),
-            &sheet.hyperlinks,
-            "hyperlinks",
-        )?;
-        let charts = sheet_json(
-            specs
-                .iter()
-                .any(|spec| spec.schema_version >= CHARTS_SCHEMA_VERSION),
-            &sheet.charts,
-            "charts",
-        )?;
-        let col_styles = sheet_json(
-            specs.iter().any(hashes_col_styles),
-            &sheet.col_styles,
-            "column styles",
-        )?;
-        let row_styles = sheet_json(
-            specs.iter().any(|spec| spec.include_row_styles)
-                && model
-                    .sheets
-                    .iter()
-                    .any(|sheet| !sheet.row_styles.is_empty()),
-            &sheet.row_styles,
-            "row styles",
-        )?;
-        for (hasher, spec) in hashers.iter_mut().zip(specs) {
-            let (col_widths, row_heights) = match spec.legacy_dimensions.get(index) {
-                Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
-                None => (&sheet.col_widths, &sheet.row_heights),
-            };
-            hash_u64(hasher, col_widths.len() as u64);
-            for (&column, &width) in col_widths {
-                hash_u32(hasher, column);
-                hash_u64(hasher, width.to_bits());
-            }
-            hash_u64(hasher, row_heights.len() as u64);
-            for (&row, &height) in row_heights {
-                hash_u32(hasher, row);
-                hash_u64(hasher, height.to_bits());
-            }
-            if spec.schema_version >= FREEZE_PANE_SCHEMA_VERSION {
-                match sheet.freeze_pane {
-                    Some(pane) => {
-                        hasher.update([1]);
-                        hash_u32(hasher, pane.rows);
-                        hash_u32(hasher, pane.cols);
-                        hash_cell_ref(hasher, pane.top_left);
-                    }
-                    None => hasher.update([0]),
-                }
-            }
-            if let Some(bytes) = hyperlinks
-                .as_ref()
-                .filter(|_| spec.schema_version >= HYPERLINK_SCHEMA_VERSION)
-            {
-                hash_bytes(hasher, bytes);
-            }
-            if let Some(bytes) = charts
-                .as_ref()
-                .filter(|_| spec.schema_version >= CHARTS_SCHEMA_VERSION)
-            {
-                hash_bytes(hasher, bytes);
-            }
-            if let Some(bytes) = col_styles.as_ref().filter(|_| hashes_col_styles(spec)) {
-                hash_bytes(hasher, bytes);
-            }
-            if let Some(bytes) = row_styles.as_ref().filter(|_| spec.include_row_styles) {
-                hash_bytes(hasher, bytes);
-            }
-        }
-    }
-    Ok(hashers
-        .into_iter()
-        .zip(specs)
-        .map(|(hasher, spec)| {
-            let digest = hasher.finalize();
-            let fingerprint = fingerprint_text(spec.reading, format!("{digest:x}"));
-            let mut client_bytes = [0_u8; 8];
-            client_bytes.copy_from_slice(&digest[..8]);
-            let client = client_id_of_digest(u64::from_be_bytes(client_bytes));
-            (fingerprint, client)
-        })
-        .collect())
-}
-
 fn client_id_of_digest(head: u64) -> u64 {
     match head & MAX_SAFE_CLIENT_ID {
         0 => 1,
@@ -6423,13 +6246,6 @@ fn sheet_json<T: Serialize>(
         .then(|| serde_json::to_vec(value))
         .transpose()
         .map_err(|error| format!("cannot fingerprint sheet {what}: {error}"))
-}
-
-fn feed_all(hashers: &mut [Sha256], bytes: &mut Vec<u8>) {
-    for hasher in hashers.iter_mut() {
-        hasher.update(bytes.as_slice());
-    }
-    bytes.clear();
 }
 
 /// Where fingerprint bytes go: a hasher, or a buffer several hashers share.
