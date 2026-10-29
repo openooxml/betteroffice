@@ -246,9 +246,11 @@ fn run_key(path: &[String]) -> bool {
 }
 
 fn para_key_or_style(path: &[String]) -> bool {
-    para_key(path)
-        || (path.len() == 1 && path[0] == "pStyle")
-        || path.first().is_some_and(|key| key == "borders")
+    para_key(path) || (path.len() == 1 && path[0] == "pStyle")
+}
+
+fn restyle_key(path: &[String]) -> bool {
+    para_key_or_style(path) || path.first().is_some_and(|key| key == "borders")
 }
 
 fn para_key(path: &[String]) -> bool {
@@ -1176,9 +1178,7 @@ pub(crate) fn diff_paragraph_v1(
                             .is_none_or(|formatting| formatting.is_empty())
                     })
                 }))
-        && para_deltas
-            .iter()
-            .all(|delta| para_key_or_style(&delta.path))
+        && para_deltas.iter().all(|delta| restyle_key(&delta.path))
         && context.plain_style_supported(&before.properties)
         && context.plain_style_supported(&after.properties);
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
@@ -1243,7 +1243,9 @@ pub(crate) fn diff_paragraph_v1(
     )?;
     validate_deltas(
         &para_deltas,
-        if patchable_restyle {
+        if patchable_restyle && plain_restyle {
+            restyle_key
+        } else if patchable_restyle {
             para_key_or_style
         } else {
             para_key
@@ -1436,6 +1438,18 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     validate_markers(&before, &after, &text_edits, &context)?;
+    let mut seed_properties = verification_properties(&before, context.seeded_markers);
+    let mut result_properties = verification_properties(&after, context.live_markers);
+    let para_deltas = if patchable_restyle && plain_restyle {
+        for properties in [&mut seed_properties, &mut result_properties] {
+            properties.retain(|key, _| key == "pStyle" || !restyle_key(std::slice::from_ref(key)));
+        }
+        let changes = deltas(&seed_properties, &result_properties);
+        validate_deltas(&changes, para_key_or_style, &context)?;
+        changes
+    } else {
+        para_deltas
+    };
     let inherit = InheritanceV1 {
         paragraph: seeded_properties,
         runs: before
@@ -1453,7 +1467,7 @@ pub(crate) fn diff_paragraph_v1(
     let seed = SeedV1 {
         inherit,
         unit_sha256: unit_sha256(&before.units),
-        properties: verification_properties(&before, context.seeded_markers),
+        properties: seed_properties,
         units: before.units,
     };
     Ok(ParagraphPatchV1 {
@@ -1465,10 +1479,7 @@ pub(crate) fn diff_paragraph_v1(
         para_deltas,
         para_inherit,
         mark_inherit,
-        result_sha256: result_sha256(
-            &units(&replay),
-            &verification_properties(&after, context.live_markers),
-        ),
+        result_sha256: result_sha256(&units(&replay), &result_properties),
     })
 }
 

@@ -924,6 +924,72 @@ fn assert_paragraph_restyle(content: &str, a: &str, b: &str) {
 }
 
 #[test]
+fn plain_restyle_with_only_an_inherited_border_has_style_only_deltas() {
+    let (doc, _, _) = restyle_source(
+        "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>x</w:t></w:r>",
+        "",
+        "<w:pPr><w:pBdr><w:bottom w:val=\"single\" w:sz=\"8\"/></w:pBdr></w:pPr>",
+    );
+    doc.apply_edits(
+        &EditRequest {
+            expect_version: doc.version(),
+            source: EditSource::Host,
+            history: EditHistory::Separate,
+            steps: vec![EditStep::new(EditOperation::SetParagraphStyle {
+                target: ParagraphTarget {
+                    story: "body".to_owned(),
+                    para_id: "00000001".to_owned(),
+                },
+                style_id: "B".to_owned(),
+            })],
+        },
+        &UndoSession::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_eq!(part.paragraph_patches.len(), 1);
+    let patch = &part.paragraph_patches[0];
+    assert_eq!(patch.para_deltas.len(), 1);
+    assert_eq!(patch.para_deltas[0].path, ["pStyle"]);
+    assert!(patch.text_edits.is_empty());
+    assert!(patch.run_edits.is_empty());
+    assert!(!patch.seed.properties.contains_key("borders"));
+    assert!(patch.para_inherit.contains_key("borders"));
+}
+
+#[test]
+fn plain_restyle_with_an_unwritable_property_delta_replaces() {
+    let (doc, bytes, styles) = restyle_source(
+        "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>x</w:t></w:r>",
+        "",
+        "",
+    );
+    doc.restyle_paragraphs(
+        &ctx(),
+        &ParaSelector::One("00000001".to_owned()),
+        "B",
+        &styles,
+    )
+    .unwrap();
+    doc.set_paragraph_attr(
+        "00000001",
+        "shading",
+        serde_json::from_value(json!({"fill": {"rgb": "112233"}})).unwrap(),
+    )
+    .unwrap();
+    assert_restyle_replace(&doc, &bytes, |paragraph| {
+        paragraph["formatting"] = json!({"styleId": "B", "shading": {"fill": {"rgb": "112233"}}});
+    });
+}
+
+#[test]
 fn plain_restyle_saves_style_properties_as_inherited() {
     let style = concat!(
         "<w:pPr><w:keepNext/>",
@@ -1002,6 +1068,8 @@ fn plain_restyle_saves_style_properties_as_inherited() {
         if !properties.contains("w:spacing") && run_properties.is_empty() {
             assert!(part.legacy_paragraphs.is_empty());
             assert_eq!(part.paragraph_patches.len(), 1);
+            assert_eq!(part.paragraph_patches[0].para_deltas.len(), 1);
+            assert_eq!(part.paragraph_patches[0].para_deltas[0].path, ["pStyle"]);
         } else {
             assert!(part.paragraph_patches.is_empty());
             assert_eq!(part.legacy_paragraphs.len(), 1);
@@ -1121,6 +1189,8 @@ fn plain_restyle_adds_and_removes_inherited_property_objects() {
             .unwrap();
         assert!(part.legacy_paragraphs.is_empty());
         assert_eq!(part.paragraph_patches.len(), 1);
+        assert_eq!(part.paragraph_patches[0].para_deltas.len(), 1);
+        assert_eq!(part.paragraph_patches[0].para_deltas[0].path, ["pStyle"]);
         let package = docx_parse::parse_docx_s9_wire(
             &bytes,
             docx_parse::S9ParseOptions {

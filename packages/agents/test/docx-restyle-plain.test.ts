@@ -69,6 +69,7 @@ for (const [name, sourceProperties, runProperties] of [
     if (!sourceProperties.includes(DIRECT_SPACING) && !runProperties) {
       expect(part.paragraphPatches?.map(patch => patch.ordinal)).toEqual([0]);
       expect(part.legacyParagraphs ?? []).toEqual([]);
+      expect(part.paragraphPatches?.[0]?.paraDeltas.map(delta => delta.path)).toEqual([['pStyle']]);
     } else {
       expect(part.paragraphPatches ?? []).toEqual([]);
       expect(part.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([0]);
@@ -105,6 +106,7 @@ for (const [previous, next] of [['Heading1', 'Normal'], ['Normal', 'Heading1']] 
       .find(entry => entry.part === 'word/document.xml')!;
     expect(part.paragraphPatches?.map(patch => patch.ordinal)).toEqual([0]);
     expect(part.legacyParagraphs ?? []).toEqual([]);
+    expect(part.paragraphPatches?.[0]?.paraDeltas.map(delta => delta.path)).toEqual([['pStyle']]);
     const exported = await doc.export();
     const saved = await JSZip.loadAsync(exported);
     expect(await saved.file('word/document.xml')!.async('string')).toBe(

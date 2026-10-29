@@ -1213,6 +1213,21 @@ fn paragraph_patch_numbering_and_run_style_deltas_request_restyle_replace() {
 }
 
 #[test]
+fn paragraph_patch_plain_restyle_inserts_the_style_element() {
+    for properties in ["", "<w:pPr/>"] {
+        let source = format!("<w:p>{properties}<w:r><w:t>x</w:t></w:r></w:p>");
+        let units = vec![text("x", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        plan.para_deltas = vec![delta("pStyle", None, Some(json!("B")))];
+        plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"pStyle": "B"})));
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            "<w:p><w:pPr><w:pStyle w:val=\"B\"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
+    }
+}
+
+#[test]
 fn paragraph_patch_plain_restyle_with_unchanged_inheritance_changes_only_style() {
     let source = "<w:p><w:pPr><w:pStyle w:val='A'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>";
     let units = vec![text("x", json!({}))];
