@@ -1110,7 +1110,15 @@ impl Session {
     }
 
     fn sheet_info(&self) -> Result<SheetInfo, String> {
-        serde_json::from_str(&self.sheet_info_json()?).map_err(|error| error.to_string())
+        let info = self
+            .workbook
+            .sheet_info()
+            .map_err(|error| error.to_string())?;
+        let auto_filter = self
+            .workbook
+            .auto_filter(info.active_sheet)
+            .map_err(|error| error.to_string())?;
+        Ok(SheetInfo::new(info, auto_filter))
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {
@@ -1569,6 +1577,73 @@ mod tests {
             );
             assert!(frame.to_string().contains("r19c7"));
         }
+    }
+
+    #[test]
+    fn cell_edit_succeeds_when_auto_sized_content_height_is_infinite() {
+        let mut model = WorkbookModel::default();
+        model.styles.fonts.extend([
+            xlsx_model::Font::default(),
+            xlsx_model::Font {
+                size_pt: Some(1e40),
+                ..Default::default()
+            },
+        ]);
+        model.styles.cell_xfs.extend([
+            xlsx_model::Xf {
+                font: Some(0),
+                ..Default::default()
+            },
+            xlsx_model::Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ]);
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "Hello".into(),
+                },
+                style: Some(1),
+                ..Default::default()
+            },
+        );
+        model.sheets.push(sheet);
+        let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut session = Session::open(&bytes, None).unwrap();
+        assert_eq!(
+            session.workbook.model().styles.font_for(1).unwrap().size_pt,
+            Some(1e40)
+        );
+        assert!(
+            session
+                .workbook
+                .sheet_info()
+                .unwrap()
+                .content_height
+                .is_infinite()
+        );
+
+        let response = session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"updated"}"#, None)
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["applied"], true);
+        assert_eq!(
+            response["sheetInfo"].get("contentHeight"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(0, 0))
+                .unwrap()
+                .input,
+            "updated"
+        );
     }
 
     #[test]

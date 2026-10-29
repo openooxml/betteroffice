@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Sheet metadata shared by binding payloads.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SheetInfoWire {
     sheet_ids: Vec<String>,
@@ -19,6 +19,24 @@ pub struct SheetInfoWire {
     initial_scroll_x: f32,
     initial_scroll_y: f32,
     auto_filter: Option<String>,
+}
+
+impl SheetInfoWire {
+    /// Combines typed sheet metadata with its auto-filter.
+    pub fn new(info: SheetInfo, auto_filter: Option<String>) -> Self {
+        Self {
+            sheet_ids: info.sheet_ids,
+            sheet_names: info.sheet_names,
+            active_sheet: info.active_sheet.0,
+            content_width: info.content_width,
+            content_height: info.content_height,
+            frozen_rows: info.frozen_rows,
+            frozen_cols: info.frozen_cols,
+            initial_scroll_x: info.initial_scroll_x,
+            initial_scroll_y: info.initial_scroll_y,
+            auto_filter,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -148,18 +166,8 @@ impl Workbook {
     }
 
     fn sheet_info_wire_json(&self, info: SheetInfo) -> Result<String> {
-        read_json(&SheetInfoWire {
-            auto_filter: self.auto_filter(info.active_sheet)?,
-            sheet_ids: info.sheet_ids,
-            sheet_names: info.sheet_names,
-            active_sheet: info.active_sheet.0,
-            content_width: info.content_width,
-            content_height: info.content_height,
-            frozen_rows: info.frozen_rows,
-            frozen_cols: info.frozen_cols,
-            initial_scroll_x: info.initial_scroll_x,
-            initial_scroll_y: info.initial_scroll_y,
-        })
+        let auto_filter = self.auto_filter(info.active_sheet)?;
+        read_json(&SheetInfoWire::new(info, auto_filter))
     }
 
     /// Serializes editable cell input with array-formula membership.
