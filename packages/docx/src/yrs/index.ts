@@ -199,6 +199,7 @@ export {
   writeSessionSave,
   type DocxSavedDocument,
   type DocxCommentSaveIdentity,
+  type DocxCommentSaveBaseline,
   type DocxSaveOptions,
   type DocxSavedParagraph,
   type DocxSessionSave,

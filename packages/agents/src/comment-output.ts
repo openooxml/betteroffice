@@ -381,11 +381,10 @@ function storyProjection(part: XmlPart, aliases: ReadonlyMap<string, string>, de
   return xml;
 }
 
-async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlySet<string>, expected: readonly CommentOutput[], previous: readonly CommentOutput[], deleted: ReadonlySet<string>, identities: ReadonlyMap<string, DocxCommentSaveIdentity>, original: JSZip): Promise<void> {
+async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlySet<string>, expected: readonly CommentOutput[], previous: readonly CommentOutput[], deleted: ReadonlySet<string>, identities: ReadonlyMap<string, DocxCommentSaveIdentity>): Promise<void> {
   const aliases = (comments: readonly CommentOutput[]) => new Map([...commentIds(seeded, comments, identities)].map(([id, saved]) => [saved, id]));
   const beforeIds = aliases(previous);
   const savedIds = aliases(expected);
-  const removedParts = new Set<string>();
   const removedParaIds = new Set<string>();
   const removedDurableIds = new Set<string>();
   const verifyPart = async (name: string, namespace: string, root: string, entry: string, drop: (element: XmlElement) => boolean) => {
@@ -396,12 +395,7 @@ async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlyS
     const before = await readXml(source, name, namespace, root);
     const entries = before.root.children.filter(element => element.name === expanded(namespace, entry));
     const removed = entries.filter(drop);
-    if (!zip.file(name)) {
-      requireOutput(!original.file(name) && removed.length === entries.length && entries.length === before.root.children.length,
-        `Saving comments would remove surviving comment markup in ${name}.`);
-      removedParts.add(name);
-      return;
-    }
+    requireOutput(zip.file(name), `Saving comments would remove the comment part ${name}.`);
     const saved = await readXml(zip, name, namespace, root);
     requireOutput(withoutElements(before, removed) === saved.xml, `Saving comments would rewrite a surviving comment or companion entry in ${name}.`);
   };
@@ -457,16 +451,6 @@ async function verifyCommentRemoval(source: JSZip, zip: JSZip, seeded: ReadonlyS
             `Saving comments would change unrelated story markup in ${name}.`);
           continue;
         }
-      }
-      if (removedParts.size && (name === '[Content_Types].xml' || name === DOCUMENT_RELS)) {
-        const before = parseXml(xml);
-        const removed = before.root.children.filter(element => name === '[Content_Types].xml'
-          ? element.name === expanded(TYPES, 'Override') && removedParts.has(element.attributes.get('{}PartName')?.slice(1) ?? '')
-          : element.name === expanded(RELS, 'Relationship') && COMMENT_TYPES.has(partName('word/', element.attributes.get('{}Target') ?? ''))
-            && removedParts.has(partName('word/', element.attributes.get('{}Target') ?? '')));
-        requireOutput(withoutWhitespaceText(withoutElements(before, removed)) === withoutWhitespaceText(savedXml),
-          `Saving comments would change unrelated registrations in ${name}.`);
-        continue;
       }
     }
     const bytes = await file.async('uint8array');
@@ -590,7 +574,7 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   if (!zip.file(COMMENTS)) {
     requireOutput(previous && !source.zip.file(COMMENTS) && added === 0 && expected.length === 0 && comments.length === 0
       && COMMENT_COMPANIONS.every(([name]) => !zip.file(name)), 'Saving comments would lose the comments part.');
-    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, new Set(), expected, previous, deleted, identities, source.zip);
+    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, new Set(), expected, previous, deleted, identities);
     return;
   }
   requireOutput(comments.length === 1 && comments[0].type === `${OFFICE_RELS}comments` && comments[0].mode !== 'External' && partName('word/', comments[0].target) === COMMENTS,
@@ -671,7 +655,7 @@ export async function verifyCommentOutput(source: CommentSource, bytes: Uint8Arr
   }
   await verifyCommentCompanions(source.zip, zip, elements, fresh, resolvedParagraphIds, removed.map(comment => comment.element));
   if (previous) {
-    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, seeded, expected, previous, deleted, identities, source.zip);
+    await verifyCommentRemoval(baseline ? await JSZip.loadAsync(baseline) : source.zip, zip, seeded, expected, previous, deleted, identities);
     return;
   }
   const mutable = new Set(['word/document.xml', '[Content_Types].xml', DOCUMENT_RELS, 'docProps/core.xml', ...COMMENT_TYPES.keys()]);

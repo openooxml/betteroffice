@@ -579,6 +579,10 @@ fn deleting_the_only_comment_with_source_ids_saves_the_remaining_comment() {
     let retained = PLAIN_COMMENT
         .replace("w:id=\"1\"", "w:id=\"0\"")
         .replace(" w14:paraId=\"10000004\"", "");
+    let removed = PLAIN_COMMENT.replace(
+        "<w:comment ",
+        "<w:comment xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" w16cid:durableId=\"20000001\" ",
+    );
     for companion in [
         (
             "word/commentsExtended.xml",
@@ -593,14 +597,12 @@ fn deleting_the_only_comment_with_source_ids_saves_the_remaining_comment() {
             "<w16cex:commentsExtensible xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\"><w16cex:commentExtensible w16cex:durableId=\"20000001\" w16cex:dateUtc=\"2026-01-01T00:00:00Z\"/></w16cex:commentsExtensible>",
         ),
     ] {
-        let source =
-            fixture_with_comment_parts(&format!("{retained}\n{PLAIN_COMMENT}"), &[companion]);
+        let source = fixture_with_comment_parts(&format!("{retained}\n{removed}"), &[companion]);
         let mut request = save_request(&source);
         request.document.comments.as_mut().unwrap().remove(1);
-        let expected = serialize_comments_part(
-            request.document.comments.as_ref().unwrap(),
-            &mut SerializerContext::new(&request.determinism).unwrap(),
-        );
+        let expected = String::from_utf8(part(&source, "word/comments.xml"))
+            .unwrap()
+            .replace(&removed, "");
         let saved = write_docx_s13(request, &source).unwrap();
         assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
         assert_comment_companion_ids(&saved);
@@ -1060,6 +1062,47 @@ fn comment_metadata_splices_resolution_and_rewrites_identity() {
 }
 
 #[test]
+fn deleting_from_a_saved_comment_baseline_cleans_earlier_story_markers() {
+    let mut parts =
+        ooxml_opc::unzip_parts(&fixture_with_comment_parts(PLAIN_COMMENT, &[])).unwrap();
+    let (_, body) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    let original = String::from_utf8(body.clone()).unwrap();
+    *body = original.replace(
+        "<w:r><w:t>Synthetic body</w:t></w:r>",
+        "<w:commentRangeStart w:id=\"0\"/><w:r><w:t>Synthetic body</w:t></w:r><w:commentRangeEnd w:id=\"0\"/><w:r><w:commentReference w:id=\"0\"/></w:r>",
+    ).into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    for removed in ["0", "1"] {
+        let mut request = save_request(&source);
+        request.paragraph_ids = Some(
+            serde_json::from_value(json!({
+                "removedCommentIds": [removed],
+                "assignments": [],
+                "patchedParts": [
+                    { "part": "word/document.xml", "paraIds": [] },
+                    { "part": "word/comments.xml", "paraIds": [] }
+                ]
+            }))
+            .unwrap(),
+        );
+        let saved = write_docx_s13(request, &source);
+        if removed == "1" {
+            assert!(saved.is_err());
+        } else {
+            let saved = saved.unwrap();
+            assert_eq!(part(&saved, "word/document.xml"), original.as_bytes());
+            assert_eq!(
+                part(&saved, "word/comments.xml"),
+                part(&source, "word/comments.xml")
+            );
+        }
+    }
+}
+
+#[test]
 fn deleting_comments_preserves_absent_companion_parts_and_rows() {
     let companions = [
         (
@@ -1142,6 +1185,8 @@ fn deleting_comments_preserves_absent_companion_parts_and_rows() {
                     .into_bytes();
             }
             let mut request = save_request(&source);
+            request.selective =
+                Some(serde_json::from_value(json!({ "changedParaIds": [] })).unwrap());
             request
                 .document
                 .comments

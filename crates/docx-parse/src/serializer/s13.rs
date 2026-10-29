@@ -184,7 +184,7 @@ fn write_docx_s13_parts_with_warnings(
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
-    let removed_comments = match (
+    let mut removed_comments = match (
         package.original_bytes(COMMENTS_PART),
         request.document.comments.as_deref(),
     ) {
@@ -193,6 +193,18 @@ fn write_docx_s13_parts_with_warnings(
         }
         _ => HashSet::new(),
     };
+    if let Some(plan) = &request.paragraph_ids {
+        for id in &plan.removed_comment_ids {
+            if request.document.comments.as_ref().is_some_and(|comments| {
+                comments
+                    .iter()
+                    .any(|comment| super::xml_writer::js_number(comment.id) == *id)
+            }) {
+                return Err(save_error("removed comment is still present"));
+            }
+            removed_comments.insert(id.clone());
+        }
+    }
     if let Some(ids) = &mut request.paragraph_ids {
         let patched_parts = &ids.patched_parts;
         ids.spliced_parts.retain(|part| {

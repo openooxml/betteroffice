@@ -222,23 +222,74 @@ test('delete_comment preserves a session-created survivor and every companion id
   expect(afterAdd).toContain('Third note.');
 });
 
-test('delete_comment removes a session-created last comment from a package opened without comments', async () => {
+test('delete_comment keeps the registered empty parts of a session-created last comment', async () => {
   const doc = await open(await editFixture());
   const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
   const added = await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: match.match, author: 'Editor', text: 'Temporary note.' }] });
-  await doc.export();
+  const before = await JSZip.loadAsync(await doc.export());
   await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: added.results[0].comment! }] });
   const bytes = await doc.export();
   const zip = await JSZip.loadAsync(bytes);
-  expect(zip.file('word/comments.xml')).toBeNull();
-  for (const [name] of COMMENT_COMPANIONS) expect(zip.file(`word/${name}.xml`)).toBeNull();
-  expect(await part(bytes, 'word/_rels/document.xml.rels')).not.toContain('relationships/comments');
-  expect(await part(bytes, '[Content_Types].xml')).not.toContain('/word/comments');
+  expect(await part(bytes, 'word/comments.xml')).toBe((await before.file('word/comments.xml')!.async('string')).replace(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g, ''));
+  for (const [name, prefix] of COMMENT_COMPANIONS) {
+    expect(await part(bytes, `word/${name}.xml`)).toBe((await before.file(`word/${name}.xml`)!.async('string')).replace(new RegExp(`<${prefix}:[^ />]+\\b[^>]*\\/>`, 'g'), ''));
+  }
+  for (const path of ['word/_rels/document.xml.rels', '[Content_Types].xml']) {
+    expect(await part(bytes, path)).toBe(await before.file(path)!.async('string'));
+  }
   expect(await part(bytes, 'word/document.xml')).not.toContain('w:comment');
   expect((await open(bytes)).list({ story: 'comments' }).total).toBe(0);
 });
 
-for (const corruption of ['text', 'numeric id', 'paragraph id', 'durable id', 'companion row']) {
+for (const companions of [[], ['commentsExtended'], COMMENT_COMPANIONS.map(([name]) => name)]) {
+  for (const target of ['added reply', 'added root', 'source reply']) {
+    test(`delete_comment preserves the pre-batch package after deleting ${target} with ${companions.length} source companions`, async () => {
+      const doc = await open(await fixture('body', companions));
+      let comment = '1';
+      if (target !== 'source reply') {
+        const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
+        const edit: DocxAgentEdit = target === 'added reply'
+          ? { op: 'reply_comment', comment: '0', author: 'Editor', text: 'Temporary note.' }
+          : { op: 'add_comment', match: match.match, author: 'Editor', text: 'Temporary note.' };
+        comment = (await doc.edit({ version: doc.list().version, edits: [edit] })).results[0].comment!;
+      }
+      const before = await JSZip.loadAsync(await doc.export());
+      const comments = await before.file('word/comments.xml')!.async('string');
+      const removed = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!
+        .find(xml => target === 'source reply' ? xml.includes('w:id="1"') : xml.includes('Temporary note.'))!;
+      const id = removed.match(/w:id="([^"]+)"/)![1];
+      const paraId = [...removed.matchAll(/w14:paraId="([^"]+)"/g)].at(-1)![1];
+      const ids = await before.file('word/commentsIds.xml')?.async('string');
+      const durableId = ids?.match(/<w16cid:commentId\b[^>]*\/>/g)?.find(row => row.includes(paraId))?.match(/w16cid:durableId="([^"]+)"/)?.[1];
+      const receipt = await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment }] });
+      expect(receipt.results[0]).toMatchObject({ comment, deleted: [comment] });
+      const bytes = await doc.export();
+      const saved = await JSZip.loadAsync(bytes);
+      before.file('word/comments.xml', comments.replace(removed, ''));
+      const document = await before.file('word/document.xml')!.async('string');
+      before.file('word/document.xml', document
+        .replace(new RegExp(`<w:commentRange(?:Start|End)\\b[^>]*w:id="${id}"[^>]*/>`, 'g'), '')
+        .replace(new RegExp(`<w:r>(?:<w:rPr>[\\s\\S]*?</w:rPr>)?<w:commentReference w:id="${id}"\\s*/></w:r>`, 'g'), ''));
+      for (const [name, prefix] of COMMENT_COMPANIONS) {
+        const file = before.file(`word/${name}.xml`);
+        if (!file) continue;
+        const xml = await file.async('string');
+        const key = name === 'commentsExtensible' ? durableId : paraId;
+        const row = key && xml.match(new RegExp(`<${prefix}:[^ />]+\\b[^>]*\\/>`, 'g'))?.find(row => row.includes(key));
+        before.file(file.name, row ? xml.replace(row, '') : xml);
+      }
+      const paths = Object.keys(before.files).filter(path => !before.files[path].dir).sort();
+      expect(Object.keys(saved.files).filter(path => !saved.files[path].dir).sort()).toEqual(paths);
+      for (const path of paths) {
+        expect(await saved.file(path)!.async('uint8array')).toEqual(await before.file(path)!.async('uint8array'));
+      }
+      expect((await open(bytes)).list({ story: 'comments' }).items.map(comment => comment.text).sort())
+        .toEqual(doc.list({ story: 'comments' }).items.map(comment => comment.text).sort());
+    });
+  }
+}
+
+for (const corruption of ['text', 'numeric id', 'paragraph id', 'durable id', 'companion row', 'missing companion part']) {
   test(`delete_comment rejects a changed session-created survivor's ${corruption}`, async () => {
     const { doc, first } = await twoAddedComments();
     await doc.export();
@@ -261,7 +312,8 @@ for (const corruption of ['text', 'numeric id', 'paragraph id', 'durable id', 'c
         const ids = await zip.file('word/commentsIds.xml')!.async('string');
         const id = ids.match(/w16cid:durableId="([^"]+)"/)![1];
         for (const name of ['commentsIds', 'commentsExtensible']) zip.file(`word/${name}.xml`, (await zip.file(`word/${name}.xml`)!.async('string')).replaceAll(id, '10203040'));
-      } else zip.file('word/commentsExtended.xml', (await zip.file('word/commentsExtended.xml')!.async('string')).replace('<w15:commentEx ', '<w15:commentEx extra="changed" '));
+      } else if (corruption === 'missing companion part') zip.remove('word/commentsIds.xml');
+      else zip.file('word/commentsExtended.xml', (await zip.file('word/commentsExtended.xml')!.async('string')).replace('<w15:commentEx ', '<w15:commentEx extra="changed" '));
       args[1] = await zip.generateAsync({ type: 'uint8array' });
       await original(...args);
     });
