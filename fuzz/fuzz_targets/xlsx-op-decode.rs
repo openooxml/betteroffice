@@ -359,7 +359,7 @@ fn normalize_nested(
             .is_some_and(|value| value.contains_key("kind") || value.contains_key("type"))
         && fields.first().is_some_and(|field| {
             serde_json::from_slice::<serde_json::Value>(&input[field.value.clone()])
-                .is_ok_and(|value| value.is_string() || value.is_number())
+                .is_ok_and(|value| value.is_number())
         })
     {
         replacements.push((span, serde_json::to_vec(canonical).unwrap()));
@@ -653,6 +653,19 @@ mod tests {
             r##""cell":{"value":{"kind":"number","value":3.5}}}"##,
         );
         assert_eq!(normalize(input), expected.as_bytes());
+    }
+
+    #[test]
+    fn positional_nested_enum_with_a_variant_name_is_untouched() {
+        let input = concat!(
+            r##"{"type":"setCell","sheet":0,"at":{"row":0,"col":0},"##,
+            r##""cell":{"value":["number",3.50]}}"##,
+        );
+        let oracle = serde_json::from_str::<OracleOp>(input).unwrap();
+        let bytes = input.as_bytes();
+        assert!(normalized_fields(bytes, root(bytes), &oracle).is_empty());
+        assert_eq!(normalize(input), bytes);
+        check_op(bytes, serde_json::from_str(input), Ok(oracle));
     }
 
     #[test]
