@@ -199,11 +199,9 @@ async function assetUrl(
     const cjk = await loadCjkAssetUrls();
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();
-    if (!cjk) {
-      throw new MissingCjkAddonError(
-        `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
-      );
-    }
+    throw new MissingCjkAddonError(cjk
+      ? `Bundled font ${file} needs a compressed @betteroffice/fonts-cjk release matching @betteroffice/fonts`
+      : `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`);
   }
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
