@@ -315,12 +315,11 @@ struct PatchParagraphStyles {
 impl PatchParagraphStyles {
     fn from_source(source: &SourceIndex) -> Option<Self> {
         let limits = docx_parse::ParseLimits::default();
-        let parts = ooxml_opc::unzip_parts_where(
-            &source.bytes(),
-            limits.max_xml_bytes as u64,
-            |name| name.eq_ignore_ascii_case("word/styles.xml"),
-        )
-        .ok()?;
+        let parts =
+            ooxml_opc::unzip_parts_where(&source.bytes(), limits.max_xml_bytes as u64, |name| {
+                name.eq_ignore_ascii_case("word/styles.xml")
+            })
+            .ok()?;
         let (name, bytes) = parts.first()?;
         let mut budget = docx_parse::ParseBudget::new(&limits);
         let xml = docx_parse::xml::parse_xml(bytes, name, &mut budget).ok()?;
@@ -331,8 +330,7 @@ impl PatchParagraphStyles {
                     property.namespace_prefix() == Some("w")
                         && matches!(
                             property.local_name(),
-                            "jc"
-                                | "outlineLvl"
+                            "jc" | "outlineLvl"
                                 | "spacing"
                                 | "ind"
                                 | "keepNext"

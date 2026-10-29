@@ -1176,7 +1176,9 @@ pub(crate) fn diff_paragraph_v1(
                             .is_none_or(|formatting| formatting.is_empty())
                     })
                 }))
-        && para_deltas.iter().all(|delta| para_key_or_style(&delta.path))
+        && para_deltas
+            .iter()
+            .all(|delta| para_key_or_style(&delta.path))
         && context.plain_style_supported(&before.properties)
         && context.plain_style_supported(&after.properties);
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")

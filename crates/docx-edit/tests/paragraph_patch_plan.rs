@@ -964,33 +964,34 @@ fn plain_restyle_saves_style_properties_as_inherited() {
         )
         .unwrap()
         .unwrap();
-        let assert_inherited = |doc: &EditingDoc, color: &str, before: f64, left: f64, size: f64| {
-            let paragraphs = doc.paragraphs("body").unwrap();
-            let attrs = &paragraphs[1].properties;
-            assert_eq!(attrs.get("spaceBefore"), Some(&Any::Number(before)));
-            assert_eq!(attrs.get("spaceAfter"), Some(&Any::Number(80.0)));
-            assert_eq!(attrs.get("indentLeft"), Some(&Any::Number(left)));
-            let defaults =
-                serde_json::to_value(attrs.get("defaultTextFormatting").unwrap()).unwrap();
-            assert_eq!(defaults["fontSize"].as_f64(), Some(size));
-            let borders = serde_json::to_value(attrs.get("borders").unwrap()).unwrap();
-            assert_eq!(borders["bottom"]["color"]["rgb"], json!(color));
-            let Some(Any::Map(direct)) = attrs.get("_originalFormatting") else {
-                panic!("missing direct formatting");
+        let assert_inherited =
+            |doc: &EditingDoc, color: &str, before: f64, left: f64, size: f64| {
+                let paragraphs = doc.paragraphs("body").unwrap();
+                let attrs = &paragraphs[1].properties;
+                assert_eq!(attrs.get("spaceBefore"), Some(&Any::Number(before)));
+                assert_eq!(attrs.get("spaceAfter"), Some(&Any::Number(80.0)));
+                assert_eq!(attrs.get("indentLeft"), Some(&Any::Number(left)));
+                let defaults =
+                    serde_json::to_value(attrs.get("defaultTextFormatting").unwrap()).unwrap();
+                assert_eq!(defaults["fontSize"].as_f64(), Some(size));
+                let borders = serde_json::to_value(attrs.get("borders").unwrap()).unwrap();
+                assert_eq!(borders["bottom"]["color"]["rgb"], json!(color));
+                let Some(Any::Map(direct)) = attrs.get("_originalFormatting") else {
+                    panic!("missing direct formatting");
+                };
+                assert_eq!(direct.get("styleId"), Some(&Any::from("B")));
+                for key in [
+                    "borders",
+                    "spaceBefore",
+                    "spaceAfter",
+                    "lineSpacing",
+                    "indentLeft",
+                    "keepNext",
+                    "runProperties",
+                ] {
+                    assert!(!direct.contains_key(key), "{key}");
+                }
             };
-            assert_eq!(direct.get("styleId"), Some(&Any::from("B")));
-            for key in [
-                "borders",
-                "spaceBefore",
-                "spaceAfter",
-                "lineSpacing",
-                "indentLeft",
-                "keepNext",
-                "runProperties",
-            ] {
-                assert!(!direct.contains_key(key), "{key}");
-            }
-        };
         assert_inherited(&doc, "112233", 240.0, 720.0, 32.0);
         let plan = doc.paragraph_save_plan();
         let part = plan
@@ -1038,7 +1039,11 @@ fn plain_restyle_saves_style_properties_as_inherited() {
         }
         let mut saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
         for (name, original) in ooxml_opc::unzip_parts(&bytes).unwrap() {
-            let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+            let output = &saved_parts
+                .iter()
+                .find(|(path, _)| path == &name)
+                .unwrap()
+                .1;
             if name == "word/document.xml" {
                 let expected = std::str::from_utf8(&original).unwrap().replace(
                     &content,
@@ -1074,7 +1079,9 @@ fn plain_restyle_saves_style_properties_as_inherited() {
         seed_from_docx(&updated, &ooxml_opc::rezip_parts(&saved_parts).unwrap()).unwrap();
         assert_inherited(&updated, "445566", 480.0, 1440.0, 40.0);
         assert_ne!(
-            updated.paragraphs("body").unwrap()[1].properties.get("keepNext"),
+            updated.paragraphs("body").unwrap()[1]
+                .properties
+                .get("keepNext"),
             Some(&Any::Bool(true))
         );
     }
@@ -1145,7 +1152,11 @@ fn plain_restyle_adds_and_removes_inherited_property_objects() {
         assert!(warnings.is_empty(), "{warnings:?}");
         let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
         for (name, original) in ooxml_opc::unzip_parts(&bytes).unwrap() {
-            let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+            let output = &saved_parts
+                .iter()
+                .find(|(path, _)| path == &name)
+                .unwrap()
+                .1;
             if name == "word/document.xml" {
                 assert_eq!(
                     std::str::from_utf8(output).unwrap(),
@@ -1164,7 +1175,13 @@ fn plain_restyle_adds_and_removes_inherited_property_objects() {
         let original = serde_json::to_value(properties.get("_originalFormatting")).unwrap();
         assert_eq!(original, json!({"styleId": "B"}));
         if next.is_empty() {
-            for key in ["borders", "spaceBefore", "spaceAfter", "indentLeft", "keepNext"] {
+            for key in [
+                "borders",
+                "spaceBefore",
+                "spaceAfter",
+                "indentLeft",
+                "keepNext",
+            ] {
                 assert!(!properties.contains_key(key), "{key}");
             }
         } else {
