@@ -3,7 +3,7 @@
 `<format>/script.json` runs one call sequence against TS wasm, TS native, Rust and Python.
 Each target compares `[{ "op", "result" }]` with `<format>/expected.json`.
 
-Normalization spec: Visit steps in script order, arrays in index order and object keys in ascending order. Replace each entire string matching `^[0-9a-f]{32}-[0-9]+$` with `<version:N>`, assigning N from 1 on first sight and reusing it for equal tokens across the run. Leave every other value unchanged. In arguments, resolve `<version:N>` to the previously observed token, failing on unknown references. The `save` op records `{ "sha256", "byteLength" }` from the exact saved bytes.
+Normalization spec: Visit steps in script order, arrays in index order and object keys in ascending order. Replace each entire string matching the format's version token pattern (xlsx: 32 lowercase hex digits, pptx: 16 lowercase hex digits, each followed by `-` and a decimal epoch) with `<version:N>`, assigning N from 1 on first sight and reusing it for equal tokens across the run. Leave every other value unchanged. In arguments, resolve `<version:N>` to the previously observed token, failing on unknown references. The `save` op records `{ "sha256", "byteLength" }` from the exact saved bytes.
 
 To add a step, edit the script and map its op in the TS, Rust and Python runners.
 Regenerate with `BETTEROFFICE_ENGINE=wasm bun scripts/parity/harness.ts xlsx --write`.

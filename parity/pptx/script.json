@@ -1,0 +1,123 @@
+{
+  "fixture": "apps/demo/public/betteroffice-demo.pptx",
+  "clientId": 4242,
+  "note": "All targets use clientId 4242 and local author wasm. Generated slide, comment and paragraph ids are compared unchanged: they derive from the client id and an incrementing counter. The comment is the first id-allocating edit, so its id is comment:4242:0. Arguments such as <version:1> refer to first-seen result versions. Mutation receipts retain every field; historyStep sorts changedSlideIds. setStoryParagraphs records the shared Story fields id, length, text and paragraphs (id, alignment, level, text and runs), with every run style field and absent optional styles as null. Python Story omits bulletJson, sourceParagraphs and preservedXml, so this op omits those fields on every target; subsequent readCommandContent compares the complete JSON read. Comment positions are multiples of 3175 EMU for lossless legacy comment storage.",
+  "steps": [
+    { "op": "version", "args": {} },
+    { "op": "readContent", "args": { "slideIds": ["slide:0:256"] } },
+    { "op": "findText", "args": { "text": "Office", "within": { "slideId": "slide:0:256" }, "limit": 10 } },
+    {
+      "op": "validateEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "source": "host",
+        "history": "separate",
+        "steps": [
+          {
+            "op": "insertText",
+            "target": {
+              "kind": "range",
+              "slideId": "slide:0:256",
+              "shapeId": "slide:0:256:shape:2",
+              "storyId": "story:slide:0:256:shape:2:0",
+              "start": 0,
+              "end": 0
+            },
+            "at": "start",
+            "text": "Draft: "
+          },
+          {
+            "op": "setShapeRect",
+            "target": { "slideId": "slide:0:256", "shapeId": "slide:0:256:shape:1" },
+            "rect": { "x": 800100, "y": 571500, "width": 2971800, "height": 426720 },
+            "expect": { "rect": { "x": 762000, "y": 533400, "width": 2971800, "height": 426720 } }
+          }
+        ]
+      }
+    },
+    { "op": "version", "args": {} },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "source": "host",
+        "history": "separate",
+        "steps": [
+          {
+            "op": "insertText",
+            "target": {
+              "kind": "range",
+              "slideId": "slide:0:256",
+              "shapeId": "slide:0:256:shape:2",
+              "storyId": "story:slide:0:256:shape:2:0",
+              "start": 0,
+              "end": 0
+            },
+            "at": "start",
+            "text": "Draft: "
+          },
+          {
+            "op": "setShapeRect",
+            "target": { "slideId": "slide:0:256", "shapeId": "slide:0:256:shape:1" },
+            "rect": { "x": 800100, "y": 571500, "width": 2971800, "height": 426720 },
+            "expect": { "rect": { "x": 762000, "y": 533400, "width": 2971800, "height": 426720 } }
+          }
+        ]
+      }
+    },
+    { "op": "readContent", "args": { "slideIds": ["slide:0:256"] } },
+    {
+      "op": "applyEdits",
+      "args": {
+        "expectVersion": "<version:1>",
+        "steps": [
+          {
+            "op": "insertText",
+            "target": {
+              "kind": "range",
+              "slideId": "slide:0:256",
+              "shapeId": "slide:0:256:shape:2",
+              "storyId": "story:slide:0:256:shape:2:0",
+              "start": 0,
+              "end": 0
+            },
+            "at": "start",
+            "text": "Stale: "
+          }
+        ]
+      }
+    },
+    { "op": "readContent", "args": { "slideIds": ["slide:0:256"] } },
+    { "op": "exportStructured", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
+    { "op": "exportMarkdown", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
+    { "op": "historyStep", "args": { "direction": "undo" } },
+    { "op": "readContent", "args": { "slideIds": ["slide:0:256"] } },
+    { "op": "historyStep", "args": { "direction": "redo" } },
+    { "op": "readContent", "args": { "slideIds": ["slide:0:256"] } },
+    {
+      "op": "addComment",
+      "args": {
+        "slideId": "slide:0:256",
+        "comment": { "author": "Parity", "initials": "P", "text": "Cross-target comment", "created": "2025-01-01T00:00:00Z", "xEmu": 31750, "yEmu": 63500 }
+      }
+    },
+    { "op": "setCommentPosition", "args": { "commentId": "comment:4242:0", "position": { "xEmu": 95250, "yEmu": 127000 } } },
+    {
+      "op": "setStoryParagraphs",
+      "args": {
+        "storyId": "story:slide:0:256:shape:3:0",
+        "paragraphs": [
+          { "alignment": "l", "runs": [{ "text": "Cross-target parity 🚀", "style": { "bold": true, "fontSizePt": 17, "color": "#475467", "fontFamily": "Arial" } }] },
+          { "alignment": "ctr", "runs": [{ "text": "One shared script.", "style": { "italic": true, "spacingPt": 0.5, "baselinePct": 5 } }] }
+        ]
+      }
+    },
+    { "op": "readCommandContent", "args": { "slideIds": ["slide:0:256"] } },
+    { "op": "duplicateSlide", "args": { "slideId": "slide:0:256", "toIndex": 1 } },
+    { "op": "bringShapeToFront", "args": { "slideId": "slide:0:256", "shapeId": "slide:0:256:shape:0" } },
+    { "op": "readContent", "args": {} },
+    { "op": "exportStructured", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
+    { "op": "exportMarkdown", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
+    { "op": "save", "args": {} }
+  ]
+}

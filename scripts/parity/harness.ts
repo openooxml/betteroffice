@@ -2,6 +2,7 @@ import { deepStrictEqual } from 'node:assert';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
+import { pptx } from './pptx';
 import { xlsx } from './xlsx';
 
 export interface StepResult {
@@ -23,9 +24,11 @@ export interface Target {
 export interface Format {
   engineBackend(): string;
   open(bytes: Uint8Array, script: Script): Promise<Target>;
+  versionPattern?: RegExp;
 }
 
-export const formats: Record<string, Format> = { xlsx };
+export const formats: Record<string, Format> = { xlsx, pptx };
+const DEFAULT_VERSION_PATTERN = /^[0-9a-f]{32}-[0-9]+$/;
 const root = new URL('../../', import.meta.url);
 
 function expectedPath(format: string): URL {
@@ -60,9 +63,10 @@ export async function run(format: string): Promise<StepResult[]> {
     readFileSync(new URL(`parity/${format}/script.json`, root), 'utf8')
   ) as Script;
   const target = await formats[format].open(readFileSync(new URL(script.fixture, root)), script);
+  const versionPattern = formats[format].versionPattern ?? DEFAULT_VERSION_PATTERN;
   const versions: string[] = [];
   const normalize = (value: string): string => {
-    if (/^[0-9a-f]{32}-[0-9]+$/.exec(value)?.[0] !== value) return value;
+    if (versionPattern.exec(value)?.[0] !== value) return value;
     let index = versions.indexOf(value);
     if (index === -1) index = versions.push(value) - 1;
     return `<version:${index + 1}>`;
