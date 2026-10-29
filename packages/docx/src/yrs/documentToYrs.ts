@@ -872,20 +872,27 @@ function runToUnits(
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => {
-    const units = runContentToUnits(content, marks, opaqueSequences);
-    if ((content.type === 'shape' && content.shape.drawingRunXml) ||
-      (content.type === 'opaqueDrawing' && content.kind === 'drawingRun')) {
-      for (const unit of units) {
-        if (unit.kind === 'embed') unit.payload.sourceRun = {
-          formatting: run.formatting ?? {},
-          attributes: { ...unit.attrs },
-          propertyChanges: run.propertyChanges ?? null,
-        };
-      }
+  return run.content.flatMap((content) => replayedRunContentToUnits(run, content, marks, opaqueSequences));
+}
+
+function replayedRunContentToUnits(
+  run: Run,
+  content: RunContent,
+  marks: readonly MarkDescriptor[],
+  opaqueSequences: string[]
+): InlineUnit[] {
+  const units = runContentToUnits(content, marks, opaqueSequences);
+  if ((content.type === 'shape' && content.shape.drawingRunXml) ||
+    (content.type === 'opaqueDrawing' && content.kind === 'drawingRun')) {
+    for (const unit of units) {
+      if (unit.kind === 'embed') unit.payload.sourceRun = {
+        formatting: run.formatting ?? {},
+        attributes: { ...unit.attrs },
+        propertyChanges: run.propertyChanges ?? null,
+      };
     }
-    return units;
-  });
+  }
+  return units;
 }
 
 function hyperlinkToUnits(
@@ -900,7 +907,7 @@ function hyperlinkToUnits(
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks, opaqueSequences));
+      for (const content of child.content) units.push(...replayedRunContentToUnits(child, content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
       const field = fieldPayload(child, styleFormatting);

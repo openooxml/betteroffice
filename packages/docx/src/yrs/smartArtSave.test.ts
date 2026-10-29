@@ -20,16 +20,22 @@ function makeOpaque(source: ReturnType<typeof smartArtFixture>): void {
   source.parts.set('word/diagrams/layout1.xml', '<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:unsupported"/>');
 }
 
-for (const [anchored, opaque] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+for (const [anchored, opaque, linked] of [
+  [false, false, false], [true, false, false], [false, true, false], [true, true, false], [false, false, true], [false, true, true],
+] as const) {
   for (const seeder of ['native', 'projected'] as const) {
     for (const edit of ['preserve hidden', 'show', 'hide'] as const) {
-      it(`${seeder} ${anchored ? 'anchored' : 'inline'} ${opaque ? 'opaque ' : ''}SmartArt ${edit} survives model serialization`, async () => {
+      it(`${seeder} ${anchored ? 'anchored' : 'inline'} ${opaque ? 'opaque ' : ''}${linked ? 'hyperlinked ' : ''}SmartArt ${edit} survives model serialization`, async () => {
         const source = smartArtFixture(anchored, { hidden: edit !== 'hide' });
         if (opaque) {
           const drawingRun = source.drawingRun.replace('<w:noProof/>', '').replace('<w:lang w:val="en-US"/>', '');
           source.parts.set('word/document.xml', source.parts.get('word/document.xml')!.replace(source.drawingRun, drawingRun));
           source.drawingRun = drawingRun;
           makeOpaque(source);
+        }
+        if (linked) {
+          source.parts.set('word/document.xml', source.parts.get('word/document.xml')!
+            .replace(source.drawingRun, `<w:hyperlink w:anchor="diagram">${source.drawingRun}</w:hyperlink>`));
         }
         const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
           [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
