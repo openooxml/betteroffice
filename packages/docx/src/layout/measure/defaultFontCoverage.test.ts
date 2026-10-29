@@ -40,19 +40,20 @@ function measure(fontChains: Record<string, number[]>, family: string, text: str
 }
 
 function paint(fontChains: Record<string, number[]>, family: string, text: string) {
+  const measured = measure(fontChains, family, text);
   const display = JSON.parse(wasm.buildDisplayListJson(JSON.stringify({
     measured: [{
       block: {
         kind: 'paragraph', id: 'coverage',
         runs: [{ kind: 'text', text, fontFamily: family, fontSize: 11 }],
       },
-      measure: {
+      measure: measured === 'browser' ? {
         kind: 'paragraph', totalHeight: 20,
         lines: [{
           headRun: 0, headChar: 0, tailRun: 0, tailChar: text.length,
           width: 100, ascent: 14, descent: 4, lineHeight: 20, syntheticFallback: true,
         }],
-      },
+      } : measured,
     }],
     fontChains,
     options: {},

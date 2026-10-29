@@ -563,21 +563,25 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-fn resolve_with_fallback(
-    store: &FontStore,
-    chain: &[FontId],
-    ch: char,
-    font_chains: FontChains<'_>,
-) -> Option<FontId> {
-    if !needs_glyph(ch) && font_chains.coverage_only(chain) {
+type FontResolver = fn(&FontStore, &[FontId], char) -> Option<FontId>;
+
+fn font_resolver(coverage_only: bool) -> FontResolver {
+    if coverage_only {
+        resolve_covered
+    } else {
+        resolve_with_fallback
+    }
+}
+
+fn resolve_with_fallback(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
+    store.resolve(chain, ch).or_else(|| chain.last().copied())
+}
+
+fn resolve_covered(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
+    if !needs_glyph(ch) {
         return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
     }
-    store.resolve(chain, ch).or_else(|| {
-        chain
-            .last()
-            .copied()
-            .filter(|_| !font_chains.coverage_only(chain))
-    })
+    store.resolve(chain, ch)
 }
 
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
@@ -606,8 +610,9 @@ pub(super) fn measure_plain_text(
 
     let levels = char_levels(text, base);
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
+    let resolve = font_resolver(font_chains.coverage_only(chain));
     for (i, ch) in text.chars().enumerate() {
-        let Some(font) = resolve_with_fallback(store, chain, ch, font_chains) else {
+        let Some(font) = resolve(store, chain, ch) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         plan.push((ch, font, levels[i]));
@@ -774,6 +779,7 @@ fn prepare_text_run(
     // that trade is rebuilt per character into `oversized` instead, one at a
     // time — never more resident than resolving it per character already was.
     let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
+    let mut slot_resolvers: [Option<FontResolver>; 4] = [None, None, None, None];
     let mut oversized: Vec<FontId> = Vec::new();
     for (char_index, ch) in text.chars().enumerate() {
         let slot = char_slot(ch, run.complex_script, east_asia_hint, previous_slot);
@@ -829,6 +835,8 @@ fn prepare_text_run(
                 resolved => resolved?,
             };
             validate_chain(store, &resolved)?;
+            slot_resolvers[index]
+                .get_or_insert_with(|| font_resolver(input.font_chains.coverage_only(&resolved)));
             if resolved.len() <= MAX_KEPT_CHAIN_IDS {
                 slot_chains[index] = Some(resolved);
             } else {
@@ -836,8 +844,9 @@ fn prepare_text_run(
             }
         }
         let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
+        let resolve = slot_resolvers[index].expect("slot resolver");
         let first = shaped[0];
-        let Some(mut font) = resolve_with_fallback(store, chain, first, input.font_chains) else {
+        let Some(mut font) = resolve(store, chain, first) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
@@ -850,7 +859,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve_with_fallback(store, chain, ch, input.font_chains)
+            && let Some(original_font) = resolve(store, chain, ch)
             && supports_smcp(
                 store,
                 original_font,
@@ -1106,12 +1115,16 @@ mod tests {
             assert_eq!(store.resolve(&chain, ch), store.resolve(&[fallback], ch));
             for chains in [&configured, &unrelated] {
                 assert_eq!(
-                    resolve_with_fallback(&store, &chain, ch, FontChains::Hash(chains)),
+                    font_resolver(FontChains::Hash(chains).coverage_only(&chain))(
+                        &store, &chain, ch
+                    ),
                     Some(fallback)
                 );
             }
             assert_eq!(
-                resolve_with_fallback(&store, &chain, ch, FontChains::Hash(&implicit)),
+                font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
+                    &store, &chain, ch
+                ),
                 Some(font)
             );
         }
@@ -1119,7 +1132,9 @@ mod tests {
         assert!(store.covers(fallback, '€').unwrap());
         assert!(needs_glyph('\u{0939}'));
         assert_eq!(
-            resolve_with_fallback(&store, &chain, '\u{0939}', FontChains::Hash(&implicit)),
+            font_resolver(FontChains::Hash(&implicit).coverage_only(&chain))(
+                &store, &chain, '\u{0939}'
+            ),
             None
         );
         let unknown = FontId::from_u32(u32::MAX);

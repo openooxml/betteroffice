@@ -23,6 +23,25 @@ const regular: ResidentFontRequirement = {
   key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false,
 };
 
+test('implicit measurement leaves unknown families absent even with script fallbacks', async () => {
+  const registerFont = mock((_bytes: Uint8Array) => 7);
+  const source = createRustMeasureSource({ engine: { registerFont, clearFonts() {} } });
+  const unknown: ResidentFontRequirement = {
+    key: 'brand sans|0|0', family: 'Brand Sans', bold: false, italic: false,
+  };
+  await source.prepareFontRequirements([unknown]);
+  expect(source.measurementConfigForRequirements([unknown])?.fontChains).toEqual({});
+  expect(registerFont).not.toHaveBeenCalled();
+  unknown.scripts = ['arabic'];
+  await source.prepareFontRequirements([unknown]);
+  expect(source.measurementConfigForRequirements([unknown])?.fontChains).toEqual({});
+  const liberation = await fontManager.createFontProvider().resolveLastResort('Brand Sans', false, false, 'word')();
+  expect(registerFont.mock.calls.map(([bytes]) => bytes)).not.toContainEqual(new Uint8Array(liberation));
+  await source.prepareFontRequirements([regular]);
+  const carlito = await fontManager.createFontProvider().resolve('Calibri', false, false)!();
+  expect(registerFont).toHaveBeenCalledWith(new Uint8Array(carlito));
+});
+
 test('unconfigured measurement lazily resolves faces through the fonts manager', async () => {
   const data = new Uint8Array([1, 2, 3]).buffer;
   const provider = providerFor(data);

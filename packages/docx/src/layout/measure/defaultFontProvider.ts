@@ -14,11 +14,15 @@ export function isImplicitFontProvider(provider: BundledFontProvider | undefined
 
 function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): BundledFontProvider {
   const provider = manager.createFontProvider();
+  const providesFamily = (family: string) =>
+    manager.resolveMetricCompatFamily(family) !== undefined ||
+    manager.resolveBundledFamilyFace(family, false, false) !== undefined;
   const checked = (
     loader: BundledFontLoader | undefined,
     face: import('@betteroffice/fonts').BundledFontFace | undefined
   ): BundledFontLoader | undefined => {
-    if (!loader || !face?.script) return loader;
+    if (!face) return undefined;
+    if (!loader || !face.script) return loader;
     return Object.assign(async () => {
       let bytes: ArrayBuffer;
       try { bytes = await loader(); }
@@ -30,7 +34,8 @@ function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): Bu
   const implicit: BundledFontProvider = {
     ...provider,
     resolve: (family, bold, italic) => checked(
-      provider.resolve(family, bold, italic), manager.resolveMetricCompatFace(family, bold, italic)
+      provider.resolve(family, bold, italic) ?? provider.resolveFamily(family, bold, italic),
+      manager.resolveMetricCompatFace(family, bold, italic) ?? manager.resolveBundledFamilyFace(family, bold, italic)
     ),
     resolveFamily: (family, bold, italic) => checked(
       provider.resolveFamily(family, bold, italic), manager.resolveBundledFamilyFace(family, bold, italic)
@@ -38,14 +43,14 @@ function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): Bu
     resolveScriptFallback: (script, bold, italic) => checked(
       provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
     ),
-    resolveGlyphFallback: (family, bold, italic, office) => checked(
+    resolveGlyphFallback: (family, bold, italic, office) => providesFamily(family) ? checked(
       provider.resolveGlyphFallback?.(family, bold, italic, office),
       manager.resolveGlyphFallbackFace(family, bold, italic, office)
-    ),
-    resolveLastResort: (family, bold, italic, office) => checked(
+    ) : undefined,
+    resolveLastResort: (family, bold, italic, office) => providesFamily(family) ? checked(
       provider.resolveLastResort(family, bold, italic, office),
       manager.resolveLastResortFace(family, bold, italic, office)
-    ),
+    ) : undefined,
   };
   implicitProviders.add(implicit);
   return implicit;

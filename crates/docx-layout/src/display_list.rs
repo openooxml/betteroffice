@@ -4521,8 +4521,50 @@ impl RenderCtx<'_> {
 /// borrowed by every page/HF `RenderCtx`.
 pub(crate) struct ShapeFonts<'a> {
     store: &'a ooxml_text::FontStore,
-    chains: HashMap<String, Vec<ooxml_text::FontId>>,
-    coverage_only: HashSet<ooxml_text::FontId>,
+    chains: HashMap<String, ShapeFontChain>,
+    coverage_only: bool,
+}
+
+type FontResolver =
+    fn(&ooxml_text::FontStore, &[ooxml_text::FontId], char) -> Option<ooxml_text::FontId>;
+
+struct ShapeFontChain {
+    ids: Vec<ooxml_text::FontId>,
+    coverage_only: bool,
+    resolve: FontResolver,
+}
+
+impl ShapeFontChain {
+    fn new(ids: Vec<ooxml_text::FontId>, coverage_only: bool) -> Self {
+        Self {
+            ids,
+            coverage_only,
+            resolve: if coverage_only {
+                Self::resolve_covered
+            } else {
+                Self::resolve_with_fallback
+            },
+        }
+    }
+
+    fn resolve_with_fallback(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        store.resolve(chain, ch).or_else(|| chain.last().copied())
+    }
+
+    fn resolve_covered(
+        store: &ooxml_text::FontStore,
+        chain: &[ooxml_text::FontId],
+        ch: char,
+    ) -> Option<ooxml_text::FontId> {
+        if !ooxml_text::measure::needs_glyph(ch) {
+            return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+        }
+        store.resolve(chain, ch)
+    }
 }
 
 impl<'a> ShapeFonts<'a> {
@@ -4535,62 +4577,46 @@ impl<'a> ShapeFonts<'a> {
         if input.font_chains.is_empty() {
             return None;
         }
+        let coverage_only: HashSet<_> = input
+            .font_chains
+            .get("@betteroffice/fonts/coverage")
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
         let chains = input
             .font_chains
             .iter()
             .map(|(k, ids)| {
                 (
                     k.clone(),
-                    ids.iter()
-                        .map(|&id| ooxml_text::FontId::from_u32(id))
-                        .collect(),
+                    ShapeFontChain::new(
+                        ids.iter()
+                            .map(|&id| ooxml_text::FontId::from_u32(id))
+                            .collect(),
+                        ids.last().is_some_and(|id| coverage_only.contains(id)),
+                    ),
                 )
             })
-            .collect();
-        let coverage_only = input
-            .font_chains
-            .get("@betteroffice/fonts/coverage")
-            .into_iter()
-            .flatten()
-            .map(|&id| ooxml_text::FontId::from_u32(id))
             .collect();
         Some(ShapeFonts {
             store,
             chains,
-            coverage_only,
+            coverage_only: !coverage_only.is_empty(),
         })
     }
 
     /// Fallback chain for a `(family, bold, italic)` combination, keyed exactly
     /// like the measure input (`"<family lowercase>|<b>|<i>"`). `None` when the
     /// run's family has no chain — that run falls back to `TextRunPrimitive`.
-    fn chain_for(&self, family: &str, bold: bool, italic: bool) -> Option<&[ooxml_text::FontId]> {
+    fn chain_for(&self, family: &str, bold: bool, italic: bool) -> Option<&ShapeFontChain> {
         let key = format!(
             "{}|{}|{}",
             family.to_lowercase(),
             u8::from(bold),
             u8::from(italic)
         );
-        self.chains.get(&key).map(|v| v.as_slice())
-    }
-
-    fn resolve(&self, chain: &[ooxml_text::FontId], ch: char) -> Option<ooxml_text::FontId> {
-        if !ooxml_text::measure::needs_glyph(ch)
-            && chain
-                .last()
-                .is_some_and(|id| self.coverage_only.contains(id))
-        {
-            return chain
-                .iter()
-                .copied()
-                .find(|&id| self.store.metrics(id).is_ok());
-        }
-        self.store.resolve(chain, ch).or_else(|| {
-            chain
-                .last()
-                .copied()
-                .filter(|id| !self.coverage_only.contains(id))
-        })
+        self.chains.get(&key)
     }
 }
 
@@ -4614,11 +4640,17 @@ fn painted_text_width(
         }
     });
     let width = |text: &str, small_caps: bool| {
-        if text.chars().any(|ch| {
-            !ch.is_whitespace()
-                && (!coverage_only || ooxml_text::measure::needs_glyph(ch))
-                && !fonts.store.covers(font, ch).unwrap_or(false)
-        }) {
+        let uncovered = if coverage_only {
+            text.chars().any(|ch| {
+                ooxml_text::measure::needs_glyph(ch)
+                    && !ch.is_whitespace()
+                    && !fonts.store.covers(font, ch).unwrap_or(false)
+            })
+        } else {
+            text.chars()
+                .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
+        };
+        if uncovered {
             return None;
         }
         let mut features = features.clone();
@@ -4715,16 +4747,14 @@ fn text_substitute_scale(
     let ratio = fonts.and_then(|fonts| {
         let family = fmt.font_family.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
         let chain = fonts.chain_for(family, fmt.bold == Some(true), fmt.italic == Some(true))?;
-        let font = *chain.first()?;
+        let font = *chain.ids.first()?;
         if fonts.store.family_widths(font).ok()?.is_none()
             && fonts.store.advance_scale(font).ok()? == 1.0
         {
             return None;
         }
         let owner = fonts.store.byte_owner(font).ok()?;
-        let coverage_only = chain
-            .last()
-            .is_some_and(|id| fonts.coverage_only.contains(id));
+        let coverage_only = chain.coverage_only;
         let wanted = painted_text_width(
             fonts,
             font,
@@ -6135,6 +6165,19 @@ pub(crate) fn emit_paragraph_fragment(
     emit_block_chrome: bool,
     stamp_line_range: bool,
 ) {
+    let fallback_ctx;
+    let ctx = if ctx.shape.is_some_and(|fonts| fonts.coverage_only)
+        && measure.lines.iter().any(|line| line.synthetic_fallback)
+    {
+        fallback_ctx = RenderCtx {
+            shape: None,
+            page_label: ctx.page_label.clone(),
+            ..*ctx
+        };
+        &fallback_ctx
+    } else {
+        ctx
+    };
     // primitives emitted for this fragment get the paragraph's paraId stamped
     // afterward (mirror `data-para-id`); remember where they start
     let stamp_from = prims.len();
@@ -7823,9 +7866,11 @@ fn try_emit_glyph_runs(
     let Some(chain) = shape_fonts.chain_for(family, bold, italic) else {
         return false;
     };
-    if chain.is_empty() {
+    if chain.ids.is_empty() {
         return false;
     }
+    let resolve = chain.resolve;
+    let chain = chain.ids.as_slice();
     let echo_font_route = fmt.complex_script != Some(true)
         && fmt.font_slots.as_ref().is_none_or(|slots| {
             slots.ascii == slots.h_ansi
@@ -7853,7 +7898,7 @@ fn try_emit_glyph_runs(
     let mut first_font: Option<ooxml_text::FontId> = None;
     let mut uniform = true;
     for ch in text.chars() {
-        match shape_fonts.resolve(chain, ch) {
+        match resolve(shape_fonts.store, chain, ch) {
             Some(font) => match first_font {
                 None => first_font = Some(font),
                 Some(first) if font != first => uniform = false,
@@ -7888,7 +7933,7 @@ fn try_emit_glyph_runs(
         let chars: Vec<char> = text.chars().collect();
         let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
         for &ch in &chars {
-            match shape_fonts.resolve(chain, ch) {
+            match resolve(shape_fonts.store, chain, ch) {
                 Some(font) => fonts.push(font),
                 None => return false,
             }
@@ -13745,23 +13790,42 @@ mod tests {
         let first = store.register(bytes.to_vec()).unwrap();
         let last = store.register(bytes.to_vec()).unwrap();
         let chain = [first, last];
-        let mut fonts = ShapeFonts {
-            store: &store,
-            chains: HashMap::new(),
-            coverage_only: HashSet::new(),
-        };
         for ch in ['\t', '\u{2060}', '\u{fe0f}', '\u{feff}'] {
             assert_eq!(store.resolve(&chain, ch), None);
-            assert_eq!(fonts.resolve(&chain, ch), Some(last));
-            fonts.coverage_only.insert(first);
-            assert_eq!(fonts.resolve(&chain, ch), Some(last));
-            fonts.coverage_only.insert(last);
-            assert_eq!(fonts.resolve(&chain, ch), Some(first));
+            for (marked, expected) in [
+                (vec![], last),
+                (vec![first.to_u32()], last),
+                (vec![first.to_u32(), last.to_u32()], first),
+            ] {
+                let input: BuildInput = serde_json::from_value(serde_json::json!({
+                    "measured": [], "options": {}, "layout": {"pages": []},
+                    "fontChains": {
+                        "calibri|0|0": [first.to_u32(), last.to_u32()],
+                        "@betteroffice/fonts/coverage": marked,
+                    },
+                }))
+                .unwrap();
+                let fonts = ShapeFonts::build(&input, &store).unwrap();
+                let chain = fonts.chain_for("Calibri", false, false).unwrap();
+                assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(expected));
+                assert_eq!(
+                    (chain.resolve)(&store, &chain.ids, '\u{0939}'),
+                    if chain.coverage_only {
+                        None
+                    } else {
+                        Some(last)
+                    }
+                );
+            }
             let unknown = ooxml_text::FontId::from_u32(u32::MAX);
-            assert_eq!(fonts.resolve(&[unknown, first, last], ch), Some(first));
-            assert_eq!(fonts.resolve(&chain, '\u{0939}'), None);
-            fonts.coverage_only.clear();
+            let chain = ShapeFontChain::new(vec![unknown, first, last], true);
+            assert_eq!((chain.resolve)(&store, &chain.ids, ch), Some(first));
         }
+        let fonts = ShapeFonts {
+            store: &store,
+            chains: HashMap::new(),
+            coverage_only: false,
+        };
         let fmt = RunFormattingIn::default();
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, false).is_none());
         assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, true).is_some());

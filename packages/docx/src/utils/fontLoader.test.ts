@@ -465,22 +465,22 @@ test('an embedded family still gets its bundled equivalent as a coverage fallbac
 });
 
 test('without configuration the fonts manager registers bundled faces without Google', async () => {
-  const resolveFamily = spyOn(bundle(['Default Sans']).createFontProvider(), 'resolveFamily');
+  const resolveFamily = spyOn(bundle(['DM Sans']).createFontProvider(), 'resolveFamily');
   const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
     resolve: () => bytes, resolveFamily,
     resolveScriptFallback: () => undefined, resolveLastResort: () => bytes,
   });
   try {
     expect(create).not.toHaveBeenCalled();
-    expect(await loadFont('Default Sans')).toBe(true);
+    expect(await loadFont('DM Sans')).toBe(true);
     expect(create).toHaveBeenCalledTimes(1);
     expect(added).toEqual([
-      { family: 'Default Sans', weight: '400', style: 'normal' },
-      { family: 'Default Sans', weight: '700', style: 'normal' },
-      { family: 'Default Sans', weight: '400', style: 'italic' },
-      { family: 'Default Sans', weight: '700', style: 'italic' },
+      { family: 'DM Sans', weight: '400', style: 'normal' },
+      { family: 'DM Sans', weight: '700', style: 'normal' },
+      { family: 'DM Sans', weight: '400', style: 'italic' },
+      { family: 'DM Sans', weight: '700', style: 'italic' },
     ]);
-    expect(resolveFamily).toHaveBeenCalledWith('Default Sans', false, false);
+    expect(resolveFamily).toHaveBeenCalledWith('DM Sans', false, false);
     expect(googleLinks()).toHaveLength(0);
   } finally { create.mockRestore(); resolveFamily.mockRestore(); }
 });
@@ -523,11 +523,11 @@ test('a default manager load failure returns false without Google and retries', 
     });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    expect(await loadFont('Recovered Default Sans')).toBe(false);
+    expect(await loadFont('Poppins')).toBe(false);
     expect(added).toHaveLength(0);
     expect(googleLinks()).toHaveLength(0);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(await loadFont('Recovered Default Sans')).toBe(true);
+    expect(await loadFont('Poppins')).toBe(true);
     expect(create).toHaveBeenCalledTimes(2);
     expect(added).toHaveLength(4);
     expect(googleLinks()).toHaveLength(0);
@@ -567,17 +567,17 @@ test('a failing default bundled face leaves no Google link and remains retryable
   const unsubscribe = onFontError(() => {});
   const now = Date.now;
   try {
-    expect(await loadFont('Unserved Office Face')).toBe(false);
+    expect(await loadFont('Open Sans')).toBe(false);
     expect(attempts).toBe(4);
     expect(added).toHaveLength(0);
     expect(googleLinks()).toHaveLength(0);
-    expect(await loadFont('Unserved Office Face')).toBe(false);
+    expect(await loadFont('Open Sans')).toBe(false);
     expect(attempts).toBe(8);
     expect(added).toHaveLength(0);
     expect(googleLinks()).toHaveLength(0);
     Date.now = () => now() + 5 * 60_000;
     unavailable = false;
-    expect(await loadFont('Unserved Office Face')).toBe(true);
+    expect(await loadFont('Open Sans')).toBe(true);
     expect(attempts).toBe(12);
     expect(added).toHaveLength(4);
     expect(create).toHaveBeenCalledTimes(1);
@@ -611,6 +611,21 @@ test('without configuration a family the fonts manager lacks still asks Google',
     append.mockRestore();
     create.mockRestore();
   }
+});
+
+test('an unknown family stays absent across implicit manager loaders', async () => {
+  const { resolveDefaultFontProvider } = await import('../layout/measure/defaultFontProvider');
+  const provider = (await resolveDefaultFontProvider())!;
+  expect(provider.resolve('Brand Sans', false, false)).toBeUndefined();
+  expect(provider.resolveFamily?.('Brand Sans', false, false)).toBeUndefined();
+  expect(provider.resolveLastResort?.('Brand Sans', false, false, 'word')).toBeUndefined();
+  expect(provider.resolveGlyphFallback?.('Brand Sans', false, false, 'word')).toBeUndefined();
+  const append = spyOn(document.head, 'appendChild');
+  try {
+    expect(await loadFontWithMapping('Brand Sans')).toBe(false);
+    expect(googleRequests(append)).toBe(1);
+    expect(added).toHaveLength(0);
+  } finally { append.mockRestore(); }
 });
 
 test('a family neither the manager nor Google serves is asked for once, and its link removed', async () => {

@@ -177,6 +177,7 @@ export function createRustMeasureSource(options: {
         );
         if (familyIds === undefined || scriptIds === undefined)
           return undefined;
+        if (implicit && familyIds.length === 0) continue;
         const chain = Array.from(familyIds);
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
         if (chain.length > 0) fontChains[requirement.key] = chain;
