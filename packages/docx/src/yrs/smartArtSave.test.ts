@@ -134,6 +134,36 @@ for (const opaque of [false, true]) {
   }
 }
 
+for (const seeder of ['native', 'projected'] as const) {
+  it(`${seeder} hidden SmartArt in a mixed-content run stays hidden after an adjacent edit`, async () => {
+    const source = smartArtFixture(false);
+    const mixedRun = `<w:r><w:rPr><w:vanish/></w:rPr><w:t>x</w:t>${source.drawing}</w:r>`;
+    source.parts.set('word/document.xml', source.parts.get('word/document.xml')!.replace(source.drawingRun, mixedRun));
+    const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
+      [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
+    )));
+    const host = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession();
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, host);
+      const segment = session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'shape');
+      expect(segment?.kind).toBe('embed');
+      expect(segment?.attributes.hidden).toBe(true);
+      const { paraId } = session.paragraphs('body')[0]!;
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'Edited ');
+      const result = await repackDocxWithWarnings(yrsToDocument(session, host));
+      const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(result.buffer))['word/document.xml']);
+      const run = smartArtDrawingRun(xml)!;
+      expect(run).toContain('<dgm:relIds');
+      expect(run).toContain('<w:vanish');
+      expect(xml).toContain('Edited Process overview before ');
+    } finally {
+      session.destroy();
+    }
+  }, 30_000);
+}
+
 for (const anchored of [false, true]) {
   it(`saveEditorDocument preserves ${anchored ? 'anchored' : 'inline'} SmartArt in an edited paragraph`, async () => {
     const source = smartArtFixture(anchored);
