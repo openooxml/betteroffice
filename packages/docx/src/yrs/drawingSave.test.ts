@@ -111,6 +111,34 @@ function drawingTags(bytes: Uint8Array): { inline: string; effectExtent: string 
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
+for (const seeder of ['native', 'projected'] as const) {
+  it(`${seeder} image runs project hidden formatting and explicit clears`, async () => {
+    const bytes = fixture('<wp:inline>', '');
+    const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const session = await createYrsSession();
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      const { paraId } = session.paragraphs('body')[1]!;
+      for (const hidden of [true, false]) {
+        session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 1 } }, {
+          other: { hidden },
+        });
+        const projected = yrsToDocument(session, parsed);
+        const paragraph = projected.package.document.content[1]!;
+        if (paragraph.type !== 'paragraph') throw new Error('expected picture paragraph');
+        const run = paragraph.content[0];
+        if (run?.type !== 'run') throw new Error('expected picture run');
+        expect(run.formatting).toEqual(hidden ? { hidden: true } : {});
+        const saved = readDocxContainer(await repackDocx(projected));
+        expect(saved.text('word/document.xml')!.includes('<w:vanish')).toBe(hidden);
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+}
+
 const CASES = [
   { name: 'absent attributes', inline: '<wp:inline>', effectExtent: '' },
   {

@@ -875,8 +875,8 @@ function imageFromPayload(payload: Attrs): Image {
   return image;
 }
 
-function imageRunFromPayload(payload: Attrs): Run {
-  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }] };
+function imageRunFromPayload(payload: Attrs, attributes: Attrs, format: RunFormatter): Run {
+  return { type: 'run', content: [{ type: 'drawing', image: imageFromPayload(payload) }], formatting: format(attributes) };
 }
 
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
@@ -935,7 +935,6 @@ function opaqueDrawingRunFromPayload(
     ? payload.previews.map(asObject).filter((image): image is Attrs => !!image).map(imageFromPayload)
     : [];
   const textBox = storedShape(payload.textBoxJson);
-  const formatting = format(attributes);
   return {
     type: 'run',
     content: [{
@@ -944,7 +943,7 @@ function opaqueDrawingRunFromPayload(
       ...(previews.length ? { previews } : {}),
       ...(textBox ? { textBox } : {}),
     }],
-    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    formatting: format(attributes),
   };
 }
 
@@ -1145,7 +1144,7 @@ function ordinaryContentForItem(
     case 'tab':
       return tabRun(item.attributes, format);
     case 'image':
-      return imageRunFromPayload(item.payload);
+      return imageRunFromPayload(item.payload, item.attributes, format);
     case 'horizontalRule':
       return horizontalRuleRun(item.payload, item.attributes, format);
     case 'shape':
@@ -1195,7 +1194,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
     const ordinary = ordinaryContentForItem(item, recovery, format);
     child = inlineSdtContent(ordinary ? [ordinary] : [])[0] ?? { type: 'run', content: [] };
   } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
-  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
@@ -1245,7 +1244,7 @@ function addToHyperlink(
   } else if (item.embedKind === 'tab') child = { type: 'run', content: [{ type: 'tab' }] };
   else if (item.embedKind === 'horizontalRule') {
     child = horizontalRuleRun(item.payload, item.attributes, format);
-  } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload);
+  } else if (item.embedKind === 'image') child = imageRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'shape') child = shapeRunFromPayload(item.payload, item.attributes, format);
   else if (item.embedKind === 'chart') child = chartRunFromPayload(item.payload, recovery) ?? undefined;
   else if (item.embedKind === 'opaqueDrawing') child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? undefined;

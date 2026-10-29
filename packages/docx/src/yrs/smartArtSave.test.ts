@@ -15,11 +15,18 @@ beforeAll(async () => {
   await preloadOpcWasm();
 });
 
-for (const anchored of [false, true]) {
+for (const [anchored, opaque] of [[false, false], [true, false], [false, true], [true, true]] as const) {
   for (const seeder of ['native', 'projected'] as const) {
     for (const edit of ['preserve hidden', 'show', 'hide'] as const) {
-      it(`${seeder} ${anchored ? 'anchored' : 'inline'} SmartArt ${edit} survives model serialization`, async () => {
+      it(`${seeder} ${anchored ? 'anchored' : 'inline'} ${opaque ? 'opaque ' : ''}SmartArt ${edit} survives model serialization`, async () => {
         const source = smartArtFixture(anchored, { hidden: edit !== 'hide' });
+        if (opaque) {
+          const drawingRun = source.drawingRun.replace('<w:noProof/>', '').replace('<w:lang w:val="en-US"/>', '');
+          source.parts.set('word/document.xml', source.parts.get('word/document.xml')!.replace(source.drawingRun, drawingRun));
+          source.drawingRun = drawingRun;
+          source.parts.set('word/diagrams/drawing1.xml', '<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"/>');
+          source.parts.set('word/diagrams/layout1.xml', '<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:unsupported"/>');
+        }
         const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map(
           [...source.parts].map(([name, xml]) => [name, toBytes(xml)])
         )));
@@ -29,8 +36,10 @@ for (const anchored of [false, true]) {
         try {
           if (seeder === 'native') session.seedFromDocx(bytes);
           else documentToYrs(session, host);
-          const segment = session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'shape');
+          const embedKind = opaque ? 'opaqueDrawing' : 'shape';
+          const segment = session.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === embedKind);
           expect(segment?.kind).toBe('embed');
+          if (opaque && segment?.kind === 'embed') expect(segment.payload.kind).toBe('drawingRun');
           expect(segment?.attributes.hidden === true).toBe(edit !== 'hide');
           const { paraId } = session.paragraphs('body')[0]!;
           if (edit !== 'preserve hidden') {
@@ -45,14 +54,16 @@ for (const anchored of [false, true]) {
           const xml = new TextDecoder().decode(parts['word/document.xml']);
           const run = smartArtDrawingRun(xml)!;
           expect(run).toContain(source.drawing);
-          expect(run).toContain('<w:noProof/>');
-          expect(run).toContain('<w:lang w:val="en-US"/>');
+          if (!opaque) {
+            expect(run).toContain('<w:noProof/>');
+            expect(run).toContain('<w:lang w:val="en-US"/>');
+          }
           expect(run.includes('<w:vanish')).toBe(edit !== 'show');
           if (edit === 'preserve hidden') expect(run).toBe(source.drawingRun);
           expect(xml).toContain('Edited Process overview before ');
           expect(result.warnings.filter(warning => warning.startsWith('Drawing run'))).toEqual([]);
           reopened.openDocx(saved, true);
-          const savedSegment = reopened.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === 'shape');
+          const savedSegment = reopened.storySegments('body').find(segment => segment.kind === 'embed' && segment.embedKind === embedKind);
           expect(savedSegment?.kind).toBe('embed');
           expect(savedSegment?.attributes.hidden === true).toBe(edit !== 'show');
         } finally {

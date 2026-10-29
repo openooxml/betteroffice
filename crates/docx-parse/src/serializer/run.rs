@@ -1516,6 +1516,7 @@ mod tests {
         for opaque in [false, true] {
             for properties in [
                 "",
+                "<w:rPr><w:vanish/></w:rPr>",
                 r#"<w:rPr keep:attribute="source"><w:noProof/><w:vanish/><keep:metadata/></w:rPr>"#,
             ] {
                 let source = format!(
@@ -1544,7 +1545,7 @@ mod tests {
                             .and_then(|formatting| formatting.hidden),
                         hidden
                     );
-                    if !properties.is_empty() {
+                    if properties.contains("keep:attribute") {
                         assert!(saved.contains("<w:noProof/>"));
                         assert!(saved.contains("<keep:metadata/>"));
                         assert!(saved.contains("keep:attribute=\"source\""));
