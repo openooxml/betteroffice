@@ -97,6 +97,7 @@ pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
 
+mod leading_inline_box;
 mod typed_measure;
 #[cfg(any(test, feature = "test-support"))]
 pub mod work_counters;
