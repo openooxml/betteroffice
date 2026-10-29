@@ -115,6 +115,46 @@ test('delete_comment removes only a reply and preserves its root and other comme
   expect((await open(bytes)).list({ story: 'comments' }).items.map(comment => comment.id)).toEqual(['0', '2']);
 });
 
+for (const [label, companions] of [
+  ['no companion parts', []],
+  ['only commentsExtended', ['commentsExtended']],
+  ['all companion parts', COMMENT_COMPANIONS.map(([name]) => name)],
+] as const) {
+  for (const survivorRows of companions.length ? [false, true] : [false]) {
+    test(`delete_comment preserves ${label} ${survivorRows ? 'with' : 'without'} survivor rows`, async () => {
+      const zip = await JSZip.loadAsync(await commentFixture({ companions }));
+      const comments = await zip.file('word/comments.xml')!.async('string');
+      zip.file('word/comments.xml', comments.replace('</w:comments>',
+        EXISTING_COMMENT.replace('w:id="0"', 'w:id="1"').replace('1A2B3C4D', '11223344').replace('Keep this note.', 'Surviving note.') + '</w:comments>'));
+      const document = await zip.file('word/document.xml')!.async('string');
+      const anchor = '<w:r><w:t>Revenue grew strongly in the third quarter.</w:t></w:r>';
+      zip.file('word/document.xml', document.replace(anchor, markers('1', anchor)));
+      for (const [name, prefix, , root, entry] of COMMENT_COMPANIONS) {
+        if (!zip.file(`word/${name}.xml`) || !survivorRows) continue;
+        const xml = await zip.file(`word/${name}.xml`)!.async('string');
+        const survivor = entry.replace('1A2B3C4D', '11223344').replace('2ECC71AA', 'AABBCCDD');
+        zip.file(`word/${name}.xml`, xml.replace(`</${prefix}:${root}>`, `${survivor}</${prefix}:${root}>`));
+      }
+      const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+      await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: '0' }] });
+      const bytes = await doc.export();
+      const saved = await JSZip.loadAsync(bytes);
+      zip.file('word/comments.xml', (await zip.file('word/comments.xml')!.async('string')).replace(EXISTING_COMMENT, ''));
+      zip.file('word/document.xml', withoutComments(await zip.file('word/document.xml')!.async('string'), ['0']));
+      for (const [name, , , , entry] of COMMENT_COMPANIONS) {
+        const file = zip.file(`word/${name}.xml`);
+        if (file) zip.file(file.name, (await file.async('string')).replace(entry, ''));
+      }
+      const paths = Object.keys(zip.files).filter(path => !zip.files[path].dir).sort();
+      expect(Object.keys(saved.files).filter(path => !saved.files[path].dir).sort()).toEqual(paths);
+      for (const path of paths) {
+        expect(await saved.file(path)!.async('uint8array')).toEqual(await zip.file(path)!.async('uint8array'));
+      }
+      expect((await open(bytes)).list({ story: 'comments' }).items).toMatchObject([{ id: '1', text: 'Surviving note.' }]);
+    });
+  }
+}
+
 test('delete_comment removes the last comment and keeps empty registered comment parts', async () => {
   const doc = await open(await commentFixture());
   const before = await doc.export();

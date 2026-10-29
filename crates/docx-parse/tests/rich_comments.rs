@@ -1060,6 +1060,137 @@ fn comment_metadata_splices_resolution_and_rewrites_identity() {
 }
 
 #[test]
+fn deleting_comments_preserves_absent_companion_parts_and_rows() {
+    let companions = [
+        (
+            "commentsExtended",
+            "w15",
+            "http://schemas.microsoft.com/office/word/2012/wordml",
+            "commentsEx",
+            "<w15:commentEx w15:paraId=\"10000006\" w15:done='0'/>",
+            "<w15:commentEx w15:paraId=\"10000004\" w15:done='0'/>",
+            "http://schemas.microsoft.com/office/2011/relationships/commentsExtended",
+        ),
+        (
+            "commentsIds",
+            "w16cid",
+            "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+            "commentsIds",
+            "<w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\"/>",
+            "<w16cid:commentId w16cid:paraId=\"10000004\" w16cid:durableId=\"20000002\"/>",
+            "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds",
+        ),
+        (
+            "commentsExtensible",
+            "w16cex",
+            "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+            "commentsExtensible",
+            "<w16cex:commentExtensible w16cex:durableId=\"20000001\"/>",
+            "<w16cex:commentExtensible w16cex:durableId=\"20000002\"/>",
+            "http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible",
+        ),
+    ];
+    for count in [0, 1, 3] {
+        for survivor_rows in [false, true] {
+            if count == 0 && survivor_rows {
+                continue;
+            }
+            let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+            for (name, prefix, namespace, root, removed, survivor, relationship) in
+                &companions[..count]
+            {
+                let survivor = if survivor_rows { *survivor } else { "" };
+                let xml = format!(
+                    "<{prefix}:{root} xmlns:{prefix}=\"{namespace}\">{removed}{survivor}</{prefix}:{root}>"
+                );
+                parts.push((format!("word/{name}.xml"), xml.into_bytes()));
+                for (path, close, entry) in [
+                    (
+                        "[Content_Types].xml",
+                        "</Types>",
+                        format!(
+                            "<Override PartName=\"/word/{name}.xml\" ContentType=\"application/vnd.ms-word.{name}+xml\"/>"
+                        ),
+                    ),
+                    (
+                        "word/_rels/document.xml.rels",
+                        "</Relationships>",
+                        format!(
+                            "<Relationship Id=\"{name}\" Type=\"{relationship}\" Target=\"{name}.xml\"/>"
+                        ),
+                    ),
+                ] {
+                    let (_, bytes) = parts.iter_mut().find(|(name, _)| name == path).unwrap();
+                    *bytes = std::str::from_utf8(bytes)
+                        .unwrap()
+                        .replace(close, &format!("{entry}{close}"))
+                        .into_bytes();
+                }
+            }
+            let source = ooxml_opc::rezip_parts(&parts).unwrap();
+            let mut expected: std::collections::BTreeMap<_, _> = parts.into_iter().collect();
+            let bytes = expected.get_mut("word/comments.xml").unwrap();
+            *bytes = std::str::from_utf8(bytes)
+                .unwrap()
+                .replace(RICH_COMMENT, "")
+                .into_bytes();
+            for (name, _, _, _, removed, _, _) in &companions[..count] {
+                let bytes = expected.get_mut(&format!("word/{name}.xml")).unwrap();
+                *bytes = std::str::from_utf8(bytes)
+                    .unwrap()
+                    .replace(*removed, "")
+                    .into_bytes();
+            }
+            let mut request = save_request(&source);
+            request
+                .document
+                .comments
+                .as_mut()
+                .unwrap()
+                .retain(|comment| comment.id == 1.0);
+            let saved = write_docx_s13(request, &source).unwrap();
+            assert_comment_text(&saved, 1.0, "Plain");
+            let saved: std::collections::BTreeMap<_, _> = ooxml_opc::unzip_parts(&saved)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(
+                saved.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>(),
+                "companions={count}, survivor_rows={survivor_rows}"
+            );
+            for (path, bytes) in expected {
+                assert_eq!(
+                    saved.get(&path).unwrap(),
+                    &bytes,
+                    "{path}, companions={count}, survivor_rows={survivor_rows}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn deleting_and_resolving_comments_can_create_required_companions() {
+    let source = fixture();
+    let mut request = save_request(&source);
+    let comments = request.document.comments.as_mut().unwrap();
+    comments.retain(|comment| comment.id == 1.0);
+    comments[0].done = Some(true);
+    let saved = write_docx_s13(request, &source).unwrap();
+    let comments = save_request(&saved).document.comments.unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].id, 1.0);
+    assert_eq!(comments[0].done, Some(true));
+    assert!(
+        ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path == "word/commentsExtended.xml")
+    );
+}
+
+#[test]
 fn deleting_comments_splices_only_their_entries() {
     let extended = "<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\"><w15:commentEx w15:paraId=\"10000006\" w15:done='0'/><w15:commentEx w15:paraId=\"10000004\" w15:done='0'/></w15:commentsEx>";
     let ids = "<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\"><w16cid:commentId w16cid:paraId=\"10000006\" w16cid:durableId=\"20000001\"/><w16cid:commentId w16cid:paraId=\"10000004\" w16cid:durableId=\"20000002\"/></w16cid:commentsIds>";

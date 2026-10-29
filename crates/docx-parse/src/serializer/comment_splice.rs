@@ -407,7 +407,7 @@ fn splice_companions(
     let mut result = Vec::new();
     for (path, row_name, serialized) in written {
         let Some((_, source)) = find_part(parts, path) else {
-            if !serialized.is_empty() {
+            if (!added_ids.is_empty() || !changed.is_empty()) && !serialized.is_empty() {
                 result.push((path.to_owned(), serialized));
             }
             continue;
