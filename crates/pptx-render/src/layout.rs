@@ -311,15 +311,78 @@ impl SlideRenderer {
         Ok(id.to_u32())
     }
 
-    /// The fallback face that draws `cluster` for a run in `face`: one of the
+    /// The fallback face that draws `character` for a run in `face`: one of the
     /// same weight and slant where there is one, sized on the run's own line.
     fn coverage_face(
+        &self,
+        face: &FontFace,
+        character: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                self.fonts.covers(candidate.id, character).unwrap_or(false)
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+    }
+
+    /// Where `text` in `face` needs a fallback: each piece's byte start and the
+    /// face that draws it, `None` for `face` itself. Spaces and punctuation
+    /// stay with the fallback text around them.
+    fn coverage_pieces(
+        &self,
+        face: &FontFace,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<(usize, Option<FontFace>)> {
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        if self.coverage_faces.is_empty()
+            || text
+                .chars()
+                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        {
+            return vec![(0, None)];
+        }
+        for (index, character) in text.char_indices() {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = self.fonts.covers(face.id, character).unwrap_or(true);
+            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let chosen = match current {
+                Some(current)
+                    if neutral && self.fonts.covers(current.id, character).unwrap_or(false) =>
+                {
+                    Some(current.clone())
+                }
+                _ if own => None,
+                _ => self.coverage_face(face, character, bold, italic),
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, chosen));
+            }
+        }
+        pieces
+    }
+
+    fn browser_coverage_face(
         &self,
         face: &FontFace,
         cluster: &str,
         bold: bool,
         italic: bool,
-        browser_fallback: bool,
     ) -> Option<FontFace> {
         let covering = || {
             self.coverage_faces.iter().filter(|(_, _, candidate)| {
@@ -339,29 +402,24 @@ impl SlideRenderer {
                 ..candidate.clone()
             })
             .or_else(|| {
-                (browser_fallback && cluster.chars().any(needs_visible_glyph)).then(|| FontFace {
+                cluster.chars().any(needs_visible_glyph).then(|| FontFace {
                     id: FontId::from_u32(BROWSER_FONT_ID),
                     ..face.clone()
                 })
             })
     }
 
-    /// Where `text` in `face` needs a fallback: each piece's byte start and the
-    /// face that draws it, `None` for `face` itself. Spaces and punctuation
-    /// stay with the fallback text around them.
-    fn coverage_pieces(
+    fn browser_coverage_pieces(
         &self,
         face: &FontFace,
         text: &str,
         bold: bool,
         italic: bool,
-        browser_fallback: bool,
     ) -> Vec<(usize, Option<FontFace>)> {
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
-        if self.coverage_faces.is_empty() && !browser_fallback
-            || text
-                .chars()
-                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+        if text
+            .chars()
+            .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
         {
             return vec![(0, None)];
         }
@@ -384,7 +442,7 @@ impl SlideRenderer {
                     Some(current.clone())
                 }
                 _ if own => None,
-                _ => self.coverage_face(face, cluster, bold, italic, browser_fallback),
+                _ => self.browser_coverage_face(face, cluster, bold, italic),
             };
             let same = pieces.last().is_some_and(|(_, last)| {
                 last.as_ref().map(|face| face.id) == chosen.as_ref().map(|face| face.id)
@@ -399,13 +457,16 @@ impl SlideRenderer {
     /// Splits `run` where its face has no glyph and a fallback does, so each
     /// part is shaped, measured and drawn in a face that can draw it.
     fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
-        let pieces = self.coverage_pieces(
-            &run.style.face,
-            &run.text,
-            run.style.bold,
-            run.style.italic,
-            self.browser_coverage_fallback,
-        );
+        let pieces = if self.browser_coverage_fallback {
+            self.browser_coverage_pieces(
+                &run.style.face,
+                &run.text,
+                run.style.bold,
+                run.style.italic,
+            )
+        } else {
+            self.coverage_pieces(&run.style.face, &run.text, run.style.bold, run.style.italic)
+        };
         split_coverage_pieces(run, pieces, out);
     }
 
@@ -4035,13 +4096,11 @@ fn chart_text_primitive(
             .map_err(|error| RenderError::Font(error.to_string()))?;
         single_line_box(metrics, size_px, &CompatFlags::default())
     };
-    let pieces = renderer.coverage_pieces(
-        &face,
-        text.text,
-        bold,
-        italic,
-        renderer.browser_coverage_fallback,
-    );
+    let pieces = if renderer.browser_coverage_fallback {
+        renderer.browser_coverage_pieces(&face, text.text, bold, italic)
+    } else {
+        renderer.coverage_pieces(&face, text.text, bold, italic)
+    };
     let mut shaped_pieces = Vec::with_capacity(pieces.len());
     let mut cursor = 0.0_f32;
     let mut cluster_advance = 0.0_f32;
@@ -7436,7 +7495,7 @@ mod tests {
             )
             .runs
             .remove(0);
-            let pieces = renderer.coverage_pieces(&run.style.face, &run.text, false, false, true);
+            let pieces = renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false);
             assert_eq!(pieces.len(), 1);
             assert_eq!(pieces[0].0, 0);
             assert!(pieces[0].1.is_none());
@@ -7483,7 +7542,7 @@ mod tests {
                 ])
             {
                 let text = format!("{character}Latin{character}");
-                let pieces = renderer.coverage_pieces(&run.style.face, &text, false, false, true);
+                let pieces = renderer.browser_coverage_pieces(&run.style.face, &text, false, false);
                 assert_eq!(pieces.len(), 1, "{character:?}");
                 assert_eq!(pieces[0].0, 0);
                 assert!(pieces[0].1.is_none(), "{character:?}");
@@ -7506,13 +7565,11 @@ mod tests {
                 Ok(false)
             );
             for browser_fallback in [false, true] {
-                let pieces = renderer.coverage_pieces(
-                    &run.style.face,
-                    &run.text,
-                    false,
-                    false,
-                    browser_fallback,
-                );
+                let pieces = if browser_fallback {
+                    renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false)
+                } else {
+                    renderer.coverage_pieces(&run.style.face, &run.text, false, false)
+                };
                 let pieces: Vec<_> = pieces
                     .iter()
                     .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))
@@ -7541,13 +7598,11 @@ mod tests {
             .runs
             .remove(0);
         for browser_fallback in [false, true] {
-            let pieces = renderer.coverage_pieces(
-                &run.style.face,
-                &run.text,
-                false,
-                false,
-                browser_fallback,
-            );
+            let pieces = if browser_fallback {
+                renderer.browser_coverage_pieces(&run.style.face, &run.text, false, false)
+            } else {
+                renderer.coverage_pieces(&run.style.face, &run.text, false, false)
+            };
             let pieces: Vec<_> = pieces
                 .iter()
                 .map(|(start, face)| (*start, face.as_ref().map(|face| face.id.to_u32())))

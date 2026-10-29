@@ -30,6 +30,51 @@ mod coverage_regressions {
     }
 
     #[test]
+    fn disabled_browser_coverage_keeps_registered_fallbacks_scalar() {
+        let mut renderer = renderer();
+        let own = renderer.fallback_font().unwrap();
+        let fallback = renderer
+            .register_fallback_font(
+                "Carlito",
+                false,
+                false,
+                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
+            )
+            .unwrap();
+        assert_eq!(renderer.fonts.covers(own, '\u{20DD}'), Ok(false));
+        assert_eq!(
+            renderer.fonts.covers(FontId::from_u32(fallback), '\u{20DD}'),
+            Ok(true)
+        );
+        for enabled in [false, true, false] {
+            renderer.set_browser_coverage_fallback(enabled);
+            let pieces = split(&renderer, "a\u{20DD}b");
+            let actual: Vec<_> = pieces
+                .iter()
+                .map(|piece| {
+                    (
+                        piece.text.as_str(),
+                        piece.start,
+                        piece.style.face.id.to_u32(),
+                    )
+                })
+                .collect();
+            if enabled {
+                assert_eq!(actual, [("a\u{20DD}", 7, fallback), ("b", 9, own.to_u32())]);
+            } else {
+                assert_eq!(
+                    actual,
+                    [
+                        ("a", 7, own.to_u32()),
+                        ("\u{20DD}", 8, fallback),
+                        ("b", 9, own.to_u32()),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn browser_coverage_keeps_grapheme_clusters_whole() {
         for registered_fallback in [false, true] {
             let mut renderer = renderer();
