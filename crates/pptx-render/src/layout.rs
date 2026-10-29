@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
+use ooxml_drawingml::chart::{PlotFont, PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
@@ -12,7 +12,8 @@ use ooxml_drawingml::{
     style_outline, style_reference_color,
 };
 use ooxml_text::family_metrics::{
-    FamilyMetrics, family_advance, family_metrics, runs_at_own_widths,
+    FamilyMetrics, family_advance, family_cluster_advance, family_composed_kana_advance,
+    family_metrics, runs_at_own_widths,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -413,6 +414,54 @@ impl SlideRenderer {
         )
     }
 
+    /// returns a superset of layout's requested faces, including faces skipped by
+    /// shape or operation budgets or chart labels with no room.
+    #[doc(hidden)]
+    pub fn requested_font_faces(
+        &self,
+        package: &PptxPackage,
+        scopes: &[SlideScope],
+    ) -> Result<Vec<(String, bool, bool)>, RenderError> {
+        let mut requests = FontRequests::default();
+        for scope in scopes {
+            let SlideParents {
+                slide: parsed_slide,
+                layout,
+                master,
+            } = SlideParents::resolve(
+                package,
+                scope.slide.source_part_path.as_deref(),
+                scope.slide.layout_part_path.as_deref(),
+            );
+            let theme = Theme {
+                color_map: effective_color_map(parsed_slide, layout, master),
+                ..slide_theme_part(package, master)
+                    .map(|part| part.theme.clone())
+                    .unwrap_or_default()
+            };
+            let mut walker = FontRequestWalker {
+                scope: TextScope {
+                    package,
+                    theme: &theme,
+                    parsed_slide,
+                    layout,
+                    master,
+                    slide_number: i64::from(package.presentation.first_slide_num)
+                        + scope.index as i64,
+                },
+                requests: &mut requests,
+                shape_count: 0,
+            };
+            for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
+                walker.parsed_shape(shape, &stable_id, Space::root())?;
+            }
+            for shape in &scope.slide.shapes {
+                walker.snapshot_shape(shape, Space::root())?;
+            }
+        }
+        Ok(requests.faces)
+    }
+
     fn layout_resolved(
         &self,
         package: &PptxPackage,
@@ -431,10 +480,7 @@ impl SlideRenderer {
             deck_slide.source_part_path.as_deref(),
             deck_slide.layout_part_path.as_deref(),
         );
-        let theme_part = master
-            .and_then(|master| master.theme_part_path.as_deref())
-            .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
-            .or_else(|| package.themes.first());
+        let theme_part = slide_theme_part(package, master);
         let default_theme = Theme::default();
         let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
         // The slot mapping is per slide, not per theme part.
@@ -571,33 +617,9 @@ impl SlideRenderer {
                 transform: Transform::default(),
             });
         }
-        // `p:sld/@showMasterSp` hides the layout's own decoration as well as the
-        // master's, because the master reaches the slide through the layout.
-        let show_layout =
-            shape_filter.is_none() && parsed_slide.is_none_or(|slide| slide.show_master_shapes);
-        let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
-        if show_master && let Some(master) = master {
-            for (index, shape) in master.shapes.iter().enumerate() {
-                if node_placeholder(shape).is_none() {
-                    builder.render_parsed_shape(
-                        shape,
-                        &format!("master:{}:{index}", master.part_path),
-                        root_space,
-                        false,
-                    )?;
-                }
-            }
-        }
-        if show_layout && let Some(layout) = layout {
-            for (index, shape) in layout.shapes.iter().enumerate() {
-                if node_placeholder(shape).is_none() {
-                    builder.render_parsed_shape(
-                        shape,
-                        &format!("layout:{}:{index}", layout.part_path),
-                        root_space,
-                        false,
-                    )?;
-                }
+        if shape_filter.is_none() {
+            for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
+                builder.render_parsed_shape(shape, &stable_id, root_space, false)?;
             }
         }
         for shape in &deck_slide.shapes {
@@ -938,6 +960,420 @@ impl RenderedSlide {
     }
 }
 
+fn slide_theme_part<'a>(
+    package: &'a PptxPackage,
+    master: Option<&SlideMaster>,
+) -> Option<&'a pptx_parse::ThemePart> {
+    master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .or_else(|| package.themes.first())
+}
+
+fn inherited_shapes<'a>(
+    slide: Option<&Slide>,
+    layout: Option<&'a SlideLayout>,
+    master: Option<&'a SlideMaster>,
+) -> impl Iterator<Item = (&'a ShapeNode, String)> {
+    let show_layout = slide.is_none_or(|slide| slide.show_master_shapes);
+    let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
+    let master_shapes = master
+        .filter(|_| show_master)
+        .into_iter()
+        .flat_map(|master| {
+            master
+                .shapes
+                .iter()
+                .enumerate()
+                .filter(|(_, shape)| node_placeholder(shape).is_none())
+                .map(move |(index, shape)| (shape, format!("master:{}:{index}", master.part_path)))
+        });
+    let layout_shapes = layout
+        .filter(|_| show_layout)
+        .into_iter()
+        .flat_map(|layout| {
+            layout
+                .shapes
+                .iter()
+                .enumerate()
+                .filter(|(_, shape)| node_placeholder(shape).is_none())
+                .map(move |(index, shape)| (shape, format!("layout:{}:{index}", layout.part_path)))
+        });
+    master_shapes.chain(layout_shapes)
+}
+
+#[derive(Clone, Copy)]
+struct TextScope<'a> {
+    package: &'a PptxPackage,
+    theme: &'a Theme,
+    parsed_slide: Option<&'a Slide>,
+    layout: Option<&'a SlideLayout>,
+    master: Option<&'a SlideMaster>,
+    slide_number: i64,
+}
+
+impl<'a> TextScope<'a> {
+    fn snapshot_nodes(&self, shape: &ShapeSnapshot) -> [Option<&'a ShapeNode>; 3] {
+        let original = (shape.source_id != 0)
+            .then(|| {
+                self.parsed_slide
+                    .and_then(|slide| find_node(&slide.shapes, shape.source_id))
+            })
+            .flatten();
+        let layout = shape.placeholder.as_ref().and_then(|placeholder| {
+            self.layout
+                .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
+        });
+        let master = shape.placeholder.as_ref().and_then(|placeholder| {
+            self.master
+                .and_then(|master| find_placeholder(&master.shapes, placeholder))
+        });
+        [original, layout, master]
+    }
+
+    fn cascade<'b>(
+        &self,
+        nodes: [Option<&'b ShapeNode>; 3],
+        placeholder: Option<&'b Placeholder>,
+        fit_to_box: bool,
+    ) -> BodyCascade<'b>
+    where
+        'a: 'b,
+    {
+        BodyCascade {
+            fit_to_box,
+            primary: nodes[0].and_then(node_text),
+            layout: nodes[1].and_then(node_text),
+            master: nodes[2].and_then(node_text),
+            master_slide: self.master,
+            default_style: &self.package.presentation.default_text_style,
+            default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
+            placeholder,
+            style_color: shape_style_color(nodes[0]),
+        }
+    }
+}
+
+struct TableStyleScope<'a> {
+    style: Option<&'a TableStyle>,
+    flags: TableStyleFlags,
+}
+
+impl<'a> TableStyleScope<'a> {
+    fn new(package: &'a PptxPackage, table: &Table) -> Self {
+        Self {
+            style: table.properties.style_id.as_deref().and_then(|id| {
+                package
+                    .table_styles
+                    .style(Some(id))
+                    .or_else(|| builtin_table_style(id))
+            }),
+            flags: TableStyleFlags {
+                first_row: table.properties.first_row,
+                last_row: table.properties.last_row,
+                first_column: table.properties.first_col,
+                last_column: table.properties.last_col,
+                band_row: table.properties.band_row,
+            },
+        }
+    }
+
+    fn cell(
+        &self,
+        position: TableCellPosition,
+        cell: &TableCell,
+        span: usize,
+        row_span: usize,
+    ) -> ResolvedCellStyle {
+        let resolve = |position| {
+            self.style
+                .map(|style| style.resolve_cell(self.flags, position))
+                .unwrap_or_default()
+        };
+        let mut style = resolve(position);
+        if span > 1 || row_span > 1 {
+            let far = resolve(TableCellPosition {
+                row: position.row + row_span - 1,
+                column: position.column + span - 1,
+                ..position
+            });
+            style.right = far.right;
+            style.bottom = far.bottom;
+        }
+        style.apply_cell_style(&direct_cell_style(cell));
+        style
+    }
+}
+
+#[derive(Default)]
+struct FontRequests {
+    seen: HashSet<(String, bool, bool)>,
+    faces: Vec<(String, bool, bool)>,
+}
+
+impl FontRequests {
+    fn record(&mut self, request: RequestedFontFace) {
+        let normalized = normalize_family(&request.family);
+        if !normalized.is_empty() && self.seen.insert((normalized, request.bold, request.italic)) {
+            self.faces.push((
+                request.family.trim().to_owned(),
+                request.bold,
+                request.italic,
+            ));
+        }
+    }
+
+    fn content(
+        &mut self,
+        theme: &Theme,
+        content: &TextContent,
+        cascade: BodyCascade<'_>,
+    ) -> Result<(), RenderError> {
+        let mut numbering = ListCounters::default();
+        for source in paragraph_sources(content, cascade)? {
+            let fallback = source.properties.default_run.as_ref();
+            let first = match source.paragraph.runs.first() {
+                Some(run) => resolve_font_request(theme, &run.style, fallback),
+                None => {
+                    let end_style = source
+                        .end_properties
+                        .map(|end| style_from_properties(end, theme))
+                        .unwrap_or_default();
+                    resolve_font_request(theme, &end_style, fallback)
+                }
+            };
+            self.record(first.clone());
+            for run in source.paragraph.runs.iter().skip(1) {
+                self.record(resolve_font_request(theme, &run.style, fallback));
+            }
+            if paragraph_marker(source.paragraph, &source.properties, &mut numbering).is_some()
+                && let Some(family) = bullet_font_request(theme, &source.properties)
+            {
+                self.record(RequestedFontFace { family, ..first });
+            }
+        }
+        Ok(())
+    }
+}
+
+struct FontRequestWalker<'a, 'b> {
+    scope: TextScope<'a>,
+    requests: &'b mut FontRequests,
+    shape_count: usize,
+}
+
+impl FontRequestWalker<'_, '_> {
+    fn charge_shape(&mut self) -> Result<(), RenderError> {
+        self.shape_count += 1;
+        if self.shape_count > MAX_RENDER_SHAPES {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_RENDER_SHAPES} shapes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn snapshot_shape(&mut self, shape: &ShapeSnapshot, space: Space) -> Result<(), RenderError> {
+        self.charge_shape()?;
+        if shape.hidden {
+            return Ok(());
+        }
+        let scope = self.scope;
+        let nodes @ [original, layout, master] = scope.snapshot_nodes(shape);
+        let resolved = resolved_transform_value(shape, original, layout, master);
+        let rect = space.map_transform(&resolved);
+        if shape.kind == ShapeKind::Group {
+            let group = nodes.into_iter().flatten().find_map(node_group_transform);
+            let child_space = group
+                .map(|transform| space.for_group(rect, transform))
+                .unwrap_or(space);
+            for child in &shape.children {
+                self.snapshot_shape(child, child_space)?;
+            }
+        } else if shape.kind == ShapeKind::GraphicFrame {
+            self.graphic(
+                &shape.id,
+                shape.graphic.as_ref(),
+                &shape.text_stories,
+                rect,
+                space,
+            )?;
+        } else if let Some(story) = shape.text_stories.first() {
+            let cascade = scope.cascade(nodes, shape.placeholder.as_ref(), false);
+            let content =
+                content_from_story(story, cascade.primary, scope.slide_number, scope.theme);
+            self.requests.content(scope.theme, &content, cascade)?;
+        }
+        Ok(())
+    }
+
+    fn parsed_shape(
+        &mut self,
+        shape: &ShapeNode,
+        stable_id: &str,
+        space: Space,
+    ) -> Result<(), RenderError> {
+        self.charge_shape()?;
+        if node_base(shape).hidden {
+            return Ok(());
+        }
+        if let ShapeNode::Group(group) = shape {
+            let rect = space.map_transform(&group.base.transform);
+            let child_space = space.for_group(rect, &group.base.transform);
+            for (index, child) in group.children.iter().enumerate() {
+                self.parsed_shape(child, &format!("{stable_id}:{index}"), child_space)?;
+            }
+            return Ok(());
+        }
+        if let ShapeNode::GraphicFrame(frame) = shape {
+            self.graphic(
+                stable_id,
+                Some(&frame.data),
+                &[],
+                space.map_transform(&frame.base.transform),
+                space,
+            )?;
+        }
+        if let Some(body) = node_text(shape) {
+            let scope = self.scope;
+            let content = content_from_body(stable_id, body, scope.theme, scope.slide_number);
+            self.requests.content(
+                scope.theme,
+                &content,
+                scope.cascade([Some(shape), None, None], node_placeholder(shape), false),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn graphic(
+        &mut self,
+        shape_id: &str,
+        graphic: Option<&GraphicFrameData>,
+        stories: &[StorySnapshot],
+        rect: PxRect,
+        space: Space,
+    ) -> Result<(), RenderError> {
+        let scope = self.scope;
+        match graphic {
+            Some(GraphicFrameData::Table(table)) => {
+                let row_count = table.rows.len();
+                let column_count = table.grid.len().max(
+                    table
+                        .rows
+                        .iter()
+                        .map(|row| row.cells.len())
+                        .max()
+                        .unwrap_or_default(),
+                );
+                if row_count == 0 || column_count == 0 {
+                    return Ok(());
+                }
+                let levels = scope
+                    .master
+                    .map(|master| scope.package.master_other_style_levels(master))
+                    .unwrap_or([false; 9]);
+                let text_levels =
+                    table_text_levels(scope.master, &levels, &scope.package.presentation);
+                let table_style = TableStyleScope::new(scope.package, table);
+                let mut story_index = 0;
+                for (row_index, row) in table.rows.iter().enumerate() {
+                    for (column, cell) in row.cells.iter().enumerate() {
+                        let story = stories.get(story_index);
+                        story_index += 1;
+                        self.charge_shape()?;
+                        if cell.merged {
+                            continue;
+                        }
+                        let content = match story {
+                            Some(story) => content_from_story(
+                                story,
+                                Some(&cell.text),
+                                scope.slide_number,
+                                scope.theme,
+                            ),
+                            None => content_from_body(
+                                &format!("{shape_id}:table:{row_index}:{column}"),
+                                &cell.text,
+                                scope.theme,
+                                scope.slide_number,
+                            ),
+                        };
+                        let style = table_style.cell(
+                            TableCellPosition {
+                                row: row_index,
+                                column,
+                                row_count,
+                                column_count,
+                            },
+                            cell,
+                            (cell.grid_span as usize).clamp(1, column_count - column),
+                            (cell.row_span as usize).clamp(1, row_count - row_index),
+                        );
+                        let inherited = table_style_text_body(&style, &text_levels);
+                        self.requests.content(
+                            scope.theme,
+                            &content,
+                            cell_cascade(&cell.text, &inherited),
+                        )?;
+                    }
+                }
+            }
+            Some(GraphicFrameData::Diagram {
+                drawing_part_path: Some(path),
+                ..
+            }) => {
+                if let Some(drawing) = scope
+                    .package
+                    .diagram_drawings
+                    .iter()
+                    .find(|drawing| drawing.part_path == *path)
+                {
+                    let (scale_x, scale_y) = drawing
+                        .synthesis_extent
+                        .filter(|[width, height]| *width > 0 && *height > 0)
+                        .map(|[width, height]| (rect.w / width as f32, rect.h / height as f32))
+                        .unwrap_or((space.scale_x, space.scale_y));
+                    let space = Space {
+                        origin_x: rect.x,
+                        origin_y: rect.y,
+                        scale_x,
+                        scale_y,
+                    };
+                    for (index, child) in drawing.shapes.iter().enumerate() {
+                        self.parsed_shape(child, &format!("{shape_id}:{index}"), space)?;
+                    }
+                }
+            }
+            Some(GraphicFrameData::Chart {
+                part_path: Some(path),
+                ..
+            }) => {
+                let theme_path = slide_theme_part(scope.package, scope.master)
+                    .map(|part| part.part_path.as_str());
+                if let Some(part) = scope.package.charts.iter().find(|part| {
+                    part.part_path == *path && part.theme_part_path.as_deref() == theme_path
+                }) {
+                    let default_font = resolve_theme_font_ref(Some(scope.theme), "+mn-lt");
+                    crate::chart::visit_chart_fonts(
+                        &part.chart,
+                        &default_font,
+                        &mut |family, bold, italic| {
+                            self.requests.record(RequestedFontFace {
+                                family: resolve_font_family(scope.theme, family),
+                                bold,
+                                italic,
+                            });
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 struct LayoutBuilder<'a> {
     renderer: &'a SlideRenderer,
     package: &'a PptxPackage,
@@ -973,6 +1409,17 @@ struct LayoutBuilder<'a> {
 }
 
 impl<'a> LayoutBuilder<'a> {
+    fn text_scope(&self) -> TextScope<'a> {
+        TextScope {
+            package: self.package,
+            theme: self.theme,
+            parsed_slide: self.parsed_slide,
+            layout: self.layout,
+            master: self.master,
+            slide_number: self.slide_number,
+        }
+    }
+
     fn resolved_effects(&self, nodes: &[Option<&ShapeNode>]) -> Option<ShapeEffects> {
         nodes
             .iter()
@@ -1049,20 +1496,8 @@ impl<'a> LayoutBuilder<'a> {
         if shape.hidden {
             return Ok(());
         }
-        let original = (shape.source_id != 0)
-            .then(|| {
-                self.parsed_slide
-                    .and_then(|slide| find_node(&slide.shapes, shape.source_id))
-            })
-            .flatten();
-        let layout_node = shape.placeholder.as_ref().and_then(|placeholder| {
-            self.layout
-                .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
-        });
-        let master_node = shape.placeholder.as_ref().and_then(|placeholder| {
-            self.master
-                .and_then(|master| find_placeholder(&master.shapes, placeholder))
-        });
+        let text_scope = self.text_scope();
+        let [original, layout_node, master_node] = text_scope.snapshot_nodes(shape);
         let resolved = resolved_transform_value(shape, original, layout_node, master_node);
         let rect = space.map_transform(&resolved);
         if shape.kind == ShapeKind::Group {
@@ -1215,17 +1650,11 @@ impl<'a> LayoutBuilder<'a> {
                 ShapeKind::Group => unreachable!(),
             }
         }
-        let body_cascade = BodyCascade {
-            fit_to_box: false,
-            primary: original.and_then(node_text),
-            layout: layout_node.and_then(node_text),
-            master: master_node.and_then(node_text),
-            master_slide: self.master,
-            default_style: &self.package.presentation.default_text_style,
-            default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
-            placeholder: shape.placeholder.as_ref(),
-            style_color: shape_style_color(original),
-        };
+        let body_cascade = text_scope.cascade(
+            [original, layout_node, master_node],
+            shape.placeholder.as_ref(),
+            false,
+        );
         let text = match shape.kind {
             ShapeKind::GraphicFrame => None,
             ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
@@ -2001,13 +2430,6 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         let columns = column_edges(&table.grid, column_count, rect);
-        let flags = TableStyleFlags {
-            first_row: table.properties.first_row,
-            last_row: table.properties.last_row,
-            first_column: table.properties.first_col,
-            last_column: table.properties.last_col,
-            band_row: table.properties.band_row,
-        };
         let package = self.package;
         let master = self.master;
         let master_levels = self.master_other_style_levels.get_or_insert_with(|| {
@@ -2016,12 +2438,7 @@ impl<'a> LayoutBuilder<'a> {
                 .unwrap_or([false; 9])
         });
         let text_levels = table_text_levels(master, master_levels, &package.presentation);
-        let table_style = table.properties.style_id.as_deref().and_then(|id| {
-            package
-                .table_styles
-                .style(Some(id))
-                .or_else(|| builtin_table_style(id))
-        });
+        let table_style = TableStyleScope::new(package, table);
         let mut heights: Vec<f32> = table.rows.iter().map(|row| emu_to_px(row.height)).collect();
         let mut spans = Vec::new();
         let mut plans = Vec::new();
@@ -2056,22 +2473,7 @@ impl<'a> LayoutBuilder<'a> {
                     row_count,
                     column_count,
                 };
-                let resolve = |position| {
-                    table_style
-                        .map(|style: &TableStyle| style.resolve_cell(flags, position))
-                        .unwrap_or_default()
-                };
-                let mut style = resolve(position);
-                if span > 1 || row_span > 1 {
-                    let far = resolve(TableCellPosition {
-                        row: row_index + row_span - 1,
-                        column: column + span - 1,
-                        ..position
-                    });
-                    style.right = far.right;
-                    style.bottom = far.bottom;
-                }
-                style.apply_cell_style(&direct_cell_style(cell));
+                let style = table_style.cell(position, cell, span, row_span);
                 let inherited = table_style_text_body(&style, &text_levels);
                 let height = self.cell_text_height(
                     &content,
@@ -2786,7 +3188,7 @@ struct BodyCascade<'a> {
     style_color: Option<&'a ColorValue>,
 }
 
-impl BodyCascade<'_> {
+impl<'a> BodyCascade<'a> {
     /// The shadow the body's text is drawn with. PowerPoint keeps one per run;
     /// the first any level declares stands for the whole box, because a body
     /// that shadows one run shadows them all.
@@ -2886,7 +3288,7 @@ impl BodyCascade<'_> {
 
     /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
     /// runs of its own.
-    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
+    fn end_run_properties(&self, index: usize) -> Option<&'a RunProperties> {
         [self.primary, self.layout, self.master]
             .into_iter()
             .flatten()
@@ -3108,13 +3510,16 @@ struct ResolvedStyle {
     caps: TextCaps,
 }
 
-fn resolve_content(
-    renderer: &SlideRenderer,
-    theme: &Theme,
-    content: &TextContent,
-    cascade: BodyCascade<'_>,
-    substitutions: &mut SubstitutionLog,
-) -> Result<ResolvedContent, RenderError> {
+struct ParagraphSource<'a> {
+    paragraph: &'a ContentParagraph,
+    properties: ParagraphProperties,
+    end_properties: Option<&'a RunProperties>,
+}
+
+fn paragraph_sources<'a>(
+    content: &'a TextContent,
+    cascade: BodyCascade<'a>,
+) -> Result<impl Iterator<Item = ParagraphSource<'a>> + 'a, RenderError> {
     let total_bytes = content
         .paragraphs
         .iter()
@@ -3141,13 +3546,58 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
+    Ok(content
+        .paragraphs
+        .iter()
+        .enumerate()
+        .map(move |(index, paragraph)| {
+            let properties =
+                cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
+            let end_properties = if paragraph.runs.is_empty() {
+                cascade.end_run_properties(index)
+            } else {
+                None
+            };
+            ParagraphSource {
+                paragraph,
+                properties,
+                end_properties,
+            }
+        }))
+}
+
+fn paragraph_marker(
+    paragraph: &ContentParagraph,
+    properties: &ParagraphProperties,
+    numbering: &mut ListCounters,
+) -> Option<String> {
+    numbering
+        .next(
+            properties.bullet.as_ref(),
+            paragraph.level,
+            paragraph.runs.iter().any(|run| !run.text.is_empty()),
+        )
+        .map(|marker| marker.text())
+}
+
+fn resolve_content(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    content: &TextContent,
+    cascade: BodyCascade<'_>,
+    substitutions: &mut SubstitutionLog,
+) -> Result<ResolvedContent, RenderError> {
+    let sources = paragraph_sources(content, cascade)?;
     let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
     let mut numbering = ListCounters::default();
-    for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties =
-            cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
+    for source in sources {
+        let ParagraphSource {
+            paragraph,
+            properties,
+            end_properties,
+        } = source;
         let language = properties
             .default_run
             .as_ref()
@@ -3177,8 +3627,7 @@ fn resolve_content(
             }
         }
         if runs.is_empty() {
-            let end_style = cascade
-                .end_run_properties(index)
+            let end_style = end_properties
                 .map(|end| style_from_properties(end, theme))
                 .unwrap_or_default();
             runs.push(ResolvedRun {
@@ -3197,13 +3646,7 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let written_marker = numbering
-            .next(
-                properties.bullet.as_ref(),
-                paragraph.level,
-                paragraph.runs.iter().any(|run| !run.text.is_empty()),
-            )
-            .map(|marker| marker.text());
+        let written_marker = paragraph_marker(paragraph, &properties, &mut numbering);
         let marker = written_marker
             .as_deref()
             .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
@@ -3338,6 +3781,67 @@ fn case_segments(text: &str) -> Vec<(bool, &str)> {
     segments
 }
 
+#[derive(Clone)]
+struct RequestedFontFace {
+    family: String,
+    bold: bool,
+    italic: bool,
+}
+
+fn resolve_font_request(
+    theme: &Theme,
+    direct: &TextStyle,
+    fallback: Option<&RunProperties>,
+) -> RequestedFontFace {
+    let bold = direct
+        .bold
+        .or_else(|| fallback.and_then(|value| value.bold))
+        .unwrap_or(false);
+    let italic = direct
+        .italic
+        .or_else(|| fallback.and_then(|value| value.italic))
+        .unwrap_or(false);
+    let family = direct
+        .font_family
+        .as_deref()
+        .filter(|family| family.len() <= 256)
+        .or_else(|| {
+            fallback
+                .and_then(|value| value.font_family.as_deref())
+                .filter(|family| family.len() <= 256)
+        })
+        .map(|family| resolve_font_family(theme, family))
+        .unwrap_or_else(|| resolve_theme_font_ref(Some(theme), "+mn-lt"));
+    RequestedFontFace {
+        family,
+        bold,
+        italic,
+    }
+}
+
+fn bullet_font_request(theme: &Theme, properties: &ParagraphProperties) -> Option<String> {
+    let BulletFont::Typeface(family) = properties.bullet_font.as_ref()? else {
+        return None;
+    };
+    Some(resolve_font_family(theme, family))
+}
+
+fn resolve_font_family(theme: &Theme, family: &str) -> String {
+    if family.starts_with('+') {
+        resolve_theme_font_ref(Some(theme), family)
+    } else {
+        family.to_owned()
+    }
+}
+
+fn chart_font_request(theme: &Theme, font: &PlotFont) -> RequestedFontFace {
+    RequestedFontFace {
+        family: resolve_font_family(theme, &font.family),
+        bold: font.weight >= 600,
+        italic: font.italic,
+    }
+}
+
 fn resolve_bullet_style(
     renderer: &SlideRenderer,
     theme: &Theme,
@@ -3347,12 +3851,7 @@ fn resolve_bullet_style(
     substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
-    if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
-        let family = if family.starts_with('+') {
-            resolve_theme_font_ref(Some(theme), family)
-        } else {
-            family.clone()
-        };
+    if let Some(family) = bullet_font_request(theme, properties) {
         let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
             written_marker
                 .chars()
@@ -3388,31 +3887,11 @@ fn resolve_style(
     fallback: Option<&RunProperties>,
     substitutions: &mut SubstitutionLog,
 ) -> Result<ResolvedStyle, RenderError> {
-    let bold = direct
-        .bold
-        .or_else(|| fallback.and_then(|value| value.bold))
-        .unwrap_or(false);
-    let italic = direct
-        .italic
-        .or_else(|| fallback.and_then(|value| value.italic))
-        .unwrap_or(false);
-    let family = direct
-        .font_family
-        .as_deref()
-        .filter(|family| family.len() <= 256)
-        .or_else(|| {
-            fallback
-                .and_then(|value| value.font_family.as_deref())
-                .filter(|family| family.len() <= 256)
-        })
-        .map(|family| {
-            if family.starts_with('+') {
-                resolve_theme_font_ref(Some(theme), family)
-            } else {
-                family.to_owned()
-            }
-        })
-        .unwrap_or_else(|| resolve_theme_font_ref(Some(theme), "+mn-lt"));
+    let RequestedFontFace {
+        family,
+        bold,
+        italic,
+    } = resolve_font_request(theme, direct, fallback);
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let color = direct
         .color
@@ -3509,12 +3988,7 @@ fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox
 /// have widths but no face for. `None` for anything the table cannot measure,
 /// which keeps the substitute's own advance.
 fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
-    let metrics = style.face.widths?;
-    let mut total = 0.0;
-    for character in text.chars() {
-        total += family_advance(metrics, character)?;
-    }
-    Some(total * size_px)
+    family_cluster_advance(style.face.widths?, text).map(|advance| advance * size_px)
 }
 
 /// Optional ligatures are off once glyphs are tracked apart or advanced by the
@@ -3562,13 +4036,11 @@ fn chart_text_primitive(
     text: ChartText<'_>,
     substitutions: &mut SubstitutionLog,
 ) -> Result<Primitive, RenderError> {
-    let bold = text.font.weight >= 600;
-    let italic = text.font.italic;
-    let family = if text.font.family.starts_with('+') {
-        resolve_theme_font_ref(Some(theme), &text.font.family)
-    } else {
-        text.font.family.clone()
-    };
+    let RequestedFontFace {
+        family,
+        bold,
+        italic,
+    } = chart_font_request(theme, &text.font);
     let face = renderer.resolve_face(&family, bold, italic, substitutions)?;
     let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
     let tracking = safe_geometry(text.font.letter_spacing_px as f32);
@@ -4607,9 +5079,11 @@ fn shape_face(
     if face.id.to_u32() != BROWSER_FONT_ID {
         return shape(fonts, face.id, text, size_px, features);
     }
-    Ok(text
-        .char_indices()
-        .map(|(index, character)| ShapedGlyph {
+    let mut glyphs = Vec::new();
+    let mut characters = text.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        let first = glyphs.len();
+        glyphs.push(ShapedGlyph {
             glyph_id: 0,
             cluster: index as u32,
             x_advance: face
@@ -4619,8 +5093,24 @@ fn shape_face(
                 * size_px,
             x_offset: 0.0,
             y_offset: 0.0,
-        })
-        .collect())
+        });
+        if let Some(&(_, mark)) = characters.peek()
+            && let Some(advance) = face
+                .widths
+                .and_then(|metrics| family_composed_kana_advance(metrics, character, mark))
+        {
+            characters.next();
+            glyphs.push(ShapedGlyph {
+                glyph_id: 0,
+                cluster: index as u32,
+                x_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            glyphs[first].x_advance = advance * size_px;
+        }
+    }
+    Ok(glyphs)
 }
 
 fn add_shaped_segment(
@@ -12314,6 +12804,203 @@ mod tests {
             assert!((x - pen).abs() < 0.01, "{character} at {x}, expected {pen}");
             pen += family_advance(metrics, character).unwrap() * size;
         }
+    }
+
+    #[test]
+    fn named_japanese_clusters_use_composed_kana_advances() {
+        const NOTO_SANS_JP: &[u8] =
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
+            let mut renderer = SlideRenderer::new();
+            renderer
+                .register_font(family, false, false, NOTO_SANS_JP)
+                .unwrap();
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            let metrics = family_metrics(&family.to_lowercase(), false, false).unwrap();
+            for (text, composed) in [("か\u{3099}中", 'が'), ("は\u{309a}中", 'ぱ')] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                let size = points_to_px(paragraph.runs[0].style.font_size_pt);
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let expected = (family_advance(metrics, composed).unwrap() + 1.0) * size;
+                assert_eq!(lines.len(), 1);
+                assert!((lines[0].width - expected).abs() < 1e-3, "{family} {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_japanese_faces_keep_decomposed_kana_in_one_cluster() {
+        let renderer = SlideRenderer::new();
+        for family in [
+            "MS UI Gothic",
+            "MS PGothic",
+            "ＭＳ Ｐゴシック",
+            "MS PMincho",
+            "ＭＳ Ｐ明朝",
+        ] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+            let metrics = family_metrics(&family.to_lowercase(), false, false).unwrap();
+            for (decomposed, composed) in [
+                ("か\u{3099}", 'が'),
+                ("き\u{3099}", 'ぎ'),
+                ("は\u{309a}", 'ぱ'),
+                ("ヒ\u{309a}", 'ピ'),
+            ] {
+                let mut paragraph = paragraph(&renderer, "l", decomposed);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                paragraph.runs[0].style.font_size_pt = 12.0;
+                paragraph.runs[0].style.line_font_size_pt = 12.0;
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                let expected = family_advance(metrics, composed).unwrap() * 16.0;
+                assert_eq!(lines.len(), 1);
+                assert!(
+                    (lines[0].width - expected).abs() < 1e-3,
+                    "{family} {decomposed}"
+                );
+                assert!(!lines[0].caret_stops.iter().any(|stop| stop.position == 1));
+                let glyphs = shape_face(&renderer.fonts, &face, decomposed, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), 2);
+                assert!(glyphs.iter().all(|glyph| glyph.cluster == 0));
+                assert!((glyphs[0].x_advance - expected).abs() < 1e-3);
+                assert_eq!(glyphs[1].x_advance, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_fixed_japanese_faces_keep_decomposed_kana_scalar_widths() {
+        let renderer = SlideRenderer::new();
+        for family in ["MS Gothic", "ＭＳ ゴシック", "MS Mincho", "ＭＳ 明朝"] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+            for text in ["か\u{3099}", "は\u{309a}", "ヒ\u{309a}"] {
+                let mut paragraph = paragraph(&renderer, "l", text);
+                paragraph.runs[0].style.face = face.clone();
+                paragraph.runs[0].style.family = family.to_owned();
+                paragraph.runs[0].style.font_size_pt = 12.0;
+                paragraph.runs[0].style.line_font_size_pt = 12.0;
+                let lines = layout_paragraph(
+                    &renderer.fonts,
+                    &paragraph,
+                    0.0,
+                    0.0,
+                    1_000.0,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].width, 16.0, "{family} {text}");
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), 2);
+                assert_eq!(glyphs[0].cluster, 0);
+                assert_eq!(glyphs[1].cluster, 3);
+                assert!(glyphs.iter().all(|glyph| glyph.x_advance == 8.0));
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_faces_preserve_scalar_advances_outside_kana_voicing() {
+        let renderer = SlideRenderer::new();
+        for family in ["MS UI Gothic", "MS Mincho", "MS Gothic", "Aptos"] {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap();
+            for text in [
+                "x\u{0301}x",
+                "x\u{1ab0}x",
+                "x\u{20d0}x",
+                "x\u{fe20}x",
+                "x\u{0301}\u{1ab0}x",
+                "\u{0301}\u{1ab0}",
+                "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}",
+                "👩\u{200d}💻",
+                "\u{fe0f}",
+                "\u{200d}",
+                "か\u{fe0f}",
+                "か\u{0301}",
+                "あ\u{3099}",
+                "あ\u{309a}",
+                "ｶ\u{3099}",
+                "x\u{3099}",
+                "x\u{309a}",
+                "\u{3099}\u{309a}",
+                "あ\u{309b}",
+                "あ\u{309c}",
+            ] {
+                let glyphs = shape_face(&renderer.fonts, &face, text, 16.0, &[]).unwrap();
+                assert_eq!(glyphs.len(), text.chars().count(), "{family} {text}");
+                for (glyph, (index, character)) in glyphs.iter().zip(text.char_indices()) {
+                    let expected = face
+                        .widths
+                        .and_then(|metrics| family_advance(metrics, character))
+                        .unwrap_or(0.5)
+                        * 16.0;
+                    assert_eq!(glyph.cluster as usize, index, "{family} {text}");
+                    assert_eq!(glyph.x_advance, expected, "{family} {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unregistered_aptos_keeps_emoji_variation_selector_widths() {
+        let renderer = SlideRenderer::new();
+        let face = renderer
+            .resolve_face("Aptos", false, false, &mut SubstitutionLog::default())
+            .unwrap();
+        assert_eq!(face.id.to_u32(), BROWSER_FONT_ID);
+        let text = "❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}";
+        let mut paragraph = paragraph(&renderer, "l", text);
+        paragraph.runs[0].style.face = face;
+        paragraph.runs[0].style.family = "Aptos".to_owned();
+        paragraph.runs[0].style.font_size_pt = 12.0;
+        paragraph.runs[0].style.line_font_size_pt = 12.0;
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].width, 48.0);
     }
 
     #[test]
