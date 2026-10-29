@@ -200,6 +200,12 @@ test('delete_comment preserves a session-created survivor and every companion id
   const { doc, first } = await twoAddedComments();
   const before = await doc.export();
   const comments = await part(before, 'word/comments.xml');
+  const survivor = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('Second note.'))!;
+  const survivorId = survivor.match(/w:id="([^"]+)"/)![1];
+  const anchors = (xml: string) => [...xml.matchAll(/<w:(commentRangeStart|commentRangeEnd|commentReference)\b[^>]*w:id="([^"]+)"[^>]*\/>/g)]
+    .map(([xml, kind, id]) => ({ xml, kind, id }));
+  const survivorAnchors = anchors(await part(before, 'word/document.xml')).filter(anchor => anchor.id === survivorId);
+  expect(survivorAnchors.map(anchor => anchor.kind).sort()).toEqual(['commentRangeEnd', 'commentRangeStart', 'commentReference']);
   const deleted = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('First note.'))!;
   const paraId = [...deleted.matchAll(/w14:paraId="([^"]+)"/g)].at(-1)![1];
   const ids = await part(before, 'word/commentsIds.xml');
@@ -207,6 +213,7 @@ test('delete_comment preserves a session-created survivor and every companion id
   const durableId = deletedId.match(/w16cid:durableId="([^"]+)"/)![1];
   await doc.edit({ version: doc.list().version, edits: [{ op: 'delete_comment', comment: first }] });
   const bytes = await doc.export();
+  expect(anchors(await part(bytes, 'word/document.xml'))).toEqual(survivorAnchors);
   expect(await part(bytes, 'word/comments.xml')).toBe(comments.replace(deleted, ''));
   for (const [name, prefix] of COMMENT_COMPANIONS) {
     const original = await part(before, `word/${name}.xml`);
@@ -217,10 +224,50 @@ test('delete_comment preserves a session-created survivor and every companion id
   const match = doc.grep({ query: 'Revenue grew strongly' }).matches[0];
   await doc.edit({ version: doc.list().version, edits: [{ op: 'add_comment', match: match.match, author: 'Editor', text: 'Third note.' }] });
   const afterAdd = await part(await doc.export(), 'word/comments.xml');
-  const survivor = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('Second note.'))!;
   expect(afterAdd).toContain(survivor);
   expect(afterAdd).toContain('Third note.');
 });
+
+for (const [label, kinds, nativeId] of [
+  ['start range id', ['commentRangeStart'], true],
+  ['end range id', ['commentRangeEnd'], true],
+  ['both range ids', ['commentRangeStart', 'commentRangeEnd'], true],
+  ['unknown range ids', ['commentRangeStart', 'commentRangeEnd'], false],
+] as const) {
+  test(`delete_comment refuses a survivor's ${label} changed away from its saved id`, async () => {
+    const { doc, first, second } = await twoAddedComments();
+    const before = await doc.export();
+    const comments = await part(before, 'word/comments.xml');
+    const survivor = comments.match(/<w:comment\b[^>]*>[\s\S]*?<\/w:comment>/g)!.find(xml => xml.includes('Second note.'))!;
+    const id = survivor.match(/w:id="([^"]+)"/)![1];
+    const replacement = nativeId ? second : 'missing';
+    expect(replacement).not.toBe(id);
+    const state = doc.session.encodeState();
+    const version = doc.list().version;
+    const original = commentOutput.verifyCommentOutput;
+    const verify = spyOn(commentOutput, 'verifyCommentOutput').mockImplementationOnce(async (...args) => {
+      const zip = await JSZip.loadAsync(args[1]);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      let tampered = xml;
+      for (const kind of kinds) {
+        tampered = tampered.replace(new RegExp(`(<w:${kind}\\b[^>]*w:id=")${id}(")`, 'g'),
+          (_match, start, end) => `${start}${replacement}${end}`);
+      }
+      expect(tampered).not.toBe(xml);
+      expect(tampered).toContain(`<w:commentReference w:id="${id}"`);
+      expect(await zip.file('word/comments.xml')!.async('string')).toContain(survivor);
+      zip.file('word/document.xml', tampered);
+      args[1] = await zip.generateAsync({ type: 'uint8array' });
+      await original(...args);
+    });
+    try {
+      expect((await refusal(doc.edit({ version, edits: [{ op: 'delete_comment', comment: first }] }))).code).toBe('UNSUPPORTED_TARGET');
+      expect(doc.session.encodeState()).toEqual(state);
+      expect(doc.list().version).toBe(version);
+      expect(await part(await doc.export(), 'word/document.xml')).toBe(await part(before, 'word/document.xml'));
+    } finally { verify.mockRestore(); }
+  });
+}
 
 test('delete_comment keeps the registered empty parts of a session-created last comment', async () => {
   const doc = await open(await editFixture());
