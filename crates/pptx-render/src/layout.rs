@@ -5114,6 +5114,22 @@ struct SegmentShape<'a> {
     breaks: &'a HashMap<usize, bool>,
 }
 
+/// The em advance of a character the browser draws for a family without a
+/// width table: an East Asian full-width character fills its em box, anything
+/// else, halfwidth forms and kana voicing marks included, takes half of it.
+fn browser_default_advance(character: char) -> f32 {
+    if matches!(character as u32,
+        0x1100..=0x115f | 0x2e80..=0x303e | 0x3041..=0x3098 | 0x309b..=0x33ff | 0x3400..=0x4dbf |
+        0x4e00..=0x9fff | 0xa000..=0xa4cf | 0xa960..=0xa97f | 0xac00..=0xd7a3 |
+        0xf900..=0xfaff | 0xfe30..=0xfe4f | 0xff00..=0xff60 | 0xffe0..=0xffe6 |
+        0x20000..=0x3fffd)
+    {
+        1.0
+    } else {
+        0.5
+    }
+}
+
 fn shape_face(
     fonts: &FontStore,
     face: &FontFace,
@@ -5131,18 +5147,20 @@ fn shape_face(
         glyphs.push(ShapedGlyph {
             glyph_id: 0,
             cluster: index as u32,
-            x_advance: face
-                .widths
-                .and_then(|metrics| family_advance(metrics, character))
-                .unwrap_or(0.5)
-                * size_px,
+            x_advance: face.widths.map_or_else(
+                || browser_default_advance(character),
+                |metrics| family_advance(metrics, character).unwrap_or(0.5),
+            ) * size_px,
             x_offset: 0.0,
             y_offset: 0.0,
         });
         if let Some(&(_, mark)) = characters.peek()
-            && let Some(advance) = face
-                .widths
-                .and_then(|metrics| family_composed_kana_advance(metrics, character, mark))
+            && let Some(advance) = match face.widths {
+                Some(metrics) => family_composed_kana_advance(metrics, character, mark),
+                None => (matches!(mark, '\u{3099}' | '\u{309a}')
+                    && browser_default_advance(character) == 1.0)
+                    .then_some(1.0),
+            }
         {
             characters.next();
             glyphs.push(ShapedGlyph {

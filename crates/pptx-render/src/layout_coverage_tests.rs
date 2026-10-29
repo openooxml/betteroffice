@@ -253,4 +253,67 @@ mod coverage_regressions {
         assert_eq!(arabic.glyphs[0].cluster, 3);
         assert_eq!(lines[0].runs.last().unwrap().glyphs[0].cluster, 4);
     }
+
+    fn chart_run_widths(enabled: bool, text: &str) -> Vec<(u32, f32)> {
+        let mut renderer = renderer();
+        renderer.set_browser_coverage_fallback(enabled);
+        let primitive = chart_text_primitive(
+            &renderer,
+            &Theme::default(),
+            "chart:1",
+            ChartText {
+                object_id: 1,
+                text,
+                x: 0.0,
+                baseline_y: 40.0,
+                width: 2000.0,
+                font: PlotFont {
+                    weight: 400,
+                    size_px: 20.0,
+                    family: "Arial".to_owned(),
+                    italic: false,
+                    letter_spacing_px: 0.0,
+                },
+                color: "#000000",
+                align: PlotTextAlign::Start,
+                rotation_deg: 0.0,
+            },
+            &mut SubstitutionLog::default(),
+        )
+        .unwrap();
+        let Primitive::TextBox { lines, .. } = primitive else {
+            panic!("a text box");
+        };
+        lines[0]
+            .runs
+            .iter()
+            .map(|run| (run.font_id, run.width))
+            .collect()
+    }
+
+    #[test]
+    fn browser_coverage_gives_full_width_east_asian_text_its_em_box() {
+        for text in ["本町商店街周辺", "データ提供元", "한국어", "Ａ区間"] {
+            let count = text.chars().count() as f32;
+            let browser = chart_run_widths(true, text);
+            assert_eq!(browser.len(), 1, "{text}");
+            assert_eq!(browser[0].0, BROWSER_FONT_ID, "{text}");
+            assert!(
+                (browser[0].1 - count * 20.0).abs() <= count * 20.0 * 0.02,
+                "{text}: {} for {count} characters",
+                browser[0].1
+            );
+            let scalar: f32 = chart_run_widths(false, text).iter().map(|run| run.1).sum();
+            assert!(browser[0].1 >= scalar, "{text}: {} < {scalar}", browser[0].1);
+        }
+        for (decomposed, composed) in [("か\u{3099}か\u{3099}", "がが"), ("ハ\u{309a}", "パ")] {
+            let decomposed = chart_run_widths(true, decomposed);
+            let composed = chart_run_widths(true, composed);
+            assert_eq!(decomposed.len(), 1);
+            assert!((decomposed[0].1 - composed[0].1).abs() < 0.01, "{decomposed:?} {composed:?}");
+        }
+        let halfwidth = chart_run_widths(true, "ｱｲｳ");
+        assert_eq!(halfwidth[0].0, BROWSER_FONT_ID);
+        assert!((halfwidth[0].1 - 30.0).abs() <= 0.6, "{}", halfwidth[0].1);
+    }
 }
