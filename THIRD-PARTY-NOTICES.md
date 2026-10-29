@@ -231,4 +231,6 @@ Copyright (c) 2013-2017 by the WOFF2 Authors.
 Copyright (c) 2025 by Nico Burns.
 
 License: MIT. The unmodified upstream licence is included under
-`packages/fonts/LICENSES/MIT-wuff.txt` for decoder redistribution.
+`packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
+in each native platform package and in each Python wheel, which link it through
+`betteroffice-fonts`.

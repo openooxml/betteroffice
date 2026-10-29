@@ -12,3 +12,7 @@ The extension also links the Zstandard decoder (`facebook/zstd` v1.5.7, decompre
 only) through the `betteroffice-fonts` crate to decode compressed font packs.
 Copyright (c) Meta Platforms, Inc. and affiliates. It is distributed under the
 BSD-3-Clause license in `licenses/BSD-3-Clause-Zstandard.txt`.
+
+It also links `wuff` 0.2.9 for WOFF2 reconstruction of woff2t font packs.
+Copyright (c) 2013-2017 by the WOFF2 Authors. Copyright (c) 2025 by Nico Burns.
+It is distributed under the MIT license in `licenses/MIT-wuff.txt`.

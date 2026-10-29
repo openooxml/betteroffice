@@ -1,10 +1,10 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { imageSize } from 'image-size';
 import { createFontProvider, resolveGlyphFallbackFace } from '@betteroffice/fonts';
-import { paintSlide, type PresentationHandle, type CanvasImageResolver, type ShapeSnapshot } from '@betteroffice/pptx';
+import { decodeFontFace, paintSlide, type PresentationHandle, type CanvasImageResolver, type ShapeSnapshot } from '@betteroffice/pptx';
 import { DocumentToolError, type RenderedPage } from './types';
 
-export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1, provider = createFontProvider()): Promise<RenderedPage> {
+export async function renderPptxSlide(handle: PresentationHandle, page: number, scale = 1, provider = createFontProvider(undefined, { decoder: decodeFontFace })): Promise<RenderedPage> {
   const snapshot = handle.snapshot();
   const slide = snapshot.slides[page - 1];
   if (!slide) throw new DocumentToolError('SLIDE_OUT_OF_RANGE', `Choose a slide index from 1 to ${snapshot.slides.length}.`);

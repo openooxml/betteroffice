@@ -7,7 +7,8 @@
   "main": "betteroffice-xlsx-native.linux-x64-gnu.node",
   "files": [
     "betteroffice-xlsx-native.linux-x64-gnu.node",
-    "BSD-3-Clause-Zstandard.txt"
+    "BSD-3-Clause-Zstandard.txt",
+    "MIT-wuff.txt"
   ],
   "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.",
   "keywords": [
