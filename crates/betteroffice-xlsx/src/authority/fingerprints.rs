@@ -127,7 +127,7 @@ impl Deref for Fingerprints {
 
 impl DerefMut for Fingerprints {
     fn deref_mut(&mut self) -> &mut Accepted {
-        let _ = self.deref();
+        let _ = Self::deref(self);
         self.values.get_mut().unwrap()
     }
 }
@@ -137,7 +137,7 @@ impl IntoIterator for Fingerprints {
     type IntoIter = std::collections::btree_map::IntoIter<i64, Vec<String>>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        let _ = self.deref();
+        let _ = Self::deref(&self);
         self.values.take().unwrap().into_iter()
     }
 }

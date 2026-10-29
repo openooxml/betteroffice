@@ -50,6 +50,305 @@ fn eager_base(case: &open_test_cases::OpenCase, readings: &[Stylesheet]) -> Work
     base
 }
 
+fn fingerprint_bytes(value: &impl snapshot::Codec) -> Vec<u8> {
+    let mut writer = crate::snapshot::wire::Writer::new();
+    value.write(&mut writer);
+    writer.into_bytes()
+}
+
+fn encoded_reading(
+    model: &WorkbookModel,
+    base: &WorkbookBase,
+    version: i64,
+    reading: FingerprintReading,
+    rows: bool,
+) -> Vec<u8> {
+    let mut model = model.clone();
+    if !reading.has_facets() {
+        model.styles = pre_facet_styles(&model.styles);
+    }
+    if !reading.as_written() {
+        model.styles.fills = model
+            .styles
+            .fills
+            .iter()
+            .map(|fill| released_fill(fill).into_owned())
+            .collect();
+        model.styles.borders = model
+            .styles
+            .borders
+            .iter()
+            .map(|border| released_border(border).into_owned())
+            .collect();
+    }
+    if !rows {
+        for sheet in &mut model.sheets {
+            sheet.row_styles.clear();
+        }
+    }
+    let keys = (0..model.sheets.len())
+        .map(|index| format!("sheet:{index}"))
+        .collect::<Vec<_>>();
+    let doc = Doc::with_client_id(base.bootstrap_client_id);
+    let entry: FormatEntryWriter = if reading.has_facets() {
+        style_entry
+    } else {
+        |styles, index| cell_format_entry(&styles.cell_format(Some(index)))
+    };
+    seed_with_format_entries(&doc, base, &model, &keys, entry).unwrap();
+    {
+        let mut txn = doc.transact_mut();
+        let meta = txn.get_map(META).unwrap();
+        meta.insert(&mut txn, "schemaVersion", version);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        for key in &keys {
+            let sheet = sheets.get(&txn, key).unwrap().cast::<MapRef>().unwrap();
+            for (introduced, name) in [
+                (FREEZE_PANE_SCHEMA_VERSION, FREEZE_PANE),
+                (HYPERLINK_SCHEMA_VERSION, HYPERLINKS),
+                (CHARTS_SCHEMA_VERSION, CHARTS),
+                (CHARTS_SCHEMA_VERSION, COL_STYLES),
+            ] {
+                if version < introduced {
+                    sheet.remove(&mut txn, name);
+                }
+            }
+            if !rows {
+                sheet.remove(&mut txn, ROW_STYLES);
+            }
+        }
+    }
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
+#[test]
+fn historical_state_encodings_match_eager_acceptance() {
+    for case in cases() {
+        let reading = FingerprintReading::of(true, !released_styles(&case.model.styles));
+        let defaults = has_style_defaults(&case.model);
+        let mut encodings = (MIN_SUPPORTED_SCHEMA_VERSION..6)
+            .map(|version| ("released", version, FingerprintReading::Released, false))
+            .collect::<Vec<_>>();
+        encodings.extend([
+            ("0.4.3-era", 6, FingerprintReading::Released, false),
+            ("pre-#1312", 6, reading.legacy().unwrap(), false),
+            (
+                "current",
+                SCHEMA_VERSION,
+                reading.with_defaults(defaults),
+                defaults,
+            ),
+        ]);
+        for (era, version, reading, rows) in encodings {
+            let (actual, _, _) = WorkbookAuthority::from_source_with_projection(
+                &case.model,
+                Some(71),
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+                &[],
+            )
+            .unwrap();
+            let expected = WorkbookAuthority::from_source_oracle(
+                &case.model,
+                Some(71),
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+                &[],
+            )
+            .unwrap();
+            let domain = fingerprint_domain(version, reading);
+            let (fingerprint, client) = fingerprint_model_with_row_domain_oracle(
+                &case.model, version, version >= 4, true, rows, domain,
+            )
+            .unwrap();
+            if version == SCHEMA_VERSION {
+                let accepted = if era == "current" {
+                    WorkbookBase::current_fingerprints_oracle(&case.model, None).unwrap()
+                } else {
+                    WorkbookBase::reading_fingerprints_oracle(&case.model, None, reading).unwrap()
+                };
+                assert!(accepted.contains(&fingerprint), "{}: {era}", case.label);
+            }
+            assert!(expected.base.accepts_fingerprint(version, &fingerprint));
+            for schema in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(SCHEMA_VERSION + 1) {
+                assert_eq!(
+                    actual.base.accepts_fingerprint(schema, &fingerprint),
+                    expected.base.accepts_fingerprint(schema, &fingerprint),
+                    "{}: {era} {schema}",
+                    case.label,
+                );
+            }
+            let mut base = expected.base.as_ref().clone();
+            base.fingerprint = fingerprint;
+            base.bootstrap_client_id = client;
+            let update = encoded_reading(&case.model, &base, version, reading, rows);
+            let adopted = |authority: &WorkbookAuthority| {
+                match authority.snapshot_replacement(&update) {
+                    SnapshotAdoption::Replacement(adopted) => adopted,
+                    SnapshotAdoption::Incompatible(error) => {
+                        panic!("{}: {era}: {error}", case.label)
+                    }
+                    SnapshotAdoption::NotApplicable => {
+                        panic!("{}: {era}: not adopted", case.label)
+                    }
+                }
+            };
+            let actual_adopted = adopted(&actual);
+            let expected_adopted = adopted(&expected);
+            assert_eq!(
+                actual_adopted.strict_materialize().unwrap(),
+                expected_adopted.strict_materialize().unwrap(),
+                "{}: {era}",
+                case.label,
+            );
+            let mut changed = case.model.clone();
+            changed.sheets[0].name.push('!');
+            (base.fingerprint, base.bootstrap_client_id) =
+                fingerprint_model_with_row_domain_oracle(
+                    &changed, version, version >= 4, true, rows, domain,
+                )
+                .unwrap();
+            let rejected = encoded_reading(&changed, &base, version, reading, rows);
+            for authority in [&expected, &actual] {
+                assert!(!authority.base.accepts_fingerprint(version, &base.fingerprint));
+                assert!(matches!(
+                    authority.snapshot_replacement(&rejected),
+                    SnapshotAdoption::Incompatible(_)
+                ));
+            }
+            let adopted_fingerprints = actual_adopted.base.fingerprints.clone();
+            let expected_map = expected
+                .base
+                .fingerprints
+                .clone()
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                adopted_fingerprints.clone().into_iter().collect::<BTreeMap<_, _>>(),
+                expected_map,
+            );
+            assert_eq!(
+                fingerprint_bytes(&actual_adopted.base.fingerprints),
+                fingerprint_bytes(&expected_map),
+                "{}: {era}",
+                case.label,
+            );
+            assert_eq!(&*actual_adopted.base.fingerprints, &expected_map);
+            let restored = WorkbookAuthority::restore_recovery_state(
+                &actual_adopted.encode_recovery_state().unwrap(),
+                72,
+                0,
+                true,
+            )
+            .unwrap();
+            for mut fingerprints in [adopted_fingerprints, restored.base.fingerprints.clone()] {
+                fingerprints.retain(|version, _| *version <= SCHEMA_VERSION);
+                append_fingerprint(&mut fingerprints, version, expected_map[&version][0].clone());
+                assert_eq!(
+                    fingerprints.into_iter().collect::<BTreeMap<_, _>>(),
+                    expected_map,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn construction_paths_materialize_before_mutation_and_iteration() {
+    use snapshot::Codec;
+
+    let case = cases().remove(1);
+    let planned = || {
+        WorkbookBase::from_model_with_style_readings(
+            &case.model,
+            &case.legacy_dimensions,
+            case.legacy_styles.as_ref(),
+            &[],
+        )
+        .unwrap()
+        .fingerprints
+    };
+    let expected = eager_base(&case, &[])
+        .fingerprints
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let mut duplicated = expected.clone();
+    let accepted = duplicated.get_mut(&SCHEMA_VERSION).unwrap();
+    accepted.push(accepted[0].clone());
+    let bytes = fingerprint_bytes(&duplicated);
+    let mut reader = crate::snapshot::wire::Reader::new(&bytes);
+    let restored = Fingerprints::read(&mut reader).unwrap();
+    reader.finish().unwrap();
+    let lazy = planned();
+    let materialized = planned();
+    assert_eq!(&*materialized, &expected);
+    let ready = Fingerprints::from(duplicated.clone());
+    let mut paths = vec![
+        ("default", Fingerprints::default(), BTreeMap::new()),
+        ("empty-map", BTreeMap::new().into(), BTreeMap::new()),
+        ("map", ready.clone(), duplicated.clone()),
+        ("persisted-clone", restored.clone(), duplicated.clone()),
+        ("persisted", restored, duplicated.clone()),
+        ("planned", planned(), expected.clone()),
+        ("planned-clone", lazy.clone(), expected.clone()),
+        ("materialized-clone", materialized.clone(), expected.clone()),
+    ];
+    for (label, mut left, right, expected) in [
+        (
+            "empty-planned",
+            Fingerprints::default(),
+            lazy.clone(),
+            expected.clone(),
+        ),
+        ("planned-planned", lazy.clone(), lazy.clone(), expected.clone()),
+        ("planned-ready", lazy.clone(), ready.clone(), expected.clone()),
+        ("ready-planned", ready, lazy.clone(), duplicated),
+        ("materialized-planned", materialized, lazy, expected),
+    ] {
+        left.merge(right);
+        paths.push((label, left, expected));
+    }
+    for (label, mut actual, mut expected) in paths {
+        assert_eq!(
+            actual.clone().into_iter().collect::<BTreeMap<_, _>>(),
+            expected,
+            "{label}",
+        );
+        let mut appended = actual.clone();
+        let mut expected_appended = expected.clone();
+        append_fingerprint(&mut appended, SCHEMA_VERSION, case.label.clone());
+        append_fingerprint(&mut expected_appended, SCHEMA_VERSION, case.label.clone());
+        assert_eq!(
+            appended.into_iter().collect::<BTreeMap<_, _>>(),
+            expected_appended,
+            "{label}",
+        );
+        let removed = expected.get(&SCHEMA_VERSION).cloned().unwrap_or_default();
+        actual.retain(|version, _| *version < SCHEMA_VERSION);
+        expected.retain(|version, _| *version < SCHEMA_VERSION);
+        assert!(
+            removed.iter().all(|value| !actual.accepts(SCHEMA_VERSION, value)),
+            "{label}",
+        );
+        for _ in 0..2 {
+            append_fingerprint(&mut actual, SCHEMA_VERSION, case.label.clone());
+            append_fingerprint(&mut expected, SCHEMA_VERSION, case.label.clone());
+        }
+        actual.merge(Fingerprints::default());
+        assert_eq!(
+            fingerprint_bytes(&actual),
+            fingerprint_bytes(&expected),
+            "{label}",
+        );
+        assert_eq!(
+            actual.into_iter().collect::<BTreeMap<_, _>>(),
+            expected,
+            "{label}",
+        );
+    }
+}
+
 #[test]
 fn accepted_fingerprint_matrix_matches_released_and_current_states() {
     for case in cases() {
