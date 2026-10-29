@@ -1244,6 +1244,9 @@ export class FileSession {
                 this.#log("warn", "relock after reconnect failed");
               }
             }
+          } else {
+            this.#loseLock();
+            this.#scheduleRefresh();
           }
           return;
         }

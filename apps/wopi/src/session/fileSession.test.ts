@@ -1256,6 +1256,49 @@ describe("session safety regressions", () => {
     }
   });
 
+  test("a lost Unlock response during a reconnect enters lock recovery instead of trusting the old lease", async () => {
+    let releaseUnlock: () => void = () => {};
+    const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
+    let enteredUnlock: () => void = () => {};
+    const unlockEntered = new Promise<void>((resolve) => { enteredUnlock = resolve; });
+    const h = makeHarness({ refreshStatus: () => 500 });
+    addToken(h, "tok-a", "user-a");
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    const unlock = h.hostClient.unlock;
+    let lostResponses = 0;
+    try {
+      h.hostClient.unlock = async (input) => {
+        enteredUnlock();
+        await unlockGate;
+        await unlock(input);
+        lostResponses += 1;
+        throw new WopiHostError("network", "unlock response lost");
+      };
+      const locksBefore = h.callsFor("LOCK").length;
+      const leaving = session.disconnect(a.user.id);
+      await unlockEntered;
+      session.heartbeat(a.user.id);
+      releaseUnlock();
+      await leaving;
+      expect(lostResponses).toBe(1);
+      expect(h.host.files.get("file1")!.lock).toBeNull();
+      expect(session.lockHeld).toBe(false);
+      client.edit("during-recovery ");
+      expect(session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector())).accepted).toBe(false);
+      h.hostClient.unlock = unlock;
+      await h.clock.advance(5000);
+      await h.clock.drain();
+      expect(h.callsFor("LOCK").length).toBeGreaterThan(locksBefore);
+      expect(session.lockHeld).toBe(true);
+      expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
+    } finally {
+      client.destroy();
+      await session.close();
+    }
+  });
+
   test("a reconnect relock validates the source before accepting more updates", async () => {
     let releaseUnlock: () => void = () => {};
     const unlockGate = new Promise<void>((resolve) => { releaseUnlock = resolve; });
