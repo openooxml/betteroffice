@@ -895,8 +895,9 @@ impl<'a> Iterator for SparseCells<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Workbook {
+    pub full_precision: bool,
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
     pub defined_names: Vec<DefinedName>,
@@ -906,6 +907,20 @@ pub struct Workbook {
     pub styles: Stylesheet,
     /// table parts, in package order; structured references resolve through them.
     pub tables: Vec<Table>,
+}
+
+impl Default for Workbook {
+    fn default() -> Self {
+        Self {
+            full_precision: true,
+            sheets: Vec::new(),
+            date_system: DateSystem::default(),
+            defined_names: Vec::new(),
+            shared_strings: Vec::new(),
+            styles: Stylesheet::default(),
+            tables: Vec::new(),
+        }
+    }
 }
 
 impl Workbook {
