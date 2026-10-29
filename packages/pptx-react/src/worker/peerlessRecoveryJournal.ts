@@ -6,9 +6,9 @@ type RecoveryBaseline = { kind: 'source'; throughSeq: 0; engine: string }
   | { kind: 'update'; update: Uint8Array; throughSeq: number };
 
 export const peerlessRecoveryFactory = {
-  create(bytes: Uint8Array, journalByteLimit?: number) {
-    const sourceSize = bytes.byteLength;
-    let saved = { bytes, throughSeq: 0, version: '' };
+  create(source: Blob | Uint8Array, journalByteLimit?: number) {
+    const sourceSize = source instanceof Uint8Array ? source.byteLength : source.size;
+    let saved: { bytes?: Uint8Array; throughSeq: number; version: string } = { throughSeq: 0, version: '' };
     let baseline: RecoveryBaseline | undefined;
     let journal: { throughSeq: number; version: string; updates: Uint8Array[] }[] = [];
     let journalBytes = 0;
