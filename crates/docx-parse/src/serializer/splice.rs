@@ -2403,12 +2403,10 @@ mod tests {
         use quick_xml::name::{Namespace, ResolveResult};
 
         let host = "<w:p><w:r><w:t>Host</w:t></w:r></w:p>";
-        let source = body(host)
-            .replace(W14_NAMESPACE, "urn:other")
-            .replace(
-                "<w:document ",
-                &format!("<w:document xmlns=\"{W14_NAMESPACE}\" "),
-            );
+        let source = body(host).replace(W14_NAMESPACE, "urn:other").replace(
+            "<w:document ",
+            &format!("<w:document xmlns=\"{W14_NAMESPACE}\" "),
+        );
         let patched = host.replace("Host", "Edited Host");
         let projected = patched.replace("<w:p>", "<w:p w14:paraId=\"00000001\">");
         let recorded = RecordedParagraphs {

@@ -671,8 +671,15 @@ fn homogeneous_source_replacement(
                     *properties = Some(raw);
                 }
             }
-            "w:pPr" | "w:proofErr" | "w:smartTagPr" | "w:bookmarkStart" | "w:bookmarkEnd"
-            | "w:commentRangeStart" | "w:commentRangeEnd" | "w:permStart" | "w:permEnd" => {}
+            "w:pPr"
+            | "w:proofErr"
+            | "w:smartTagPr"
+            | "w:bookmarkStart"
+            | "w:bookmarkEnd"
+            | "w:commentRangeStart"
+            | "w:commentRangeEnd"
+            | "w:permStart"
+            | "w:permEnd" => {}
             _ => return None,
         }
         Some(())
@@ -1648,7 +1655,9 @@ mod tests {
                 } else {
                     ""
                 };
-                Some(format!("<w:p><w:r><w:t>Caption </w:t></w:r>{drawing}</w:p>"))
+                Some(format!(
+                    "<w:p><w:r><w:t>Caption </w:t></w:r>{drawing}</w:p>"
+                ))
             };
             let patch = diff_paragraph_v1(
                 &before,
