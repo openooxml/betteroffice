@@ -2261,20 +2261,7 @@ fn lower_table<T: ReadTxn>(
             {
                 column += 1;
             }
-            let seeded_col_span = map_number(tc_pr, "colspan");
-            let omitted_columns = (grid_before.unwrap_or(0) + grid_after.unwrap_or(0)) as usize;
-            let col_span = seeded_col_span.map(|span| {
-                if cell_values.len() == 1 && omitted_columns > 0 && !grid_widths.is_empty() {
-                    let available_columns = grid_widths
-                        .len()
-                        .saturating_sub(column)
-                        .saturating_sub(grid_after.unwrap_or(0) as usize)
-                        .max(1);
-                    span.min(available_columns as f64)
-                } else {
-                    span
-                }
-            });
+            let col_span = map_number(tc_pr, "colspan").map(|span| span.min(16_384.0));
             let row_span = map_number(tc_pr, "rowspan");
             let colspan = col_span.unwrap_or(1.0) as usize;
             let width_type = map_string(tc_pr, "widthType");
@@ -2292,7 +2279,7 @@ fn lower_table<T: ReadTxn>(
                         &grid_widths,
                         total_grid_width,
                         column.saturating_sub(grid_before.unwrap_or(0) as usize),
-                        seeded_col_span.unwrap_or(1.0) as usize,
+                        colspan,
                     );
             let width_value =
                 width_value.filter(|_| width_type.as_deref() != Some("auto") && !synthesized_width);

@@ -1082,6 +1082,36 @@ fn lowering_and_saving_preserve_all_row_grid_properties_byte_for_byte() {
 }
 
 #[test]
+fn authored_span_after_grid_before_survives_lowering_and_saving() {
+    let row = format!(
+        r#"<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>{}</w:tr>"#,
+        table_cell(r#"<w:gridSpan w:val="2"/>"#, &paragraph(1, "abc")),
+    );
+    let xml = table_document(&row, 2);
+    let (doc, mut model) = open(&xml);
+    let blocks = docx_edit::bridge::yrs_doc_to_layout_blocks(
+        &doc,
+        "body",
+        &docx_edit::bridge::RenderEnv::default(),
+    )
+    .unwrap();
+    let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+        panic!("table");
+    };
+    assert_eq!(table.rows[0].cells[0].col_span, Some(2.0));
+    assert_eq!(docx_layout::table_grid::count_table_columns(table), 3);
+    let (untouched, warnings) = save(&xml, &doc, model.clone());
+    assert_eq!(untouched, xml);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    replace(&doc, 0, "xyz");
+    model_text(model_cell(&mut model, 0), "xyz");
+    let (output, warnings) = save(&xml, &doc, model);
+    assert_eq!(output, xml.replace(">abc<", ">xyz<"));
+    assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
 fn merges_with_continuation_paragraphs_use_the_base_story_fallback() {
     for replace_row in [false, true] {
         let owners = (1..=3)

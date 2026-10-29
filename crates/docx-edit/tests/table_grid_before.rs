@@ -6,7 +6,7 @@ use serde_json::json;
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
-fn lower(properties: &str, span: u32) -> Vec<LayoutBlock> {
+fn lower(properties: &str, span: u64) -> Vec<LayoutBlock> {
     let xml = format!(
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="300"/><w:gridCol w:w="1200"/><w:gridCol w:w="1800"/></w:tblGrid><w:tr><w:trPr>{properties}</w:trPr><w:tc><w:tcPr><w:gridSpan w:val="{span}"/></w:tcPr><w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>ECM Description Title</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
     );
@@ -253,4 +253,53 @@ fn mixed_skipped_rows_keep_main_grid_and_unskipped_widths() {
             assert_eq!(widths, main_widths);
         }
     });
+}
+
+#[test]
+fn authored_span_after_grid_before_extends_the_grid() {
+    docx_layout::with_private_measure_fonts(|| {
+        let cells =
+            ["First", "Second"].map(|text| cell(r#"<w:tcW w:w="1500" w:type="dxa"/>"#, text));
+        let full = row("", &cells.concat());
+        let skipped = row(
+            r#"<w:gridBefore w:val="1"/>"#,
+            &cell(r#"<w:gridSpan w:val="2"/>"#, "Wide"),
+        );
+        let (table, measure) =
+            measured_fixed_table(&[1500, 1500], 3000, &format!("{full}{skipped}"));
+        assert_eq!(table.rows[1].grid_before, Some(1));
+        assert_eq!(table.rows[1].cells[0].col_span, Some(2.0));
+        assert_eq!(docx_layout::table_grid::count_table_columns(&table), 3);
+        assert_eq!(measure.column_widths.len(), 3);
+        assert!(measure.column_widths[2] > 0.0);
+        assert_widths(
+            &[measure.rows[1].cells[0].width],
+            &[measure.column_widths[1] + measure.column_widths[2]],
+        );
+    });
+}
+
+#[test]
+fn inferred_span_after_grid_before_fills_only_the_remaining_columns() {
+    docx_layout::with_private_measure_fonts(|| {
+        let cells = ["First", "Second", "Third"]
+            .map(|text| cell(r#"<w:tcW w:w="1500" w:type="dxa"/>"#, text));
+        let full = row("", &cells.concat());
+        let skipped = row(r#"<w:gridBefore w:val="1"/>"#, &cell("", "Tail"));
+        let (table, measure) =
+            measured_fixed_table(&[1500, 1500, 1500], 4500, &format!("{full}{skipped}"));
+        assert_eq!(table.rows[1].cells[0].col_span, Some(2.0));
+        assert_eq!(docx_layout::table_grid::count_table_columns(&table), 3);
+        assert_eq!(measure.column_widths, [100.0, 100.0, 100.0]);
+        assert_eq!(measure.rows[1].cells[0].width, 200.0);
+    });
+}
+
+#[test]
+fn oversized_authored_span_after_grid_before_lowers_at_the_grid_cap() {
+    let blocks = lower(r#"<w:gridBefore w:val="1"/>"#, 4_294_967_296);
+    let LayoutBlock::Table(table) = &blocks[0] else {
+        panic!("table");
+    };
+    assert_eq!(table.rows[0].cells[0].col_span, Some(16_384.0));
 }

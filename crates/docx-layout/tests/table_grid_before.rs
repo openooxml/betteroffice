@@ -111,6 +111,19 @@ fn grid_before_places_a_spanning_cell_in_columns_two_and_three() {
 }
 
 #[test]
+fn an_oversized_span_after_grid_before_paints_one_cell() {
+    let (_, _, display) = render(table(Some(1), None, 1_000_000_000));
+    let fills: Vec<_> = display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|primitive| primitive["fill"] == "#abcdef")
+        .collect();
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0]["cell"]["col"], 1);
+}
+
+#[test]
 fn grid_after_leaves_the_last_column_unpainted() {
     let (measure, _, display) = render(table(None, Some(1), 2));
     assert_eq!(measure["columnWidths"], json!([20.0, 80.0, 120.0]));

@@ -10045,7 +10045,7 @@ fn compute_cell_grid(block: &TableBlockIn, column_widths: &[f64]) -> Vec<GridCel
             column_index += 1;
         }
         for (cell_index, cell) in row.cells.iter().enumerate() {
-            let col_span = cell.col_span.unwrap_or(1).max(1) as usize;
+            let col_span = cell.col_span.unwrap_or(1).clamp(1, 16_384) as usize;
             let row_span = cell.row_span.unwrap_or(1).max(1) as usize;
             let mut x = 0.0;
             for c in 0..column_index {
