@@ -783,7 +783,7 @@ describe('editable session workbook', () => {
     const commands = createXlsxCommandController().store;
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onReady: ready }, commands, controls));
     await waitFor(() => expect(result.current.run).not.toBeNull());
-    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: false, retainPeerHydration: true });
+    expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: true, retainPeerHydration: true });
     expect(hydrate).not.toHaveBeenCalled();
     const run = result.current.run!;
     await act(async () => run.firstPaint());

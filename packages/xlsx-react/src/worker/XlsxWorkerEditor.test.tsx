@@ -4762,7 +4762,7 @@ describe('workbook worker editor', () => {
       const ready = mock((_api: XlsxWorkerEditorApi) => {});
       const view = render(<XlsxEditor legacySyncApi file={file} {...props} onReady={ready} showToolbar={false} />);
       await opened();
-      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: false, retainPeerHydration: true });
+      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: true, retainPeerHydration: true });
       expect(painted.length).toBeGreaterThan(0);
       expect(ready).toHaveBeenCalledTimes(1);
       expect(host.hydrate).toHaveBeenCalledTimes(1);
