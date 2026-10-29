@@ -48,6 +48,10 @@ impl Presentation {
         Ok(self.session.proposals()?)
     }
 
+    pub fn list_proposals(&self) -> Result<Vec<crate::Proposal>> {
+        self.proposals()
+    }
+
     pub fn preview_proposal(&self, id: &str) -> Result<crate::ProposalPreview> {
         Ok(self.session.preview_proposal(id)?)
     }
@@ -773,16 +777,35 @@ impl Presentation {
         self.session.encode_state_vector_v1()
     }
 
+    pub fn encode_state_vector(&self) -> Vec<u8> {
+        self.encode_state_vector_v1()
+    }
+
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
         self.session.encode_state_as_update_v1()
+    }
+
+    pub fn encode_state_as_update(&self, remote_state_vector: Option<&[u8]>) -> Result<Vec<u8>> {
+        match remote_state_vector {
+            Some(state_vector) => self.encode_diff_v1(state_vector),
+            None => Ok(self.encode_state_as_update_v1()),
+        }
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>> {
         Ok(self.session.encode_diff_v1(remote_state_vector)?)
     }
 
+    pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>> {
+        self.encode_diff_v1(remote_state_vector)
+    }
+
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn apply_update(&self, update: &[u8]) -> Result<DeckSnapshot> {
+        self.apply_update_v1(update)
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
@@ -815,6 +838,10 @@ impl Presentation {
 
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
+    }
+
+    pub fn add_undo_boundary(&self) {
+        self.add_undo_barrier();
     }
 
     pub fn undo_capture_mode(&self) -> UndoCaptureMode {
