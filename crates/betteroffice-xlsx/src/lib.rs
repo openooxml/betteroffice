@@ -48,6 +48,8 @@ pub use workbook::reads::{
     CalculationStatus, ConditionalFormatInfo, DefinedNameInfo, DefinedNamesRequest,
     DefinedNamesResult,
 };
+#[doc(hidden)]
+pub use workbook::reads::SheetInfoWire;
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{
     CellPosition, CellRead, CellTarget, CellsRead, FindMatch, FindOutcome, FindRequest,

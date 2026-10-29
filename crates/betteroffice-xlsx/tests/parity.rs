@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellRef, MutationResult, SheetId, Workbook,
+    CalculationOptions, CellAddress, CellRange, CellRef, MutationResult, SheetId, Workbook,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -182,6 +182,18 @@ fn serialized(value: &impl Serialize) -> Value {
     serde_json::from_str(&serde_json::to_string(value).unwrap()).unwrap()
 }
 
+fn cell_edit(workbook: &Workbook, sheet: SheetId, cell: betteroffice_xlsx::CellEdit) -> CellEdit {
+    CellEdit {
+        a1: cell.cell.to_a1(),
+        input: cell.input,
+        is_formula: cell.is_formula,
+        is_array_formula: workbook
+            .is_array_formula(sheet, cell.cell)
+            .unwrap()
+            .then_some(true),
+    }
+}
+
 fn execute(
     workbook: &mut Workbook,
     op: &str,
@@ -233,16 +245,63 @@ fn execute(
                     ),
                 )
                 .unwrap();
-            serialized(&CellEdit {
-                a1: cell.cell.to_a1(),
-                input: cell.input,
-                is_formula: cell.is_formula,
-                is_array_formula: workbook
-                    .is_array_formula(sheet, cell.cell)
-                    .unwrap()
-                    .then_some(true),
-            })
+            serialized(&cell_edit(workbook, sheet, cell))
         }
+        "rangeCells" => {
+            let sheet = SheetId(serde_json::from_value(args["sheet"].clone()).unwrap());
+            let range = CellRange::parse_a1(args["range"].as_str().unwrap()).unwrap();
+            let cells = workbook
+                .range_cells(sheet, range)
+                .unwrap()
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| cell_edit(workbook, sheet, cell))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            serialized(&cells)
+        }
+        "searchText" => {
+            let info = workbook.sheet_info().unwrap();
+            let options = &args["options"];
+            let matches = workbook
+                .search_text(
+                    args["query"].as_str().unwrap(),
+                    options["caseSensitive"].as_bool().unwrap_or(false),
+                    options
+                        .get("limit")
+                        .map(|limit| serde_json::from_value::<u32>(limit.clone()).unwrap() as usize),
+                )
+                .into_iter()
+                .map(|result| {
+                    let sheet = result.address.sheet.0 as usize;
+                    json!({
+                        "sheet": sheet,
+                        "sheetId": info.sheet_ids[sheet],
+                        "sheetName": info.sheet_names[sheet],
+                        "row": result.address.cell.row,
+                        "col": result.address.cell.col,
+                        "a1": result.address.cell.to_a1(),
+                        "text": result.text,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serialized(&matches)
+        }
+        "selectionFormatting" => serialized(
+            &workbook
+                .selection_formatting(
+                    SheetId(serde_json::from_value(args["sheet"].clone()).unwrap()),
+                    CellRange::parse_a1(args["range"].as_str().unwrap()).unwrap(),
+                )
+                .unwrap(),
+        ),
+        "charts" => serialized(
+            &workbook
+                .charts(SheetId(serde_json::from_value(args["sheet"].clone()).unwrap()))
+                .unwrap(),
+        ),
         "version" => json!(workbook.version()),
         "readCells" => wire(workbook.read_cells_json(&args.to_string())),
         "findText" => wire(workbook.find_text_json(&args.to_string())),
