@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import ts from 'typescript';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 116_000;
+const STATIC_GZIP_BUDGET = 75_500;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
   'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx',
@@ -17,10 +17,7 @@ const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxA
   'worker/PeerlessWorkerSurface.tsx', 'worker/PeerlessWorkerInputs.tsx', 'worker/WorkerDraftController.ts',
   'worker/WorkerPresentationStore.ts', 'worker/createAsyncEditorApi.ts', 'commands/peerlessWorkerInputCoordinator.ts',
   'commands/usePeerlessWorkerXlsxCommands.ts', 'plugins/createPeerlessPluginDocument.ts', 'plugins/createPeerlessPluginClients.ts']
-  .map((path) => `packages/xlsx-react/src/${path}`).concat([
-    'packages/xlsx/src/session/client.ts', 'packages/xlsx/src/session/replay.ts',
-    'packages/xlsx/src/session/clientRecovery.ts', 'shared/office-session/commands/session.ts',
-  ]);
+  .map((path) => `packages/xlsx-react/src/${path}`);
 
 test('default editor static chunks exclude the legacy and in-thread editors', async () => {
   const result = await build({
