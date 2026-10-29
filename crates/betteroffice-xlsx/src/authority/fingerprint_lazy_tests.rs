@@ -56,6 +56,35 @@ fn fingerprint_bytes(value: &impl snapshot::Codec) -> Vec<u8> {
     writer.into_bytes()
 }
 
+fn fingerprints_with_budget(
+    case: &open_test_cases::OpenCase,
+    readings: &[Stylesheet],
+    limit: usize,
+) -> (String, u64, Fingerprints) {
+    let mut builder = FingerprintBuilder::new(&case.model, &case.legacy_dimensions);
+    let accepted = builder
+        .plan(|builder| {
+            let styles = FingerprintStyles::new(&case.model.styles);
+            builder.current(if released_styles(&case.model.styles) {
+                styles
+            } else {
+                styles.with_written_fills()
+            })?;
+            let mut accepted =
+                builder.style_fingerprints(&case.model.styles, case.legacy_styles.as_ref())?;
+            for reading in readings {
+                for (version, values) in builder.style_fingerprints(reading, None)? {
+                    for value in values {
+                        append_fingerprint(&mut accepted, version, value);
+                    }
+                }
+            }
+            Ok(accepted)
+        })
+        .unwrap();
+    builder.finish_with_budget(accepted, limit).unwrap()
+}
+
 fn encoded_reading(
     model: &WorkbookModel,
     base: &WorkbookBase,
@@ -319,6 +348,7 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         let mut expected_appended = expected.clone();
         append_fingerprint(&mut appended, SCHEMA_VERSION, case.label.clone());
         append_fingerprint(&mut expected_appended, SCHEMA_VERSION, case.label.clone());
+        assert_eq!(appended.materialized_bytes(), Some(appended.retained_bytes()), "{label}");
         assert_eq!(
             appended.into_iter().collect::<BTreeMap<_, _>>(),
             expected_appended,
@@ -327,6 +357,7 @@ fn construction_paths_materialize_before_mutation_and_iteration() {
         let removed = expected.get(&SCHEMA_VERSION).cloned().unwrap_or_default();
         actual.retain(|version, _| *version < SCHEMA_VERSION);
         expected.retain(|version, _| *version < SCHEMA_VERSION);
+        assert_eq!(actual.materialized_bytes(), Some(actual.retained_bytes()), "{label}");
         assert!(
             removed.iter().all(|value| !actual.accepts(SCHEMA_VERSION, value)),
             "{label}",
@@ -586,4 +617,231 @@ fn merging_accepted_sets_defers_hashing_and_preserves_order() {
             .contains_key("fingerprint_planned_keys")
     );
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn bounded_stream_matches_eager_acceptance_and_persisted_bytes() {
+    use xlsx_model::open_timing;
+
+    for case in cases() {
+        let mut reading = case.model.styles.clone();
+        reading.cell_xfs[1].num_fmt_id = None;
+        for readings in [Vec::new(), vec![reading.clone(), reading.clone()]] {
+            let expected = eager_base(&case, &readings);
+            for limit in [0, 32, 128] {
+                open_timing::begin();
+                let (fingerprint, client, actual) =
+                    fingerprints_with_budget(&case, &readings, limit);
+                let timing = open_timing::finish();
+                assert_eq!(timing.counts["fingerprint_payload_fallbacks"], 1);
+                assert_eq!(fingerprint, expected.fingerprint);
+                assert_eq!(client, expected.bootstrap_client_id);
+                assert_eq!(actual.materialized_bytes(), Some(actual.retained_bytes()));
+                for accepted in expected.fingerprints.values() {
+                    for value in accepted {
+                        for version in (MIN_SUPPORTED_SCHEMA_VERSION - 1)..=(SCHEMA_VERSION + 1) {
+                            assert_eq!(
+                                actual.accepts(version, value),
+                                expected.accepts_fingerprint(version, value)
+                            );
+                        }
+                        assert!(actual.contains_client(fingerprint_client_id(value).unwrap()));
+                    }
+                }
+                assert!(!actual.accepts(SCHEMA_VERSION, "invalid"));
+                assert_eq!(
+                    fingerprint_bytes(&actual),
+                    fingerprint_bytes(&expected.fingerprints)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn oversized_cell_payload_retains_only_materialized_fingerprints() {
+    use xlsx_model::open_timing;
+
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Payload");
+    for row in 0..=(fingerprints::MAX_LAZY_BYTES / 32_767) as u32 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(32_767),
+                },
+                formula: Some(format!("\"{}\"", "y".repeat(257))),
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    model.sheets.push(Sheet::new("Tail"));
+    open_timing::begin();
+    let actual = WorkbookBase::from_model(&model).unwrap();
+    assert_eq!(
+        open_timing::finish().counts["fingerprint_payload_fallbacks"],
+        1
+    );
+    let before = actual.fingerprints.retained_bytes();
+    assert!(before < 64 * 1024, "{before}");
+    assert_eq!(actual.fingerprints.materialized_bytes(), Some(before));
+    let expected =
+        WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
+    assert_eq!(actual.fingerprint, expected.fingerprint);
+    assert_eq!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+    assert_eq!(
+        fingerprint_bytes(&actual.fingerprints),
+        fingerprint_bytes(&expected.fingerprints)
+    );
+    let after = actual.fingerprints.retained_bytes();
+    assert_eq!(before, after);
+    assert_eq!(actual.fingerprints.materialized_bytes(), Some(after));
+}
+
+#[test]
+fn oversized_shared_strings_do_not_survive_in_a_plan() {
+    use xlsx_model::open_timing;
+
+    let mut model = WorkbookModel::default();
+    model.shared_strings = (0..=fingerprints::MAX_LAZY_BYTES / 32_767)
+        .map(|_| "x".repeat(32_767))
+        .collect();
+    model.sheets.push(Sheet::new("Payload"));
+    open_timing::begin();
+    let actual = WorkbookBase::from_model(&model).unwrap();
+    assert_eq!(
+        open_timing::finish().counts["fingerprint_payload_fallbacks"],
+        1
+    );
+    let retained = actual.fingerprints.retained_bytes();
+    assert!(retained < 64 * 1024, "{retained}");
+    assert_eq!(actual.fingerprints.materialized_bytes(), Some(retained));
+    let expected =
+        WorkbookBase::from_model_with_legacy_dimensions_oracle(&model, &[], None).unwrap();
+    assert_eq!(actual.fingerprint, expected.fingerprint);
+    assert_eq!(
+        fingerprint_bytes(&actual.fingerprints),
+        fingerprint_bytes(&expected.fingerprints)
+    );
+}
+
+#[test]
+fn dimension_and_cell_heavy_workbooks_remain_lazy() {
+    use xlsx_model::open_timing;
+
+    for dimensions in [true, false] {
+        let mut case = cases().remove(1);
+        for sheet in &mut case.model.sheets {
+            if dimensions {
+                sheet.col_widths = (0..MAX_COLS).map(|col| (col, 12.0)).collect();
+            } else {
+                for row in 0..65_536 {
+                    sheet.set_cell(
+                        CellRef::new(row, 0),
+                        Cell {
+                            value: CellValue::Number {
+                                value: f64::from(row),
+                            },
+                            style: Some(1),
+                            ..Cell::default()
+                        },
+                    );
+                }
+            }
+        }
+        open_timing::begin();
+        let actual = WorkbookBase::from_model_with_style_readings(
+            &case.model,
+            &case.legacy_dimensions,
+            case.legacy_styles.as_ref(),
+            &[],
+        )
+        .unwrap();
+        let timing = open_timing::finish();
+        assert_eq!(timing.counts["fingerprint_planned_keys"], 1);
+        assert!(!timing.counts.contains_key("fingerprint_payload_fallbacks"));
+        assert_eq!(actual.fingerprints.materialized_bytes(), None);
+        assert!(actual.fingerprints.retained_bytes() < fingerprints::MAX_LAZY_BYTES + 64 * 1024);
+        let expected = fingerprint_model_current_oracle(&case.model).unwrap();
+        assert_eq!((actual.fingerprint, actual.bootstrap_client_id), expected);
+    }
+}
+
+#[test]
+fn materialization_releases_payload_across_clones() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Payload");
+    for row in 0..64 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(32_767),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    for path in 0..3 {
+        let mut actual = WorkbookBase::from_model(&model).unwrap().fingerprints;
+        let cloned = actual.clone();
+        let before = actual.retained_bytes();
+        assert!(before > 1024 * 1024);
+        match path {
+            0 => {
+                let _ = fingerprint_bytes(&actual);
+            }
+            1 => actual.retain(|_, _| true),
+            _ => {
+                let _ = actual.clone().into_iter().collect::<BTreeMap<_, _>>();
+            }
+        }
+        assert!(cloned.retained_bytes() < 64 * 1024);
+        assert_eq!(cloned.materialized_bytes(), None);
+        if path < 2 {
+            assert_eq!(actual.materialized_bytes(), Some(actual.retained_bytes()));
+        }
+        assert_eq!(fingerprint_bytes(&actual), fingerprint_bytes(&cloned));
+        assert_eq!(cloned.materialized_bytes(), Some(cloned.retained_bytes()));
+    }
+}
+
+#[test]
+fn merging_plans_keeps_the_combined_payload_within_budget() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Payload");
+    for row in 0..=(fingerprints::MAX_LAZY_BYTES / 2 / 32_767) as u32 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(32_767),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut left = WorkbookBase::from_model(&model).unwrap().fingerprints;
+    model.sheets[0].name.push('!');
+    let right = WorkbookBase::from_model(&model).unwrap().fingerprints;
+    let left_clone = left.clone();
+    let right_clone = right.clone();
+    assert_eq!(left.materialized_bytes(), None);
+    assert_eq!(right.materialized_bytes(), None);
+    left.merge(right);
+    assert_eq!(left.materialized_bytes(), Some(left.retained_bytes()));
+    assert!(left.retained_bytes() < 64 * 1024);
+    assert!(left_clone.retained_bytes() < 64 * 1024);
+    assert!(right_clone.retained_bytes() < 64 * 1024);
+    let mut expected = left_clone.into_iter().collect::<BTreeMap<_, _>>();
+    for (version, accepted) in right_clone {
+        for fingerprint in accepted {
+            append_fingerprint(&mut expected, version, fingerprint);
+        }
+    }
+    assert_eq!(fingerprint_bytes(&left), fingerprint_bytes(&expected));
 }
