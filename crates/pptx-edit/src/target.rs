@@ -110,28 +110,28 @@ pub struct ReadResponse {
 #[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommandReadResponse {
+pub struct CommandReadResponse {
     #[serde(flatten)]
-    read: ReadResponse,
-    sources: Vec<CommandStorySource>,
+    pub read: ReadResponse,
+    pub sources: Vec<CommandStorySource>,
 }
 
 #[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandStorySource {
-    story_id: String,
-    paragraphs: Vec<CommandParagraphSource>,
+pub struct CommandStorySource {
+    pub story_id: String,
+    pub paragraphs: Vec<CommandParagraphSource>,
 }
 
 #[cfg(any(feature = "engine", test))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CommandParagraphSource {
-    paragraph_id: String,
-    text: String,
-    fields: Vec<TextField>,
-    editable: bool,
+pub struct CommandParagraphSource {
+    pub paragraph_id: String,
+    pub text: String,
+    pub fields: Vec<TextField>,
+    pub editable: bool,
 }
 
 /// One story's projected text.
@@ -960,7 +960,7 @@ impl DeckSession {
     }
 
     #[cfg(any(feature = "engine", test))]
-    pub(crate) fn read_command_content(
+    pub fn read_command_content(
         &self,
         request: &ReadRequest,
     ) -> EditResult<Result<CommandReadResponse, EditRefusal>> {
