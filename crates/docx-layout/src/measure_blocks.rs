@@ -1726,7 +1726,9 @@ fn measure_paragraph_with_context(
                     cumulative_y,
                 )
                 .unwrap_or_else(|| {
-                    if config.font_chains.values().all(Vec::is_empty) {
+                    if config.font_chains.values().all(Vec::is_empty)
+                        || config.font_chains.contains_key("@betteroffice/fonts/coverage")
+                    {
                         wrapped_synthetic_paragraph_extent(paragraph, content_width)
                     } else {
                         synthetic_paragraph_extent(paragraph, content_width)
@@ -3627,7 +3629,10 @@ fn measure_table_cells(
             } else {
                 measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
             };
-            if rotated && config.font_chains.values().all(Vec::is_empty) {
+            if rotated
+                && (config.font_chains.values().all(Vec::is_empty)
+                    || config.font_chains.contains_key("@betteroffice/fonts/coverage"))
+            {
                 for (block, measure) in cell.blocks.iter().zip(&mut measures) {
                     if let (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent)) =
                         (block, measure)
@@ -7636,6 +7641,40 @@ mod tests {
                 keys,
                 ["aptos|0|1", "calibri|0|0", "traditional arabic|0|1"],
                 "{fallback:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_uncovered_text_matches_no_provider_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = crate::register_measure_font_bytes(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let mut config = MeasurementConfig {
+            defaults: json!({"fontFamily": "Calibri", "fontSize": 12}),
+            ..Default::default()
+        };
+        for family in ["Noto Sans Devanagari", "Calibri"] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "coverage",
+                "runs": [{"kind": "text", "text": "हहहहहहहहहह", "fontFamily": family}]
+            }))
+            .unwrap();
+            config.font_chains.clear();
+            let main = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            config
+                .font_chains
+                .insert(format!("{}|0|0", family.to_lowercase()), vec![font]);
+            config
+                .font_chains
+                .insert("@betteroffice/fonts/coverage".to_owned(), vec![font]);
+            let implicit = measure_paragraph(&paragraph, 32.0, &config).unwrap();
+            assert_eq!(
+                serde_json::to_value(implicit).unwrap(),
+                serde_json::to_value(main).unwrap()
             );
         }
     }

@@ -11,6 +11,8 @@
 import {
   hasConfiguredFontSource,
   hasDefaultFontSource,
+  ImplicitFontAbsentError,
+  isImplicitFontProvider,
   resolveDefaultFontProvider,
 } from '../layout/measure/defaultFontProvider';
 import type { BundledFontProvider } from '../layout/measure/fontRegistry';
@@ -214,7 +216,7 @@ const BUNDLED_FONT_DEADLINE_MS = 5000;
 const BUNDLED_ANNOUNCE_BATCH_MS = 500;
 
 // Bundled faces by family|weight|style; a failed face is evicted so a later call retries it.
-const bundledFaces = new Map<string, Promise<boolean>>();
+const bundledFaces = new Map<string, Promise<boolean | undefined>>();
 // The requesters of every load that joined a bundled face still loading, which hear it fail.
 const bundledFaceRequesters = new Map<string, Set<Requesters>>();
 // Families with at least one bundled face registered; like registeredFamilies,
@@ -275,7 +277,7 @@ function registerBundledFace(
   bold: boolean,
   italic: boolean,
   requesters: Requesters
-): Promise<boolean> | undefined {
+): Promise<boolean | undefined> | undefined {
   const key = faceKey(family, bold ? 700 : 400, italic ? 'italic' : 'normal');
   const existing = bundledFaces.get(key);
   if (existing) {
@@ -301,6 +303,7 @@ function registerBundledFace(
       return true;
     } catch (error) {
       if (face) document.fonts.delete(face);
+      if (error instanceof ImplicitFontAbsentError) return undefined;
       reportFontError(
         error,
         `failed to register bundled "${family}"`,
@@ -390,8 +393,14 @@ function registerBundledFamily(
             states[index] = 'unsupported';
             return;
           }
+          if (!isImplicitFontProvider(provider)) bundledFamilies.add(family);
+          const registered = await registration;
+          if (registered === undefined) {
+            states[index] = 'unsupported';
+            return;
+          }
           bundledFamilies.add(family);
-          states[index] = (await registration) ? 'registered' : 'failed';
+          states[index] = registered ? 'registered' : 'failed';
         })
       );
     })()

@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
-import { configureDefaultFonts } from './defaultFontProvider';
+import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE } from './defaultFontProvider';
 import {
   createRustMeasureSource,
   type ResidentFontRequirement,
@@ -38,6 +38,7 @@ test('unconfigured measurement lazily resolves faces through the fonts manager',
     expect(registerFont).toHaveBeenCalledWith(new Uint8Array(data));
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [7],
+      [IMPLICIT_FONT_COVERAGE]: [7],
     });
   } finally { create.mockRestore(); }
 });
@@ -93,6 +94,7 @@ for (const configured of ['default', 'configured', 'explicit'] as const) {
       expect(registered).toEqual([new Uint8Array(embedded), new Uint8Array(bundled)]);
       expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
         [regular.key]: [1, 2],
+        ...(configured === 'default' && { [IMPLICIT_FONT_COVERAGE]: [1, 2] }),
       });
       expect(create).toHaveBeenCalledTimes(configured === 'default' ? 1 : 0);
     } finally { create.mockRestore(); }
@@ -120,6 +122,7 @@ test('a failed default manager load settles to approximate metrics and retries',
     await source.prepareFontRequirements([regular]);
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [3],
+      [IMPLICIT_FONT_COVERAGE]: [3],
     });
     expect(create).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledTimes(2);
@@ -149,6 +152,7 @@ test('a failed default manager face remains retryable', async () => {
     await source.prepareFontRequirements([regular]);
     expect(source.measurementConfigForRequirements([regular])?.fontChains).toEqual({
       [regular.key]: [5],
+      [IMPLICIT_FONT_COVERAGE]: [5],
     });
     expect(create).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);

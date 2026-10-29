@@ -1,5 +1,9 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
-import { resolveDefaultFontProvider } from './defaultFontProvider';
+import {
+  IMPLICIT_FONT_COVERAGE,
+  isImplicitFontProvider,
+  resolveDefaultFontProvider,
+} from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
   type BundledFontProvider,
@@ -70,6 +74,8 @@ export function createRustMeasureSource(options: {
   bundled?: BundledFontProvider;
 }): RustMeasureSource {
   const engine = options.engine;
+  let implicit = false;
+  let generation = 0;
   const registry = new TextMeasureFontRegistry(
     {
       registerFont: (bytes) => engine.registerFont(bytes),
@@ -78,7 +84,12 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: options.bundled ?? resolveDefaultFontProvider },
+    { bundled: options.bundled ?? (async () => {
+      const current = generation;
+      const provider = await resolveDefaultFontProvider();
+      if (current === generation) implicit = isImplicitFontProvider(provider);
+      return provider;
+    }) },
   );
   let compat: CompatibilityFlags | undefined;
 
@@ -170,6 +181,10 @@ export function createRustMeasureSource(options: {
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
         if (chain.length > 0) fontChains[requirement.key] = chain;
       }
+      if (implicit) {
+        const ids = [...new Set(Object.values(fontChains).flat())];
+        if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
+      }
       return {
         fontChains,
         defaults: { fontSize: 11, fontFamily: 'Calibri' },
@@ -183,6 +198,8 @@ export function createRustMeasureSource(options: {
     },
 
     clear(): void {
+      generation++;
+      implicit = false;
       registry.clear();
     },
   };

@@ -4,4 +4,4 @@
 "@betteroffice/agents": patch
 ---
 
-DOCX measurement and browser font loading now use the bundled fonts manager by default, loaded lazily. Configured fonts and document embeds still win; families the manager lacks still load from Google Fonts unless disabled.
+DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.

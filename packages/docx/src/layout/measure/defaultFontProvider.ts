@@ -1,6 +1,55 @@
 /** Lazy default-font provider resolution. @packageDocumentation */
 
-import type { BundledFontProvider } from './fontRegistry';
+import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
+
+export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
+
+export class ImplicitFontAbsentError extends Error {}
+
+const implicitProviders = new WeakSet<BundledFontProvider>();
+
+export function isImplicitFontProvider(provider: BundledFontProvider | undefined): boolean {
+  return provider !== undefined && implicitProviders.has(provider);
+}
+
+function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): BundledFontProvider {
+  const provider = manager.createFontProvider();
+  const checked = (
+    loader: BundledFontLoader | undefined,
+    face: import('@betteroffice/fonts').BundledFontFace | undefined
+  ): BundledFontLoader | undefined => {
+    if (!loader || !face?.script) return loader;
+    return Object.assign(async () => {
+      let bytes: ArrayBuffer;
+      try { bytes = await loader(); }
+      catch { throw new ImplicitFontAbsentError(face.family); }
+      if (bytes.byteLength !== face.byteLength) throw new ImplicitFontAbsentError(face.family);
+      return bytes;
+    }, loader);
+  };
+  const implicit: BundledFontProvider = {
+    ...provider,
+    resolve: (family, bold, italic) => checked(
+      provider.resolve(family, bold, italic), manager.resolveMetricCompatFace(family, bold, italic)
+    ),
+    resolveFamily: (family, bold, italic) => checked(
+      provider.resolveFamily(family, bold, italic), manager.resolveBundledFamilyFace(family, bold, italic)
+    ),
+    resolveScriptFallback: (script, bold, italic) => checked(
+      provider.resolveScriptFallback(script, bold, italic), manager.resolveScriptFallbackFace(script, bold, italic)
+    ),
+    resolveGlyphFallback: (family, bold, italic, office) => checked(
+      provider.resolveGlyphFallback?.(family, bold, italic, office),
+      manager.resolveGlyphFallbackFace(family, bold, italic, office)
+    ),
+    resolveLastResort: (family, bold, italic, office) => checked(
+      provider.resolveLastResort(family, bold, italic, office),
+      manager.resolveLastResortFace(family, bold, italic, office)
+    ),
+  };
+  implicitProviders.add(implicit);
+  return implicit;
+}
 
 /** The consumed font-manager contract. @public */
 export interface BundledFontModule {
@@ -52,6 +101,9 @@ export function configureDefaultFonts(next: DefaultFontOptions): void {
 async function load(): Promise<BundledFontProvider | undefined> {
   const { baseUrl, fonts, load: loader } = options;
   try {
+    if (fonts === undefined && loader === undefined && baseUrl === undefined) {
+      return implicitFontProvider(await import('@betteroffice/fonts'));
+    }
     const module = fonts ?? (
       (loader ? await loader() : await import('@betteroffice/fonts')) as BundledFontModule
     );

@@ -4522,6 +4522,7 @@ impl RenderCtx<'_> {
 pub(crate) struct ShapeFonts<'a> {
     store: &'a ooxml_text::FontStore,
     chains: HashMap<String, Vec<ooxml_text::FontId>>,
+    coverage_only: HashSet<ooxml_text::FontId>,
 }
 
 impl<'a> ShapeFonts<'a> {
@@ -4546,7 +4547,18 @@ impl<'a> ShapeFonts<'a> {
                 )
             })
             .collect();
-        Some(ShapeFonts { store, chains })
+        let coverage_only = input
+            .font_chains
+            .get("@betteroffice/fonts/coverage")
+            .into_iter()
+            .flatten()
+            .map(|&id| ooxml_text::FontId::from_u32(id))
+            .collect();
+        Some(ShapeFonts {
+            store,
+            chains,
+            coverage_only,
+        })
     }
 
     /// Fallback chain for a `(family, bold, italic)` combination, keyed exactly
@@ -4562,15 +4574,13 @@ impl<'a> ShapeFonts<'a> {
         self.chains.get(&key).map(|v| v.as_slice())
     }
 
-    /// Resolve `ch` to the first covering font in `chain`, else the chain's
-    /// terminal font — the same policy as ooxml-text `prepare::resolve_with_fallback`
-    /// (the host guarantees the chain ends in a broad-coverage last-resort face,
-    /// so an uncovered char shapes as that face's `.notdef` box rather than
-    /// routing the whole run to the browser).
     fn resolve(&self, chain: &[ooxml_text::FontId], ch: char) -> Option<ooxml_text::FontId> {
-        self.store
-            .resolve(chain, ch)
-            .or_else(|| chain.last().copied())
+        self.store.resolve(chain, ch).or_else(|| {
+            chain
+                .last()
+                .copied()
+                .filter(|id| !self.coverage_only.contains(id))
+        })
     }
 }
 

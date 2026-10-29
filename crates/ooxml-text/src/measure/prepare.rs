@@ -42,7 +42,7 @@ use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_wit
 use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
-use super::input::{MeasureRequest, RunIn, validate_pt_size};
+use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
@@ -539,6 +539,7 @@ fn prepare_field_run(
         fallback,
         pt_to_px(font_size_pt),
         base_direction(run.rtl, input),
+        input.font_chains,
     )?;
     Ok(PreparedField {
         width,
@@ -562,12 +563,18 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-/// First font in `chain` covering `ch`, or the chain's terminal font when
-/// nothing covers it. A truly uncovered character therefore shapes as that
-/// face's `.notdef` — a real advance width — instead of refusing the block.
-/// `None` only for an empty chain, which `validate_chain` rejects upstream.
-fn resolve_with_fallback(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
-    store.resolve(chain, ch).or_else(|| chain.last().copied())
+fn resolve_with_fallback(
+    store: &FontStore,
+    chain: &[FontId],
+    ch: char,
+    font_chains: FontChains<'_>,
+) -> Option<FontId> {
+    store.resolve(chain, ch).or_else(|| {
+        chain
+            .last()
+            .copied()
+            .filter(|_| !font_chains.coverage_only(chain))
+    })
 }
 
 /// Width of `text` shaped plainly through `chain` — no caps, letter spacing
@@ -579,6 +586,7 @@ pub(super) fn measure_plain_text(
     text: &str,
     size_px: f32,
     base: crate::bidi::BaseDirection,
+    font_chains: FontChains<'_>,
 ) -> Result<f32, MeasureError> {
     if text.len() > MAX_RUN_TEXT_BYTES {
         return Err(MeasureError::Unsupported(format!(
@@ -596,8 +604,8 @@ pub(super) fn measure_plain_text(
     let levels = char_levels(text, base);
     let mut plan: Vec<(char, FontId, u8)> = Vec::new();
     for (i, ch) in text.chars().enumerate() {
-        let Some(font) = resolve_with_fallback(store, chain, ch) else {
-            return Err(MeasureError::Unsupported("empty font chain".to_string()));
+        let Some(font) = resolve_with_fallback(store, chain, ch, font_chains) else {
+            return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         plan.push((ch, font, levels[i]));
     }
@@ -826,8 +834,8 @@ fn prepare_text_run(
         }
         let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
         let first = shaped[0];
-        let Some(mut font) = resolve_with_fallback(store, chain, first) else {
-            return Err(MeasureError::Unsupported("empty font chain".to_string()));
+        let Some(mut font) = resolve_with_fallback(store, chain, first, input.font_chains) else {
+            return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
         let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
             kern_enabled(
@@ -839,7 +847,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve_with_fallback(store, chain, ch)
+            && let Some(original_font) = resolve_with_fallback(store, chain, ch, input.font_chains)
             && supports_smcp(
                 store,
                 original_font,
