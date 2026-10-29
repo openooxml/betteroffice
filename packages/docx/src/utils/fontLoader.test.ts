@@ -499,6 +499,25 @@ test('URL definitions take precedence over the default fonts manager', async () 
   } finally { create.mockRestore(); }
 });
 
+test('a hosted family skips implicit browser faces through its mapped name while other families still load', async () => {
+  setGoogleFontsEnabled(false);
+  const resolveFamily = spyOn(bundle(['Georgia', 'DM Serif Display']).createFontProvider(), 'resolveFamily');
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
+    resolve: () => bytes, resolveFamily,
+    resolveScriptFallback: () => undefined, resolveLastResort: () => bytes,
+  });
+  const scope = createFontLoadScope();
+  try {
+    await scope.loadFontDefinitions([{ family: 'Georgia', src: '/georgia-bold.woff2', weight: 700 }]);
+    await scope.loadFontsWithMapping(['Georgia', 'DM Serif Display']);
+    expect(new Set(added.map(face => face.family))).toEqual(new Set(['DM Serif Display']));
+    expect(added.map(face => face.style)).toEqual(['normal', 'italic']);
+    expect(resolveFamily.mock.calls.some(([family]) => family === 'Georgia' || family === 'Tinos')).toBe(false);
+    expect(document.head.textContent).toContain('/georgia-bold.woff2');
+    expect(googleLinks()).toHaveLength(0);
+  } finally { scope.dispose(); create.mockRestore(); resolveFamily.mockRestore(); }
+});
+
 test('server font loading returns false without creating a manager or touching the DOM', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document')!;
   const create = spyOn(fontManager, 'createFontProvider').mockImplementation(() => {

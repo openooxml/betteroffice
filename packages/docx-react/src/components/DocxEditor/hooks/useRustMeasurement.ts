@@ -63,6 +63,7 @@ export function useRustMeasurement(
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
+  const sourceProviderRef = useRef(fontProvider);
   const releaseSourceRef = useRef<(() => void) | null>(null);
   const latestFontChainsRef = useRef<Record<string, number[]>>({});
   // The latest font requirement for each key a layout of this document asked
@@ -85,10 +86,12 @@ export function useRustMeasurement(
         const engine = textEngine ?? (await getRustTextEngine());
         if (cancelled) return;
         let source = sourceRef.current;
-        if (sourceEngineRef.current !== engine) {
+        if (sourceEngineRef.current !== engine || sourceProviderRef.current !== fontProvider) {
+          releaseSourceRef.current?.();
           source = null;
           sourceRef.current = null;
           sourceEngineRef.current = engine;
+          sourceProviderRef.current = fontProvider;
           fedFontSourceRef.current = null;
           latestFontChainsRef.current = {};
           requiredRef.current = new Map();
@@ -128,7 +131,7 @@ export function useRustMeasurement(
     return () => {
       cancelled = true;
     };
-  }, [document, textEngine]);
+  }, [document, textEngine, fontProvider]);
 
   // A replaced or unmounted editor may free the session behind `textEngine`: font loads and
   // layout passes its source still has pending end with it.

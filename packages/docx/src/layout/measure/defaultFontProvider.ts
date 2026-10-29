@@ -12,6 +12,29 @@ export function isImplicitFontProvider(provider: BundledFontProvider | undefined
   return provider !== undefined && implicitProviders.has(provider);
 }
 
+const hostedFamiliesKey = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+
+export function hostedFontFamilies(source: object | undefined): ReadonlySet<string> | undefined {
+  return (source as { [hostedFamiliesKey]?: ReadonlySet<string> } | undefined)?.[hostedFamiliesKey];
+}
+
+export function excludeHostedFontFamilies(
+  provider: BundledFontProvider | undefined,
+  families: ReadonlySet<string> | undefined
+): BundledFontProvider | undefined {
+  if (!provider || !isImplicitFontProvider(provider) || !families?.size) return provider;
+  const hosted = (family: string) => families.has(family.trim().toLowerCase());
+  const filtered: BundledFontProvider = {
+    ...provider,
+    resolve: (family, bold, italic) => hosted(family) ? undefined : provider.resolve(family, bold, italic),
+    resolveFamily: (family, bold, italic) => hosted(family) ? undefined : provider.resolveFamily?.(family, bold, italic),
+    resolveGlyphFallback: (family, bold, italic, office) => hosted(family) ? undefined : provider.resolveGlyphFallback?.(family, bold, italic, office),
+    resolveLastResort: (family, bold, italic, office) => hosted(family) ? undefined : provider.resolveLastResort?.(family, bold, italic, office),
+  };
+  implicitProviders.add(filtered);
+  return filtered;
+}
+
 function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): BundledFontProvider {
   const provider = manager.createFontProvider();
   const providesFamily = (family: string) =>

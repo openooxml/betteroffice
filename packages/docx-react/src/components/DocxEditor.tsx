@@ -172,6 +172,7 @@ import { clampZoom } from '../commands/evaluate';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import { useFontLifecycle, useFontLoadScope } from '../hooks/useFontLifecycle';
+import { hostedFontProvider } from '../hooks/hostedFonts';
 import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
@@ -869,10 +870,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   ref
 ) {
   const props = useDocxFileAliases(aliasedProps);
+  const measurementFontProvider = useMemo(
+    () => hostedFontProvider(props.measurementFontProvider, props.fonts),
+    [props.measurementFontProvider, props.fonts]
+  );
   const choice = useDocxEditorRoute(props);
   if (choice.route === 'sync-api-error') return <DocxSyncApiRefusal key={choice.route} {...props} />;
-  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} ref={ref} />;
-  return <LegacyDocxEditor key={choice.route} {...props} ref={ref} />;
+  if (choice.route === 'peerless') return <LazyPeerlessDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
+  return <LegacyDocxEditor key={choice.route} {...props} measurementFontProvider={measurementFontProvider} ref={ref} />;
 });
 
 function DocxSyncApiRefusal(props: Pick<DocxEditorProps, 'onError' | 'className' | 'style'>) {
@@ -1020,7 +1025,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // PagedEditor ref declared early so comment management can read the live
   // Yrs session before the tracked-changes effect drives `setComments`.
   const pagedEditorRef = useRef<PagedEditorRef>(null);
-  const fontScope = useFontLoadScope();
+  const fontScope = useFontLoadScope(fonts);
 
   const {
     comments,

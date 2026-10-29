@@ -1,5 +1,7 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import {
+  excludeHostedFontFamilies,
+  hostedFontFamilies,
   IMPLICIT_FONT_COVERAGE,
   isImplicitFontProvider,
   resolveDefaultFontProvider,
@@ -74,6 +76,7 @@ export function createRustMeasureSource(options: {
   bundled?: BundledFontProvider;
 }): RustMeasureSource {
   const engine = options.engine;
+  const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
   const registry = new TextMeasureFontRegistry(
@@ -84,9 +87,9 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: options.bundled ?? (async () => {
+    { bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
-      const provider = await resolveDefaultFontProvider();
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }) },
@@ -126,6 +129,10 @@ export function createRustMeasureSource(options: {
           })(),
           ...Array.from(new Set(requirement.scripts ?? []), async (script) => {
             try {
+              if (hosted?.has(requirement.family.trim().toLowerCase())) {
+                await registry.getFontIdChain(requirement.family, requirement.bold, requirement.italic);
+                if (implicit) return false;
+              }
               if (
                 registry.getCachedScriptFallbackIds([script], false) !==
                 undefined
@@ -153,7 +160,7 @@ export function createRustMeasureSource(options: {
           requirement.italic,
           false,
         ),
-        scriptIds: registry.getCachedScriptFallbackIds(
+        scriptIds: implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
           false,
         ),
@@ -172,7 +179,7 @@ export function createRustMeasureSource(options: {
           requirement.bold,
           requirement.italic,
         );
-        const scriptIds = registry.getCachedScriptFallbackIds(
+        const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
         );
         if (familyIds === undefined || scriptIds === undefined)

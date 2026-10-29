@@ -201,6 +201,44 @@ test('a legacy editor measures and paints an app URL family through the no-provi
   expect(await open()).toEqual(browser);
 }, 60_000);
 
+test('a legacy editor leaves hosted Calibri to the browser while unhosted Cambria uses the manager', async () => {
+  const zip = await JSZip.loadAsync(await pagedDocx(1));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const paragraph = (family: string, text: string) =>
+    `<w:p><w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  zip.file('word/document.xml', xml.replace(/<w:p>.*?<\/w:p>/,
+    paragraph('Calibri', 'Hosted Calibri') + paragraph('Cambria', 'Unhosted Cambria')));
+  const buffer = await zip.generateAsync({ type: 'arraybuffer' });
+  const noProvider = { resolve: () => undefined };
+  const open = async (measurementFontProvider?: typeof noProvider) => {
+    const ref = createRef<Editor>();
+    let painted = false;
+    let display: DisplayList | undefined;
+    const unsubscribe = onPresented((list) => { display = list as DisplayList; });
+    const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false}
+      documentBuffer={buffer} fonts={[{ family: 'Calibri', src: '/calibri.woff2' }]}
+      measurementFontProvider={measurementFontProvider} onFirstPagePainted={() => { painted = true; }} />);
+    try {
+      await waitFor(() => expect(ref.current).not.toBeNull(), { timeout: 20_000 });
+      expect(await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 })).toBe(1);
+      await waitFor(() => expect(painted).toBe(true), { timeout: 20_000 });
+      expect(document.head.textContent).toContain('/calibri.woff2');
+      return display!.pages.flatMap((page) => page.primitives).filter(
+        (primitive) => primitive.kind === 'text' || primitive.kind === 'glyphRun',
+      );
+    } finally { unsubscribe(); view.unmount(); }
+  };
+  const browser = await open(noProvider);
+  const implicit = await open();
+  const hosted = (primitives: typeof browser) => primitives.filter(
+    (primitive) => primitive.kind === 'text' && primitive.font.includes('Calibri'),
+  );
+  expect(hosted(browser)).not.toHaveLength(0);
+  expect(hosted(implicit)).toEqual(hosted(browser));
+  expect(implicit.some((primitive) => primitive.kind === 'glyphRun' && primitive.text === 'Hosted Calibri')).toBe(false);
+  expect(implicit.some((primitive) => primitive.kind === 'glyphRun' && primitive.text === 'Unhosted Cambria')).toBe(true);
+}, 60_000);
+
 test('each document reports its first page painted once, however often its pages repaint', async () => {
   const ref = createRef<Editor>();
   const painted: string[] = [];

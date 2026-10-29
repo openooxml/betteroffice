@@ -23,6 +23,30 @@ const regular: ResidentFontRequirement = {
   key: 'calibri|0|0', family: 'Calibri', bold: false, italic: false,
 };
 
+test('hosted families exclude every style from implicit measurement while unhosted families keep it', async () => {
+  const resolve = mock((_family: string, _bold: boolean, _italic: boolean) => async () => Uint8Array.of(1, 2).buffer);
+  const resolveScriptFallback = mock(() => async () => Uint8Array.of(3, 4).buffer);
+  const provider = { ...providerFor(Uint8Array.of(1, 2).buffer), resolve, resolveScriptFallback };
+  const create = spyOn(fontManager, 'createFontProvider').mockReturnValue(provider);
+  const hosted = Object.assign({ resolve: () => undefined }, {
+    [Symbol.for('@betteroffice/docx/hostedFontFamilies')]: new Set(['calibri']),
+  });
+  const requirements = [false, true].flatMap(bold => [false, true].map((italic): ResidentFontRequirement => ({
+    key: `calibri|${Number(bold)}|${Number(italic)}`, family: ' Calibri ', bold, italic, scripts: ['arabic'],
+  })));
+  const cambria = { ...regular, key: 'cambria|0|0', family: 'Cambria' };
+  try {
+    const source = createRustMeasureSource({ bundled: hosted, engine: { registerFont: () => 7, clearFonts() {} } });
+    await source.prepareFontRequirements([...requirements, cambria]);
+    expect(source.measurementConfigForRequirements([...requirements, cambria])?.fontChains).toEqual({
+      [cambria.key]: [7], [IMPLICIT_FONT_COVERAGE]: [7],
+    });
+    expect(provider.resolve).toHaveBeenCalledWith('Cambria', false, false);
+    expect(provider.resolve.mock.calls.some(([family]) => family.trim().toLowerCase() === 'calibri')).toBe(false);
+    expect(resolveScriptFallback).not.toHaveBeenCalled();
+  } finally { create.mockRestore(); }
+});
+
 test('implicit measurement leaves unknown families absent even with script fallbacks', async () => {
   const registerFont = mock((_bytes: Uint8Array) => 7);
   const source = createRustMeasureSource({ engine: { registerFont, clearFonts() {} } });

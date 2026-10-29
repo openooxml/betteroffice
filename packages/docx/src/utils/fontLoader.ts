@@ -11,6 +11,7 @@
 import {
   hasConfiguredFontSource,
   hasDefaultFontSource,
+  hostedFontFamilies,
   ImplicitFontAbsentError,
   isImplicitFontProvider,
   resolveDefaultFontProvider,
@@ -79,6 +80,7 @@ type Requesters = ReadonlySet<ScopeState | null>;
 
 const MODULE_LEVEL: Requesters = new Set([null]);
 const PERMANENT: FaceOwner = { scope: null };
+const moduleHostedFonts = {};
 const NO_OWNERS: ReadonlySet<FaceOwner> = new Set();
 // Scopes with at least one listener; a scope nobody listens to stays collectable.
 const liveScopes = new Set<ScopeState>();
@@ -338,7 +340,8 @@ function registerBundledFamily(
   weights: number[] | undefined,
   styles: ('normal' | 'italic')[] | undefined,
   deadlineMs: number,
-  requesters: Requesters
+  requesters: Requesters,
+  requester: ScopeState | null
 ): Promise<BundledRegistration> {
   if (typeof FontFace === 'undefined' || document.fonts === undefined) {
     return Promise.resolve('none');
@@ -375,6 +378,13 @@ function registerBundledFamily(
       const provider = await resolveDefaultFontProvider();
       if (!provider) return;
       resolvedProvider = true;
+      if (isImplicitFontProvider(provider) && sources.some(source =>
+        hostedFontFamilies(requester ?? undefined)?.has(source.trim().toLowerCase()) ||
+        hostedFontFamilies(moduleHostedFonts)?.has(source.trim().toLowerCase())
+      )) {
+        states.fill('unsupported');
+        return;
+      }
       const source =
         sources.find((candidate) =>
           faces.some(([bold, italic]) => bundledLoad(provider, candidate, bold, italic))
@@ -617,7 +627,8 @@ async function loadFontFrom(
           deadlineAt === undefined
             ? BUNDLED_FONT_DEADLINE_MS
             : Math.max(0, deadlineAt - Date.now()),
-          requesters
+          requesters,
+          requester
         );
         if (registration === 'absent') bundledAbsentFamilies.add(normalizedFamily);
         else bundledAbsentFamilies.delete(normalizedFamily);
@@ -1511,6 +1522,9 @@ async function loadDefinitionsFor(
   defs: ReadonlyArray<FontDefinition> | undefined,
   requester: ScopeState | null
 ): Promise<void> {
+  Object.assign(requester ?? moduleHostedFonts, {
+    [Symbol.for('@betteroffice/docx/hostedFontFamilies')]: new Set((defs ?? []).map(def => def.family.trim().toLowerCase())),
+  });
   if (!defs || defs.length === 0) return;
   await Promise.all(
     defs.map((def) => loadUrlFace(def.family, def.src, { weight: def.weight }, requester))
