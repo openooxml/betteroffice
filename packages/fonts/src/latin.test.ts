@@ -12,7 +12,7 @@ const latin = BUNDLED_FONTS.filter((face) => isLatinFont(face.file));
 
 test('ships Latin at the fixed version as a regular dependency', () => {
   expect(latinPackage.version).toBe(fontsPackage.version);
-  expect(fontsPackage.dependencies['@betteroffice/fonts-latin']).toBe('workspace:^0');
+  expect(fontsPackage.dependencies['@betteroffice/fonts-latin']).toBe('workspace:*');
   expect(latinPackage.exports['.'].import).toBe('./dist/index.js');
   expect(latinPackage.files).toEqual(['dist', 'assets', 'LICENSE', 'LICENSES', 'README.md']);
   expect(pack.schema).toBe(1);

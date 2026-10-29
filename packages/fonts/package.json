@@ -77,6 +77,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@betteroffice/fonts-latin": "workspace:^0"
+    "@betteroffice/fonts-latin": "workspace:*"
   }
 }
