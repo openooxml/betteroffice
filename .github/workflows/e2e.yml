@@ -245,6 +245,16 @@ jobs:
       - name: Run the editor plugin hosts in Chromium
         run: bunx playwright test --config e2e/browser/plugin-host/playwright.config.ts --pass-with-no-tests
 
+      - name: Run the harness-gated docx editor in Chromium
+        if: matrix.shard == 3
+        env:
+          DOCX_PEERLESS_HARNESS: '1'
+          BETTEROFFICE_BROWSER_SHARD: ''
+          BETTEROFFICE_BROWSER_OUTPUT: ${{ runner.temp }}/browser-results/harness
+        run: |
+          bun run --filter @betteroffice/desktop build
+          bunx playwright test --config e2e/browser/playwright.config.ts --grep @harness
+
       - name: Upload browser report and failure traces
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
