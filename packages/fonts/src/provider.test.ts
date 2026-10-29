@@ -15,7 +15,7 @@ for (const [source, create] of [
         const coverage = provider.resolveGlyphFallback!(family, bold, false, 'word');
         const coverageBold = / (Light|Semilight)$/.test(family) ? false : bold;
         expect(coverage).toBeDefined();
-        expect(lastResort).toBe(coverage);
+        expect(lastResort).toBe(coverage!);
         expect(provider.resolve('Arial', coverageBold, false)).toBe(coverage);
         expect(provider.resolveFamily('Liberation Sans', coverageBold, false)).toBe(coverage);
         expect(lastResort.onlyIfPrimaryFails).toBeUndefined();
