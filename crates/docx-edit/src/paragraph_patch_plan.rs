@@ -299,10 +299,8 @@ fn delta_at(
     let old = before.and_then(Value::as_object);
     let new = after.and_then(Value::as_object);
     if (old.is_some() || before.is_none())
-        && (new.is_some() || after.is_none())
-        && (old.is_some() || new.is_some())
         && !old.is_some_and(|map| map.is_empty())
-        && !new.is_some_and(|map| map.is_empty())
+        && new.is_some_and(|map| !map.is_empty())
     {
         let keys: BTreeSet<_> = old
             .into_iter()

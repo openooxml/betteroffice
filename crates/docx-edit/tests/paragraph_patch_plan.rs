@@ -1081,6 +1081,101 @@ fn plain_restyle_saves_style_properties_as_inherited() {
 }
 
 #[test]
+fn plain_restyle_adds_and_removes_inherited_property_objects() {
+    let bordered = concat!(
+        "<w:pPr><w:keepNext/>",
+        "<w:pBdr><w:top w:val=\"single\" w:sz=\"4\"/>",
+        "<w:bottom w:val=\"single\" w:sz=\"8\" w:color=\"112233\"/></w:pBdr>",
+        "<w:spacing w:before=\"240\" w:after=\"80\"/>",
+        "<w:ind w:left=\"720\"/></w:pPr>",
+        "<w:rPr><w:color w:val=\"112233\"/><w:sz w:val=\"32\"/></w:rPr>",
+    );
+    let top_only = "<w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"4\"/></w:pBdr></w:pPr>";
+    let content = "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>Other</w:t></w:r>";
+    for (previous, next) in [
+        (bordered, ""),
+        ("", bordered),
+        (bordered, top_only),
+        (top_only, bordered),
+    ] {
+        let (doc, bytes, styles) = restyle_source(content, previous, next);
+        doc.restyle_paragraphs(
+            &ctx(),
+            &ParaSelector::One("00000001".to_owned()),
+            "B",
+            &styles,
+        )
+        .unwrap();
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap();
+        assert!(part.legacy_paragraphs.is_empty());
+        assert_eq!(part.paragraph_patches.len(), 1);
+        let package = docx_parse::parse_docx_s9_wire(
+            &bytes,
+            docx_parse::S9ParseOptions {
+                source_ordinals: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .document
+        .package;
+        let document = save_document(&package.document, |document| {
+            document["content"][1]["formatting"] = json!({"styleId": "B"});
+        });
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": document,
+            "headerEntries": package.header_entries.unwrap_or_default(),
+            "relationshipEntries": package.relationship_entries,
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
+                "part": part.part, "sha256": part.sha256,
+                "paragraphs": [0, 1, 2, 3], "changed": [1],
+                "paragraphPatches": part.paragraph_patches,
+                "legacyParagraphs": part.legacy_paragraphs
+            }]}
+        }))
+        .unwrap();
+        let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        for (name, original) in ooxml_opc::unzip_parts(&bytes).unwrap() {
+            let output = &saved_parts.iter().find(|(path, _)| path == &name).unwrap().1;
+            if name == "word/document.xml" {
+                assert_eq!(
+                    std::str::from_utf8(output).unwrap(),
+                    std::str::from_utf8(&original)
+                        .unwrap()
+                        .replace("w:val=\"A\"", "w:val=\"B\"")
+                );
+            } else {
+                assert_eq!(output, &original, "{name}");
+            }
+        }
+        let reopened = EditingDoc::new(72);
+        seed_from_docx(&reopened, &saved).unwrap();
+        let paragraphs = reopened.paragraphs("body").unwrap();
+        let properties = &paragraphs[1].properties;
+        let original = serde_json::to_value(properties.get("_originalFormatting")).unwrap();
+        assert_eq!(original, json!({"styleId": "B"}));
+        if next.is_empty() {
+            for key in ["borders", "spaceBefore", "spaceAfter", "indentLeft", "keepNext"] {
+                assert!(!properties.contains_key(key), "{key}");
+            }
+        } else {
+            let borders = serde_json::to_value(properties.get("borders")).unwrap();
+            assert_eq!(borders["top"]["size"].as_f64(), Some(4.0));
+            assert_eq!(borders.get("bottom").is_some(), next == bordered);
+        }
+    }
+}
+
+#[test]
 fn restyle_complex_script_toggles_replace() {
     for toggle in ["bCs", "iCs"] {
         assert_paragraph_restyle(

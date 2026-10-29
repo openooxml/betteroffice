@@ -92,3 +92,31 @@ for (const [name, sourceProperties, runProperties] of [
     expect(properties(updated).keepNext ?? null).toBeNull();
   }, 30_000);
 }
+
+for (const [previous, next] of [['Heading1', 'Normal'], ['Normal', 'Heading1']] as const) {
+  test(`restyling a plain paragraph from ${previous} to ${next} exports only the style change`, async () => {
+    const source = await restyleFixture(`<w:pPr><w:pStyle w:val="${previous}"/></w:pPr>`, '');
+    const doc = await open(source.bytes);
+    await doc.edit({
+      version: doc.list().version,
+      edits: [{ op: 'set_paragraph_style', paragraph: doc.list().items[0]!.ref, style: next }],
+    });
+    const part = doc.session.paragraphSavePlan().splicedParts!
+      .find(entry => entry.part === 'word/document.xml')!;
+    expect(part.paragraphPatches?.map(patch => patch.ordinal)).toEqual([0]);
+    expect(part.legacyParagraphs ?? []).toEqual([]);
+    const exported = await doc.export();
+    const saved = await JSZip.loadAsync(exported);
+    expect(await saved.file('word/document.xml')!.async('string')).toBe(
+      source.document.replace(`w:val="${previous}"`, `w:val="${next}"`));
+    const reopened = await open(exported);
+    expect(properties(reopened)._originalFormatting).toEqual({ styleId: next });
+    if (next === 'Heading1') {
+      expectInherited(reopened, '112233', 240, 720);
+    } else {
+      for (const key of ['borders', 'spaceBefore', 'spaceAfter', 'indentLeft', 'keepNext']) {
+        expect(properties(reopened)[key] ?? null).toBeNull();
+      }
+    }
+  }, 30_000);
+}
