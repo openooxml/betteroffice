@@ -6841,10 +6841,25 @@ fn bullet_font_draws(
     if ooxml_text::SymbolFont::named(&family).is_some() || !renderer.has_face_for(&family) {
         return true;
     }
+    let requested = normalize_family(&family);
+    let substitute = renderer
+        .fonts
+        .declared_families(face)
+        .is_ok_and(|declared| {
+            !declared.is_empty()
+                && declared
+                    .iter()
+                    .all(|name| normalize_family(name) != requested)
+        });
     marker
         .chars()
         .filter(|character| !character.is_whitespace())
+        .filter(|character| !substitute || is_private_use(*character))
         .all(|character| renderer.fonts.covers(face, character).unwrap_or(true))
+}
+
+fn is_private_use(character: char) -> bool {
+    matches!(character as u32, 0xe000..=0xf8ff | 0xf_0000..=0x10_ffff)
 }
 
 /// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
@@ -12433,11 +12448,16 @@ mod tests {
     fn a_bullet_font_without_the_marker_character_paints_no_marker() {
         let mut renderer = SlideRenderer::new();
         renderer
-            .register_font("Georgia", false, false, FONT)
+            .register_font("Liberation Sans", false, false, FONT)
             .unwrap();
         let theme = Theme::default();
         let face = renderer
-            .resolve_face("Georgia", false, false, &mut SubstitutionLog::default())
+            .resolve_face(
+                "Liberation Sans",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
             .unwrap()
             .id;
         let draws = |family: Option<&str>, marker: &str| {
@@ -12445,11 +12465,62 @@ mod tests {
             bullet_font_draws(&renderer, &theme, font.as_ref(), face, marker)
         };
         assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
-        assert!(draws(Some("Georgia"), "\u{2022}"));
-        assert!(!draws(Some("Georgia"), "\u{2713}"));
+        assert!(draws(Some("Liberation Sans"), "\u{2022}"));
+        assert!(!draws(Some("Liberation Sans"), "\u{2713}"));
         assert!(draws(Some("Wingdings"), "\u{2713}"));
         assert!(draws(Some("Futura"), "\u{2713}"));
         assert!(draws(None, "\u{2713}"));
+    }
+
+    #[test]
+    fn a_substitute_bullet_face_hides_only_private_use_markers() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Calibri", false, false, CARLITO)
+            .unwrap();
+        renderer
+            .register_font("Carlito", false, false, CARLITO)
+            .unwrap();
+        let theme = Theme::default();
+        let draws = |family: &str, marker: &str| {
+            let face = renderer
+                .resolve_face(family, false, false, &mut SubstitutionLog::default())
+                .unwrap()
+                .id;
+            assert!(!renderer.fonts.covers(face, '\u{25a0}').unwrap());
+            let font = BulletFont::Typeface(family.to_owned());
+            bullet_font_draws(&renderer, &theme, Some(&font), face, marker)
+        };
+        assert!(draws("Calibri", "\u{25a0}"));
+        assert!(draws("Calibri", "\u{2022}"));
+        assert!(!draws("Calibri", "\u{e83a}"));
+        assert!(!draws("Carlito", "\u{25a0}"));
+    }
+
+    #[test]
+    fn a_light_face_under_its_legacy_family_name_is_the_real_font() {
+        const SELAWIK_LIGHT: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/Selawik-Light.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Selawik Light", false, false, SELAWIK_LIGHT)
+            .unwrap();
+        let theme = Theme::default();
+        let face = renderer
+            .resolve_face(
+                "Selawik Light",
+                false,
+                false,
+                &mut SubstitutionLog::default(),
+            )
+            .unwrap()
+            .id;
+        assert!(!renderer.fonts.covers(face, '\u{2713}').unwrap());
+        let font = BulletFont::Typeface("Selawik Light".to_owned());
+        let draws = |marker: &str| bullet_font_draws(&renderer, &theme, Some(&font), face, marker);
+        assert!(!draws("\u{2713}"));
+        assert!(draws("\u{2022}"));
     }
 
     #[test]
