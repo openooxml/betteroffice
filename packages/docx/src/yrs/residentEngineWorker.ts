@@ -1268,6 +1268,22 @@ let openedViaSource = false;
 let openedParsed = false;
 let saveWasmPreloadTimer: ReturnType<typeof setTimeout> | null = null;
 let saveWasmPreload: Promise<void> | null = null;
+let saveWarmupTimer: ReturnType<typeof setTimeout> | null = null;
+let saveWarmupOwner: ResidentEngineSession | null = null;
+let saveWarmupAttempts = 0;
+let saveWarmupFinished = false;
+let saveWarmupRequestAt = Number.NEGATIVE_INFINITY;
+let saveWarmupInputAt = Number.NEGATIVE_INFINITY;
+let saveWarmupSaveReceivedAt: number | null = null;
+const saveWarmupStats: { saveDelayMs: number | null } = { saveDelayMs: null };
+interface SaveWarmup {
+  owner: ResidentEngineSession;
+  cancelled: boolean;
+  reject?: (error: unknown) => void;
+}
+let saveWarmup: SaveWarmup | null = null;
+const SAVE_WARMUP_IDLE_MS = 1_000;
+const SAVE_WARMUP_INPUT_IDLE_MS = 2_000;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -1400,9 +1416,11 @@ scope.onmessage = (
   event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
 ) => {
   const message = event.data;
+  interruptSaveWarmup(message.type);
   if (message.type === 'editModule') {
     // The queued warm waits for this message.
     resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+    scheduleSaveWarmup();
     return;
   }
   if (message.type === 'prepare-save') {
@@ -1410,6 +1428,7 @@ scope.onmessage = (
     return;
   }
   scheduler.submit(classify(message));
+  scheduleSaveWarmup();
 };
 scope.onmessageerror = () => resolveHostEditModule(null);
 
@@ -1949,6 +1968,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
     return;
   }
   if (request.type === 'save') {
+    if (saveWarmupSaveReceivedAt !== null) {
+      saveWarmupStats.saveDelayMs = performance.now() - saveWarmupSaveReceivedAt;
+      saveWarmupSaveReceivedAt = null;
+    }
     if (previewing) throw new SaveUnavailableError('Document worker is still opening');
     if (!session || (!openedSource && !openedParsed)) {
       throw new SaveUnavailableError('Document worker has no opened document to save');
@@ -3344,6 +3367,8 @@ function asciiProposalFontsUnchanged(
  */
 function destroySession(keepSurfaces = false): void {
   cancelSaveWasmPreload();
+  cancelSaveWarmup();
+  saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
@@ -3853,13 +3878,99 @@ function canPreloadSaveWasm(): boolean {
 }
 
 function scheduleSaveWasmPreload(): void {
-  if (saveWasmPreloadTimer !== null || saveWasmPreload || !canPreloadSaveWasm()) return;
+  if (!canPreloadSaveWasm()) return;
   const owner = session;
+  if (saveWasmPreload) {
+    void saveWasmPreload.then(() => prepareSaveWarmup(owner)).catch(() => {});
+    return;
+  }
+  if (saveWasmPreloadTimer !== null) return;
   saveWasmPreloadTimer = setTimeout(() => {
     saveWasmPreloadTimer = null;
     if (session !== owner || !canPreloadSaveWasm()) return;
-    void preloadSaveWasm().catch(() => {});
+    void preloadSaveWasm().then(() => prepareSaveWarmup(owner)).catch(() => {});
   }, 0);
+}
+
+function prepareSaveWarmup(owner: ResidentEngineSession | null): void {
+  if (!owner || session !== owner || !canPreloadSaveWasm()) return;
+  saveWarmupOwner = owner;
+  scheduleSaveWarmup();
+}
+
+function cancelSaveWarmup(): void {
+  if (saveWarmupTimer !== null) clearTimeout(saveWarmupTimer);
+  saveWarmupTimer = null;
+  if (!saveWarmup) return;
+  saveWarmup.cancelled = true;
+  saveWarmup.reject?.(new Error('Save warmup cancelled'));
+}
+
+function interruptSaveWarmup(type: string): void {
+  saveWarmupRequestAt = performance.now();
+  if (type === 'edit' || type.startsWith('command') || type === 'applyInput' || type === 'applyDelete') {
+    saveWarmupInputAt = saveWarmupRequestAt;
+  }
+  if (type === 'save') {
+    if (saveWarmup && !saveWarmup.cancelled) saveWarmupSaveReceivedAt = saveWarmupRequestAt;
+    saveWarmupFinished = true;
+  }
+  cancelSaveWarmup();
+}
+
+function saveWarmupCurrent(attempt: SaveWarmup): boolean {
+  return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
+    canPreloadSaveWasm();
+}
+
+function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!saveWarmupCurrent(attempt)) {
+      reject(new Error('Save warmup cancelled'));
+      return;
+    }
+    attempt.reject = reject;
+    scheduler.schedule({
+      kind: 'saveWarmup', version: scheduler.version, generation: scheduler.generation,
+      onStale: () => 'continue',
+      run: () => {
+        attempt.reject = undefined;
+        if (saveWarmupCurrent(attempt)) resolve();
+        else reject(new Error('Save warmup cancelled'));
+        return 'done';
+      },
+      cancel: () => reject(new Error('Save warmup cancelled')),
+      fail: reject,
+    });
+  });
+}
+
+function scheduleSaveWarmup(): void {
+  if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm()) return;
+  const owner = saveWarmupOwner;
+  const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
+    saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
+  saveWarmupTimer = setTimeout(() => {
+    saveWarmupTimer = null;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished) return;
+    const attempt: SaveWarmup = { owner, cancelled: false };
+    saveWarmup = attempt;
+    void yieldSaveWarmup(attempt).then(async () => {
+      if (!saveWarmupCurrent(attempt)) return;
+      saveWarmupAttempts += 1;
+      const { warmResidentSave } = await import('./residentSaveWarmup');
+      if (!saveWarmupCurrent(attempt)) return;
+      await warmResidentSave(() => yieldSaveWarmup(attempt));
+      if (!attempt.cancelled) saveWarmupFinished = true;
+    }).catch(() => {
+      if (!attempt.cancelled && session === owner) saveWarmupFinished = true;
+    }).finally(() => {
+      if (saveWarmup !== attempt) return;
+      saveWarmup = null;
+      scheduleSaveWarmup();
+    });
+  }, delay);
 }
 
 function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {

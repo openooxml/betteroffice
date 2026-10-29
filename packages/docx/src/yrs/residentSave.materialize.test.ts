@@ -9,6 +9,8 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
 import { createResidentEngineSession } from './residentEngineSession';
 import { saveResidentDocument, type ResidentSaveRecord } from './residentSave';
+import { warmResidentSave } from './residentSaveWarmup';
+import * as parseWasm from '../docx/parseWasm';
 import { sectionPackage } from './sectionTestPackage';
 import { sessionInternals } from './sessionInternals';
 import { structuralFixture, W, W14 } from './structuralSaveTestSupport';
@@ -47,6 +49,82 @@ function fixture(text = 'before table'): Uint8Array<ArrayBuffer> {
   parts.set('word/document.xml', toBytes(xml.replace('before table', text)));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
+
+it('warms the resident writer with a separate edited document and preserves the opened session', async () => {
+  const opened = open(fixture());
+  const paragraph = opened.session.paragraphs('body')[0]!;
+  const point = { story: 'body', paraId: paragraph.paraId, offset: 0 };
+  opened.session.insertText(point, 'first');
+  opened.session.addUndoBoundary();
+  opened.session.insertText(point, 'second');
+  opened.session.undo();
+  const state = opened.raw.encode_state();
+  const vector = opened.raw.encode_state_vector();
+  const identities = toBytes(opened.raw.paragraph_identities());
+  const history = toBytes(JSON.stringify({ undo: opened.raw.can_undo(), redo: opened.raw.can_redo() }));
+  const materialize = spyOn(opened.raw, 'materialize_docx');
+  const recordIds = spyOn(opened.raw, 'record_saved_paragraph_ids');
+  const writer = spyOn(parseWasm, 'writeDocxS13WithWarningsWire');
+  const create = spyOn(editWasm, 'createEditSession');
+  const heapLimit = spyOn(editWasm, 'setEditWasmHeapLimit');
+  const mutations = spyOn(opened.session, 'insertText');
+  let phases = 0;
+  try {
+    await warmResidentSave(async () => { phases += 1; });
+    expect(phases).toBeGreaterThan(8);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(heapLimit).not.toHaveBeenCalled();
+    expect(writer).toHaveBeenCalledTimes(1);
+    expect(writer.mock.calls[0]![0]).toContain('warm');
+    expect(opened.raw.encode_state()).toEqual(state);
+    expect(opened.raw.encode_state_vector()).toEqual(vector);
+    expect(toBytes(opened.raw.paragraph_identities())).toEqual(identities);
+    expect(toBytes(JSON.stringify({ undo: opened.raw.can_undo(), redo: opened.raw.can_redo() }))).toEqual(history);
+    expect(materialize).not.toHaveBeenCalled();
+    expect(recordIds).not.toHaveBeenCalled();
+    expect(mutations).not.toHaveBeenCalled();
+    expect(opened.session.redo()).toBe(true);
+    expect(opened.session.undo()).toBe(true);
+    expect(opened.session.undo()).toBe(true);
+    expect(opened.session.paragraphs('body')[0]!.text).toBe(paragraph.text);
+  } finally {
+    materialize.mockRestore();
+    recordIds.mockRestore();
+    writer.mockRestore();
+    create.mockRestore();
+    heapLimit.mockRestore();
+    mutations.mockRestore();
+  }
+});
+
+it('disposes the synthetic session when a save warmup phase is cancelled', async () => {
+  const original = editWasm.createEditSession;
+  const create = spyOn(editWasm, 'createEditSession');
+  const writer = spyOn(parseWasm, 'writeDocxS13WithWarningsWire');
+  let restoreFree: (() => void) | undefined;
+  let frees = 0;
+  let phases = 0;
+  try {
+    create.mockImplementation((clientId) => {
+      const raw = original(clientId);
+      const originalFree = raw.free.bind(raw);
+      const free = spyOn(raw, 'free').mockImplementation(() => { frees += 1; originalFree(); });
+      restoreFree = () => free.mockRestore();
+      return raw;
+    });
+    await expect(warmResidentSave(async () => {
+      phases += 1;
+      if (phases === 5) throw new Error('cancelled');
+    })).rejects.toThrow('cancelled');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(frees).toBe(1);
+    expect(writer).not.toHaveBeenCalled();
+  } finally {
+    create.mockRestore();
+    writer.mockRestore();
+    restoreFree?.();
+  }
+});
 
 for (const edit of ['text', 'section', 'no-section-change'] as const) {
   it(`materializes once on the first resident save and never on the second or third ${edit} save`, async () => {

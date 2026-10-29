@@ -100,9 +100,11 @@ export async function writeDocumentWithRust(
   selective?: RustSelectiveSave,
   determinism?: RustSaveDeterminism,
   paragraphIds?: RustParagraphIds,
-  skipMutations = false
+  skipMutations = false,
+  yieldSave?: () => Promise<void>
 ): Promise<RustSaveResult> {
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+  if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
     if (part.changed.length && paragraphPatchWriterVersionWire() !== PARAGRAPH_PATCH_WRITER_VERSION) {
       throw new Error(
@@ -118,6 +120,7 @@ export async function writeDocumentWithRust(
       now: new Date().toISOString(),
     } satisfies RustSaveDeterminism);
   validateDeterminism(fixed);
+  if (yieldSave) await yieldSave();
 
   const pkg = document.package;
   const request = {
@@ -152,6 +155,7 @@ export async function writeDocumentWithRust(
   engineProgress();
   const wire = withSessionRevisionIds(request, () => JSON.stringify(request));
   engineProgress();
+  if (yieldSave) await yieldSave();
   const { bytes, warnings } = writeDocxS13WithWarningsWire(wire, new Uint8Array(originalBuffer));
   engineProgress();
   const buffer = exactArrayBuffer(bytes);

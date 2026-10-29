@@ -142,7 +142,8 @@ async function writeEditorDocument(
   capture: DocxSessionSave | null,
   comments: Comment[],
   injectedMarkers: boolean,
-  record?: EditorSaveRecord
+  record?: EditorSaveRecord,
+  yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
@@ -159,7 +160,7 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false);
+    const { bytes } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
     return bytes.buffer as ArrayBuffer;
   }
   const commentsChanged = keys.comments !== source.keys.comments;
@@ -177,7 +178,8 @@ async function writeEditorDocument(
     {},
     patches,
     true,
-    () => true
+    () => true,
+    yieldSave
   );
   const saved = bytes.buffer as ArrayBuffer;
   saves.saved = saved;
@@ -242,10 +244,13 @@ export async function saveEditorDocument(
   session: YrsSession,
   projected: Document,
   comments: Comment[],
-  record?: EditorSaveRecord
+  record?: EditorSaveRecord,
+  yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
+  if (yieldSave) await yieldSave();
   const capture = projected.originalBuffer ? captureSessionSave(session) : null;
   engineProgress();
+  if (yieldSave) await yieldSave();
   const document = withSavedComments(projected, session, comments, record);
   engineProgress();
 
@@ -262,6 +267,7 @@ export async function saveEditorDocument(
     capture,
     comments,
     injectedReplies || injectedTCReplies,
-    record
+    record,
+    yieldSave
   );
 }

@@ -42,6 +42,7 @@ beforeAll(async () => {
       'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
+    './residentSaveWarmup': 'export const warmResidentSave = async () => {};',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
