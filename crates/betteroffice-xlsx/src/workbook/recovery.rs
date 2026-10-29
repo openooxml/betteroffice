@@ -1854,6 +1854,94 @@ mod tests {
         assert_eq!(workbook.recovery_checkpoint(0, None).unwrap(), bytes);
     }
 
+    #[test]
+    fn recovery_refuses_non_finite_proposal_and_history_cells_without_mutation() {
+        let mut workbook = Workbook::from_model(model()).unwrap();
+        let options = CalculationOptions::default();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "7", options)
+            .unwrap();
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 1), "8", options)
+            .unwrap();
+        workbook.undo(options).unwrap();
+        let proposal = workbook
+            .propose(
+                ProposalRequest {
+                    agent_id: "agent".into(),
+                    note: None,
+                    edits: vec![crate::ProposalEditInput {
+                        sheet: SheetId(0),
+                        cell: CellRef::new(0, 0),
+                        input: "9".into(),
+                        number_format: None,
+                    }],
+                },
+                options,
+            )
+            .unwrap();
+        let original = workbook
+            .recovery_checkpoint_with_history(2, None, true)
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let version = workbook.version();
+        let before_model = workbook.model.clone();
+        let before_history = encoded(&workbook.undo);
+        let before_proposals = workbook.proposals().to_vec();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for target in 0..4 {
+                let forged = rewrite_metadata(&original, |checkpoint| {
+                    let value = CellValue::Number { value };
+                    match target {
+                        0 => checkpoint.proposals[0].edits[0].old_state.value = value,
+                        1 | 2 => {
+                            let (undo, redo) =
+                                checkpoint.history.as_ref().unwrap().undo.recovery_stacks();
+                            let (mut undo, mut redo) = (undo.to_vec(), redo.to_vec());
+                            let stack = if target == 1 { &mut undo } else { &mut redo };
+                            let cell = stack
+                                .iter_mut()
+                                .flatten()
+                                .find_map(|op| match op {
+                                    Op::SetCell { cell, .. } => Some(cell),
+                                    _ => None,
+                                })
+                                .unwrap();
+                            cell.value = value;
+                            checkpoint.history.as_mut().unwrap().undo =
+                                UndoStack::from_recovery_stacks(undo, redo);
+                        }
+                        _ => checkpoint.proposals[0].ghosts.push(ProposalGhost {
+                            sheet: 0,
+                            row: 0,
+                            col: 0,
+                            old_text: "7".into(),
+                            new_text: "9".into(),
+                            alignment_value: value,
+                        }),
+                    }
+                });
+                assert_eq!(digest(&forged[41..])[..], forged[9..41]);
+                assert!(matches!(Workbook::restore_recovery_checkpoint(&forged),
+                    Err(Error::InvalidRequest(message)) if message == "non-finite recovery number"));
+                assert_eq!(workbook.version(), version);
+                assert_eq!(workbook.model, before_model);
+                assert_eq!(encoded(&workbook.undo), before_history);
+                assert_eq!(workbook.proposals(), before_proposals.as_slice());
+                assert_eq!(workbook.save().unwrap(), saved);
+            }
+        }
+        let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&original).unwrap();
+        restored
+            .accept_proposal(&proposal.id, false, options)
+            .unwrap();
+        workbook
+            .accept_proposal(&proposal.id, false, options)
+            .unwrap();
+        assert_eq!(restored.model, workbook.model);
+        assert_eq!(restored.save().unwrap(), workbook.save().unwrap());
+    }
+
     fn framed(version: u8, payload: &[u8]) -> Vec<u8> {
         let mut framed = MAGIC.to_vec();
         framed.push(version);

@@ -68,6 +68,22 @@ fn range() -> S<CellRange> {
     })
 }
 
+fn filter_range() -> S<CellRange> {
+    let at = || {
+        (0..MAX_ROWS, 0..MAX_COLS, any::<bool>(), any::<bool>()).prop_map(
+            |(row, col, abs_row, abs_col)| CellRef {
+                row,
+                col,
+                abs_row,
+                abs_col,
+            },
+        )
+    };
+    (at(), at())
+        .prop_map(|(start, end)| CellRange::new(start, end))
+        .boxed()
+}
+
 fn value() -> S<CellValue> {
     prop_oneof![
         Just(CellValue::Empty),
@@ -518,7 +534,7 @@ fn op(tag: u8) -> S<Op> {
         }),
         15 => operation!(SetAutoFilter {
             sheet: sheet(),
-            range: opt(range())
+            range: opt(filter_range())
         }),
         16 => operation!(RestoreAutoFilter {
             sheet: sheet(),

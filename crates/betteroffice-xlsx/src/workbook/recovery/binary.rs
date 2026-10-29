@@ -1,6 +1,6 @@
 use crate::authority::snapshot::{Codec, EditedChart, edited_charts};
 use crate::snapshot::SnapshotError;
-use xlsx_model::{CellFormat, ErrorValue, NumberFormat};
+use xlsx_model::{CellFormat, Color, ErrorValue, Font, NumberFormat};
 use xlsx_ops::{BorderPatch, KeptFacets, PreservedCellFormat, StyleProperty};
 
 use super::*;
@@ -11,7 +11,7 @@ mod properties;
 mod tests;
 
 macro_rules! record_codec {
-    ($ty:ident = $tag:literal { $($field:ident),+ $(,)? } $(; $default:ident = $value:expr)*) => {
+    ($ty:ident = $tag:literal { $($field:ident),+ $(,)? } $(; $default:ident = $value:expr)* $(=> $validate:ident)?) => {
         impl Codec for $ty {
             fn write(&self, w: &mut Writer) {
                 let Self { $($field),+ $(, $default: _)* } = self;
@@ -23,7 +23,9 @@ macro_rules! record_codec {
                 if r.u8()? != $tag {
                     return Err(SnapshotError::new(concat!("invalid recovery ", stringify!($ty))));
                 }
-                Ok(Self { $($field: Codec::read(r)?),+ $(, $default: $value)* })
+                let value = Self { $($field: Codec::read(r)?),+ $(, $default: $value)* };
+                $($validate(&value)?;)?
+                Ok(value)
             }
         }
     };
@@ -47,7 +49,7 @@ macro_rules! enum_codec {
 }
 
 macro_rules! tagged_codec {
-    ($ty:ident { $($variant:ident = $tag:literal $( { $($field:ident),+ $(,)? } )?),+ $(,)? }) => {
+    ($ty:ident { $($variant:ident = $tag:literal $( { $($field:ident),+ $(,)? } )?),+ $(,)? } $(=> $validate:ident)?) => {
         impl Codec for $ty {
             fn write(&self, w: &mut Writer) {
                 match self {
@@ -59,10 +61,12 @@ macro_rules! tagged_codec {
             }
 
             fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
-                match r.u8()? {
-                    $($tag => Ok(Self::$variant $( { $($field: Codec::read(r)?),+ } )?),)+
-                    _ => Err(SnapshotError::new(concat!("invalid recovery ", stringify!($ty)))),
-                }
+                let value = match r.u8()? {
+                    $($tag => Self::$variant $( { $($field: Codec::read(r)?),+ } )?,)+
+                    _ => return Err(SnapshotError::new(concat!("invalid recovery ", stringify!($ty)))),
+                };
+                $($validate(&value)?;)?
+                Ok(value)
             }
         }
     };
@@ -77,10 +81,10 @@ record_codec!(RecoveryHeader = 0 {
     client_id, next_sheet_id
 });
 record_codec!(RecoveryDiagnostics = 0 { cycle_cells, limited_cells, budget_exhausted });
-record_codec!(CalculationOptions = 0 { now_serial });
+record_codec!(CalculationOptions = 0 { now_serial } => validate_calculation_options);
 record_codec!(CellAddress = 0 { sheet, cell });
 record_codec!(RecoveryCalculation = 0 { cells, deleted_cells, arrays, styles, hidden_sizes });
-record_codec!(RecoveryHiddenSizes = 0 { cols, rows });
+record_codec!(RecoveryHiddenSizes = 0 { cols, rows } => validate_hidden_sizes);
 record_codec!(RecoveryAxes = 0 { rows, cols });
 record_codec!(RecoveryHistory = 0 { undo, sheet_order, preserved_undo, preserved_redo });
 record_codec!(RecoveryPreservedHistory = 0 { before, after });
@@ -95,7 +99,7 @@ record_codec!(ProposalGhost = 0 { sheet, row, col, old_text, new_text, alignment
 record_codec!(StylePatch = 0 {
     bold, italic, strikethrough, font_family, font_size, text_color, fill_color, border,
     horizontal_alignment, vertical_alignment, text_wrapping, clear
-});
+} => validate_style_patch);
 record_codec!(BorderPatch = 0 { preset, style, color });
 record_codec!(CapturedFormat = 0 { rows, columns, formats, kept, source_styles, source_formats });
 record_codec!(KeptFacets = 0 {
@@ -105,7 +109,7 @@ record_codec!(KeptFacets = 0 {
 record_codec!(PreservedCellFormat = 0 { format, source_xf, derived_from });
 record_codec!(CellFormat = 0 {
     font, fill, border, number_format, alignment, protection, xf_id, quote_prefix, pivot_button
-});
+} => validate_cell_format);
 
 enum_codec!(StyleProperty {
     Bold = 0, Italic = 1, Strikethrough = 2, FontFamily = 3, FontSize = 4, TextColor = 5,
@@ -124,13 +128,103 @@ enum_codec!(ErrorValue {
 });
 tagged_codec!(CellValue {
     Empty = 0, Number = 1 { value }, Text = 2 { value }, Bool = 3 { value }, Error = 4 { value },
-});
+} => validate_cell_value);
 tagged_codec!(NumberFormat { Builtin = 0 { id }, Custom = 1 { pattern } });
 tagged_codec!(NumberFormatMutation {
     Automatic = 0, PlainText = 1, Number = 2, Percent = 3, Scientific = 4, Currency = 5,
     Date = 6, Time = 7, Custom = 8 { pattern }, IncreaseDecimal = 9, DecreaseDecimal = 10,
 });
 tagged_codec!(Provenance { User = 0, Agent = 1 { id }, Remote = 2 { actor } });
+
+fn finite(value: f64) -> SnapshotResult<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(SnapshotError::new("non-finite recovery number"))
+    }
+}
+
+fn finite_option(value: Option<f64>) -> SnapshotResult<()> {
+    value.map_or(Ok(()), finite)
+}
+
+fn read_finite_option(r: &mut Reader<'_>) -> SnapshotResult<Option<f64>> {
+    let value = Codec::read(r)?;
+    finite_option(value)?;
+    Ok(value)
+}
+
+fn validate_cell_value(value: &CellValue) -> SnapshotResult<()> {
+    match value {
+        CellValue::Number { value } => finite(*value),
+        CellValue::Empty
+        | CellValue::Text { .. }
+        | CellValue::Bool { .. }
+        | CellValue::Error { .. } => Ok(()),
+    }
+}
+
+fn validate_calculation_options(options: &CalculationOptions) -> SnapshotResult<()> {
+    finite_option(options.now_serial)
+}
+
+fn validate_hidden_sizes(sizes: &RecoveryHiddenSizes) -> SnapshotResult<()> {
+    sizes
+        .cols
+        .values()
+        .chain(sizes.rows.values())
+        .try_for_each(|value| finite(*value))
+}
+
+fn validate_style_patch(patch: &StylePatch) -> SnapshotResult<()> {
+    finite_option(patch.font_size)
+}
+
+fn validate_color(color: &Color) -> SnapshotResult<()> {
+    match color {
+        Color::Theme { tint, .. } => finite(*tint),
+        Color::Rgb(_) | Color::Indexed(_) | Color::Auto => Ok(()),
+    }
+}
+
+fn validate_font(font: &Font) -> SnapshotResult<()> {
+    finite_option(font.size_pt)?;
+    font.color.as_ref().map_or(Ok(()), validate_color)
+}
+
+fn validate_fill(fill: &Fill) -> SnapshotResult<()> {
+    match fill {
+        Fill::None => Ok(()),
+        Fill::Solid(color) => validate_color(color),
+        Fill::Pattern { fg, bg, .. } => fg.iter().chain(bg.iter()).try_for_each(validate_color),
+    }
+}
+
+fn validate_border(border: &Border) -> SnapshotResult<()> {
+    [&border.left, &border.right, &border.top, &border.bottom]
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| edge.color.as_ref())
+        .try_for_each(validate_color)
+}
+
+fn validate_cell_format(format: &CellFormat) -> SnapshotResult<()> {
+    validate_font(&format.font)?;
+    validate_fill(&format.fill)?;
+    validate_border(&format.border)
+}
+
+fn read_filter_range(r: &mut Reader<'_>) -> SnapshotResult<Option<CellRange>> {
+    let range = Option::<CellRange>::read(r)?;
+    range
+        .map(|range| {
+            validate_cell_ref(range.start)
+                .map_err(|error| SnapshotError::new(error.to_string()))?;
+            validate_cell_ref(range.end).map_err(|error| SnapshotError::new(error.to_string()))?;
+            Ok(CellRange::new(range.start, range.end))
+        })
+        .transpose()
+}
 
 impl<A: Codec, B: Codec, C: Codec> Codec for (A, B, C) {
     fn write(&self, w: &mut Writer) {
@@ -198,6 +292,9 @@ impl Codec for Stylesheet {
         styles.indexed_colors = Codec::read(r)?;
         styles.dxfs = Codec::read(r)?;
         styles.restore_recovery_provenance(Codec::read(r)?, Codec::read(r)?, Codec::read(r)?);
+        styles.fonts.iter().try_for_each(validate_font)?;
+        styles.fills.iter().try_for_each(validate_fill)?;
+        styles.borders.iter().try_for_each(validate_border)?;
         Ok(styles)
     }
 }
@@ -494,7 +591,7 @@ impl Codec for Op {
             5 => Self::SetColWidth {
                 sheet: Codec::read(r)?,
                 col: Codec::read(r)?,
-                width: Codec::read(r)?,
+                width: read_finite_option(r)?,
             },
             6 => Self::SetColVisibility {
                 sheet: Codec::read(r)?,
@@ -504,13 +601,13 @@ impl Codec for Op {
             7 => Self::RestoreColDimension {
                 sheet: Codec::read(r)?,
                 col: Codec::read(r)?,
-                width: Codec::read(r)?,
-                hidden_width: Codec::read(r)?,
+                width: read_finite_option(r)?,
+                hidden_width: read_finite_option(r)?,
             },
             8 => Self::SetRowHeight {
                 sheet: Codec::read(r)?,
                 row: Codec::read(r)?,
-                height: Codec::read(r)?,
+                height: read_finite_option(r)?,
             },
             9 => Self::SetRowVisibility {
                 sheet: Codec::read(r)?,
@@ -520,8 +617,8 @@ impl Codec for Op {
             10 => Self::RestoreRowDimension {
                 sheet: Codec::read(r)?,
                 row: Codec::read(r)?,
-                height: Codec::read(r)?,
-                hidden_height: Codec::read(r)?,
+                height: read_finite_option(r)?,
+                hidden_height: read_finite_option(r)?,
             },
             11 => Self::SetFreezePane {
                 sheet: Codec::read(r)?,
@@ -541,7 +638,7 @@ impl Codec for Op {
             },
             15 => Self::SetAutoFilter {
                 sheet: Codec::read(r)?,
-                range: Codec::read(r)?,
+                range: read_filter_range(r)?,
             },
             16 => Self::RestoreAutoFilter {
                 sheet: Codec::read(r)?,

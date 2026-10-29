@@ -618,3 +618,168 @@ fn stylesheet_recovery_keeps_provenance_and_legacy_facet_markers() {
     assert_eq!(restored, styles);
     assert_eq!(restored.recovery_provenance(), styles.recovery_provenance());
 }
+
+#[test]
+fn recovery_rejects_non_finite_numbers_in_all_float_fields() {
+    fn rejected<T: Codec>(value: &T) {
+        let bytes = encoded(value);
+        let failure = T::read(&mut Reader::new(&bytes)).err().unwrap();
+        assert_eq!(failure.to_string(), "non-finite recovery number");
+    }
+
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        rejected(&CellValue::Number { value });
+        rejected(&CalculationOptions {
+            now_serial: Some(value),
+        });
+        for sizes in [
+            RecoveryHiddenSizes {
+                cols: BTreeMap::from([(0, value)]),
+                rows: BTreeMap::new(),
+            },
+            RecoveryHiddenSizes {
+                cols: BTreeMap::new(),
+                rows: BTreeMap::from([(0, value)]),
+            },
+        ] {
+            rejected(&sizes);
+        }
+        let sheet = SheetId(0);
+        for op in [
+            Op::SetColWidth {
+                sheet,
+                col: 0,
+                width: Some(value),
+            },
+            Op::RestoreColDimension {
+                sheet,
+                col: 0,
+                width: Some(value),
+                hidden_width: None,
+            },
+            Op::RestoreColDimension {
+                sheet,
+                col: 0,
+                width: None,
+                hidden_width: Some(value),
+            },
+            Op::SetRowHeight {
+                sheet,
+                row: 0,
+                height: Some(value),
+            },
+            Op::RestoreRowDimension {
+                sheet,
+                row: 0,
+                height: Some(value),
+                hidden_height: None,
+            },
+            Op::RestoreRowDimension {
+                sheet,
+                row: 0,
+                height: None,
+                hidden_height: Some(value),
+            },
+        ] {
+            rejected(&op);
+        }
+        rejected(&StylePatch {
+            font_size: Some(value),
+            ..StylePatch::default()
+        });
+        let tint = Color::Theme {
+            idx: 0,
+            tint: value,
+        };
+        for field in 0..9 {
+            let mut format = CellFormat::default();
+            match field {
+                0 => format.font.size_pt = Some(value),
+                1 => format.font.color = Some(tint.clone()),
+                2 => format.fill = Fill::Solid(tint.clone()),
+                3 => {
+                    format.fill = Fill::Pattern {
+                        pattern: xlsx_model::PatternType::LightUp,
+                        fg: Some(tint.clone()),
+                        bg: None,
+                    }
+                }
+                4 => {
+                    format.fill = Fill::Pattern {
+                        pattern: xlsx_model::PatternType::LightUp,
+                        fg: None,
+                        bg: Some(tint.clone()),
+                    }
+                }
+                edge => {
+                    let edge = match edge {
+                        5 => &mut format.border.left,
+                        6 => &mut format.border.right,
+                        7 => &mut format.border.top,
+                        _ => &mut format.border.bottom,
+                    };
+                    *edge = Some(BorderEdge {
+                        style: BorderStyle::Thin,
+                        color: Some(tint.clone()),
+                    });
+                }
+            }
+            rejected(&format);
+            let mut capture = captured();
+            capture.formats[0] = format.clone();
+            rejected(&capture);
+            let mut capture = captured();
+            capture.source_formats[0].format = format.clone();
+            rejected(&capture);
+            let mut styles = Stylesheet::default();
+            styles.fonts.push(format.font);
+            styles.fills.push(format.fill);
+            styles.borders.push(format.border);
+            rejected(&styles);
+        }
+    }
+}
+
+#[test]
+fn recovery_float_validation_leaves_shared_snapshot_codecs_unchanged() {
+    let font = Font {
+        size_pt: Some(f64::NAN),
+        ..Font::default()
+    };
+    let bytes = encoded(&font);
+    let mut reader = Reader::new(&bytes);
+    assert!(Font::read(&mut reader).unwrap().size_pt.unwrap().is_nan());
+    reader.finish().unwrap();
+    for value in [f64::MIN, -0.0, f64::MIN_POSITIVE, f64::MAX] {
+        round_trip(CellValue::Number { value });
+        round_trip(CalculationOptions {
+            now_serial: Some(value),
+        });
+    }
+}
+
+#[test]
+fn recovery_auto_filter_ranges_keep_json_grid_checks() {
+    for at in [CellRef::new(MAX_ROWS, 0), CellRef::new(0, MAX_COLS)] {
+        let op = Op::SetAutoFilter {
+            sheet: SheetId(0),
+            range: Some(CellRange::new(CellRef::new(0, 0), at)),
+        };
+        assert!(Op::read(&mut Reader::new(&encoded(&op))).is_err());
+    }
+    let range = CellRange {
+        start: CellRef::new(4, 5),
+        end: CellRef::new(0, 1),
+    };
+    let op = Op::SetAutoFilter {
+        sheet: SheetId(0),
+        range: Some(range),
+    };
+    assert_eq!(
+        Op::read(&mut Reader::new(&encoded(&op))).unwrap(),
+        Op::SetAutoFilter {
+            sheet: SheetId(0),
+            range: Some(CellRange::new(range.start, range.end))
+        }
+    );
+}
