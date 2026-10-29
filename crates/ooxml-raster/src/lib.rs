@@ -1,5 +1,9 @@
 //! Shared tiny-skia raster helpers.
 
+mod glyph;
+
+pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
+
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_text::PathCmd;
 use tiny_skia::{Color, ColorU8, Path, PathBuilder, Pixmap};
