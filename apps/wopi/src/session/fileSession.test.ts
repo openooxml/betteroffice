@@ -1425,8 +1425,11 @@ describe("session safety regressions", () => {
       addToken(h, "tok-a", "writer");
       const viewer = await joinEditor(h, "tok-v", "view");
       const session = viewer.session;
+      const baselineGeneration = session.baselineGeneration;
+      expect(baselineGeneration).toBe(1);
       const events: unknown[] = [];
-      session.on("rejoinRequired", (event) => events.push(event));
+      const generations: number[] = [];
+      session.on("rejoinRequired", (event) => { events.push(event); generations.push(session.baselineGeneration); });
       const external = await openFreshClient("xlsx", sourceBytes("xlsx"), nextId());
       let client: TestClient | null = null;
       try {
@@ -1444,12 +1447,14 @@ describe("session safety regressions", () => {
         const writer = await joinEditor(h, "tok-a");
         expect(changedUnderLock).toBe(true);
         expect(events).toEqual([{ reason: "sourceChanged" }]);
+        expect(generations).toEqual([baselineGeneration + 1]);
         client = await clientFor(session, writer.joinPayload, bytes);
         expect(client.contains("external-before-lock")).toBe(true);
         edit(session, writer.user.id, client, "writer-after-lock ", 1);
         await session.requestSave(writer.user.id);
         expect(await savedContains(h, "external-before-lock")).toBe(true);
         expect(await savedContains(h, "writer-after-lock")).toBe(true);
+        expect(session.baselineGeneration).toBe(baselineGeneration + 1);
         expect(h.calls.filter((call) => call.pathname.endsWith("/contents") && call.override === null)).toHaveLength(2);
       } finally {
         external.destroy();

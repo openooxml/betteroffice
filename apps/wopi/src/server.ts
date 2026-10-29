@@ -13,6 +13,7 @@ import { CollabRelay, findByHandle, isSessionUserAuthorized } from "./relay/rela
 import { SessionError } from "./session/fileSession";
 import { SessionRegistry } from "./session/registry";
 import { encodeJoinPayload, sourceContentType } from "./sessionApi";
+import { BASELINE_GENERATION_HEADER, BASELINE_GENERATION_PROTOCOL, parseBaselineGeneration } from "./baseline";
 
 export interface WopiServerDeps {
   config: WopiConfig;
@@ -264,6 +265,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
           "Content-Type": sourceContentType(session.format),
           "Content-Length": String(bytes.byteLength),
           "Cache-Control": "no-store",
+          [BASELINE_GENERATION_HEADER]: String(session.baselineGeneration),
           ...SECURITY_HEADERS,
         },
       });
@@ -272,7 +274,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);
       const replica = session.replica;
       if (!replica) return typedError("closed", 409);
-      return json(encodeJoinPayload(replica.joinPayload()), 200, { "Cache-Control": "no-store" });
+      return json({ ...encodeJoinPayload(replica.joinPayload()), baselineGeneration: session.baselineGeneration }, 200, { "Cache-Control": "no-store" });
     }
     if (path === "/api/session/save") {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
@@ -306,7 +308,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
     }
     if (path === "/api/session/events") {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);
-      return eventsResponse(session, user.id);
+      return eventsResponse(session, user.id, parseBaselineGeneration(request.headers.get(BASELINE_GENERATION_HEADER)));
     }
     return respond("Not Found", "text/plain; charset=utf-8", 404);
   };
@@ -332,10 +334,13 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (protocols[0] !== "bo-wopi.v1" || !protocols[1]) return typedError("unauthorized", 401);
       const resolved = ensure().relay.resolve(protocols[1]);
       if (!resolved) return typedError("unauthorized", 401);
+      const baselineGeneration = parseBaselineGeneration(protocols[2]?.startsWith(BASELINE_GENERATION_PROTOCOL)
+        ? protocols[2].slice(BASELINE_GENERATION_PROTOCOL.length) : null);
+      if (baselineGeneration === null) return typedError("invalidBaselineGeneration", 400);
       if (!server) return typedError("upgradeUnavailable", 503);
       const upgraded = server.upgrade(request, {
         headers: { "Sec-WebSocket-Protocol": "bo-wopi.v1" },
-        data: { handle: protocols[1] },
+        data: { handle: protocols[1], baselineGeneration },
       });
       if (!upgraded) return typedError("badRequest", 400);
       return undefined as unknown as Response;
@@ -353,7 +358,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
   });
 }
 
-function eventsResponse(session: import("./session/fileSession").FileSession, userId: string): Response {
+function eventsResponse(session: import("./session/fileSession").FileSession, userId: string, baselineGeneration: number | null): Response {
   const encoder = new TextEncoder();
   const unsubscribes: Array<() => void> = [];
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
@@ -386,6 +391,11 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
   const stream = new ReadableStream<Uint8Array>({
     start(ctrl) {
       controller = ctrl;
+      if (baselineGeneration !== session.baselineGeneration) {
+        send("rejoinRequired", { reason: "sourceChanged" });
+        end();
+        return;
+      }
       try {
         ctrl.enqueue(encoder.encode(": connected\n\n"));
       } catch {}

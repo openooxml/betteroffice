@@ -1,12 +1,13 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 
 import { generateKeyPair } from "./proof";
-import { createHandler, startServer } from "./server";
+import { createHandler, startServer, type UpgradeServer } from "./server";
 import { initEngines } from "./replica/engines";
 import { openFreshClient, openTestClient, sourceBytes } from "../test/replica/clients";
 import { addToken, makeHarness, SRC, type Harness } from "../test/session/harness";
 import { decodeJoinPayload } from "./sessionApi";
 import { SessionRegistry } from "./session/registry";
+import { BASELINE_GENERATION_HEADER, BASELINE_GENERATION_PROTOCOL } from "./baseline";
 
 const TOKEN = "SECRETTOKEN-routes-9f8e7d6c";
 const TOKEN_B = "SECRETTOKEN-routes-b-1a2b3c";
@@ -252,7 +253,11 @@ describe("session API", () => {
 
     const join = await fetch(`${s.base}/api/session/join`, { headers: auth(config) });
     expect(join.status).toBe(200);
-    const payload = decodeJoinPayload((await join.json()) as never);
+    const encoded = (await join.json()) as { baselineGeneration: number };
+    expect(encoded.baselineGeneration).toBe(s.h.registry.list()[0]!.baselineGeneration);
+    expect(encoded.baselineGeneration).toBe(1);
+    expect(source.headers.get(BASELINE_GENERATION_HEADER)).toBe(String(encoded.baselineGeneration));
+    const payload = decodeJoinPayload(encoded as never);
     const client = await openTestClient(payload, bytes, 990001);
     try {
       expect(client.format).toBe("xlsx");
@@ -260,6 +265,62 @@ describe("session API", () => {
       client.destroy();
     }
     expectNoToken(s);
+  });
+
+  test("WebSocket upgrade requires a valid baseline generation in the third subprotocol", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "user-a");
+    const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "edit" });
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const upgrades: unknown[] = [];
+    const server: UpgradeServer = { upgrade: (_request, options) => { upgrades.push(options); return true; } };
+    const request = (protocol: string) => new Request("https://office.example.com/collab", {
+      headers: { "Sec-WebSocket-Protocol": `bo-wopi.v1, ${a.user.id}${protocol ? `, ${protocol}` : ""}` },
+    });
+    try {
+      const invalidProtocols = [
+        "", "wrong.1", "1",
+        ...["", "-1", "01", "1.0", "1e0", "NaN", "9007199254740992"].map((value) => `${BASELINE_GENERATION_PROTOCOL}${value}`),
+        `wrong, ${BASELINE_GENERATION_PROTOCOL}${a.session.baselineGeneration}`,
+      ];
+      for (const protocol of invalidProtocols) {
+        const response = await handler(request(protocol), server);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: { kind: "invalidBaselineGeneration" } });
+      }
+      expect(upgrades).toEqual([]);
+      expect(await handler(request(`${BASELINE_GENERATION_PROTOCOL}${a.session.baselineGeneration}`), server)).toBeUndefined();
+      expect(upgrades).toEqual([{
+        headers: { "Sec-WebSocket-Protocol": "bo-wopi.v1" },
+        data: { handle: a.user.id, baselineGeneration: a.session.baselineGeneration },
+      }]);
+    } finally {
+      a.session.abandon();
+    }
+  });
+
+  test("missing or malformed event stream generations require rejoining immediately", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "user-a");
+    const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "view" });
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    try {
+      for (const value of [null, "", "-1", "01", "1.0", "9007199254740992"]) {
+        const headers = new Headers({ Authorization: `Bearer ${a.user.id}` });
+        if (value !== null) headers.set(BASELINE_GENERATION_HEADER, value);
+        const response = await handler(new Request("https://office.example.com/api/session/events", { headers }));
+        const reader = response.body!.getReader();
+        try {
+          expect(response.status).toBe(200);
+          expect(new TextDecoder().decode((await reader.read()).value)).toBe('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n');
+          expect((await reader.read()).done).toBe(true);
+        } finally {
+          await reader.cancel();
+        }
+      }
+    } finally {
+      a.session.abandon();
+    }
   });
 
   for (const invalidation of ["expiry", "removal", "host rejection"] as const) {
@@ -276,10 +337,10 @@ describe("session API", () => {
       const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: invalidation === "expiry" ? h.clock.t + 10000 : 0, mode: "edit" });
       const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "edit" });
       const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
-      const headers = { Authorization: `Bearer ${a.user.id}` };
+      const headers = { Authorization: `Bearer ${a.user.id}`, [BASELINE_GENERATION_HEADER]: String(a.session.baselineGeneration) };
       const request = (path: string, method = "GET") => handler(new Request(`https://office.example.com${path}`, { method, headers }));
       const closed: number[] = [];
-      handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
+      handler.relay.websocket.open({ data: { handle: a.user.id, baselineGeneration: a.session.baselineGeneration }, send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
       expect((await request("/api/session/source")).status).toBe(200);
       const events = await request("/api/session/events");
       const reader = events.body!.getReader();
@@ -315,12 +376,12 @@ describe("session API", () => {
         }
         let upgrades = 0;
         const upgrade = await handler(new Request("https://office.example.com/collab", {
-          headers: { "Sec-WebSocket-Protocol": `bo-wopi.v1, ${a.user.id}` },
+          headers: { "Sec-WebSocket-Protocol": `bo-wopi.v1, ${a.user.id}, ${BASELINE_GENERATION_PROTOCOL}${a.session.baselineGeneration}` },
         }), { upgrade: () => { upgrades += 1; return true; } });
         expect(upgrade.status).toBe(401);
         expect(upgrades).toBe(0);
         const lateClosed: number[] = [];
-        handler.relay.websocket.open({ data: { handle: a.user.id }, send: (frame) => frame.length, close: (code) => { lateClosed.push(code!); } });
+        handler.relay.websocket.open({ data: { handle: a.user.id, baselineGeneration: a.session.baselineGeneration }, send: (frame) => frame.length, close: (code) => { lateClosed.push(code!); } });
         expect(lateClosed).toEqual([4401]);
         expect((await handler(new Request("https://office.example.com/api/session/source", { headers: { Authorization: `Bearer ${b.user.id}` } }))).status).toBe(200);
       } finally {
@@ -403,7 +464,7 @@ describe("session API", () => {
     expectNoToken(s);
   });
 
-  test("source replacement sends rejoinRequired to every existing SSE stream before closing", async () => {
+  test("source replacement ends existing and delayed stale SSE streams while current streams receive saves", async () => {
     const h = makeHarness();
     addToken(h, TOKEN, "viewer-a", { canWrite: false });
     addToken(h, TOKEN_B, "viewer-b", { canWrite: false });
@@ -412,9 +473,10 @@ describe("session API", () => {
       wopiSrc: SRC, accessToken, accessTokenTtl: 0, mode: "view",
     })));
     const session = viewers[0]!.session;
+    const baselineGeneration = session.baselineGeneration;
     const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
-    const requestEvents = (handle: string) => handler(new Request("https://office.example.com/api/session/events", {
-      headers: { Authorization: `Bearer ${handle}` },
+    const requestEvents = (handle: string, generation = session.baselineGeneration) => handler(new Request("https://office.example.com/api/session/events", {
+      headers: { Authorization: `Bearer ${handle}`, [BASELINE_GENERATION_HEADER]: String(generation) },
     }));
     const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
     const external = await openFreshClient("xlsx", sourceBytes("xlsx"), 990251);
@@ -446,10 +508,16 @@ describe("session API", () => {
         for (const token of [TOKEN, TOKEN_B, "SECRETTOKEN-routes-writer-rejoin"]) expect(text).not.toContain(token);
       }
 
+      const delayed = await requestEvents(viewers[0]!.user.id, baselineGeneration);
+      const delayedReader = delayed.body!.getReader();
+      readers.push(delayedReader);
+      expect(new TextDecoder().decode((await delayedReader.read()).value)).toBe('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n');
+      expect((await delayedReader.read()).done).toBe(true);
+
       const fresh = await requestEvents(viewers[0]!.user.id);
       const freshReader = fresh.body!.getReader();
       readers.push(freshReader);
-      expect((await freshReader.read()).done).toBe(false);
+      expect(new TextDecoder().decode((await freshReader.read()).value)).toBe(": connected\n\n");
       writerClient = await openTestClient(writer.joinPayload, session.sourceBytes!, 990351);
       expect(writerClient.contains("sse-replacement-baseline")).toBe(true);
       writerClient.edit("sse-replacement-live ", 1);
@@ -470,9 +538,10 @@ describe("session API", () => {
     const s = setup({ quirks: { timestampConflict: true, relativeUrlToken: true } });
     const config = await joined(s);
     const viewer = pageConfig(await tracked(s, await postPage(s, "view", TOKEN_B)));
+    const session = s.h.registry.list()[0]!;
     const controller = new AbortController();
     const eventsResponse = await fetch(`${s.base}/api/session/events`, {
-      headers: auth(viewer),
+      headers: { ...auth(viewer), [BASELINE_GENERATION_HEADER]: String(session.baselineGeneration) },
       signal: controller.signal,
     });
     expect(eventsResponse.status).toBe(200);
@@ -491,7 +560,6 @@ describe("session API", () => {
       expect(text).toContain(needle);
     };
 
-    const session = s.h.registry.list()[0]!;
     const payload = decodeJoinPayload(
       (await (await fetch(`${s.base}/api/session/join`, { headers: auth(config) })).json()) as never,
     );
