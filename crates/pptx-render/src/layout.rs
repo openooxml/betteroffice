@@ -11204,8 +11204,8 @@ mod tests {
         };
         let small_text = format!("{}x", "\u{1f600}".repeat(32_768));
         assert_eq!(utf16_len(&small_text), 65_537);
-        let large_text = format!("{}xx", "\u{1f600}".repeat(65_536));
-        assert_eq!(utf16_len(&large_text), 131_074);
+        let large_text = format!("{}xx", "\u{1f600}".repeat(131_072));
+        assert_eq!(utf16_len(&large_text), 262_146);
         let small_contexts = build(&small_text);
         let large_contexts = build(&large_text);
         let renderer = renderer();
@@ -11223,8 +11223,8 @@ mod tests {
         });
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 2.8,
-            "doubling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         for ((_, plain_bytes, plain_autofit), saved) in small_contexts
             .iter()
