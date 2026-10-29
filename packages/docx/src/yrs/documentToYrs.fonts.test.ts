@@ -181,7 +181,7 @@ function layoutRuns(blocks: readonly LayoutBlock[]): LayoutRun[] {
       : block.kind === 'shape' ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
         : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : [];
     return runs.flatMap(run => run.kind === 'image' && run.inlineShape
-      ? layoutRuns([run.inlineShape as ShapeBlock]) : [run]);
+      ? layoutRuns([{ ...(run.inlineShape as ShapeBlock), kind: 'shape' }]) : [run]);
   });
 }
 
