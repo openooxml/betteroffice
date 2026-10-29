@@ -2289,6 +2289,10 @@ pub(crate) struct TableRowIn {
     #[serde(default)]
     cells: Vec<TableCellIn>,
     #[serde(default)]
+    grid_before: Option<u64>,
+    #[serde(default)]
+    grid_after: Option<u64>,
+    #[serde(default)]
     is_header: Option<bool>,
     #[serde(default)]
     tracked_ins: Option<RevisionInfoIn>,
@@ -10036,12 +10040,12 @@ fn compute_cell_grid(block: &TableBlockIn, column_widths: &[f64]) -> Vec<GridCel
     for (row_index, row) in block.rows.iter().enumerate() {
         let occ = occupied.remove(&row_index).unwrap_or_default();
         let is_occ = |c: usize| occ.contains(&c);
-        let mut column_index = 0;
+        let mut column_index = row.grid_before.unwrap_or(0).min(16_384) as usize;
         while is_occ(column_index) {
             column_index += 1;
         }
         for (cell_index, cell) in row.cells.iter().enumerate() {
-            let col_span = cell.col_span.unwrap_or(1).max(1) as usize;
+            let col_span = cell.col_span.unwrap_or(1).clamp(1, 16_384) as usize;
             let row_span = cell.row_span.unwrap_or(1).max(1) as usize;
             let mut x = 0.0;
             for c in 0..column_index {
@@ -10478,10 +10482,12 @@ impl TablePaintPlan {
 
 /// Whether a grid cell is on the table's outer leading edge, whose border insets content.
 fn is_first_grid_column(g: &GridCell, block: &TableBlockIn, measure: &TableExtentIn) -> bool {
+    let row = &block.rows[g.row_index];
     if block.bidi == Some(true) {
-        g.column_index + g.col_span >= measure.column_widths.len()
+        g.column_index + g.col_span + row.grid_after.unwrap_or(0).min(16_384) as usize
+            >= measure.column_widths.len()
     } else {
-        g.column_index == 0
+        g.column_index == row.grid_before.unwrap_or(0).min(16_384) as usize
     }
 }
 
