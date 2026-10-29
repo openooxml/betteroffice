@@ -120,7 +120,7 @@ pub struct DeckUndoManager {
 #[cfg(any(feature = "engine", test))]
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct HistoryReceipt {
+pub struct HistoryReceipt {
     pub applied: bool,
     pub changed_slide_ids: BTreeSet<String>,
     pub deck_size_changed: bool,
@@ -283,7 +283,7 @@ impl DeckSession {
         Ok(())
     }
 
-    pub(crate) fn history_step(&self, redo: bool) -> EditResult<HistoryReceipt> {
+    pub fn history_step(&self, redo: bool) -> EditResult<HistoryReceipt> {
         self.enable_history_receipts()?;
         let mut undo = self.undo.borrow_mut();
         let state = undo.history.as_ref().unwrap().state.clone();

@@ -939,6 +939,18 @@ impl PptxRenderer {
             .map_err(|error| map_error(env, error))
     }
 
+    #[napi(js_name = "requestedFontFacesJson")]
+    pub fn requested_font_faces_json(
+        &self,
+        env: Env,
+        document: &PptxDocument,
+        slide_id: Option<String>,
+    ) -> Result<String> {
+        self.renderer()?
+            .requested_font_faces_json(document.document()?.session(), slide_id.as_deref())
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi]
     pub fn layout_proposal_slide_json(
         &self,

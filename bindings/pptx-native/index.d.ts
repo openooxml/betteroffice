@@ -119,6 +119,7 @@ export declare class PptxRenderer {
   snapshotWithLayoutKeysJson(document: PptxDocument): string
   slideLayoutKey(document: PptxDocument, slideIndex: number): string
   hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string
+  requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
 }
