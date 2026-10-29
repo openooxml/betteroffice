@@ -6,6 +6,12 @@ interface InputEditor {
   hasPendingUpdates(): boolean;
 }
 
+interface RecoveryOptions {
+  signal?: AbortSignal;
+  hasUnacknowledgedUpdates(): boolean;
+  upload?(bytes: Uint8Array, signal: AbortSignal): Promise<{ copyName: string }>;
+}
+
 interface SaveDocumentOptions extends SaveOptions {
   signal?: AbortSignal;
   captureBarrier?(): SocketSaveBarrier | null;
@@ -50,6 +56,27 @@ async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason
   } finally {
     clearTimeout(timer);
     if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function recoverDocument(
+  editor: (InputEditor & { serialize(): Promise<Uint8Array> }) | null,
+  options: RecoveryOptions,
+): Promise<{ bytes: Uint8Array; copyName?: string } | null> {
+  const controller = new AbortController();
+  try {
+    if (!editor) throw new Error("The editor is not ready to preserve local work.");
+    await bounded(() => editor.flushPendingInput(), 3000, "Recovery input flush timed out.", options.signal);
+    options.signal?.throwIfAborted();
+    if (!editor.hasPendingUpdates() && !options.hasUnacknowledgedUpdates()) return null;
+    const bytes = await bounded(() => editor.serialize(), 10_000, "Recovery serialization timed out.", options.signal);
+    options.signal?.throwIfAborted();
+    if (!options.upload) return { bytes };
+    const result = await bounded(() => options.upload!(bytes, controller.signal), 10_000, "Recovery upload timed out.", options.signal);
+    options.signal?.throwIfAborted();
+    return { bytes, copyName: result.copyName };
+  } finally {
+    controller.abort();
   }
 }
 

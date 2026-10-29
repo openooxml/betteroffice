@@ -16,6 +16,7 @@ import { registerPresentationCommandHandlers } from '../../../pptx/src/session/c
 import * as wasm from '../../../pptx/src/wasm/loader';
 import { PptxEditor } from '../PptxEditor';
 import { peerlessSessionOpener } from './usePeerlessPresentation';
+import type { PptxAsyncEditorApi } from './createPeerlessEditorApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -101,7 +102,7 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 async function open() {
-  const ready = mock(() => {});
+  const ready = mock((_api: PptxAsyncEditorApi) => {});
   const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
@@ -120,9 +121,31 @@ async function open() {
     const stop = line.caretStops.find((stop) => stop.position === position)!;
     return { clientX: stop.x, clientY: line.y + line.height / 2, pointerId: 7, isPrimary: true, button: 0, detail: 1 };
   };
-  return { view, stage, canvas, box, point, capture, release,
+  return { view, stage, canvas, box, point, capture, release, api: ready.mock.calls[0]![0],
     input: view.getByRole('textbox', { name: 'Slide text' }) };
 }
+
+test('saving during active composition includes the composed text exactly once', async () => {
+  const { api, input, canvas, stage, point } = await open();
+  act(() => { fireEvent.pointerDown(canvas, point(1)); fireEvent.pointerUp(stage, point(1)); });
+  await waitFor(() => expect(client.state.selection?.focus).toBe(1));
+  act(() => {
+    fireEvent.compositionStart(input);
+    fireEvent.compositionUpdate(input, { data: '漢字' });
+  });
+  let bytes!: Uint8Array;
+  await act(async () => { await api.flushPendingInput(); bytes = await api.save(); });
+  const zip = await JSZip.loadAsync(bytes);
+  expect(await zip.file('ppt/slides/slide1.xml')!.async('string')).toContain('漢字');
+  act(() => {
+    fireEvent.compositionEnd(input, { data: '漢字' });
+    input.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertFromComposition', data: '漢字',
+      bubbles: true, cancelable: true }));
+  });
+  await act(async () => { await api.flushPendingInput(); });
+  const read = (await client.read()).result;
+  expect(read.ok && read.stories[0]!.text).toBe('a漢字lpha beta\nx\nalpha beta');
+});
 
 test('shift_drag', async () => {
   const { stage, canvas, point, capture, release } = await open();

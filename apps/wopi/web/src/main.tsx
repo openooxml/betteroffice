@@ -18,7 +18,7 @@ async function boot(): Promise<void> {
       return actions.save(options);
     },
     onClose: () => {
-      void actions.close?.();
+      void actions.close?.().catch(() => {});
     },
     onBlurFocus: () => {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -30,6 +30,7 @@ async function boot(): Promise<void> {
     onGetViews: () => actions.views,
   });
   wopiDebug({ bridgeEnabled: bridge.enabled, bridgeOrigin: config.postMessageOrigin });
+  bridge.start();
   bridge.frameReady();
   wopiDebug({ frameReadySent: true });
 

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import Editor, { prepareFile, type EditorApi, type EditorView, type PreparedFile } from "../../../../shared/editor-host/Editor";
-import type { SessionApi, JoinResponse } from "./api";
+import { SessionEndedError, type SessionApi, type JoinResponse } from "./api";
 import { displayUserName, randomClientId, showCloseButton, type WopiPageConfig } from "./config";
 import type { PostMessageBridge, SaveOptions, WopiView } from "./postMessage";
-import { closeDocument, finishClose, saveDocument } from "./documentActions";
+import { closeDocument, finishClose, recoverDocument, saveDocument } from "./documentActions";
 import { createWopiTransport, type WopiTransport } from "./transport";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -56,6 +56,7 @@ export default function WopiApp({ loaded }: { loaded: Loaded }) {
   useEffect(() => {
     if (current) return;
     const controller = new AbortController();
+    loaded.bridge.start();
     loaded.bridge.frameReady();
     void loadBaseline(loaded.api, controller.signal).then((baseline) => {
       if (controller.signal.aborted) return;
@@ -94,6 +95,8 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   );
   const [closed, setClosed] = useState(false);
   const [readOnly, setReadOnly] = useState(!config.canWrite);
+  const [localRecovery, setLocalRecovery] = useState<{ bytes: Uint8Array; name: string } | null>(null);
+  const [recoveryFailed, setRecoveryFailed] = useState(false);
   const editorApi = useRef<EditorApi | null>(null);
   const transportRef = useRef<WopiTransport | null>(null);
   const editorContainer = useRef<HTMLElement | null>(null);
@@ -125,49 +128,90 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     finishClose(config, bridge, window, () => setClosed(true));
   }, [bridge, config]);
 
+  const offerLocalRecovery = useCallback((bytes: Uint8Array) => {
+    const suffix = ` (recovered ${new Date().toISOString().replace(/[:.]/g, "-")})`;
+    const dot = config.fileName.lastIndexOf(".");
+    const name = dot > 0 ? `${config.fileName.slice(0, dot)}${suffix}${config.fileName.slice(dot)}` : `${config.fileName}${suffix}.${config.format}`;
+    setLocalRecovery({ bytes, name });
+    setBanner("This session has ended. Download your recovered document before reloading the page to continue editing.");
+  }, [config.fileName, config.format]);
+
+  const recover = useCallback((kind: "baseline" | "local") => {
+    if (recoveryController.current) return;
+    const controller = new AbortController();
+    recoveryController.current = controller;
+    let serialized: Uint8Array | null = null;
+    setRecoveryFailed(false);
+    setBanner(kind === "baseline" ? "Preserving local edits before reopening the document..." : "This session has ended. Checking for local edits...");
+    void recoverDocument(editorApi.current, {
+      signal: controller.signal,
+      hasUnacknowledgedUpdates: () => transportRef.current?.hasUnacknowledgedUpdates() ?? false,
+      ...(kind === "baseline" ? { upload: (bytes: Uint8Array, signal: AbortSignal) => {
+        serialized = bytes;
+        return api.recover(bytes, signal);
+      } } : {}),
+    }).then((result) => {
+      if (!mounted.current || controller.signal.aborted) return;
+      if (kind === "baseline") {
+        onRejoin(result?.copyName);
+      } else if (result) {
+        offerLocalRecovery(result.bytes);
+      } else {
+        setBanner("This session has ended. Reload the page to continue editing.");
+      }
+    }).catch((failure: unknown) => {
+      if (!mounted.current || controller.signal.aborted) return;
+      if (failure instanceof SessionEndedError && serialized) {
+        sessionEnded.current = true;
+        handleClosed.resolve();
+        offerLocalRecovery(serialized);
+        return;
+      }
+      setRecoveryFailed(true);
+      const message = failure instanceof Error ? failure.message : "Could not preserve local edits.";
+      setBanner(`${message} Your document is still open read-only. Retry recovery to preserve your edits.`);
+    }).finally(() => {
+      if (recoveryController.current === controller) recoveryController.current = null;
+    });
+  }, [api, handleClosed, offerLocalRecovery, onRejoin]);
+
   const endSession = useCallback(() => {
-    if (lifetime.signal.aborted) return;
+    if (lifetime.signal.aborted || sessionEnded.current) return;
     sessionEnded.current = true;
     handleClosed.resolve();
     transportRef.current?.disconnect();
     if (editorContainer.current) editorContainer.current.inert = true;
     setReadOnly(true);
     if (finalSaved.current) completeClose();
-    else setBanner("This session has ended. Reload the page to continue editing.");
-  }, [completeClose, handleClosed, lifetime]);
+    else recover("local");
+  }, [completeClose, handleClosed, lifetime, recover]);
 
   const rejoin = useCallback(() => {
-    if (lifetime.signal.aborted || rejoining.current) return;
+    if (lifetime.signal.aborted || rejoining.current || sessionEnded.current) return;
     rejoining.current = true;
     if (editorContainer.current) editorContainer.current.inert = true;
     setReadOnly(true);
     lifetime.abort(new Error("rejoinRequired"));
-    const oldTransport = transportRef.current;
-    oldTransport?.disconnect();
-    const editor = editorApi.current;
-    const controller = new AbortController();
-    recoveryController.current = controller;
-    void (async () => {
-      await editor?.flushPendingInput();
-      controller.signal.throwIfAborted();
-      let copyName: string | undefined;
-      if (editor?.hasPendingUpdates() || oldTransport?.hasUnacknowledgedUpdates()) {
-        if (!editor) throw new Error("The editor is not ready to preserve local work. Reload the page to retry.");
-        const bytes = await editor.serialize();
-        controller.signal.throwIfAborted();
-        copyName = (await api.recover(bytes, controller.signal)).copyName;
-      }
-      controller.signal.throwIfAborted();
-      onRejoin(copyName);
-    })().catch((failure: unknown) => {
-      if (!mounted.current || controller.signal.aborted) return;
-      setBanner(failure instanceof Error ? failure.message : "Could not save a recovery copy. Reload the page to retry.");
-    });
-  }, [api, lifetime, onRejoin]);
+    transportRef.current?.disconnect();
+    recover("baseline");
+  }, [lifetime, recover]);
+
+  const downloadRecovery = useCallback(() => {
+    if (!localRecovery) return;
+    const url = URL.createObjectURL(new Blob([localRecovery.bytes.slice().buffer], { type: "application/octet-stream" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = localRecovery.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [localRecovery]);
 
   const requestSave = useCallback(async (options: SaveOptions = {}): Promise<void> => {
-    lifetime.signal.throwIfAborted();
     if (sessionEnded.current || finalSaved.current) throw new Error("sessionEnded");
+    if (rejoining.current) throw new Error("rejoinRequired: Recovery must finish before saving or closing.");
+    lifetime.signal.throwIfAborted();
     setSaveState("saving");
     try {
       let version = changeVersion.current;
@@ -186,10 +230,11 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
         bridge.modified(false);
       }
     } catch (error) {
+      if (error instanceof SessionEndedError) endSession();
       if (!lifetime.signal.aborted) setSaveState("failed");
       throw error;
     }
-  }, [api, bridge, config.canWrite, lifetime]);
+  }, [api, bridge, config.canWrite, lifetime, endSession]);
 
   const onSaveRequest = useCallback(async (): Promise<boolean> => {
     await requestSave();
@@ -198,6 +243,8 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
 
   const close = useCallback((): Promise<void> => {
     if (closeCompleted.current) return Promise.resolve();
+    if (sessionEnded.current && !finalSaved.current) return Promise.reject(new Error("sessionEnded"));
+    if (rejoining.current) return Promise.reject(new Error("rejoinRequired: Recovery must finish before saving or closing."));
     if (lifetime.signal.aborted) return Promise.reject(lifetime.signal.reason);
     if (closing.current) return closing.current;
     setSaveState("saving");
@@ -215,13 +262,17 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       },
       onFailure: (error) => {
         if (lifetime.signal.aborted) return;
+        if (error instanceof SessionEndedError) {
+          endSession();
+          return;
+        }
         setSaveState("failed");
         setBanner(error instanceof Error ? error.message : "Could not close the document.");
       },
     }, completeClose).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
     return pending;
-  }, [api, completeClose, config.canWrite, handleClosed, lifetime]);
+  }, [api, completeClose, config.canWrite, handleClosed, lifetime, endSession]);
 
   useEffect(() => {
     mounted.current = true;
@@ -342,12 +393,16 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
           {saveState === "saving" ? "Saving..." : saveState === "saved" ? "Saved" : saveState === "failed" ? "Save failed" : ""}
         </span>
         {showCloseButton(config) ? (
-          <button type="button" className="wopi-close" onClick={() => void close()}>
+          <button type="button" className="wopi-close" onClick={() => void close().catch(() => {})}>
             Close
           </button>
         ) : null}
       </header>
-      {banner ? <div className="wopi-banner" role="alert">{banner}</div> : null}
+      {banner ? <div className="wopi-banner" role="alert">
+        {banner}
+        {localRecovery ? <button type="button" onClick={downloadRecovery}>Download recovered document</button> : null}
+        {recoveryFailed ? <button type="button" onClick={() => recover(rejoining.current ? "baseline" : "local")}>Retry</button> : null}
+      </div> : null}
       {conflictName ? <div className="wopi-banner" role="alert">Saved as a conflict copy: {conflictName}</div> : null}
       <main className="wopi-editor" ref={editorContainer}>
         <Editor

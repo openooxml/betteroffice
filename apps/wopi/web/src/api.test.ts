@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { SessionApi, decodeJoinResponse } from "./api";
+import { SessionApi, SessionEndedError, decodeJoinResponse } from "./api";
 import type { SessionEvent } from "./sse";
 
 function sseResponse(text: string): Response {
@@ -160,4 +160,10 @@ test("recovery posts serialized bytes with a Bearer handle and returns only the 
     return Response.json({ copyName: "file (conflict recovery).xlsx", access_token: "discard" });
   });
   expect(await api.recover(bytes)).toEqual({ copyName: "file (conflict recovery).xlsx" });
+});
+
+test.each([401, 404, 410, 409])("save and recovery identify an ended handle with status %i", async (status) => {
+  const api = new SessionApi("handle", async () => Response.json({ error: { kind: "closed" } }, { status }));
+  await expect(api.save({ connectionId: crypto.randomUUID(), seq: 1 })).rejects.toBeInstanceOf(SessionEndedError);
+  await expect(api.recover(Uint8Array.of(1))).rejects.toBeInstanceOf(SessionEndedError);
 });

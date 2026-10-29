@@ -2,6 +2,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { GlobalWindow } from "happy-dom";
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 import { useEffect } from "react";
+import * as ReactDOMClient from "react-dom/client";
 import type { EditorApi, EditorProps, PreparedFile } from "../../../../shared/editor-host/Editor";
 import { SessionApi } from "./api";
 import { parseWopiConfig } from "./config";
@@ -137,6 +138,8 @@ async function mount(replaceBeforeAttach = false) {
   let generation = 1;
   let hostText = "";
   let closeRequest = async (_signal?: AbortSignal | null): Promise<Response> => Response.json({ closed: true });
+  let recoveryRequest = async (_signal?: AbortSignal | null): Promise<Response> =>
+    failRecovery ? new Response(null, { status: 502 }) : Response.json({ copyName: "file (conflict recovered).docx" });
   const api = new SessionApi("same-handle", async (input, init) => {
     expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer same-handle");
     const path = String(input);
@@ -158,7 +161,7 @@ async function mount(replaceBeforeAttach = false) {
     }
     if (path.endsWith("/recovery")) {
       copies.push(new Uint8Array(await new Response(init?.body).arrayBuffer()));
-      return failRecovery ? new Response(null, { status: 502 }) : Response.json({ copyName: "file (conflict recovered).docx" });
+      return recoveryRequest(init?.signal);
     }
     if (path.endsWith("/save")) { hostText = serverDoc.getText("body").toString(); return Response.json({ itemVersion: "2" }); }
     if (path.endsWith("/close")) return closeRequest(init?.signal);
@@ -189,6 +192,7 @@ async function mount(replaceBeforeAttach = false) {
     failRecovery() { failRecovery = true; },
     get hostText() { return hostText; },
     setCloseRequest(request: typeof closeRequest) { closeRequest = request; },
+    setRecoveryRequest(request: typeof recoveryRequest) { recoveryRequest = request; },
     blockSource() { let release!: () => void; sourceGate = new Promise((resolve) => { release = resolve; }); return release; },
     failSource() { failSource = true; },
     closedEvent() { streams.at(-1)!.enqueue(new TextEncoder().encode("event: closed\ndata: {}\n\n")); },
@@ -431,6 +435,132 @@ test.each(["unauthorized", "rejected upgrade", "closed event"])("an ended sessio
   expect(mounts).toHaveLength(1);
 });
 
+test.each(["provider", "unacknowledged", "none"])("expired reconnect preserves %s local work as a download", async (pending) => {
+  const h = await mount();
+  const local = new Doc();
+  const recovered = new Doc();
+  let blob: Blob | undefined;
+  let downloadName = "";
+  const createUrl = spyOn(URL, "createObjectURL").mockImplementation((value) => {
+    blob = value as Blob;
+    return "blob:recovery";
+  });
+  const revokeUrl = spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    downloadName = this.download;
+  });
+  try {
+    await act(async () => {
+      sockets[0]!.drop(1006);
+      if (pending !== "none") local.getText("body").insert(0, "edit made offline");
+      serialize = async () => encodeStateAsUpdate(local);
+      if (pending === "provider") hasPendingUpdates = () => true;
+      if (pending === "unacknowledged") mounts[0]!.onLocalUpdate!();
+      expect(publish(encodeStateAsUpdate(local))).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      h.endSession();
+      sockets[1]!.drop(1006);
+    });
+    expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    expect(mounts).toHaveLength(1);
+    expect(createUrl).not.toHaveBeenCalled();
+    if (pending === "none") {
+      expect(h.view.queryByRole("button", { name: "Download recovered document" })).toBeNull();
+      expect(h.view.getByRole("alert").textContent).toMatch(/session.*ended.*reload/i);
+      return;
+    }
+    expect(h.view.getByRole("alert").textContent).toMatch(/download.*before.*reload/i);
+    act(() => h.view.getByRole("button", { name: "Download recovered document" }).click());
+    expect(downloadName).toMatch(/^file \(recovered .+\)\.docx$/);
+    applyUpdate(recovered, new Uint8Array(await blob!.arrayBuffer()));
+    expect(recovered.getText("body").toString()).toBe("edit made offline");
+    expect(h.copies).toHaveLength(0);
+    expect(lifecycle).not.toContain("destroy");
+    expect(h.view.getByRole("button", { name: "Download recovered document" })).toBeDefined();
+  } finally {
+    local.destroy(); recovered.destroy();
+    createUrl.mockRestore(); revokeUrl.mockRestore(); click.mockRestore();
+  }
+});
+
+test.each(["flush", "serialization", "upload"])("a stalled recovery %s times out and can be retried", async (stage) => {
+  const h = await mount();
+  hasPendingUpdates = () => true;
+  const signals: Array<AbortSignal | null | undefined> = [];
+  if (stage === "flush") flush = () => new Promise<void>(() => {});
+  if (stage === "serialization") serialize = () => new Promise<Uint8Array>(() => {});
+  if (stage === "upload") h.setRecoveryRequest((signal) => {
+    signals.push(signal);
+    return new Promise<Response>(() => {});
+  });
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay !== 3000 && delay !== 10_000) return schedule(callback, delay);
+    const timer = schedule(() => {}, delay);
+    deadlines.set(timer, callback);
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  try {
+    await act(async () => sockets[0]!.drop(4409));
+    expect(deadlines.size).toBe(1);
+    await expect(h.loaded.actions.save!()).rejects.toThrow(/recovery/i);
+    await expect(h.loaded.actions.close!()).rejects.toThrow(/recovery/i);
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
+    expect(h.view.getByRole("alert").textContent).toMatch(/recovery.*timed out/i);
+    expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    expect(mounts).toHaveLength(1);
+    expect(lifecycle).not.toContain("destroy");
+    expect(h.calls.filter((path) => path.endsWith("/source"))).toHaveLength(0);
+    if (stage === "upload") expect(signals[0]?.aborted).toBe(true);
+    flush = async () => {};
+    serialize = async () => Uint8Array.of(7);
+    h.setRecoveryRequest(async () => Response.json({ copyName: "file (retried).docx" }));
+    await act(async () => h.view.getByRole("button", { name: "Retry" }).click());
+    expect(mounts).toHaveLength(2);
+    expect(h.copies.at(-1)).toEqual(Uint8Array.of(7));
+    expect(h.view.getByRole("alert").textContent).toContain("file (retried).docx");
+  } finally {
+    for (const timer of deadlines.keys()) cancel(timer);
+    timers.mockRestore(); cancellations.mockRestore();
+  }
+});
+
+test("an ended handle during recovery offers the serialized document as a local download", async () => {
+  const h = await mount();
+  hasPendingUpdates = () => true;
+  h.setRecoveryRequest(async () => Response.json({ error: { kind: "unauthorized" } }, { status: 401 }));
+  await act(async () => sockets[0]!.drop(4409));
+  expect(h.view.getByRole("button", { name: "Download recovered document" })).toBeDefined();
+  expect(h.view.container.querySelector("main")!.inert).toBe(true);
+  expect(mounts).toHaveLength(1);
+  expect(lifecycle).not.toContain("destroy");
+  expect(h.view.queryByRole("button", { name: "Retry" })).toBeNull();
+});
+
+test("a rejected save detects an ended handle and preserves unacknowledged work", async () => {
+  const h = await mount();
+  const local = new Doc();
+  local.getText("body").insert(0, "unacknowledged edit");
+  serialize = async () => encodeStateAsUpdate(local);
+  mounts[0]!.onLocalUpdate!();
+  const save = spyOn(h.loaded.api, "save").mockImplementation(() =>
+    new SessionApi("expired", async () => new Response(null, { status: 401 }))
+      .save({ connectionId: crypto.randomUUID(), seq: 1 }));
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await act(async () => { await expect(h.loaded.actions.save!()).rejects.toThrow("sessionEnded"); });
+    expect(h.view.getByRole("button", { name: "Download recovered document" })).toBeDefined();
+    expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    expect(lifecycle).not.toContain("destroy");
+  } finally { local.destroy(); save.mockRestore(); warning.mockRestore(); }
+});
+
 test("own Close completes on handle invalidation while the close response is delayed", async () => {
   const h = await mount();
   let invalidate!: () => void;
@@ -527,4 +657,58 @@ test("an invalid handle response after the final save completes Close", async ()
   expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
   expect(h.view.queryByTestId("editor")).toBeNull();
   expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+});
+
+test("host messages during deferred boot receive normal replies through the window listener", async () => {
+  const previousRoot = document.getElementById("root");
+  const element = document.createElement("script");
+  element.id = "wopi-config";
+  element.textContent = JSON.stringify({ sessionHandle: "boot-handle", format: "docx", fileName: "file.docx",
+    postMessageOrigin: "https://host.example", userFriendlyName: "Peer" });
+  document.body.appendChild(element);
+  let release!: (value: { bytes: Uint8Array; baselineGeneration: number }) => void;
+  const source = spyOn(SessionApi.prototype, "source").mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+  const join = spyOn(SessionApi.prototype, "join").mockResolvedValue({ format: "docx", initialUpdate: Uint8Array.of(0), baselineGeneration: 1 });
+  const root = { render: mock(() => {}), unmount() {} };
+  const createRoot = spyOn(ReactDOMClient, "createRoot").mockReturnValue(root);
+  const send = (MessageId: string, Values = {}) => window.dispatchEvent(new MessageEvent("message", {
+    origin: "https://host.example", data: JSON.stringify({ MessageId, Values }),
+  }));
+  const messages: Array<{ MessageId: string; Values: unknown }> = [];
+  const post = spyOn(window.parent, "postMessage").mockImplementation((data: unknown) => {
+    const message = JSON.parse(String(data));
+    messages.push(message);
+    if (message.Values.Status === "Frame_Ready") {
+      send("Action_Save", { Notify: true });
+      send("Get_Views");
+    }
+  });
+  let bridge: PostMessageBridge | undefined;
+  const frameReady = PostMessageBridge.prototype.frameReady;
+  const ready = spyOn(PostMessageBridge.prototype, "frameReady").mockImplementation(function (this: PostMessageBridge) {
+    bridge = this;
+    frameReady.call(this);
+  });
+  try {
+    await act(async () => { await import("./main"); });
+    expect(source).toHaveBeenCalledTimes(1);
+    expect(root.render).not.toHaveBeenCalled();
+    send("Action_Save", { Notify: true });
+    send("Get_Views");
+    await Promise.resolve();
+    expect(messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+      expect.objectContaining({ Values: { success: false, result: "editorNotReady" } }),
+      expect.objectContaining({ Values: { success: false, result: "editorNotReady" } }),
+    ]);
+    expect(messages.filter((message) => message.MessageId === "Get_Views_Resp")).toEqual([
+      expect.objectContaining({ Values: [{ ViewId: 0, UserName: "Peer" }] }),
+      expect.objectContaining({ Values: [{ ViewId: 0, UserName: "Peer" }] }),
+    ]);
+  } finally {
+    release?.({ bytes: Uint8Array.of(2), baselineGeneration: 1 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    bridge?.dispose(); element.remove();
+    if (!previousRoot) document.getElementById("root")?.remove();
+    source.mockRestore(); join.mockRestore(); createRoot.mockRestore(); post.mockRestore(); ready.mockRestore();
+  }
 });

@@ -34,6 +34,13 @@ function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Res
   return globalThis.fetch(input, init);
 }
 
+export class SessionEndedError extends Error {
+  constructor() {
+    super("sessionEnded");
+    this.name = "SessionEndedError";
+  }
+}
+
 /** Session API client. The handle is only ever sent as a Bearer header. */
 export class SessionApi {
   readonly #handle: string;
@@ -72,6 +79,7 @@ export class SessionApi {
     if (!response.ok) {
       const failure = await response.json().catch(() => null) as { error?: { kind?: unknown } } | null;
       const reason = failure?.error?.kind;
+      if ([401, 404, 410].includes(response.status) || reason === "closed") throw new SessionEndedError();
       throw new Error(typeof reason === "string" ? reason : `Save failed (${response.status}).`);
     }
     const result = (await response.json()) as { itemVersion?: unknown };
@@ -94,7 +102,11 @@ export class SessionApi {
     const response = await this.#fetch("/api/session/recovery", {
       method: "POST", headers: { ...this.#headers(), "Content-Type": "application/octet-stream" }, body: bytes as BodyInit, signal,
     });
-    if (!response.ok) throw new Error(`Recovery copy failed (${response.status}).`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => null) as { error?: { kind?: unknown } } | null;
+      if ([401, 404, 410].includes(response.status) || failure?.error?.kind === "closed") throw new SessionEndedError();
+      throw new Error(`Recovery copy failed (${response.status}).`);
+    }
     const result = await response.json() as { copyName?: unknown };
     if (typeof result.copyName !== "string" || !result.copyName) throw new Error("Invalid recovery copy response.");
     return { copyName: result.copyName };

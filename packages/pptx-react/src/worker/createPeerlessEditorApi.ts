@@ -5,7 +5,7 @@ import type {
   PresentationCommandAccessMethod,
 } from '@betteroffice/pptx/worker';
 import { invokePeerless } from './peerlessObjectCommands';
-import { peerlessGestureActive } from './peerlessViewStore';
+import { commitComposition, peerlessGestureActive } from './peerlessViewStore';
 import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
 import type { PptxCommandStore } from '../commands/types';
 import type { PptxPointPosition } from '../PptxEditor';
@@ -98,12 +98,21 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     get commands() { run.require(); return commands ?? unsupported('commands'); },
     get hydrated() { run.require(); return run.hydrated; },
     get failure() { return run.failure; },
-    save: () => fenced(() => run.client.save()),
+    save: async () => { await api.flushPendingInput(); return fenced(() => run.client.save()); },
     saveAsync: () => api.save(),
     recoverySave: () => run.recover(),
     whenHydrated: installed,
     handleAsync: async () => { await installed(); return access; },
-    flushPendingInput: () => fenced(async () => { await run.client.flush(); await installed(); }),
+    flushPendingInput: async () => {
+      admit();
+      const composition = run.store.getSnapshot().composition;
+      if (composition) {
+        const ack = await commitComposition(run.store, composition.text, performance.now());
+        const refused = ack?.outcomes.find((outcome) => outcome.status === 'refused' || outcome.status === 'cancelled');
+        if (refused || (!ack && composition.text)) throw new Error(refused?.reason ?? 'Composition could not be committed');
+      }
+      await fenced(async () => { await run.client.flush(); await installed(); });
+    },
     version: () => fenced(async () => (await run.client.flush()).version),
     readContent: (request) => fenced(async () => (await run.client.read(request)).result),
     findText: (request) => read('findText', request),
