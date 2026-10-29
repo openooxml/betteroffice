@@ -310,7 +310,7 @@ test.each([false, true])("xlsx Action_Save commits deferred text through version
     return "committed";
   });
   const saved: string[] = [];
-  const replies: Array<{ MessageId: string; Values: Record<string, unknown> }> = [];
+  const replies: Array<{ MessageId: string; SendTime?: number; Values: Record<string, unknown> }> = [];
   const barrier = { connectionId: crypto.randomUUID(), seq: 1 };
   const captureSaveBarrier = mock(() => barrier);
   const connection = spyOn(wopiTransport, "createWopiTransport").mockReturnValue({
