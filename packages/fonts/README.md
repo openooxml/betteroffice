@@ -106,6 +106,13 @@ export default {
 };
 ```
 
+To inline the manager with esbuild, use `baseUrl` and add the pack's `.zst` files and
+the manager's `dist/decoder/fontpack.wasm` as explicit entry points with
+`loader: { '.zst': 'copy', '.wasm': 'copy' }`. Preserve the face filenames under
+the asset root and place the decoder at `decoder/fontpack.wasm`. Keep the pack
+packages external. Esbuild does not emit assets referenced only by
+`new URL(..., import.meta.url)`.
+
 Latin and RTL assets ship in the regular dependency `@betteroffice/fonts-latin`.
 The manager loads compressed faces on demand and returns decoded, independently
 owned sfnt buffers. `BundledFontFace.file` names the `.ttf.zst` asset. For a custom

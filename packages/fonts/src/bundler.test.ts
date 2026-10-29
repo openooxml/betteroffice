@@ -1,66 +1,73 @@
 import { expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
-import { fontAssetResponse } from './test-assets';
 
-test('esbuild emits Latin frames separately and fetches only the requested face on demand', async () => {
+test('esbuild deploys the published entry with separate Latin frames and decoder for baseUrl loading', async () => {
   const output = await mkdtemp(join(tmpdir(), 'latin-assets-'));
   const originalFetch = globalThis.fetch;
   try {
+    const fontsPackage = new URL(import.meta.resolve('@betteroffice/fonts/package.json'));
+    const latinPackage = new URL(import.meta.resolve('@betteroffice/fonts-latin/package.json'));
+    const manifest: { faces: { file: string }[] } = JSON.parse(
+      await readFile(new URL('./assets/manifest.json', latinPackage), 'utf8'),
+    );
     const result = await build({
       stdin: {
-        contents: `import { loadBundledFontBytes, resolveBundledFamilyFace } from './index';
-export const load = () => loadBundledFontBytes(resolveBundledFamilyFace('Carlito', false, false));`,
-        resolveDir: import.meta.dir, sourcefile: 'entry.ts', loader: 'ts',
+        contents: `import { loadBundledFontBytes, resolveBundledFamilyFace } from '@betteroffice/fonts';
+export const face = resolveBundledFamilyFace('Carlito', false, false);
+export const load = (baseUrl) => loadBundledFontBytes(face, { baseUrl });`,
+        resolveDir: import.meta.dir, sourcefile: 'consumer.ts', loader: 'ts',
       },
-      outdir: output, bundle: true, format: 'esm', platform: 'browser',
-      splitting: true, metafile: true, assetNames: '[name]-[hash]',
-      outExtension: { '.js': '.mjs' }, loader: { '.zst': 'file' },
-      external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
-      define: { 'import.meta.url': JSON.stringify('https://latin-bundle.example/entry.mjs') },
-      plugins: [{
-        name: 'literal-font-urls',
-        setup(builder) {
-          builder.onResolve({ filter: /^@betteroffice\/fonts-latin$/ }, () => ({
-            path: new URL('../../fonts-latin/src/index.ts', import.meta.url).pathname,
-          }));
-          builder.onLoad({ filter: /fonts-latin\/src\/index\.ts$/ }, async ({ path }) => {
-            const imports: string[] = [];
-            const source = (await readFile(path, 'utf8')).replace(
-              /new URL\('([^']+\.zst)', import\.meta\.url\)/g,
-              (_, asset: string) => {
-                const name = `asset${imports.length}`;
-                imports.push(`import ${name} from ${JSON.stringify(asset)};`);
-                return `new URL(${name}, import.meta.url)`;
-              },
-            );
-            return { contents: `${imports.join('\n')}\n${source}`, loader: 'ts', resolveDir: dirname(path) };
-          });
+      entryPoints: [
+        ...manifest.faces.map(({ file }) => ({
+          in: fileURLToPath(new URL(`./assets/${file}`, latinPackage)),
+          out: `fonts/${file.slice(0, -4)}`,
+        })),
+        {
+          in: fileURLToPath(new URL('./dist/decoder/fontpack.wasm', fontsPackage)),
+          out: 'fonts/decoder/fontpack',
         },
-      }],
+      ],
+      outdir: output, bundle: true, format: 'esm', platform: 'browser',
+      metafile: true, outExtension: { '.js': '.mjs' },
+      loader: { '.zst': 'copy', '.wasm': 'copy' },
+      external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
+      define: { 'globalThis.process': 'undefined' },
     });
-    const outputs = Object.entries(result.metafile.outputs);
-    const frame = outputs.find(([file]) => basename(file).startsWith('Carlito-Regular.ttf-') && file.endsWith('.zst'));
-    expect(frame).toBeDefined();
-    expect(Object.keys(frame![1].inputs).some((file) => file.endsWith('Carlito-Regular.ttf.zst'))).toBe(true);
-    const entry = outputs.find(([, info]) => info.entryPoint?.endsWith('entry.ts'))!;
-    expect(entry[1].imports.some((entry) => entry.kind === 'dynamic-import')).toBe(true);
+    expect(Object.keys(result.metafile.inputs).map((file) => resolve(file)))
+      .toContain(fileURLToPath(import.meta.resolve('@betteroffice/fonts')));
+    const outputs = new Map(Object.entries(result.metafile.outputs).map(([file, info]) => [resolve(file), info]));
+    expect([...outputs.keys()].filter((file) => file.endsWith('.zst')).sort()).toEqual(
+      manifest.faces.map(({ file }) => join(output, 'fonts', file)).sort(),
+    );
+    const wasm = join(output, 'fonts/decoder/fontpack.wasm');
+    expect([...outputs.keys()].filter((file) => file.endsWith('.wasm'))).toEqual([wasm]);
+    expect(outputs.get(wasm)!.bytes).toBeGreaterThan(0);
+    const entry = [...outputs].find(([, info]) => info.entryPoint?.endsWith('consumer.ts'));
+    expect(entry).toBeDefined();
+    const deployment = new URL('https://latin-bundle.example/build/');
+    const emitted = new Map([...outputs.keys()].map((file) => [new URL(relative(output, file), deployment).href, file]));
     const requested: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const url = new URL(String(input));
+      const url = new URL(input instanceof Request ? input.url : String(input));
       requested.push(url.href);
-      if (url.pathname.endsWith('.wasm')) return fontAssetResponse(input);
-      return new Response(await readFile(join(output, basename(url.pathname))));
+      const file = emitted.get(url.href);
+      if (!file) throw new Error(`Fetch outside emitted bundle: ${url.href}`);
+      return new Response(await readFile(file), file === wasm
+        ? { headers: { 'Content-Type': 'application/wasm' } }
+        : undefined);
     }) as typeof fetch;
-    const bundled = await import(pathToFileURL(entry[0]).href);
+    const bundled = await import(pathToFileURL(entry![0]).href);
     expect(requested).toEqual([]);
-    const bytes = await bundled.load();
+    const bytes = await bundled.load(new URL('fonts/', deployment));
+    expect(bytes.byteLength).toBe(bundled.face.byteLength);
     expect(new DataView(bytes).getUint32(0)).toBe(0x00010000);
-    expect(requested.filter((url) => url.endsWith('.zst'))).toEqual([
-      `https://latin-bundle.example/${basename(frame![0])}`,
+    expect(requested).toEqual([
+      new URL('fonts/Carlito-Regular.ttf.zst', deployment).href,
+      new URL('fonts/decoder/fontpack.wasm', deployment).href,
     ]);
   } finally {
     globalThis.fetch = originalFetch;
