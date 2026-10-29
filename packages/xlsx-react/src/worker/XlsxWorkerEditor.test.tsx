@@ -2100,7 +2100,7 @@ describe('XlsxEditor async API', () => {
     }
   }
 
-  it('downloads viewport PNG from the worker and resolves the export API', async () => {
+  it('opens the worker lean, downloads viewport PNG and resolves the export API', async () => {
     const host = peerlessHarness(true);
     const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
     const renderPng = mock(async (_viewport: xlsx.Viewport, _options?: { sheet?: number }) => png);
@@ -2139,6 +2139,7 @@ describe('XlsxEditor async API', () => {
     const view = render(host.asyncEditor({ onReady: ready, fileName: 'Report.XLSX' }));
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    expect(host.open.mock.calls[0]![1]?.png).toBe(false);
     const api = ready.mock.calls[0]![0];
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
@@ -4761,7 +4762,7 @@ describe('workbook worker editor', () => {
       const ready = mock((_api: XlsxWorkerEditorApi) => {});
       const view = render(<XlsxEditor legacySyncApi file={file} {...props} onReady={ready} showToolbar={false} />);
       await opened();
-      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), retainPeerHydration: true });
+      expect(host.open).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), png: false, retainPeerHydration: true });
       expect(painted.length).toBeGreaterThan(0);
       expect(ready).toHaveBeenCalledTimes(1);
       expect(host.hydrate).toHaveBeenCalledTimes(1);

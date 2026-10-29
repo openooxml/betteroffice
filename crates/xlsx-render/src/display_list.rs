@@ -2,12 +2,12 @@
 //! coordinates are viewport-local pixels; colors are `#rrggbb` strings.
 
 use ooxml_drawingml::GeometryPathCommand;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use xlsx_model::PatternType;
 
 /// horizontal text anchoring within a cell's clip rect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Align {
     Left,
@@ -15,7 +15,7 @@ pub enum Align {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextValign {
     Top,
@@ -26,7 +26,7 @@ pub enum TextValign {
 /// wrapped cell text: the painter breaks the run into lines no wider than
 /// `width` and steps their baselines by `line_height`, the block anchored by
 /// `valign` on the single-line baseline `y`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextWrap {
     pub width: f32,
@@ -35,7 +35,7 @@ pub struct TextWrap {
 }
 
 /// a rectangle in viewport-local pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -45,7 +45,7 @@ pub struct Rect {
 
 /// a single primitive. `op` tags the variant with a stable string discriminant;
 /// style fields skip-serialize at their defaults for backward compatibility.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DrawCmd {
     PatternFill {
@@ -145,7 +145,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PathStroke {
     pub color: Arc<str>,
     pub width: f32,
@@ -153,7 +153,7 @@ pub struct PathStroke {
 
 /// viewport-local grid boundaries for overlay hit-testing. offset vecs are
 /// `visible count + 1` long; `offsets[i+1] - offsets[i]` is cell `i`'s span.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridMeta {
     pub start_row: u32,
@@ -170,7 +170,7 @@ pub struct GridMeta {
     pub col_offsets: Vec<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HyperlinkRegion {
     pub top: u32,
@@ -190,7 +190,7 @@ pub struct HyperlinkRegion {
 /// it, its full viewport-local rect and the visible part after pane clipping.
 /// A chart that degraded to a placeholder still gets a region, so it stays an
 /// addressable object on the sheet.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRegion {
     /// `SheetChart::frame_id` — the drawing part and the anchor in it, unique
@@ -212,7 +212,7 @@ pub type ChartA11yAttrs = ChartRegion;
 
 /// a full frame for one viewport, sized in pixels; commands are emitted in a
 /// fixed order so serialized output is deterministic.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DisplayList {
     pub width: f32,
     pub height: f32,
@@ -581,6 +581,13 @@ mod tests {
                 movable: true,
             }],
         }
+    }
+
+    #[test]
+    fn json_round_trip_restores_omitted_defaults() {
+        let list = sample();
+        let json = serde_json::to_string(&list).unwrap();
+        assert_eq!(serde_json::from_str::<DisplayList>(&json).unwrap(), list);
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { compileWasm, createWorkerWasmInitializer } from '../../../../shared/off
 import { wasmAssetUrl } from '../wasm/asset';
 import { initWasm } from '../wasm/loader';
 import { createWorkbookSessionHost } from './host';
+import { renderPng } from './raster';
 
 const transport = createScopeTransport(self as unknown as SessionScope);
 let module: WebAssembly.Module | undefined;
@@ -36,5 +37,6 @@ const host = createWorkbookSessionHost(transport, {
     return initializeLean(input);
   },
   wasmModule: () => module,
+  renderPng,
 });
 Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });

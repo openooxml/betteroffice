@@ -2453,6 +2453,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlsx-raster-wasm"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-xlsx",
+ "betteroffice-xlsx-raster",
+ "betteroffice-xlsx-render",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "xlsx-wasm"
 version = "0.0.0"
 dependencies = [

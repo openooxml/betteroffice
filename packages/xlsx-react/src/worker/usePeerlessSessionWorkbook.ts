@@ -330,7 +330,7 @@ export function usePeerlessSessionWorkbook(
     if (props.file) void (async () => {
       try {
         const session = await editableWorkbookSessionBackend.open(props.file!, {
-          signal: controller.signal,
+          signal: controller.signal, png: false,
           includeEditState: true,
           ...(collaboration ? { collaborative: true,
             clientId: collaborationClientId, initialUpdate: collaborationInitialUpdate?.slice() } : {}),

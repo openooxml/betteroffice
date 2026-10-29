@@ -207,6 +207,8 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
           '--release',
           '--target',
           'web',
+          '--out-name',
+          name,
           '--out-dir',
           output,
           ...(cargoArgs.length ? ['--', ...cargoArgs] : ['--locked']),

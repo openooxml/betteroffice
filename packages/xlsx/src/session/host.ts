@@ -16,6 +16,7 @@ import {
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
+import { workbookPngDisplayListJson, workbookRangePngDisplayListJson } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
@@ -60,6 +61,7 @@ export function createWorkbookSessionHost(
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module, options?: WasmInitOptions) => Promise<void>;
     wasmModule?(): WebAssembly.Module | undefined;
+    renderPng?(displayListJson: string): Promise<Uint8Array>;
   } = {}
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
@@ -153,14 +155,23 @@ export function createWorkbookSessionHost(
       mergedRanges: opened.visibleMergedRanges(sheet, viewport) };
   }
 
-  function renderPng(sheet: number, render: (opened: WorkbookHandle) => Uint8Array) {
+  function pngExportAvailable() {
+    return isPngExportAvailable() || options.renderPng !== undefined;
+  }
+
+  function renderPng(
+    sheet: number, render: (opened: WorkbookHandle) => Uint8Array,
+    displayList: (opened: WorkbookHandle) => string
+  ) {
     const opened = workbook();
-    if (!isPngExportAvailable()) throw new WorkbookPngUnavailableError();
+    if (!pngExportAvailable()) throw new WorkbookPngUnavailableError();
     checkSheet(opened, sheet);
     const active = opened.sheetInfo().activeSheet;
     try {
       if (sheet !== active) opened.setActiveSheet(sheet);
-      return transferBytes(render(opened));
+      if (isPngExportAvailable()) return transferBytes(render(opened));
+      const json = displayList(opened);
+      return options.renderPng!(json).then(transferBytes);
     } finally {
       if (sheet !== active) opened.setActiveSheet(active);
     }
@@ -384,7 +395,7 @@ export function createWorkbookSessionHost(
           sheets: commands.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
           activeSheet: info.activeSheet, commandContext: { ...commandIdentity,
             basis: { epoch: commands.epoch, version: opened.version() } },
-          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: isPngExportAvailable(),
+          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: pngExportAvailable(),
           selection: commands.selection, editState: commands.editState };
       } catch (error) {
         handle = undefined;
@@ -489,7 +500,7 @@ export function createWorkbookSessionHost(
         if (initial || !retainPeerHydration && input.includeEditState) projectEditState(opened, projection);
         const state = { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
           ...(collaborative && !retainPeerHydration ? { clientId: opened.clientId } : {}),
-          sheets: summaries, activeSheet: info.activeSheet, pngExport: isPngExportAvailable(),
+          sheets: summaries, activeSheet: info.activeSheet, pngExport: pngExportAvailable(),
           commandContext: { ...commandIdentity, basis: { epoch: commands.epoch, version: opened.version() } },
           ...(!retainPeerHydration && projection.editState ? { editState: projection.editState, selection: commands.selection } : {}) };
         if (!initial) return state;
@@ -602,10 +613,12 @@ export function createWorkbookSessionHost(
       ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
     renderPng(_, viewport, options = {}) {
-      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderPng(viewport));
+      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet,
+        (opened) => opened.renderPng(viewport), (opened) => workbookPngDisplayListJson(opened, viewport));
     },
     renderRangePng(_, options, frameOptions = {}) {
-      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet, (opened) => opened.renderRangePng(options));
+      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet,
+        (opened) => opened.renderRangePng(options), (opened) => workbookRangePngDisplayListJson(opened, options));
     },
     exportStructured: (_, options) => exported(options),
     exportMarkdown(_, options, markdownOptions) {

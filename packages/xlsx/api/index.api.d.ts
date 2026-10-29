@@ -3275,6 +3275,7 @@ export class XlsxDocument {
     static open(bytes: Uint8Array): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     peerHydrationJson(): string;
+    pngDisplayListJson(viewport_json: string): string;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -3284,6 +3285,7 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
+    rangePngDisplayListJson(args: string): string;
     readCellsJson(request: string): string;
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
     /**
@@ -3437,9 +3439,11 @@ export interface InitOutput {
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_peerHydrationJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_pngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_rangePngDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_readCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
