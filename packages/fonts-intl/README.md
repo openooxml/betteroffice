@@ -50,9 +50,8 @@ The `@betteroffice/fonts/cdn` entry can fetch the faces without installing this 
 | Noto Sans Tifinagh | `tifinagh` | Regular |
 
 Lao and Lao Looped share the `lao` script bucket. Script fallback prefers Noto Sans Lao;
-Noto Sans Lao Looped is available by family name. These are coverage substitutes for Office
-families rather than metric matches. Sylfaen, Ebrima, Gadugi and Latin families retain their family
-resolution and use script fallback for international glyphs.
+Noto Sans Lao Looped is available by family name. Office families retain their existing family
+resolution and use per-character script fallback for international glyphs.
 
 ## Assets
 

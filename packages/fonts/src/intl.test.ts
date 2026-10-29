@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { INTL_FONT_ASSET_URLS } from '../../fonts-intl/src';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
+import { version as fontsVersion } from '../package.json';
 import intlPackage from '../../fonts-intl/package.json';
 import cjkPackage from '../../fonts-cjk/package.json';
+import { TextMeasureFontRegistry } from '../../docx/src/layout/measure/fontRegistry';
 import {
   BUNDLED_FONTS,
   resolveBundledFamilyFace,
+  resolveLastResortFace,
   resolveMetricCompatFace,
   resolveMetricCompatFamily,
   resolveScriptFallbackFace,
@@ -59,6 +62,7 @@ describe('international font manifest', () => {
       expect(faces.map((face) => face.weight)).toEqual(bold ? [400, 700] : [400]);
       for (const face of faces) {
         expect(face.script).toBe(script);
+        expect(face.metricCompatWith).toBeUndefined();
         expect(face.style).toBe('normal');
         expect(face.file).toBe(
           `${family.replace(/ /g, '')}-${face.weight === 700 ? 'Bold' : 'Regular'}.ttf.zst`,
@@ -148,15 +152,18 @@ describe('international font manifest', () => {
     ['Noto Sans Thaana', ['MV Boli']],
     ['Noto Sans Cherokee', ['Plantagenet Cherokee']],
   ] as const) {
-    test(`resolves Office names to ${family}`, () => {
+    test(`uses ${family} only through script fallback for Office names`, () => {
+      const [, script, hasBold] = families.find(([name]) => name === family)!;
       for (const office of officeNames) {
         for (const bold of [false, true]) {
-          const face = resolveMetricCompatFace(` ${office.toUpperCase()} `, bold, false)!;
+          expect(resolveMetricCompatFamily(office)).toBeUndefined();
+          expect(resolveMetricCompatFace(` ${office.toUpperCase()} `, bold, false)).toBeUndefined();
+          expect(resolveBundledFamilyFace(office, bold, false)).toBeUndefined();
+          expect(resolveBundledFamilyFace(office, bold, true)).toBeUndefined();
+          const face = resolveScriptFallbackFace(script, bold, false)!;
           expect(face.family).toBe(family);
-          expect(face.weight).toBe(bold && families.find(([name]) => name === family)![2] ? 700 : 400);
+          expect(face.weight).toBe(bold && hasBold ? 700 : 400);
         }
-        expect(resolveBundledFamilyFace(office, false, false)?.family).toBe(family);
-        expect(resolveBundledFamilyFace(office, false, true)).toBeUndefined();
       }
     });
   }
@@ -172,6 +179,29 @@ describe('international font manifest', () => {
       .toBe('NotoSansLaoLooped-Bold.ttf.zst');
   });
 });
+
+for (const [family, character, script, fallback] of [
+  ['Nirmala UI', 'क', 'devanagari', 'Noto Sans Devanagari'],
+  ['Leelawadee UI', 'ก', 'thai', 'Noto Sans Thai'],
+] as const) {
+  test(`Latin-only ${family} keeps the main Liberation Sans chain and ${character} has a script fallback`, async () => {
+    const { createFontProvider } = await import('./index');
+    const provider = createFontProvider();
+    const registered: Uint8Array[] = [];
+    const registry = new TextMeasureFontRegistry(
+      { registerFont: (bytes) => { registered.push(bytes); return registered.length; } },
+      { bundled: provider },
+    );
+    expect(SCRIPT_PATTERNS.filter(([, pattern]) => pattern.test('Latin text 123'))).toEqual([]);
+    expect(provider.resolve(family, false, false)).toBeUndefined();
+    expect(await registry.getFontIdChain(family, false, false)).toEqual([1]);
+    expect(registered).toEqual([new Uint8Array(await provider.resolve('Arial', false, false)!())]);
+    expect(resolveLastResortFace(family, false, false, 'word').family).toBe('Liberation Sans');
+    expect(SCRIPT_PATTERNS.filter(([, pattern]) => pattern.test(character)).map(([name]) => name)).toEqual([script]);
+    expect(provider.resolveScriptFallback(script, false, false)).toBeDefined();
+    expect(resolveScriptFallbackFace(script, false, false)?.family).toBe(fallback);
+  });
+}
 
 test('script blocks include extensions and keep neighboring scripts distinct', () => {
   for (const [script, points] of [
@@ -205,7 +235,7 @@ const decodedBold = new Uint8Array([0, 1, 0, 0, 20]);
 const decode = mock(async (
   input: ArrayBuffer | Uint8Array,
   dictionary?: ArrayBuffer | Uint8Array,
-  options?: { codec?: string },
+  options?: { codec?: string; wasmUrl?: URL },
 ): Promise<ArrayBuffer> => {
   expect(options?.codec).toBe('zstd');
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
@@ -249,7 +279,7 @@ test('lazily imports intl and decodes Bold with a cached decoded Regular diction
   }) as typeof fetch;
   try {
     const provider = createFontProvider();
-    const load = provider.resolve('Leelawadee UI', true, false)!;
+    const load = provider.resolveScriptFallback('thai', true, false)!;
     expect(importIntl).not.toHaveBeenCalled();
     expect(requested).toEqual([]);
     const [first, second, normal] = await Promise.all([
@@ -319,7 +349,7 @@ test('CDN loads the pinned intl pack and custom roots without importing the add-
   try {
     const provider = createFontProvider();
     expect(requested).toEqual([]);
-    const bytes = await provider.resolve('Vrinda', true, false)!();
+    const bytes = await provider.resolveScriptFallback('bengali', true, false)!();
     expect(new Uint8Array(bytes)).toEqual(decodedBold);
     const base = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${fontsIntlVersion}/assets/`;
     expect(requested.sort()).toEqual([`${base}${bold.file}`, `${base}${regular.file}`].sort());
@@ -330,6 +360,9 @@ test('CDN loads the pinned intl pack and custom roots without importing the add-
       `https://intl-custom-cdn.example/fonts/${bold.file}`,
       `https://intl-custom-cdn.example/fonts/${regular.file}`,
     ].sort());
+    expect(decode.mock.calls.map(([, , options]) => options?.wasmUrl?.href)).toEqual(
+      Array(4).fill(`https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`),
+    );
     expect(importIntl).toHaveBeenCalledTimes(imports);
   } finally {
     [regular.byteLength, bold.byteLength] = sizes;

@@ -13,6 +13,7 @@ export interface CdnFontOptions {
 const BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/assets/`;
 const CJK_BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/`;
 const INTL_BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-intl@${fontsIntlVersion}/assets/`;
+const DECODER_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/dist/decoder/fontpack.wasm`;
 
 function assetBase(value: string | URL): URL {
   const href = String(value);
@@ -34,7 +35,12 @@ export function createFontProvider(
   const intlBase = assetBase(options.baseUrl ?? INTL_BASE_URL);
   return fontProvider((face) => {
     if (face.file.endsWith('.ttf.zst')) {
-      return loadPackedFontBytes(face, async (dependency) => new URL(dependency.file, intlBase), 30_000);
+      return loadPackedFontBytes(
+        face,
+        async (dependency) => new URL(dependency.file, intlBase),
+        30_000,
+        new URL(DECODER_URL),
+      );
     }
     return loadFontBytes(
       face,

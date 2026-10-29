@@ -56,6 +56,8 @@ import { configureDefaultFonts } from '@betteroffice/docx/layout';
 configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 ```
 
+In browsers, international faces also load a decoder pinned to the installed `@betteroffice/fonts` version.
+
 To use your own CDN, create a provider and pass it to `DocxEditor` as `measurementFontProvider`:
 
 ```ts

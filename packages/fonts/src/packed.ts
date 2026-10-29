@@ -8,9 +8,10 @@ export async function loadPackedFontBytes(
   face: BundledFontFace,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
   timeoutMs?: number,
+  wasmUrl?: URL,
 ): Promise<ArrayBuffer> {
   const url = await resolveUrl(face);
-  const key = `${url.href}|${face.byteLength}|${timeoutMs ?? ''}`;
+  const key = `${url.href}|${face.byteLength}|${timeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
   let pending = decodedCache.get(key);
   if (pending === undefined) {
     pending = (async () => {
@@ -25,9 +26,9 @@ export async function loadPackedFontBytes(
         readFontBytes(face.file, url, timeoutMs),
         regular === undefined
           ? undefined
-          : loadPackedFontBytes(regular, resolveUrl, timeoutMs),
+          : loadPackedFontBytes(regular, resolveUrl, timeoutMs, wasmUrl),
       ]);
-      const decoded = await decodeFontBytes(encoded, dictionary, { codec: 'zstd' });
+      const decoded = await decodeFontBytes(encoded, dictionary, { codec: 'zstd', wasmUrl });
       if (decoded.byteLength !== face.byteLength) {
         throw new Error(
           `Bundled font ${face.file} has ${decoded.byteLength} bytes; expected ${face.byteLength}`,

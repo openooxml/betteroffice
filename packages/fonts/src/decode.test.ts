@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
 import { existsSync, readFileSync } from 'node:fs';
 import * as nodeZlib from 'node:zlib';
@@ -146,62 +146,110 @@ describe('internal font decoder', () => {
     expect(again).not.toBe(decoded);
   });
 
-  test.skipIf(!hasWasm)('wasm path decodes without native zstd and releases each output', async () => {
-    const results = await Promise.all([
-      decodeFontBytes(helloFrame, undefined, { wasmUrl }),
-      decodeFontBytes(helloFrame, undefined, { wasmUrl }),
-    ]);
-    for (const result of results) expect(new Uint8Array(result)).toEqual(hello);
-    expect(results[0]).not.toBe(results[1]);
-    const corrupt = helloFrame.slice();
-    corrupt[corrupt.length - 1] ^= 1;
-    await expect(decodeFontBytes(corrupt, undefined, { wasmUrl })).rejects.toThrow('checksum');
-    expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
-  });
-
-  test.skipIf(!hasWasm)('without native zstd or wasmUrl the default decoder url loads the built wasm', async () => {
+  test('native zstd takes priority over a supplied decoder URL', async () => {
     const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
     const original = host.getBuiltinModule;
-    host.getBuiltinModule = (id: string) => (id === 'node:zlib' ? {} : original?.call(host, id));
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    host.getBuiltinModule = (id: string) => id === 'node:zlib'
+      ? { zstdDecompressSync: () => { calls++; return hello; } }
+      : original?.call(host, id);
+    globalThis.fetch = (async () => { throw new Error('Unexpected decoder request'); }) as unknown as typeof fetch;
     try {
-      expect(new Uint8Array(await decodeFontBytes(helloFrame))).toEqual(hello);
-      const corrupt = helloFrame.slice();
-      corrupt[corrupt.length - 1] ^= 1;
-      await expect(decodeFontBytes(corrupt)).rejects.toThrow('Font face checksum failed');
+      const decoded = await decodeFontBytes(helloFrame, undefined, {
+        wasmUrl: new URL('https://native.example/decoder/fontpack.wasm'),
+      });
+      expect(new Uint8Array(decoded)).toEqual(hello);
+      expect(calls).toBe(1);
     } finally {
       host.getBuiltinModule = original;
+      globalThis.fetch = originalFetch;
     }
   });
 
-  test.skipIf(!hasWasm)('wasm linear memory cannot grow past 1 GiB', async () => {
-    const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
-    const memory = instance.exports.memory as WebAssembly.Memory;
-    const pages = memory.buffer.byteLength / 65536;
-    expect(() => memory.grow(16384 - pages + 1)).toThrow();
-  });
+  describe('wasm decoder', () => {
+    const host = globalThis.process as unknown as { getBuiltinModule?: (id: string) => unknown };
+    const original = host.getBuiltinModule;
+    beforeEach(() => {
+      host.getBuiltinModule = (id: string) => id === 'node:zlib' ? {} : original?.call(host, id);
+    });
+    afterEach(() => {
+      host.getBuiltinModule = original;
+    });
 
-  test.skipIf(!hasWasm)('wasm path refuses a 2 GiB content size without allocating it', async () => {
-    const bomb = new Uint8Array([
-      0x28, 0xb5, 0x2f, 0xfd, 0xa4, 0xff, 0xff, 0xff, 0x7f,
-      0x09, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00,
-    ]);
-    await expect(decodeFontBytes(bomb, undefined, { wasmUrl, maxOutput: 0x7fffffff })).rejects.toThrow(
-      'Cannot allocate memory for font face',
-    );
-    expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
-  });
+    test.skipIf(!hasWasm)('wasm path decodes without native zstd and releases each output', async () => {
+      const results = await Promise.all([
+        decodeFontBytes(helloFrame, undefined, { wasmUrl }),
+        decodeFontBytes(helloFrame, undefined, { wasmUrl }),
+      ]);
+      for (const result of results) expect(new Uint8Array(result)).toEqual(hello);
+      expect(results[0]).not.toBe(results[1]);
+      const corrupt = helloFrame.slice();
+      corrupt[corrupt.length - 1] ^= 1;
+      await expect(decodeFontBytes(corrupt, undefined, { wasmUrl })).rejects.toThrow('checksum');
+      expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
+    });
 
-  test.skipIf(!hasWasm || !canCompress)('wasm path grows memory and decodes a raw dictionary', async () => {
-    const dict = synthetic();
-    const bytes = new Uint8Array(3 * 1024 * 1024);
-    for (let offset = 0; offset < bytes.length; offset += dict.length) bytes.set(dict, offset);
-    bytes[100] ^= 1;
-    const frame = compress(bytes, dict);
-    const first = await decodeFontBytes(frame, dict, { wasmUrl });
-    const second = await decodeFontBytes(frame, dict, { wasmUrl });
-    expect(new Uint8Array(first)).toEqual(bytes);
-    expect(new Uint8Array(second)).toEqual(bytes);
-    const wrong = new Uint8Array(dict.length);
-    await expect(decodeFontBytes(frame, wrong, { wasmUrl })).rejects.toThrow(/corrupt|dictionary|checksum/);
+    test.skipIf(!hasWasm)('bundled published entry requests its adjacent decoder wasm', async () => {
+      const build = await Bun.build({
+        entrypoints: [new URL('../dist/index.js', import.meta.url).pathname],
+        target: 'browser',
+        external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
+        define: { 'import.meta.url': JSON.stringify('https://consumer.example/dist/index.js') },
+      });
+      expect(build.success).toBe(true);
+      const entry = await import(`data:text/javascript;base64,${Buffer.from(await build.outputs[0]!.text()).toString('base64')}`);
+      const face = { ...entry.resolveScriptFallbackFace('thai', false, false), byteLength: hello.length };
+      const pack = `https://bundled-pack.example/fonts/${face.file}`;
+      const decoder = 'https://consumer.example/dist/decoder/fontpack.wasm';
+      const requested: string[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requested.push(url);
+        if (url === pack) return new Response(helloFrame);
+        if (url === decoder) return new Response(readFileSync(wasmUrl));
+        return new Response('missing', { status: 404 });
+      }) as typeof fetch;
+      try {
+        expect(new Uint8Array(await entry.loadBundledFontBytes(face, { baseUrl: 'https://bundled-pack.example/fonts/' })))
+          .toEqual(hello);
+        expect(requested).toEqual([pack, decoder]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    test.skipIf(!hasWasm)('wasm linear memory cannot grow past 1 GiB', async () => {
+      const { instance } = await WebAssembly.instantiate(readFileSync(wasmUrl), {});
+      const memory = instance.exports.memory as WebAssembly.Memory;
+      const pages = memory.buffer.byteLength / 65536;
+      expect(() => memory.grow(16384 - pages + 1)).toThrow();
+    });
+
+    test.skipIf(!hasWasm)('wasm path refuses a 2 GiB content size without allocating it', async () => {
+      const bomb = new Uint8Array([
+        0x28, 0xb5, 0x2f, 0xfd, 0xa4, 0xff, 0xff, 0xff, 0x7f,
+        0x09, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00,
+      ]);
+      await expect(decodeFontBytes(bomb, undefined, { wasmUrl, maxOutput: 0x7fffffff })).rejects.toThrow(
+        'Cannot allocate memory for font face',
+      );
+      expect(new Uint8Array(await decodeFontBytes(helloFrame, undefined, { wasmUrl }))).toEqual(hello);
+    });
+
+    test.skipIf(!hasWasm || !canCompress)('wasm path grows memory and decodes a raw dictionary', async () => {
+      const dict = synthetic();
+      const bytes = new Uint8Array(3 * 1024 * 1024);
+      for (let offset = 0; offset < bytes.length; offset += dict.length) bytes.set(dict, offset);
+      bytes[100] ^= 1;
+      const frame = compress(bytes, dict);
+      const first = await decodeFontBytes(frame, dict, { wasmUrl });
+      const second = await decodeFontBytes(frame, dict, { wasmUrl });
+      expect(new Uint8Array(first)).toEqual(bytes);
+      expect(new Uint8Array(second)).toEqual(bytes);
+      const wrong = new Uint8Array(dict.length);
+      await expect(decodeFontBytes(frame, wrong, { wasmUrl })).rejects.toThrow(/corrupt|dictionary|checksum/);
+    });
   });
 });
