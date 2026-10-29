@@ -269,9 +269,9 @@ fn execute(
                 .search_text(
                     args["query"].as_str().unwrap(),
                     options["caseSensitive"].as_bool().unwrap_or(false),
-                    options
-                        .get("limit")
-                        .map(|limit| serde_json::from_value::<u32>(limit.clone()).unwrap() as usize),
+                    options.get("limit").map(|limit| {
+                        serde_json::from_value::<u32>(limit.clone()).unwrap() as usize
+                    }),
                 )
                 .into_iter()
                 .map(|result| {
@@ -299,7 +299,9 @@ fn execute(
         ),
         "charts" => serialized(
             &workbook
-                .charts(SheetId(serde_json::from_value(args["sheet"].clone()).unwrap()))
+                .charts(SheetId(
+                    serde_json::from_value(args["sheet"].clone()).unwrap(),
+                ))
                 .unwrap(),
         ),
         "version" => json!(workbook.version()),
