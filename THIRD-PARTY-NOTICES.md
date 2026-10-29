@@ -136,3 +136,75 @@ path data of the `check` and `x` icons from `lucide-static` 1.61.0
 Icons and Contributors, License: ISC. Both icons derive from the Feather
 project, Copyright (c) 2013-present Cole Bemis, License: MIT. The full notices
 ship with `@betteroffice/docx-react` in `packages/docx-react/THIRD-PARTY-NOTICES.md`.
+
+---
+
+## Microsoft Office Online test tools (WOPI proof-key test data)
+
+`apps/wopi/src/fixtures/microsoft-proof-keys.json` copies the proof-key test
+data (discovery keys, access tokens, URLs, timestamps and signatures) from
+`samples/python/proof_keys/tests.py` in
+https://github.com/microsoft/Office-Online-Test-Tools-and-Documentation.
+It is used only by tests.
+
+    The MIT License (MIT)
+
+    Copyright (c) 2015 Microsoft
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+---
+
+## Zstandard decoder
+
+`vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
+`facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
+It is compiled into the internal `fontpack` crate and its standalone wasm decoder.
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
+included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt` for decoder
+redistribution.
+
+---
+
+## lol_alloc
+
+The standalone font decoder links `lol_alloc` 0.4.1's single-threaded freelist
+allocator, https://github.com/Craig-Macomber/lol_alloc.
+
+Copyright (c) 2022 Craig
+
+License: MIT. The unmodified upstream licence is included under
+`packages/fonts/LICENSES/MIT-lol_alloc.txt` for decoder redistribution.
+
+---
+
+## wuff
+
+The internal font decoder links `wuff` 0.2.9 for WOFF2 reconstruction,
+https://github.com/nicoburns/wuff. Its wasm feature set excludes brotli and
+flate2. The native pack builder enables brotli for reference verification.
+
+Copyright (c) 2013-2017 by the WOFF2 Authors.
+Copyright (c) 2025 by Nico Burns.
+
+License: MIT. The unmodified upstream licence is included under
+`packages/fonts/LICENSES/MIT-wuff.txt` for decoder redistribution.

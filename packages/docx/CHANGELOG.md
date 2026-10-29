@@ -1,5 +1,27 @@
 # @betteroffice/docx
 
+## 0.5.1
+
+### Patch Changes
+
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+- eb6df55: Removes text-only runs emptied by direct text edits when saving DOCX files. Runs that were already empty or contain other content are preserved.
+- 673dea7: Preserves plain line breaks, automatic table cell shading, and parent comment reference formatting when saving edits. Replies use the document's comment reference style or inherit the parent's reference formatting.
+- c3eaf80: Text with automatic color now turns white on dark text boxes, shapes, shaded paragraphs and shaded runs, and stays black on mid tone table cells, matching Word.
+- d211451: Chart data labels in Word documents use the number format the chart's values were saved with when the labels name none, so a percentage chart's labels read 20.8% instead of 0.2, as in Word.
+- f9f560c: Comment cards now match the tracked change cards: the same header with avatar, name and time, icon buttons for resolve and more options, a compact reply field and matching buttons. Resolving, the menu and replies work as before.
+- 3fe4c80: Documents lay out every page when font downloads fail or no font provider is configured, with long paragraphs wrapped on fallback metrics. The font fallback warning is logged once per editor.
+- cc9f38c: Saving formatting changes in DOCX paragraphs with many short runs is faster.
+- 03591d5: Paragraph reads now include resolved outline levels and list markers in accepted and original views. Story reads report header and footer visibility when a complete layout of the current version is available.
+- c8c5d64: Preserves authored font slots and language when edits rewrite or split DOCX runs. Inserted paragraphs that copy a neighbour's formatting retain its authored fonts without adding resolved theme fonts or inherited script slots.
+- e4cf080: Saving an edited document is faster, most on documents with many pictures: the editor reads the original package once per opened document instead of parsing it again for every save.
+- 8c056d3: Documents set in Segoe UI Light, Semilight or Semibold, directly or through the theme fonts, now use the line height Word uses for those fonts, and Light and Semilight text keeps Word's narrower letter widths, so pages break closer to where Word breaks them.
+- 5f4a899: Table cell text now ignores the section line grid by default, preventing oversized rows. Documents with `adjustLineHeightInTable` enabled retain cell grid snapping.
+- b2fa7b8: Uses Selawik for upright Segoe UI families by default, preserving their weights; italic Segoe UI keeps a real italic fallback face. Adds Office-aware `resolveGlyphFallback` and `resolveGlyphFallbackFace` coverage for characters absent from Selawik in Word and PowerPoint previews.
+
 ## 0.5.0
 
 ### Minor Changes

@@ -8,6 +8,40 @@ const section = (title: string, body: string, arm?: string) => `<section${arm ? 
 const repo = 'https://github.com/openooxml/betteroffice/blob/main/';
 const count = (suite: Suite, format: string) => suite.tasks.filter(t => t.format === format).length;
 const location = (base: string, path: string) => path === '/' ? base || '/' : base + path;
+export const ORIGIN = 'https://evals.betteroffice.dev';
+const SITE_NAME = 'BetterOffice Evals';
+const canonicalPath = (base: string, route: string) => route === '/' ? (base ? base + '/' : '/') : base + route + '/';
+const routesFor = (s: Suite): [string, string][] => [ ['/', 'Overview'], ...formats(s).map((f): [string, string] => ['/' + f, f.toUpperCase()]), ['/failures', 'Failures'], ['/method', 'Method'], ['/reproduce', 'Reproduce'] ];
+
+function pageMeta(s: Suite, route: string, versioned: boolean) {
+  const counts = formats(s).map(f => f.toUpperCase()).join(', ');
+  const title = route === '/' ? 'Agent editing evals'
+    : route === '/failures' ? 'Where runs failed'
+    : route === '/method' ? 'Method and limits'
+    : route === '/reproduce' ? 'Reproduce the evals'
+    : `${route.slice(1).toUpperCase()} task results`;
+  const description = route === '/' ? `Agent editing evaluation ${s.suite}: ${s.tasks.length} tasks on ${s.fixtures.count} ${s.fixtures.kind} fixtures (${counts}), scored by whole-file checkers that catch collateral damage.`
+    : route === '/failures' ? `Every failed run in evaluation ${s.suite}, grouped by cause and linked to its task.`
+    : route === '/method' ? `How evaluation ${s.suite} runs agents, scores whole-package edits and what its results do not show.`
+    : route === '/reproduce' ? `Commands, pinned fixtures and hashes to reproduce evaluation ${s.suite}.`
+    : `Per-task ${route.slice(1).toUpperCase()} results for evaluation ${s.suite}, with prompts, tool calls and checker messages.`;
+  return { title: `${title}${versioned ? ` (${s.suite})` : ''} | ${SITE_NAME}`, description };
+}
+
+function publishedSuites(data: Pick<SiteData, 'suites' | 'publishedTiers'>) {
+  return newestFirst(data.suites.map(suite => publishedSuite(suite, data.publishedTiers)).filter(suite => suite.tasks.length));
+}
+
+export function sitemap(data: Pick<SiteData, 'suites' | 'publishedTiers'>): string {
+  const suites = publishedSuites(data);
+  const urls = suites.flatMap((s, index) => [
+    ...(index === 0 ? routesFor(s).map(([route]) => ({ path: canonicalPath('', route), date: s.date })) : []),
+    ...(index === 0 ? [] : routesFor(s).map(([route]) => ({ path: canonicalPath(`/suites/${encodeURIComponent(s.suite)}`, route), date: s.date }))),
+  ]);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(u => `  <url><loc>${escape(ORIGIN + u.path)}</loc><lastmod>${escape(u.date)}</lastmod></url>`).join('\n')}\n</urlset>\n`;
+}
+
+export const robots = () => `User-agent: *\nAllow: /\n\nSitemap: ${ORIGIN}/sitemap.xml\n`;
 const tierLabel = (tier: Tier) => tier === 'basic' ? 'Basic' : 'Complex';
 
 function intro(s: Suite) {
@@ -30,21 +64,37 @@ function metric(s: Suite, model: string, arm: string, format?: string, tier?: Ti
   return `<article class="metric"><span class="eyebrow">${escape(label)} · ${escape(a.label)}</span><strong>${stats.passes}/${stats.n}</strong><p>${percent(stats.rate!)} pass rate</p><p>95% Wilson interval: ${percent(stats.interval[0])} to ${percent(stats.interval[1])}</p><p>n = ${stats.n} runs · ${stats.tasks} tasks</p><p>${repetitions(stats.runsPerTask)}</p>${every}</article>`;
 }
 
-function groupedBars(s: Suite, model: string, tier?: Tier) {
+const barTiers = (s: Suite): (Tier | undefined)[] => tiers(s).length > 1 ? [...tiers(s)].reverse() : [undefined];
+
+function tieredMetric(s: Suite, model: string, arm: string, format?: string) {
+  const a = s.arms.find(x => x.id === arm)!;
+  const parts = barTiers(s).map(tier => ({ tier: tier!, stats: aggregate(s, { model, arm, format, tier }) })).filter(part => part.stats.n);
+  if (!parts.length) return '';
+  const label = format?.toUpperCase() ?? 'Overall';
+  return `<article class="metric"><span class="eyebrow">${escape(label)} · ${escape(a.label)}</span><strong class="tiered">${parts.map(({ tier, stats }) => `${tierLabel(tier).toLowerCase()} ${stats.passes}/${stats.n}`).join(' · ')}</strong>${parts.map(({ tier, stats }) => `<p><span class="text-fg">${tierLabel(tier)}:</span> ${percent(stats.rate!)} pass rate · 95% Wilson interval: ${percent(stats.interval[0])} to ${percent(stats.interval[1])} · n = ${stats.n} runs · ${stats.tasks} tasks${stats.runsPerTask.some(n => n > 1) ? ` · all runs pass: ${stats.allPass}/${stats.tasks} tasks (${percent(stats.allPassRate!)})` : ''}</p>`).join('')}</article>`;
+}
+
+function groupedBars(s: Suite, model: string) {
+  const series = barTiers(s).flatMap(tier => s.arms.map(arm => ({ arm, tier })));
   const groups = [...formats(s), undefined].map(format => ({
     label: format?.toUpperCase() ?? 'Total',
-    values: s.arms.map(arm => ({ arm, stats: aggregate(s, { model, arm: arm.id, format, tier }) })),
+    values: series.map(({ arm, tier }) => ({ arm, tier, stats: aggregate(s, { model, arm: arm.id, format, tier }) })),
   }));
-  const series = (arm: string) => arm === 'betteroffice' ? 'ours' : 'generic';
-  return `<figure class="comparison"><figcaption>Pass rate</figcaption><ul class="chart-legend">${s.arms.map(arm => `<li><span class="chart-key ${series(arm.id)}" aria-hidden="true"></span>${escape(arm.label)}</li>`).join('')}</ul><div class="grouped-chart" aria-hidden="true"><div class="chart-axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="chart-groups">${groups.map(group => `<div class="chart-group"><div class="chart-pair">${group.values.map(({ arm, stats }) => `<div class="chart-column"><div class="chart-bar ${series(arm.id)}" data-arm="${escape(arm.id)}" style="height:${percent(stats.rate ?? 0)}"><span class="chart-value">${stats.n ? percent(stats.rate!) : 'No runs'}</span></div></div>`).join('')}</div><span class="chart-label">${group.label}</span></div>`).join('')}</div></div><table class="sr-only"><caption>Pass rates for ${escape(model)}${tier ? ' · ' + tierLabel(tier) : ''}, shared scale from 0% to 100%</caption><thead><tr><th scope="col">Format</th><th scope="col">Arm</th><th scope="col">Passes / runs</th><th scope="col">Pass rate</th></tr></thead><tbody>${groups.flatMap(group => group.values.map(({ arm, stats }) => `<tr><th scope="row">${group.label}</th><td>${escape(arm.label)}</td><td>${stats.passes}/${stats.n}</td><td>${stats.n ? percent(stats.rate!) : 'No runs'}</td></tr>`)).join('')}</tbody></table></figure>`;
+  const hue = (arm: string) => arm === 'betteroffice' ? 'ours' : 'generic';
+  const kind = (arm: string, tier?: Tier) => `${hue(arm)}${tier === 'basic' ? ' basic' : ''}`;
+  const name = (arm: Suite['arms'][number], tier?: Tier) => `${arm.label}${tier ? ' · ' + tierLabel(tier) : ''}`;
+  const column = (index: number) => index && series[index]!.tier && series[index]!.tier !== series[index - 1]!.tier ? 'chart-column tier-start' : 'chart-column';
+  return `<figure class="comparison"><figcaption>Pass rate</figcaption><ul class="chart-legend">${series.map(({ arm, tier }) => `<li><span class="chart-key ${kind(arm.id, tier)}" aria-hidden="true"></span>${escape(name(arm, tier))}</li>`).join('')}</ul><div class="grouped-chart" aria-hidden="true"><div class="chart-axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="chart-groups">${groups.map(group => `<div class="chart-group"><div class="chart-pair">${group.values.map(({ arm, tier, stats }, index) => `<div class="${column(index)}"><div class="chart-bar ${kind(arm.id, tier)}" data-arm="${escape(arm.id)}"${tier ? ` data-tier="${tier}"` : ''} style="height:${percent(stats.rate ?? 0)}" title="${escape(name(arm, tier))}: ${stats.passes}/${stats.n}"><span class="chart-value">${stats.n ? percent(stats.rate!) : 'No runs'}</span></div></div>`).join('')}</div><span class="chart-label">${group.label}</span></div>`).join('')}</div></div><table class="sr-only"><caption>Pass rates for ${escape(model)}, shared scale from 0% to 100%</caption><thead><tr><th scope="col">Format</th><th scope="col">Arm</th><th scope="col">Passes / runs</th><th scope="col">Pass rate</th></tr></thead><tbody>${groups.flatMap(group => group.values.map(({ arm, tier, stats }) => `<tr><th scope="row">${group.label}</th><td>${escape(name(arm, tier))}</td><td>${stats.passes}/${stats.n}</td><td>${stats.n ? percent(stats.rate!) : 'No runs'}</td></tr>`)).join('')}</tbody></table></figure>`;
 }
 
 function overview(s: Suite, suites: Suite[], base: string) {
   const headline = `<p class="mt-6 max-w-[760px] text-ink">${intro(s)}</p><p class="mt-5 max-w-[760px]">A task passes only if the requested edit is correct, the rest of the file is unchanged, and the input is untouched.</p><p class="mt-5 max-w-[760px] text-ink">&quot;Nothing else in the file moved&quot; matters because a correct-looking edit can still erase formatting, formula results, paragraph ids or speaker notes. Whole-package checks catch changes a quick visual check can miss.</p>`;
   let content = hero('Agent editing evals', s, headline);
   for (const model of models(s)) {
-    const groups: (Tier | undefined)[] = tiers(s).length > 1 ? tiers(s) : [undefined];
-    content += section(`Results · ${model}`, groups.map(tier => `${tier ? `<h3 class="eyebrow my-6">${tierLabel(tier)}</h3>` : ''}${groupedBars(s, model, tier)}<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${[undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f, tier))).join('')}</div>`).join('') + `<p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
+    const cards = tiers(s).length > 1
+      ? [undefined, ...formats(s)].flatMap(f => s.arms.map(a => tieredMetric(s, model, a.id, f)))
+      : [undefined, ...formats(s)].flatMap(f => s.arms.map(a => metric(s, model, a.id, f)));
+    content += section(`Results · ${model}`, `${groupedBars(s, model)}<div class="grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2">${cards.join('')}</div>` + `<p class="mt-6 text-sm text-ink">Intervals describe uncertainty in this small sample. They do not establish performance on other documents. ${link(location(base, '/method'), 'Method and limits')}</p>`);
   }
   content += section('Suites', `<table><caption class="sr-only">Every published evaluation suite</caption><thead><tr>${['Version', 'Date', 'Fixtures', 'Tasks', 'Runs per task per model', 'Models', 'Arms and pass rates', 'JSON'].map(t => `<th scope="col">${t}</th>`).join('')}</tr></thead><tbody>${suites.map(suite => {
     const groups: (Tier | undefined)[] = tiers(suite).length > 1 ? tiers(suite) : [undefined];
@@ -130,16 +180,18 @@ function reproduce(s: Suite) {
 
 export function renderPages(data: SiteData): Map<string, string> {
   for (const suite of data.suites) validateSuite(suite);
-  const suites = newestFirst(data.suites.map(suite => publishedSuite(suite, data.publishedTiers)).filter(suite => suite.tasks.length));
+  const suites = publishedSuites(data);
   if (!suites.length) throw new Error('No evaluation suites');
   const pages = new Map<string, string>();
   for (const [index, s] of suites.entries()) {
     for (const base of index === 0 ? ['', `/suites/${encodeURIComponent(s.suite)}`] : [`/suites/${encodeURIComponent(s.suite)}`]) {
-      const routes: [string, string][] = [ ['/', 'Overview'], ...formats(s).map((f): [string, string] => ['/' + f, f.toUpperCase()]), ['/failures', 'Failures'], ['/method', 'Method'], ['/reproduce', 'Reproduce'] ];
-      for (const [route, title] of routes) {
+      const routes = routesFor(s);
+      for (const [route] of routes) {
         const body = route === '/' ? overview(s, suites, base) : route === '/failures' ? failures(s, base) : route === '/method' ? method(s) : route === '/reproduce' ? reproduce(s) : taskPage(s, route!.slice(1));
-        const nav = `<nav class="flex flex-wrap items-center gap-x-7 gap-y-2 max-[44rem]:gap-x-5 max-[36rem]:gap-x-4" aria-label="Sections">${routes.map(([path, label]) => `<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="${location(base, path!)}"${path === route ? ' aria-current="page"' : ''}>${escape(label)}</a>`).join('')}</nav>`;
-        const html = data.frame.replace('{{TITLE}}', () => escape(title!)).replace('{{NAV}}', () => nav).replace('{{CONTENT}}', () => body);
+        const nav = `<nav class="flex flex-wrap items-center gap-x-7 gap-y-2 max-[44rem]:gap-x-5 max-[36rem]:gap-x-4" aria-label="Sections">${routes.map(([path, label]) => `<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="${location(base, path!)}"${path === route ? ' aria-current="page"' : ''}>${escape(label)}</a>`).join('')}<a class="font-mono text-xs text-ink no-underline transition-colors hover:text-fg" href="https://betteroffice.dev">website</a></nav>`;
+        const meta = pageMeta(s, route!, base !== '');
+        const canonical = ORIGIN + canonicalPath(index === 0 ? '' : base, route!);
+        const html = data.frame.replace('{{TITLE}}', () => escape(meta.title)).replace('{{DESCRIPTION}}', () => escape(meta.description)).replace('{{CANONICAL}}', () => escape(canonical)).replace('{{NAV}}', () => nav).replace('{{CONTENT}}', () => body);
         if (/[\u2013\u2014]|undefined|NaN/.test(html)) throw new Error(`Invalid generated page: ${route}`);
         const path = location(base, route!);
         pages.set(path === '/' ? 'index.html' : path.slice(1) + '/index.html', html);

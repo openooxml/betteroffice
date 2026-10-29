@@ -1,5 +1,54 @@
 # @betteroffice/agents
 
+## 0.3.0
+
+### Minor Changes
+
+- e5718f5: Adds opt-in `protectedSheets: "allow"` to agent cell writes, formatting, sorting and find/replace. Protection is kept, and `protectedCells` reports edits through protection. The default remains `"refuse"`.
+- d9c0a82: Adds opt-in `width: "copy"` to `insert_table_column` and `insertTableColumn` to preserve existing column widths and refit the table frame. Omitting `width` or choosing `"split"` keeps the current behavior.
+
+### Patch Changes
+
+- c8c5d64: Preserves authored font slots and language when edits rewrite or split DOCX runs. Inserted paragraphs that copy a neighbour's formatting retain its authored fonts without adding resolved theme fonts or inherited script slots.
+- b2fa7b8: Uses Selawik for upright Segoe UI families by default, preserving their weights; italic Segoe UI keeps a real italic fallback face. Adds Office-aware `resolveGlyphFallback` and `resolveGlyphFallbackFace` coverage for characters absent from Selawik in Word and PowerPoint previews.
+- Updated dependencies [e5718f5]
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [eb6df55]
+- Updated dependencies [673dea7]
+- Updated dependencies [c3eaf80]
+- Updated dependencies [d211451]
+- Updated dependencies [f9f560c]
+- Updated dependencies [3fe4c80]
+- Updated dependencies [cc9f38c]
+- Updated dependencies [03591d5]
+- Updated dependencies [c8c5d64]
+- Updated dependencies [e4cf080]
+- Updated dependencies [8c056d3]
+- Updated dependencies [5f4a899]
+- Updated dependencies [27590d9]
+- Updated dependencies [d9c0a82]
+- Updated dependencies [70e3441]
+- Updated dependencies [375cbc3]
+- Updated dependencies [4eaba8b]
+- Updated dependencies [59deeda]
+- Updated dependencies [02818de]
+- Updated dependencies [b2fa7b8]
+- Updated dependencies [23018b6]
+- Updated dependencies [f694c05]
+- Updated dependencies [ef5eaa7]
+- Updated dependencies [d8f4d03]
+- Updated dependencies [361b113]
+- Updated dependencies [ae3902a]
+- Updated dependencies [f0f9ffe]
+- Updated dependencies [3b3af14]
+  - @betteroffice/xlsx@0.5.1
+  - @betteroffice/pptx@0.5.1
+  - @betteroffice/docx@0.5.1
+  - @betteroffice/fonts@0.4.2
+
 ## 0.2.0
 
 ### Minor Changes

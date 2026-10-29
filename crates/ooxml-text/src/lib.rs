@@ -53,6 +53,7 @@ pub mod auto_space;
 pub mod bidi;
 pub mod caps;
 pub mod echo;
+pub mod family_metrics;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;

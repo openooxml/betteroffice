@@ -210,7 +210,7 @@ pub(crate) fn unequal_column_rectangles(
         .collect()
 }
 
-fn column_rectangle_at(
+pub(crate) fn column_rectangle_at(
     page_width: f64,
     left_margin: f64,
     right_margin: f64,
@@ -314,6 +314,9 @@ pub struct Paginator {
     page_size: Size,
     margins: PageMargins,
     columns: ColumnLayout,
+    opening_margins: Vec<PageMargins>,
+    opening_columns: Vec<ColumnLayout>,
+    pub(crate) continuous_horizontal_frame: bool,
     pending_page_size: Option<Size>,
     pending_margins: Option<PageMargins>,
     pending_columns: Option<ColumnLayout>,
@@ -323,7 +326,9 @@ pub struct Paginator {
     footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     start_page_number: u32,
     section_index: usize,
+    region_section_indices: Vec<usize>,
     section_page_margins: Vec<SectionPageMargins>,
+    physical_section_page_margins: Vec<SectionPageMargins>,
     section_page_float_bands: SharedPageFloatBands,
     column_capacities: Vec<Option<f64>>,
     /// Whether the section in force has opened a page yet.
@@ -374,6 +379,9 @@ impl Paginator {
             page_size,
             margins,
             columns,
+            opening_margins: Vec::new(),
+            opening_columns: Vec::new(),
+            continuous_horizontal_frame: false,
             pending_page_size: None,
             pending_margins: None,
             pending_columns: None,
@@ -383,7 +391,9 @@ impl Paginator {
             footnote_reserved_heights: footnote_reserved_heights.map(Arc::new),
             start_page_number: 1,
             section_index: 0,
+            region_section_indices: Vec::new(),
             section_page_margins: Vec::new(),
+            physical_section_page_margins: Vec::new(),
             section_page_float_bands: SharedPageFloatBands::default(),
             column_capacities: Vec::new(),
             section_started: false,
@@ -399,6 +409,21 @@ impl Paginator {
     /// per section; see [`SectionPageMargins`].
     pub fn set_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
         self.section_page_margins = margins;
+    }
+
+    pub(crate) fn set_physical_section_page_margins(&mut self, margins: Vec<SectionPageMargins>) {
+        self.physical_section_page_margins = margins;
+    }
+
+    pub(crate) fn set_region_section_indices(&mut self, indices: Vec<usize>) {
+        self.region_section_indices = indices;
+    }
+
+    fn region_section_index(&self) -> usize {
+        self.region_section_indices
+            .get(self.section_index)
+            .copied()
+            .unwrap_or(self.section_index)
     }
 
     pub fn set_section_page_float_bands(&mut self, mut bands: Vec<SectionPageFloatBands>) {
@@ -513,19 +538,23 @@ impl Paginator {
     /// Sets ownership for future pages and the untouched current page, which
     /// then opens the section.
     pub fn set_section_index(&mut self, section_index: usize) {
-        let entering = section_index != self.section_index;
+        let physical_changed = section_index != self.section_index;
+        let previous_region = self.region_section_index();
         self.section_index = section_index;
+        let entering = previous_region != self.region_section_index();
         if entering {
             self.section_started = false;
         }
         if let Some(idx) = self.pristine_page() {
             let page_index = self.states[idx].page_index;
-            self.pages[page_index].region_section_index = section_index;
+            self.pages[page_index].region_section_index = self.region_section_index();
             if entering {
                 self.opens_section[idx] = true;
                 self.section_started = true;
                 self.displayed_parity_offset =
                     self.page_parity_offset(true, self.pages[page_index].number);
+            }
+            if physical_changed {
                 if self.states[idx].column_index == 0 && self.promote_pending_geometry() {
                     self.restamp_pristine_page();
                 } else {
@@ -611,7 +640,7 @@ impl Paginator {
     /// restart when it opens the section, else the previous page's plus one.
     fn page_parity_offset(&self, opens_section: bool, page_number: u32) -> bool {
         self.section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|margins| margins.restart)
             .filter(|_| opens_section)
             .map_or(self.continued_parity_offset, |start| {
@@ -624,12 +653,16 @@ impl Paginator {
     fn page_margins(&self, opens_section: bool, page_number: u32) -> PageMargins {
         let variant = self
             .section_page_margins
-            .get(self.section_index)
+            .get(self.region_section_index())
             .and_then(|variants| {
+                let physical = self
+                    .physical_section_page_margins
+                    .get(self.section_index)
+                    .unwrap_or(variants);
                 if opens_section && variants.first.is_some() {
-                    variants.first.as_ref()
+                    physical.first.as_ref()
                 } else if (page_number % 2 == 0) != self.displayed_parity_offset {
-                    variants.even.as_ref()
+                    physical.even.as_ref()
                 } else {
                     None
                 }
@@ -723,6 +756,10 @@ impl Paginator {
         normalize_page_float_bands(bands)
     }
 
+    pub fn active_margins(&self) -> &PageMargins {
+        &self.margins
+    }
+
     /// Returns the active section's content width.
     pub fn get_content_width(&self) -> f64 {
         self.page_size.w - self.margins.left - self.margins.right
@@ -810,7 +847,9 @@ impl Paginator {
         self.pages[page_index].body_margins = body_margins;
         self.pages[page_index].body_anchor_margins = body_anchor_margins;
         self.pages[page_index].columns = (self.columns.count > 1.0).then(|| self.columns.clone());
-        self.pages[page_index].region_section_index = self.section_index;
+        self.opening_margins[page_index] = self.margins.clone();
+        self.opening_columns[page_index] = self.columns.clone();
+        self.pages[page_index].region_section_index = self.region_section_index();
         let state = &mut self.states[idx];
         state.pen_y = content_top;
         state.content_top = content_top;
@@ -895,7 +934,7 @@ impl Paginator {
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
-            region_section_index: self.section_index,
+            region_section_index: self.region_section_index(),
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: if footnote_height > 0.0 {
@@ -935,6 +974,8 @@ impl Paginator {
         };
 
         self.pages.push(page);
+        self.opening_margins.push(self.margins.clone());
+        self.opening_columns.push(self.columns.clone());
         self.states.push(state);
         self.section_mark_counts.push(0);
         self.opens_section.push(opens_section);
@@ -1134,6 +1175,32 @@ impl Paginator {
         let y = self.states[idx].pen_y + actual_space_before;
 
         fragment.set_xy(x, y);
+        if let Fragment::Paragraph(paragraph) = &mut fragment {
+            let page_index = self.states[idx].page_index;
+            let page = &self.pages[page_index];
+            let margins = &self.opening_margins[page_index];
+            let (opening_x, opening_width) = column_rectangle_at(
+                page.size.w,
+                margins.left,
+                margins.right,
+                &self.opening_columns[page_index],
+                column_index,
+            );
+            let opening_frame = crate::types::HorizontalFrame {
+                margin_left: margins.left,
+                content_width: page.size.w - margins.left - margins.right,
+                column_x: opening_x,
+                column_width: opening_width,
+            };
+            let frame = crate::types::HorizontalFrame {
+                margin_left: self.margins.left,
+                content_width: self.get_content_width(),
+                column_x: x,
+                column_width: self.get_column_width(column_index),
+            };
+            paragraph.horizontal_frame =
+                (self.continuous_horizontal_frame || frame != opening_frame).then_some(frame);
+        }
         if self.columns.count > 1.0
             && self.columns.equal_width == Some(false)
             && let Fragment::Paragraph(pf) = &mut fragment
@@ -1234,6 +1301,7 @@ impl Paginator {
 
     /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
+        let pristine = self.pristine_page();
         self.pending_columns = None;
         self.balanced_page = None;
         self.columns = new_columns;
@@ -1246,6 +1314,9 @@ impl Paginator {
 
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
+        if pristine == Some(idx) {
+            self.opening_columns[page_index] = self.columns.clone();
+        }
         self.pages[page_index].columns = if self.columns.count > 1.0 {
             Some(self.columns.clone())
         } else {
@@ -1402,6 +1473,21 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
         )
     }
 
+    fn update_horizontal_margins(&mut self, margins: &PageMargins) {
+        let idx = self.get_current();
+        if self.states[idx].pen_y >= self.states[idx].content_limit {
+            return;
+        }
+        self.margins.left = margins.left;
+        self.margins.right = margins.right;
+        self.column_width = calculate_column_width(
+            self.page_size.w,
+            self.margins.left,
+            self.margins.right,
+            &self.columns,
+        );
+    }
+
     fn force_page_break(&mut self) -> u32 {
         let idx = Paginator::force_page_break(self);
         self.pages[self.states[idx].page_index].number
@@ -1501,6 +1587,114 @@ mod tests {
             separator: None,
             columns: None,
         }
+    }
+
+    #[test]
+    fn physical_section_change_refreshes_footer_bands_without_restarting_caller() {
+        let initial = margins(60.0, 80.0);
+        let next = PageMargins {
+            top: 70.0,
+            left: 120.0,
+            ..initial.clone()
+        };
+        let band = |top, bottom| PageFloatBand {
+            top,
+            bottom,
+            odd_page: None,
+        };
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            initial.clone(),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: None,
+            restart: Some(2),
+        }]);
+        paginator.set_section_page_float_bands(vec![
+            SectionPageFloatBands {
+                default: vec![band(400.0, 520.0)],
+                anchor_margins: Some(initial),
+                ..SectionPageFloatBands::default()
+            },
+            SectionPageFloatBands {
+                default: vec![band(800.0, 920.0)],
+                anchor_margins: Some(next.clone()),
+                ..SectionPageFloatBands::default()
+            },
+        ]);
+        let first = paginator.get_current();
+        paginator.set_pen_y(first, 200.0);
+        paginator
+            .update_page_layout(
+                Some(Size {
+                    w: 600.0,
+                    h: 1000.0,
+                }),
+                Some(next),
+                true,
+            )
+            .unwrap();
+        let following = paginator.force_authored_page_break(false);
+        assert_eq!(
+            paginator.pages[following].float_bands,
+            vec![band(400.0, 520.0)]
+        );
+        let parity = paginator.displayed_parity_offset;
+
+        paginator.set_section_index(1);
+
+        let page = &paginator.pages[following];
+        assert_eq!(page.float_bands, vec![band(800.0, 920.0)]);
+        assert_eq!(page.margins.left, 120.0);
+        assert_eq!(page.margins.top, 70.0);
+        assert_eq!(page.body_margins.as_ref().unwrap().bottom, 200.0);
+        assert_eq!(paginator.states[following].content_limit, 800.0);
+        assert_eq!(page.region_section_index, 0);
+        assert!(!paginator.opens_section[following]);
+        assert_eq!(paginator.displayed_parity_offset, parity);
+    }
+
+    #[test]
+    fn shared_caller_variants_use_each_physical_sections_margins() {
+        let mut paginator = Paginator::new(
+            Size { w: 600.0, h: 600.0 },
+            margins(60.0, 80.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        paginator.set_region_section_indices(vec![0, 0]);
+        paginator.set_section_page_margins(vec![SectionPageMargins {
+            first: Some(margins(180.0, 80.0)),
+            even: Some(margins(180.0, 80.0)),
+            restart: Some(1),
+        }]);
+        paginator.set_physical_section_page_margins(vec![
+            SectionPageMargins {
+                first: Some(margins(100.0, 80.0)),
+                even: Some(margins(120.0, 80.0)),
+                restart: None,
+            },
+            SectionPageMargins {
+                first: Some(margins(240.0, 80.0)),
+                even: Some(margins(220.0, 80.0)),
+                restart: None,
+            },
+        ]);
+        let first = paginator.get_current();
+        assert_eq!(paginator.state(first).content_top, 100.0);
+        paginator.set_pen_y(first, 200.0);
+        let even = paginator.force_authored_page_break(false);
+        assert_eq!(paginator.state(even).content_top, 120.0);
+        paginator.set_section_index(1);
+        assert_eq!(paginator.state(even).content_top, 220.0);
+        assert_eq!(paginator.pages[even].region_section_index, 0);
+        assert!(!paginator.opens_section[even]);
     }
 
     #[test]

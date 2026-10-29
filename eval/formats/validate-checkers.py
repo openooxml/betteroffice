@@ -1724,7 +1724,7 @@ def v3_structural(package, spec):
             if props is not None:
                 paragraph.append(copy.deepcopy(props))
             run = ET.SubElement(paragraph, tag('w', 'r'))
-            props = source.find('w:r/w:rPr', NS)
+            props = checker.opening_run_props(source, 'w')
             if props is not None:
                 run.append(copy.deepcopy(props))
             ET.SubElement(run, tag('w', 't')).text = text
@@ -2526,7 +2526,7 @@ def reference_drawing_text(body, value):
         if props is not None:
             paragraph.append(copy.deepcopy(props))
         run = ET.SubElement(paragraph, tag('a', 'r'))
-        props = source.find('a:r/a:rPr', NS)
+        props = checker.opening_run_props(source, 'a')
         if props is not None:
             run.append(copy.deepcopy(props))
         ET.SubElement(run, tag('a', 't')).text = line

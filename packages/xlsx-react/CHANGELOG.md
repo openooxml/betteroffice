@@ -1,5 +1,26 @@
 # @betteroffice/xlsx-react
 
+## 0.5.1
+
+### Patch Changes
+
+- 361b113: Adds `sheets[].visibility` to `readCells` results by default, including `unknown` when visibility cannot be determined. Exports the `XlsxSheetVisibility` type from both package roots.
+- Updated dependencies [e5718f5]
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [23018b6]
+- Updated dependencies [f694c05]
+- Updated dependencies [ef5eaa7]
+- Updated dependencies [d8f4d03]
+- Updated dependencies [361b113]
+- Updated dependencies [ae3902a]
+- Updated dependencies [f0f9ffe]
+- Updated dependencies [3b3af14]
+  - @betteroffice/xlsx@0.5.1
+  - @betteroffice/xlsx-i18n@0.5.1
+
 ## 0.5.0
 
 ### Minor Changes

@@ -24,6 +24,7 @@ import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave
 import { isWorkerViewer } from '../internals/workerViewer';
 import { registeredWorkerProposalAuthority, hasEditorWorkerProposalRounds } from '../internals/workerProposalAuthority';
 import type { DocxEditorProps } from '../../DocxEditor';
+import { useTranslation } from '../../../i18n';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
@@ -191,6 +192,7 @@ export function useFileIO({
   loadBuffer: (buffer: DocxInput) => Promise<void>;
   focusActiveEditor: () => void;
 }) {
+  const { t } = useTranslation();
   const imageInputRef = useRef<HTMLInputElement>(null);
   const imageInsertRef = useRef<DocxImageInsert | null>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
@@ -259,11 +261,11 @@ export function useFileIO({
       } catch (error) {
         onError?.(pagedEditorRef.current?.getYrsSession() !== initialSession
           ? new Error('The document changed while saving')
-          : toFileIOError(error, 'Failed to save document'));
+          : toFileIOError(error, t('editor.failedToSave')));
         return null;
       }
     },
-    [pagedEditorRef, comments, onSave, onError, experimentalWorkerOpen]
+    [pagedEditorRef, comments, onSave, onError, experimentalWorkerOpen, t]
   );
 
   const reservePrint = useCallback((): DocxPrintJob => {
@@ -319,14 +321,14 @@ export function useFileIO({
       setTimeout(() => URL.revokeObjectURL(url), 0);
       return 'saved';
     }).catch((error): DocxSaveOutcome => {
-      onError?.(toFileIOError(error, 'Failed to save document'));
+      onError?.(toFileIOError(error, t('editor.failedToSave')));
       return 'failed';
     }).finally(() => {
       if (saveRequestRef.current === pending) saveRequestRef.current = null;
     });
     saveRequestRef.current = pending;
     return pending;
-  }, [handleSave, documentName, downloadOnSave, onSaveRequest, onError, pagedEditorRef]);
+  }, [handleSave, documentName, downloadOnSave, onSaveRequest, onError, pagedEditorRef, t]);
 
   const handleOpenDocument = useCallback(() => {
     docxInputRef.current?.click();

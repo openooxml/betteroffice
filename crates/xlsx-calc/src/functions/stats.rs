@@ -3,10 +3,13 @@
 
 use std::collections::HashMap;
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, union_areas};
-use crate::parser::Expr;
+use crate::eval::{
+    Area, EvalContext, as_area, bound_area, err, evaluate, num, parse_cached, union_areas,
+};
+use crate::fmath;
+use crate::parser::{Expr, parse_formula};
 
 use super::criteria::{self, Criterion};
 use super::{
@@ -15,24 +18,21 @@ use super::{
 
 pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => err(ErrorValue::Div0),
-        Ok(nums) => num(nums.iter().sum::<f64>() / nums.len() as f64),
+        Ok(nums) => mean_of(&nums),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn min(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
+        Ok(nums) => min_of(&nums),
         Err(e) => err(e),
     }
 }
 
 pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => num(0.0),
-        Ok(nums) => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        Ok(nums) => max_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -264,9 +264,366 @@ pub(crate) fn quartile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// whether a parsed formula contains a `SUBTOTAL` or `AGGREGATE` call
+/// anywhere in its tree: at the top level, under an operator, or in a branch
+/// excel may not even take (`=SUBTOTAL(9,A1:A2)*2`, `=IF(x,SUBTOTAL(..),0)`).
+/// excel ignores such a cell inside an outer SUBTOTAL/AGGREGATE reference on
+/// that basis alone, so the whole tree is walked, not just its root.
+fn contains_nested_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::FuncCall { func, name, args } => {
+            matches!(func, Some(super::Func::Subtotal | super::Func::Aggregate))
+                || super::bare_name(name).eq_ignore_ascii_case("SUBTOTAL")
+                || super::bare_name(name).eq_ignore_ascii_case("AGGREGATE")
+                || args.iter().any(contains_nested_aggregate)
+        }
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_nested_aggregate(expr),
+        Expr::Binary { lhs, rhs, .. } => {
+            contains_nested_aggregate(lhs) || contains_nested_aggregate(rhs)
+        }
+        Expr::RangeJoin { start, end } => {
+            contains_nested_aggregate(start) || contains_nested_aggregate(end)
+        }
+        Expr::ArrayLiteral { values, .. } => values.iter().any(contains_nested_aggregate),
+        _ => false,
+    }
+}
+
+/// per-aggregate scan for nested SUBTOTAL/AGGREGATE cells. the provider only
+/// lends the stored formula text; a cell with no formula is never parsed.
+/// parsed results are memoised by formula text in this scan (and, on a
+/// recalc, in the context's shared `parse_cache` keyed by the same text), so
+/// one unique formula is parsed and walked at most once per aggregate no
+/// matter how many cells hold it or how often the range is re-read. the scan
+/// is therefore O(cells) provider lookups plus O(unique formula texts) of
+/// parsing, and charges no budget of its own: the value reads below go
+/// through the same bounded `cells_ref` the unfiltered aggregates used.
+#[derive(Default)]
+struct NestedScan {
+    cache: HashMap<String, bool>,
+}
+
+impl NestedScan {
+    fn is_nested(&mut self, sheet: SheetId, at: CellRef, ctx: &EvalContext<'_>) -> bool {
+        let Some(src) = ctx.provider.formula(sheet, at) else {
+            return false;
+        };
+        if let Some(hit) = self.cache.get(src) {
+            return *hit;
+        }
+        let body = src.strip_prefix('=').unwrap_or(src);
+        let hit = match ctx.parse_cache {
+            Some(cache) => {
+                parse_cached(cache, body).is_some_and(|expr| contains_nested_aggregate(&expr))
+            }
+            None => parse_formula(body).is_ok_and(|expr| contains_nested_aggregate(&expr)),
+        };
+        self.cache.insert(src.to_owned(), hit);
+        hit
+    }
+}
+
+/// the areas an argument designates (a union flattens to several), or `None`
+/// when it is a literal or computed value with no cells to skip. every
+/// reference shape `as_area`/`union_areas` resolve (single cells, ranges,
+/// unions, cross-sheet refs, OFFSET/INDIRECT/INDEX results, table refs, and
+/// defined names that resolve to a reference) arrives here as an `Area`
+/// carrying its sheet, so all of them are filtered alike. (a multi-sheet 3D
+/// ref has no single `Area` in this engine today and is untouched.)
+fn reference_areas(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Result<Vec<Area>, ErrorValue>> {
+    match union_areas(arg, ctx) {
+        Some(areas) => Some(areas),
+        None => as_area(arg, ctx).map(|area| Ok(vec![area])),
+    }
+}
+
+/// an area cut to its used extent plus its values in row-major order: the
+/// same bounded read (and the same one budget charge) `values_ref` made.
+fn bounded_values<'p>(
+    area: &Area,
+    ctx: &EvalContext<'p>,
+) -> Result<(Area, Vec<std::borrow::Cow<'p, CellValue>>), ErrorValue> {
+    let bounded = bound_area(*area, ctx);
+    let values = bounded.cells_ref(ctx)?;
+    Ok((bounded, values))
+}
+
+fn cell_at(area: &Area, index: usize) -> CellRef {
+    let cols = area.cols.max(1);
+    CellRef::new(
+        area.start.row + (index / cols) as u32,
+        area.start.col + (index % cols) as u32,
+    )
+}
+
+/// `collect_numbers` with nested cells dropped from reference arguments, as
+/// if empty: only numbers survive a reference, errors propagate (unless the
+/// cell is a skipped nested aggregate, whose value is never read as a
+/// number), and literal/computed arguments coerce exactly as before. a
+/// computed array has no cells, so nothing in it is skipped.
+fn collect_numbers_skipping(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    skip: bool,
+    scan: &mut NestedScan,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
+    for arg in args {
+        match reference_areas(arg, ctx) {
+            Some(Ok(areas)) => {
+                for area in &areas {
+                    let (bounded, values) = bounded_values(area, ctx)?;
+                    for (index, value) in values.iter().enumerate() {
+                        if skip && scan.is_nested(bounded.sheet, cell_at(&bounded, index), ctx) {
+                            continue;
+                        }
+                        super::push_reference_number(&mut nums, value)?;
+                    }
+                }
+            }
+            Some(Err(error)) => return Err(error),
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    for row in 0..array.rows() {
+                        for col in 0..array.cols() {
+                            super::push_reference_number(&mut nums, &array.at(row, col))?;
+                        }
+                    }
+                }
+                value => match value.into_scalar() {
+                    CellValue::Number { value } => nums.push(value),
+                    CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
+                    CellValue::Empty => {}
+                    CellValue::Text { value } => match ctx.parse_number(&value) {
+                        Some(n) => nums.push(n),
+                        None => return Err(ErrorValue::Value),
+                    },
+                    CellValue::Error { value } => return Err(value),
+                },
+            },
+        }
+    }
+    Ok(nums)
+}
+
+/// COUNT (`counta == false`) and COUNTA (`counta == true`) with nested cells
+/// dropped from reference arguments: a skipped nested cell counts for
+/// neither, exactly as if it were empty. non-reference arguments keep the
+/// scalar rules of `count`/`counta`.
+fn count_skipping(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    skip: bool,
+    counta: bool,
+    scan: &mut NestedScan,
+) -> Result<i64, ErrorValue> {
+    let mut count = 0i64;
+    for arg in args {
+        match reference_areas(arg, ctx) {
+            Some(Ok(areas)) => {
+                for area in &areas {
+                    let (bounded, values) = bounded_values(area, ctx)?;
+                    for (index, value) in values.iter().enumerate() {
+                        if skip && scan.is_nested(bounded.sheet, cell_at(&bounded, index), ctx) {
+                            continue;
+                        }
+                        let counted = if counta {
+                            !matches!(value.as_ref(), CellValue::Empty)
+                        } else {
+                            matches!(value.as_ref(), CellValue::Number { .. })
+                        };
+                        count += i64::from(counted);
+                    }
+                }
+            }
+            Some(Err(error)) => return Err(error),
+            None if counta => {
+                if !matches!(evaluate(arg, ctx), CellValue::Empty) {
+                    count += 1;
+                }
+            }
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    count += array
+                        .cells()
+                        .iter()
+                        .filter(|v| matches!(v, CellValue::Number { .. }))
+                        .count() as i64;
+                }
+                value => match value.into_scalar() {
+                    CellValue::Number { .. } | CellValue::Bool { .. } => count += 1,
+                    CellValue::Text { value } if ctx.parse_number(&value).is_some() => {
+                        count += 1;
+                    }
+                    _ => {}
+                },
+            },
+        }
+    }
+    Ok(count)
+}
+
+/// average over a collected list; no values -> `#DIV/0!`.
+fn mean_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        err(ErrorValue::Div0)
+    } else {
+        num(nums.iter().sum::<f64>() / nums.len() as f64)
+    }
+}
+
+/// max over a collected list; no values -> 0.
+fn max_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    }
+}
+
+/// min over a collected list; no values -> 0.
+fn min_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().copied().fold(f64::INFINITY, f64::min))
+    }
+}
+
+/// sum over a collected list; shared with `math::sum`.
+pub(crate) fn sum_of(nums: &[f64]) -> CellValue {
+    num(nums.iter().sum())
+}
+
+/// product over a collected list; no values -> 0. shared with `math::product`.
+pub(crate) fn product_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        num(0.0)
+    } else {
+        num(nums.iter().product())
+    }
+}
+
+/// median over a collected list; no values -> `#NUM!`.
+fn median_of(nums: &[f64]) -> CellValue {
+    if nums.is_empty() {
+        return err(ErrorValue::Num);
+    }
+    let mut sorted = nums.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    if n % 2 == 1 {
+        num(sorted[n / 2])
+    } else {
+        num((sorted[n / 2 - 1] + sorted[n / 2]) / 2.0)
+    }
+}
+
+/// the variance core: sample (n-1) or population (n), too few -> `#DIV/0!`.
+fn variance_of(nums: &[f64], sample: bool) -> Result<f64, ErrorValue> {
+    let n = nums.len();
+    let denom_ok = if sample { n >= 2 } else { n >= 1 };
+    if !denom_ok {
+        return Err(ErrorValue::Div0);
+    }
+    let mean = nums.iter().sum::<f64>() / n as f64;
+    let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+    let denom = if sample { n as f64 - 1.0 } else { n as f64 };
+    Ok(ss / denom)
+}
+
+/// the numeric aggregates (codes 1, 4-13) over an already-collected list,
+/// with the same empty-input answers the delegated functions gave.
+fn numbers_value(code: i64, nums: &[f64]) -> CellValue {
+    match code {
+        1 => mean_of(nums),
+        4 => max_of(nums),
+        5 => min_of(nums),
+        6 => product_of(nums),
+        7 => variance_of(nums, true).map(f64::sqrt).into_cell(),
+        8 => variance_of(nums, false).map(f64::sqrt).into_cell(),
+        9 => sum_of(nums),
+        10 => variance_of(nums, true).into_cell(),
+        11 => variance_of(nums, false).into_cell(),
+        12 => median_of(nums),
+        13 => mode_of_numbers(nums),
+        _ => err(ErrorValue::Value),
+    }
+}
+
+/// MODE.SNGL over a collected list: the most frequent value, earliest first
+/// appearance winning ties, `#N/A` when nothing repeats.
+fn mode_of_numbers(nums: &[f64]) -> CellValue {
+    let mut counts: HashMap<u64, (f64, usize, usize)> = HashMap::new();
+    for (i, &x) in nums.iter().enumerate() {
+        if !x.is_finite() {
+            return err(ErrorValue::Num);
+        }
+        let key = if x == 0.0 { 0 } else { x.to_bits() };
+        counts
+            .entry(key)
+            .and_modify(|(_, count, _)| *count += 1)
+            .or_insert((x, 1, i));
+    }
+    let mut best: Option<(f64, usize, usize)> = None;
+    for (_, (value, count, first)) in counts {
+        if count < 2 {
+            continue;
+        }
+        match best {
+            Some((_, best_count, best_first))
+                if best_count > count || (best_count == count && best_first <= first) => {}
+            _ => best = Some((value, count, first)),
+        }
+    }
+    match best {
+        Some((v, _, _)) => num(v),
+        None => err(ErrorValue::NA),
+    }
+}
+
+/// codes 14-17 over a collected list; `k` is the rank/quantile argument as
+/// the standalone LARGE/SMALL/PERCENTILE/QUARTILE would read it.
+fn ranked_value(code: i64, nums: &[f64], args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let mut sorted = nums.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    match code {
+        14 | 15 => {
+            let k = match nth_int(args, ctx, args.len() - 1) {
+                Ok(k) => k,
+                Err(e) => return err(e),
+            };
+            if k < 1 || k as usize > sorted.len() {
+                return err(ErrorValue::Num);
+            }
+            num(if code == 14 {
+                sorted[sorted.len() - k as usize]
+            } else {
+                sorted[k as usize - 1]
+            })
+        }
+        16 | 17 => {
+            let k = match nth_number(args, ctx, args.len() - 1) {
+                Ok(k) => k,
+                Err(e) => return err(e),
+            };
+            let k = if code == 17 { k.trunc() / 4.0 } else { k };
+            match percentile_inc(&sorted, k) {
+                Ok(v) => finite(v),
+                Err(e) => err(e),
+            }
+        }
+        _ => err(ErrorValue::Value),
+    }
+}
+
 /// SUBTOTAL(code, ...): one of eleven aggregates, chosen by code. 1-11 and
 /// 101-111 select the same function; the 100 series also skips manually
-/// hidden rows, which we do not model, so both behave alike here.
+/// hidden rows, which we do not model, so both behave alike here. cells in
+/// the references whose own formula contains a SUBTOTAL or AGGREGATE call
+/// (see [`contains_nested_aggregate`]) are skipped as if empty, for every
+/// code including COUNT and COUNTA, so a grand total over group subtotals
+/// does not double count. hidden/filtered rows are not modelled.
 pub(crate) fn subtotal(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 2 {
         return err(ErrorValue::Value);
@@ -275,27 +632,37 @@ pub(crate) fn subtotal(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(code) => code,
         Err(e) => return err(e),
     };
+    let code = if (101..=111).contains(&code) {
+        code - 100
+    } else {
+        code
+    };
+    if !(1..=11).contains(&code) {
+        return err(ErrorValue::Value);
+    }
     let rest = &args[1..];
+    let mut scan = NestedScan::default();
     match code {
-        1 | 101 => average(rest, ctx),
-        2 | 102 => count(rest, ctx),
-        3 | 103 => counta(rest, ctx),
-        4 | 104 => max(rest, ctx),
-        5 | 105 => min(rest, ctx),
-        6 | 106 => super::math::product(rest, ctx),
-        7 | 107 => stdev_s(rest, ctx),
-        8 | 108 => stdev_p(rest, ctx),
-        9 | 109 => super::math::sum(rest, ctx),
-        10 | 110 => var_s(rest, ctx),
-        11 | 111 => var_p(rest, ctx),
-        _ => err(ErrorValue::Value),
+        2 | 3 => match count_skipping(rest, ctx, true, code == 3, &mut scan) {
+            Ok(count) => num(count as f64),
+            Err(e) => err(e),
+        },
+        _ => match collect_numbers_skipping(rest, ctx, true, &mut scan) {
+            Ok(nums) => numbers_value(code, &nums),
+            Err(e) => err(e),
+        },
     }
 }
 
 /// AGGREGATE(code, options, ...): the SUBTOTAL aggregates plus LARGE, SMALL,
 /// PERCENTILE and QUARTILE, with an options flag that says what to ignore.
 /// Options 2,3,6,7 ignore errors, which is the whole point of the function in
-/// most sheets; nested subtotals and hidden rows are not modelled.
+/// most sheets. options 0-3 (and an omitted options argument, which reads as
+/// 0) also ignore cells in a reference whose own formula contains a SUBTOTAL
+/// or AGGREGATE call, as SUBTOTAL itself does; options 4-7 include those
+/// cells. only the reference form has cells to skip: a computed array
+/// argument (the array form used with codes 14-19) is taken as computed.
+/// hidden rows are not modelled.
 pub(crate) fn aggregate(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 {
         return err(ErrorValue::Value);
@@ -313,47 +680,68 @@ pub(crate) fn aggregate(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     let rest = &args[2..];
     let skip_errors = matches!(options, 2 | 3 | 6 | 7);
+    let skip_nested = matches!(options, 0..=3);
+    let mut scan = NestedScan::default();
     let value = match code {
-        1 => average(rest, ctx),
-        2 => count(rest, ctx),
-        3 => counta(rest, ctx),
-        4 => max(rest, ctx),
-        5 => min(rest, ctx),
-        6 => super::math::product(rest, ctx),
-        7 => stdev_s(rest, ctx),
-        8 => stdev_p(rest, ctx),
-        9 => super::math::sum(rest, ctx),
-        10 => var_s(rest, ctx),
-        11 => var_p(rest, ctx),
-        12 => median(rest, ctx),
-        13 => mode(rest, ctx),
-        14 => large(rest, ctx),
-        15 => small(rest, ctx),
-        16 => percentile(rest, ctx),
-        17 => quartile(rest, ctx),
+        1..=13 if code == 2 || code == 3 => {
+            match count_skipping(rest, ctx, skip_nested, code == 3, &mut scan) {
+                Ok(count) => num(count as f64),
+                Err(e) => err(e),
+            }
+        }
+        1..=13 => match collect_numbers_skipping(rest, ctx, skip_nested, &mut scan) {
+            Ok(nums) => numbers_value(code, &nums),
+            Err(e) => err(e),
+        },
+        14..=17 => {
+            if rest.len() != 2 {
+                err(ErrorValue::Value)
+            } else {
+                match collect_numbers_skipping(&rest[..rest.len() - 1], ctx, skip_nested, &mut scan)
+                {
+                    Ok(nums) => ranked_value(code, &nums, rest, ctx),
+                    Err(e) => err(e),
+                }
+            }
+        }
         _ => return err(ErrorValue::Value),
     };
     match (&value, skip_errors) {
-        (CellValue::Error { .. }, true) => aggregate_ignoring_errors(code, rest, ctx),
+        (CellValue::Error { .. }, true) => {
+            aggregate_ignoring_errors(code, rest, ctx, skip_nested, &mut scan)
+        }
         _ => value,
     }
 }
 
-/// the numeric cells of an argument list, skipping errors, as a literal list
-/// the scalar aggregates can be re-run over.
-fn numeric_literals(args: &[Expr], ctx: &EvalContext<'_>) -> Vec<f64> {
+/// the numeric cells of an argument list, skipping errors (and, when
+/// `skip` is set, nested SUBTOTAL/AGGREGATE cells), as a literal list the
+/// scalar aggregates can be re-run over.
+fn numeric_literals(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    skip: bool,
+    scan: &mut NestedScan,
+) -> Vec<f64> {
     let mut nums = Vec::new();
     for arg in args {
-        match as_area(arg, ctx) {
-            Some(area) => {
-                if let Ok(values) = area.values_ref(ctx) {
-                    for value in values {
-                        if let CellValue::Number { value } = value.as_ref() {
-                            nums.push(*value);
+        match reference_areas(arg, ctx) {
+            Some(Ok(areas)) => {
+                for area in &areas {
+                    if let Ok((bounded, values)) = bounded_values(area, ctx) {
+                        for (index, value) in values.iter().enumerate() {
+                            if skip && scan.is_nested(bounded.sheet, cell_at(&bounded, index), ctx)
+                            {
+                                continue;
+                            }
+                            if let CellValue::Number { value } = value.as_ref() {
+                                nums.push(*value);
+                            }
                         }
                     }
                 }
             }
+            Some(Err(_)) => {}
             // `ROW(range)/(range=key)` is the nth-match idiom: a computed
             // block whose misses are #DIV/0!, which the skip-errors options
             // exist to drop
@@ -381,12 +769,18 @@ fn numeric_literals(args: &[Expr], ctx: &EvalContext<'_>) -> Vec<f64> {
 /// re-run an aggregate over only the cells that are not errors. every code
 /// `AGGREGATE` accepts is handled here, so an error in the input cannot turn a
 /// supported code into `#VALUE!`.
-fn aggregate_ignoring_errors(code: i64, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+fn aggregate_ignoring_errors(
+    code: i64,
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    skip_nested: bool,
+    scan: &mut NestedScan,
+) -> CellValue {
     let take = match code {
         14..=17 => args.len().saturating_sub(1),
         _ => args.len(),
     };
-    let mut nums = numeric_literals(&args[..take], ctx);
+    let mut nums = numeric_literals(&args[..take], ctx, skip_nested, scan);
     if nums.is_empty() {
         return err(ErrorValue::Div0);
     }
@@ -472,16 +866,7 @@ fn mode_of(nums: &[f64]) -> CellValue {
 
 pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
-        Ok(nums) if nums.is_empty() => err(ErrorValue::Num),
-        Ok(mut nums) => {
-            nums.sort_by(f64::total_cmp);
-            let n = nums.len();
-            if n % 2 == 1 {
-                num(nums[n / 2])
-            } else {
-                num((nums[n / 2 - 1] + nums[n / 2]) / 2.0)
-            }
-        }
+        Ok(nums) => median_of(&nums),
         Err(e) => err(e),
     }
 }
@@ -489,35 +874,9 @@ pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// MODE.SNGL: the most frequent value; the earliest-appearing one wins ties.
 /// no repeats -> #N/A.
 pub(crate) fn mode(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    let nums = match collect_numbers(args, ctx) {
-        Ok(n) => n,
-        Err(e) => return err(e),
-    };
-    let mut counts: HashMap<u64, (f64, usize, usize)> = HashMap::new();
-    for (i, &x) in nums.iter().enumerate() {
-        if !x.is_finite() {
-            return err(ErrorValue::Num);
-        }
-        let key = if x == 0.0 { 0 } else { x.to_bits() };
-        counts
-            .entry(key)
-            .and_modify(|(_, count, _)| *count += 1)
-            .or_insert((x, 1, i));
-    }
-    let mut best: Option<(f64, usize, usize)> = None;
-    for (_, (value, count, first)) in counts {
-        if count < 2 {
-            continue;
-        }
-        match best {
-            Some((_, best_count, best_first))
-                if best_count > count || (best_count == count && best_first <= first) => {}
-            _ => best = Some((value, count, first)),
-        }
-    }
-    match best {
-        Some((v, _, _)) => num(v),
-        None => err(ErrorValue::NA),
+    match collect_numbers(args, ctx) {
+        Ok(nums) => mode_of_numbers(&nums),
+        Err(e) => err(e),
     }
 }
 
@@ -819,20 +1178,15 @@ fn matching_numbers(
 /// sample (n-1) or population (n) variance; too few values -> #DIV/0!.
 fn variance(args: &[Expr], ctx: &EvalContext<'_>, sample: bool) -> Result<f64, ErrorValue> {
     let nums = collect_numbers(args, ctx)?;
-    let n = nums.len();
-    let denom_ok = if sample { n >= 2 } else { n >= 1 };
-    if !denom_ok {
-        return Err(ErrorValue::Div0);
-    }
-    let mean = nums.iter().sum::<f64>() / n as f64;
-    let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-    let denom = if sample { n as f64 - 1.0 } else { n as f64 };
-    Ok(ss / denom)
+    variance_of(&nums, sample)
 }
 
 fn nth_order(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
+    }
+    if let Some(value) = super::criteria_index::nth_match(args, ctx, largest, false) {
+        return value;
     }
     let mut nums = match collect_numbers(&args[..1], ctx) {
         Ok(n) => n,
@@ -893,7 +1247,7 @@ pub(crate) fn norm_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if cumulative {
         finite(0.5 * erfc(-z * std::f64::consts::FRAC_1_SQRT_2))
     } else {
-        finite((-0.5 * z * z).exp() / (sd * (2.0 * std::f64::consts::PI).sqrt()))
+        finite(fmath::exp(-0.5 * z * z) / (sd * (2.0 * std::f64::consts::PI).sqrt()))
     }
 }
 
@@ -990,7 +1344,7 @@ fn erfc(x: f64) -> f64 {
 fn scaled_exp(y: f64) -> f64 {
     let grid = (y * 16.0).trunc() / 16.0;
     let delta = (y - grid) * (y + grid);
-    (-grid * grid).exp() * (-delta).exp()
+    fmath::exp(-grid * grid) * fmath::exp(-delta)
 }
 
 /// AVERAGEA(value, ...): the mean with text as zero and logicals as one/zero.
@@ -1040,8 +1394,8 @@ pub(crate) fn geomean(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Num);
     }
     // the logs keep a long product from overflowing before the root shrinks it
-    let mean_log = nums.iter().map(|x| x.ln()).sum::<f64>() / nums.len() as f64;
-    finite(mean_log.exp())
+    let mean_log = nums.iter().map(|x| fmath::ln(*x)).sum::<f64>() / nums.len() as f64;
+    finite(fmath::exp(mean_log))
 }
 
 /// HARMEAN(number, ...): the reciprocal of the mean reciprocal; every value

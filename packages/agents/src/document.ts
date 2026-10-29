@@ -1,9 +1,10 @@
 import { DocxSectionError, createYrsSession, saveYrsDocx, type DocxParagraphTarget, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsWithAnchorFormat, insertSectionBreak, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { docxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import {
   DocumentToolError,
+  unknownMatchError,
   type DocumentOptions,
   type ExactTextEdit,
   type GrepMatch,
@@ -149,7 +150,9 @@ export class DocxAgentDocument {
   private closed = false;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; check: Promise<CommentSource> };
+  private commentPackageBaseline?: { version: number; bytes: Promise<Uint8Array> };
   private resolvedComments = new Map<string, boolean>();
+  private readonly textEditedComments = new Set<string>();
 
   constructor(
     readonly session: YrsSession,
@@ -343,7 +346,7 @@ export class DocxAgentDocument {
       if ('oldText' in inputEdit) edit = inputEdit;
       else {
         const target = this.matches.get(inputEdit.match);
-        if (!target) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+        if (!target) throw unknownMatchError(inputEdit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
         edit = { ...target, newText: inputEdit.newText };
       }
       const p = this.get(edit.ref);
@@ -396,14 +399,14 @@ export class DocxAgentDocument {
 
   async accept(id: string, options: { tracked?: boolean; date?: string } = {}) {
     const held = this.pending(id);
-    if (options.tracked && (!options.date || !Number.isFinite(Date.parse(options.date)))) {
+    if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const draft = await this.fork();
     try {
       this.checkPending(held);
       const vector = draft.encodeStateVector();
-      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date! } : undefined);
+      this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined);
       this.checkPending(held);
       this.session.addUndoBoundary();
       try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
@@ -583,8 +586,14 @@ export class DocxAgentDocument {
     const draft = await createYrsSession();
     try {
       const source = this.session.materializeDocx()?.originalBuffer;
-      if (source) draft.openDocx(new Uint8Array(source), false);
-      draft.loadState(this.session.encodeState());
+      const state = this.session.encodeState();
+      if (source) {
+        const bytes = new Uint8Array(source);
+        const host = draft.openDocx(bytes, false);
+        draft.bootstrapPeer(state, this.session.encodePeerMetadata(), bytes, host);
+      } else {
+        draft.loadState(state);
+      }
       return draft;
     } catch (error) { draft.destroy(); throw error; }
   }
@@ -613,8 +622,8 @@ export class DocxAgentDocument {
         const doneBefore = edits.some(edit => edit.op === 'resolve_comment') ? new Map(draft.listComments().map(comment => [comment.id, comment.done])) : undefined;
         for (const [index, step] of steps.entries()) { failed = index; outcomes.push(step(draft)); }
         failed = undefined;
-        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment')) {
-          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment');
+        if (edits.some(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text')) {
+          failed = edits.findIndex(edit => edit.op === 'add_comment' || edit.op === 'reply_comment' || edit.op === 'resolve_comment' || edit.op === 'replace_comment_text');
           try {
             const source = await this.checkCommentPart();
             if (!source) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment export requires a session opened from DOCX bytes.');
@@ -624,8 +633,10 @@ export class DocxAgentDocument {
             resolved = new Map(this.resolvedComments);
             for (const id of batch) if (!resolved.has(id)) resolved.set(id, doneBefore?.get(id) ?? false);
             const earlier = this.resolvedComments;
+            const baseline = await this.commentBaselineBytes(version);
             await verifyCommentOutput(source, (await saveYrsDocx(draft)).bytes, comments.filter(comment => !seeded.has(comment.id)).length,
-              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })));
+              comments.map(comment => ({ id: comment.id, parentId: comment.parentId, ...(batch.has(comment.id) || (earlier.get(comment.id) ?? comment.done) !== comment.done ? { done: comment.done } : {}) })),
+              new Set([...this.textEditedComments, ...edits.flatMap(edit => edit.op === 'replace_comment_text' ? [edit.comment] : [])]), baseline);
           } catch (error) {
             if (error instanceof DocumentToolError) throw error;
             throw new DocumentToolError('UNSUPPORTED_TARGET', 'The saved comment package could not be verified.');
@@ -637,6 +648,7 @@ export class DocxAgentDocument {
         try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
         finally { this.session.addUndoBoundary(); }
         if (resolved) this.resolvedComments = resolved;
+        for (const edit of edits) if (edit.op === 'replace_comment_text') this.textEditedComments.add(edit.comment);
         return outcomes;
       } finally { draft.destroy(); }
     } catch (error) {
@@ -671,6 +683,10 @@ export class DocxAgentDocument {
         return { result: { ref: target.ref } };
       };
     }
+    if (edit.op === 'replace_comment_text') {
+      await this.checkCommentPart();
+      return draft => ({ result: { comment: edit.comment, replacements: replaceCommentText(draft, edit.comment, edit.find, edit.replace) } });
+    }
     if (edit.op === 'reply_comment' || edit.op === 'resolve_comment') {
       const body = edit.op === 'reply_comment' ? commentBody(edit.author, edit.text) : undefined;
       const date = edit.op === 'reply_comment' ? edit.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') : undefined;
@@ -689,7 +705,7 @@ export class DocxAgentDocument {
     }
     if (edit.op === 'format_text' || edit.op === 'add_comment') {
       const held = this.matches.get(edit.match);
-      if (!held) throw new DocumentToolError('UNKNOWN_MATCH', 'Match expired or belongs to another document. Run grep again and copy its match ID.');
+      if (!held) throw unknownMatchError(edit.match, 'm1', /^m\d+$/u, 'Match expired or belongs to another document. Run grep again and copy its match ID.');
       const p = this.get(held.ref);
       if (p.revision !== held.revision) throw new DocumentToolError('STALE_TARGET', 'The matched paragraph changed. Grep again and use a fresh match ID.', { refs: [p.ref] });
       const start = held.start ?? 0;
@@ -716,7 +732,7 @@ export class DocxAgentDocument {
         return { result: { ref: p.ref, start, end } };
       };
     }
-    const p = this.get(edit.op === 'insert_paragraphs' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
+    const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
     const target = { story: p.story, paraId: p.paraId };
     switch (edit.op) {
       case 'set_paragraph_style': {
@@ -729,6 +745,9 @@ export class DocxAgentDocument {
       }
       case 'insert_paragraphs': {
         const fallback = this.styles().find(style => style.isDefault)?.id;
+        if (edit.before !== undefined && edit.list) {
+          throw new DocumentToolError('INVALID_ARGUMENT', 'list: continue needs after.');
+        }
         if (edit.list && edit.runFormat !== undefined) {
           throw new DocumentToolError('INVALID_ARGUMENT', 'runFormat cannot be combined with list: continue. Omit runFormat.');
         }
@@ -737,7 +756,8 @@ export class DocxAgentDocument {
         }
         const paragraphs = edit.paragraphs.map(({ text, style }) => {
           lineText(text);
-          return { text, styleId: style ? resolveStyle(this.styles(), style) : fallback };
+          const resolved = style ? resolveStyle(this.styles(), style) : undefined;
+          return edit.before !== undefined ? (resolved ? { text, styleId: resolved } : { text }) : { text, styleId: resolved ?? fallback };
         });
         if (edit.list) {
           const stories = new Map(this.session.listStories().stories.map(story => [story.story, story]));
@@ -747,6 +767,7 @@ export class DocxAgentDocument {
         }
         return draft => {
           requireParagraph(draft, target);
+          if (edit.before !== undefined) return { result: {}, created: insertParagraphsBefore(draft, target, paragraphs, edit.runFormat) };
           if (edit.list) return { result: {}, created: continueList(draft, target, paragraphs) };
           if (edit.runFormat === 'anchor') return { result: {}, created: insertParagraphsWithAnchorFormat(draft, target, paragraphs) };
           return { result: {}, created: hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs };
@@ -797,6 +818,13 @@ export class DocxAgentDocument {
     if (!source) return;
     if (this.commentPartCheck?.source !== source) this.commentPartCheck = { source, check: readCommentPart(source) };
     return this.commentPartCheck.check;
+  }
+
+  private commentBaselineBytes(version: number): Promise<Uint8Array> {
+    if (this.commentPackageBaseline?.version !== version) {
+      this.commentPackageBaseline = { version, bytes: this.export() };
+    }
+    return this.commentPackageBaseline.bytes;
   }
 
   private styles(): ParagraphStyle[] {

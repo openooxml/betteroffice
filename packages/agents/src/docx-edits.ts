@@ -227,12 +227,24 @@ function paragraphMarkAttrs(formatting: TextFormatting | null | undefined): Reco
   return attrs;
 }
 
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
+
 function paragraphSegments(draft: YrsSession, target: DocxParagraphTarget) {
   const segments = draft.storySegments(target.story);
   const end = segments.findIndex(segment => segment.kind === 'pilcrow' && segment.paraId === target.paraId);
   let start = end;
   while (start > 0 && segments[start - 1].kind !== 'pilcrow') start--;
+  while (start < end) {
+    const segment = segments[start];
+    if (segment.kind !== 'embed' || !BLOCK_EMBEDS.has(segment.embedKind)) break;
+    start++;
+  }
   return { content: segments.slice(start, end), mark: segments[end] as Pilcrow };
+}
+
+function formatParagraph(draft: YrsSession, target: DocxParagraphTarget, delta: Parameters<YrsSession['formatTextTarget']>[1]) {
+  const result = draft.formatTextTarget({ kind: 'paragraph', story: target.story, paraId: target.paraId }, delta);
+  if (!result.ok) throw new DocumentToolError(result.failure.code.toUpperCase().replaceAll('-', '_'), result.failure.message);
 }
 
 function inlineLength(child: ParagraphContent): number {
@@ -257,12 +269,12 @@ function inlineLength(child: ParagraphContent): number {
   }
 }
 
-function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
+function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonNullable<ReturnType<YrsSession['materializeDocx']>>, inheritance: ReturnType<YrsSession['runInheritance']>, atOffset?: number): { run?: Run; offset: number; tableRun?: TextFormatting; tableParagraph?: ParagraphFormatting; paragraphFormatting?: ParagraphFormatting } | undefined {
   const key = JSON.stringify([target.story, target.paraId]);
   // Lookup IDs exist only in this read projection, including for paragraphs without saved IDs.
   const view: YrsSession = { ...draft, storyParagraphIds: story => draft.paragraphSpans(story).map(({ paraId }) => JSON.stringify([story, paraId])) };
   const pkg = yrsToDocument(view, source).package;
-  const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting): ReturnType<typeof openingRun> => {
+  const find = (blocks: readonly BlockContent[], tableRun?: TextFormatting, tableParagraph?: ParagraphFormatting): ReturnType<typeof openingRun> => {
     for (const block of blocks) {
       if (block.type === 'paragraph' && block.paraId === key) {
         let offset = 0;
@@ -270,20 +282,21 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
           const length = inlineLength(child);
           if (child.type === 'run' && child.content.some(part => part.type === 'text' && part.text.length > 0)
             && (atOffset === undefined || (offset <= atOffset && atOffset < offset + length))) {
-            return { run: child, offset, tableRun, paragraphFormatting: block.formatting };
+            return { run: child, offset, tableRun, tableParagraph, paragraphFormatting: block.formatting };
           }
           offset += length;
         }
-        return { offset: 0, tableRun, paragraphFormatting: block.formatting };
+        return { offset: 0, tableRun, tableParagraph, paragraphFormatting: block.formatting };
       }
       if (block.type === 'table') {
         const baseline = inheritance.tableAttributes(block);
         for (const [rowIndex, row] of block.rows.entries()) for (const [cellIndex, cell] of row.cells.entries()) {
-          const run = find(cell.content, baseline.rows[rowIndex]?.[cellIndex]?.runFormatting ?? undefined);
+          const cellFormatting = baseline.rows[rowIndex]?.[cellIndex];
+          const run = find(cell.content, cellFormatting?.runFormatting ?? undefined, cellFormatting?.paragraphFormatting ?? undefined);
           if (run) return run;
         }
       }
-      const run = block.type === 'blockSdt' ? find(block.content, tableRun) : undefined;
+      const run = block.type === 'blockSdt' ? find(block.content, tableRun, tableParagraph) : undefined;
       if (run) return run;
     }
   };
@@ -294,14 +307,18 @@ function openingRun(draft: YrsSession, target: DocxParagraphTarget, source: NonN
   ]);
 }
 
-export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+function anchorRunFormat(draft: YrsSession, target: DocxParagraphTarget) {
   const { content, mark } = paragraphSegments(draft, target);
   const source = draft.materializeDocx();
   const inheritance = draft.runInheritance(source?.package.styles);
   let attrs: Record<string, unknown> | undefined;
   let formatting: TextFormatting | undefined;
+  let tableParagraph: ParagraphFormatting | undefined;
+  let tableRun: TextFormatting | undefined;
   try {
     const selected = source ? openingRun(draft, target, source, inheritance) : undefined;
+    tableParagraph = selected?.tableParagraph;
+    tableRun = selected?.tableRun;
     let offset = 0;
     const run = selected?.run && content.find(segment => {
       const start = offset;
@@ -317,15 +334,117 @@ export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: Docx
       for (const key of ['boldCs', 'italicCs'] as const) attrs[key] ??= direct?.[key] ?? inherited[key] ?? false;
     }
   } finally { inheritance.dispose(); }
-  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
-  if (attrs) created.forEach(({ story, paraId }, index) => {
+  return { attrs, formatting, tableParagraph, tableRun, styles: source?.package.styles, markProperties: mark.properties };
+}
+
+function applyAnchorRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], attrs: Record<string, unknown>, formatting: TextFormatting | undefined) {
+  created.forEach(({ story, paraId }, index) => {
     const { text } = paragraphs[index];
     if (!text) return;
     draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
     const current = paragraphSegments(draft, { story, paraId }).content;
     const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
-    draft.formatRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: text.length } }, { other: { ...cleared, ...attrs } });
+    formatParagraph(draft, { story, paraId }, { other: { ...cleared, ...attrs } });
   });
+}
+
+function setInheritedRunFormat(draft: YrsSession, created: readonly DocxParagraphTarget[], paragraphs: readonly DocxParagraphInput[], inherited: readonly Record<string, unknown>[]) {
+  created.forEach(({ story, paraId }, index) => {
+    const { text } = paragraphs[index];
+    if (!text) return;
+    const current = paragraphSegments(draft, { story, paraId }).content;
+    const cleared = Object.fromEntries(current.flatMap(segment => Object.keys(runAttributes(segment.attributes)).map(key => [key, null])));
+    formatParagraph(draft, { story, paraId }, { other: { ...cleared, ...inherited[index] } });
+  });
+}
+
+const LIST_DERIVED = ['listNumFmt', 'listIsBullet', 'listMarker', 'listMarkerHidden', 'listMarkerBold', 'listMarkerItalic', 'listMarkerColor', 'listMarkerFontFamily', 'listMarkerFontSize', 'listMarkerSuffix', 'listLevelNumFmts', 'listAbstractNumId', 'listStartOverride'];
+const DIRECT_FLATTENED = new Set([...PARAGRAPH_PROPERTIES, 'cnfStyle', 'adjustRightInd'].filter(key => !['pStyle', '_originalFormatting', 'defaultTextFormatting', 'numPrFromStyle'].includes(key)));
+
+function directProperties(anchor: Record<string, unknown>, inherited: ParagraphFormatting | undefined): Record<string, unknown> {
+  const original = anchor._originalFormatting;
+  const direct: Record<string, unknown> = { ...(original && typeof original === 'object' ? original : {}) };
+  for (const key of ['alignment', 'widowControl', 'autoSpaceDE', 'autoSpaceDN', 'adjustRightInd', 'bidi', 'cnfStyle'] as const) {
+    const value = anchor[key] ?? undefined;
+    if (JSON.stringify(value ?? null) !== JSON.stringify(direct[key] ?? inherited?.[key] ?? null)) direct[key] = value;
+  }
+  const sameNumPr = (left: unknown, right: unknown) => {
+    const a = left as ParagraphFormatting['numPr'] | null;
+    const b = right as ParagraphFormatting['numPr'] | null;
+    return a != null && b != null && a.numId === b.numId && (a.ilvl ?? 0) === (b.ilvl ?? 0);
+  };
+  const styleNumbering = direct.numPrFromStyle ?? anchor.numPrFromStyle;
+  if ((direct.numPr == null || sameNumPr(direct.numPr, styleNumbering)) && sameNumPr(anchor.numPr, styleNumbering ?? inherited?.numPr)) {
+    delete direct.numPr;
+  } else if (!sameNumPr(anchor.numPr, direct.numPr)) {
+    direct.numPr = anchor.numPr ?? undefined;
+  }
+  delete direct.numPrFromStyle;
+  return Object.fromEntries(Object.entries(direct).filter(([key, value]) => key !== 'styleId' && !ONE_OFF.has(key) && value !== undefined));
+}
+
+function applyDirectProperties(draft: YrsSession, target: DocxParagraphTarget, current: Record<string, unknown> | undefined, direct: Record<string, unknown>, effective: string | null, anchor: Record<string, unknown>) {
+  const set = (key: string, value: unknown) => {
+    if (JSON.stringify(current?.[key] ?? null) !== JSON.stringify(value ?? null)) draft.setParagraphAttr(target.paraId, key, value ?? null);
+  };
+  set('_originalFormatting', { ...(effective ? { styleId: effective } : {}), ...direct });
+  for (const [key, value] of Object.entries(direct)) {
+    if (key === 'runProperties') {
+      const anchorStyle = typeof anchor.pStyle === 'string' ? anchor.pStyle : null;
+      if (effective === anchorStyle) set('defaultTextFormatting', anchor.defaultTextFormatting ?? null);
+      continue;
+    }
+    if (key !== 'numPrFromStyle' && DIRECT_FLATTENED.has(key)) set(key, value);
+  }
+  if ('numPr' in direct) {
+    set('numPrFromStyle', null);
+    for (const key of LIST_DERIVED) set(key, anchor[key] ?? null);
+  }
+}
+
+function copiedProperties(anchor: Record<string, unknown>, original: unknown): Record<string, unknown> {
+  const properties: Record<string, unknown> = { ...anchor };
+  if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original as Record<string, unknown>).filter(([key]) => !ONE_OFF.has(key)));
+  return properties;
+}
+
+function applyCopiedProperties(draft: YrsSession, story: string, created: readonly DocxParagraphTarget[], properties: Record<string, unknown>, keys: readonly string[]) {
+  const current = new Map(draft.storySegments(story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+  created.forEach(({ paraId }) => {
+    for (const key of keys) {
+      const value = properties[key] ?? null;
+      if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
+    }
+  });
+}
+
+export function insertParagraphsWithAnchorFormat(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[]): DocxParagraphTarget[] {
+  const { attrs, formatting } = anchorRunFormat(draft, target);
+  const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs }).newParagraphs;
+  if (attrs) applyAnchorRunFormat(draft, created, paragraphs, attrs, formatting);
+  return created;
+}
+
+export function insertParagraphsBefore(draft: YrsSession, target: DocxParagraphTarget, paragraphs: readonly DocxParagraphInput[], runFormat?: 'style' | 'anchor'): DocxParagraphTarget[] {
+  const anchor = anchorRunFormat(draft, target);
+  const { markProperties } = anchor;
+  const anchorStyle = typeof markProperties.pStyle === 'string' ? markProperties.pStyle : null;
+  const inheritance = draft.runInheritance(anchor.styles);
+  let created: DocxParagraphTarget[] = [];
+  let inherited: Record<string, unknown>[] = [];
+  try {
+    const direct = directProperties(markProperties, inheritance.paragraphFormatting(anchorStyle, anchor.tableParagraph));
+    const effective = paragraphs.map(({ styleId }) => styleId ?? anchorStyle);
+    inherited = effective.map(style => inheritance.attributes(style, null, anchor.tableRun));
+    const seeded = paragraphs.map(({ text }, index) => effective[index] ? { text, styleId: effective[index] } : { text });
+    created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'start', paragraphs: seeded }).newParagraphs;
+    const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+    created.forEach((entry, index) => {
+      applyDirectProperties(draft, entry, current.get(entry.paraId), direct, effective[index], markProperties);
+    });
+  } finally { inheritance.dispose(); }
+  if (runFormat === 'anchor' && anchor.attrs) applyAnchorRunFormat(draft, created, paragraphs, anchor.attrs, anchor.formatting);
+  else setInheritedRunFormat(draft, created, paragraphs, inherited);
   return created;
 }
 
@@ -360,15 +479,8 @@ export function continueList(draft: YrsSession, target: DocxParagraphTarget, par
   const attrs = run ? runAttributes(run.attributes)
     : paragraphMarkAttrs(anchor.properties.defaultTextFormatting as TextFormatting | null | undefined);
   const created = hostEdit(draft, { op: 'insertParagraphs', target, at: 'end', paragraphs: paragraphs.map(({ text, styleId }) => ({ text: attrs ? '' : text, styleId })) }).newParagraphs;
-  const properties: Record<string, unknown> = { ...anchor.properties };
-  const original = paragraphFormatting ?? properties._originalFormatting;
-  if (original && typeof original === 'object') properties._originalFormatting = Object.fromEntries(Object.entries(original).filter(([key]) => !ONE_OFF.has(key)));
-  const current = new Map(draft.storySegments(target.story).flatMap((segment): Array<[string, Record<string, unknown>]> => segment.kind === 'pilcrow' ? [[segment.paraId, segment.properties]] : []));
+  applyCopiedProperties(draft, target.story, created, copiedProperties(anchor.properties, paragraphFormatting ?? anchor.properties._originalFormatting), LIST_PROPERTIES);
   created.forEach(({ story, paraId }, index) => {
-    for (const key of LIST_PROPERTIES) {
-      const value = properties[key] ?? null;
-      if (JSON.stringify(current.get(paraId)?.[key] ?? null) !== JSON.stringify(value)) draft.setParagraphAttr(paraId, key, value);
-    }
     const { text } = paragraphs[index];
     if (attrs && text) {
       draft.setParagraphAttr(paraId, '_originalRunBoundaries', [{ text, formatting: formatting ?? {} }]);
@@ -413,6 +525,94 @@ export function commentRanges(session: YrsSession, id: string) {
   });
   if (!ranges.length) throw new DocumentToolError('UNSUPPORTED_TARGET', 'Comment thread has no live text anchor.');
   return ranges;
+}
+
+const COMMENT_MARKERS = new Set(['bookmarkStart', 'bookmarkEnd', 'commentRangeStart', 'commentRangeEnd', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd']);
+
+function guardedText(node: unknown): string {
+  if (Array.isArray(node)) return node.map(guardedText).join('');
+  if (!node || typeof node !== 'object') return '';
+  const item = node as { type?: string; text?: string };
+  if (item.type === 'text') return item.text ?? '';
+  const record = node as Record<string, unknown>;
+  let text = '';
+  for (const key of ['structuredChildren', 'structuredResult', 'content', 'children', 'fieldResult', 'inline']) {
+    if (key === 'children' && record.structuredChildren !== undefined) continue;
+    if (key === 'content' && record.structuredResult !== undefined) continue;
+    if (key === 'fieldResult' && record.structuredResult !== undefined) continue;
+    text += guardedText(record[key]);
+  }
+  return text;
+}
+
+export function replaceCommentText(session: YrsSession, id: string, find: string, replace: string): number {
+  plainText(find);
+  plainText(replace);
+  if (!find || /[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(find) || /[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(replace)) {
+    throw new DocumentToolError('INVALID_ARGUMENT', 'Comment find and replace are one line of plain text: no tabs, line breaks, object placeholders or noncharacters.');
+  }
+  const comment = session.listComments().find(entry => entry.id === id);
+  if (!comment) throw new DocumentToolError('UNKNOWN_REF', "Unknown comment ID. List office_outline with story 'comments'.");
+  const body: Array<Record<string, unknown>> = typeof comment.body === 'string'
+    ? [{ type: 'paragraph', formatting: {}, content: comment.body ? [{ type: 'run', formatting: {}, content: [{ type: 'text', text: comment.body }] }] : [] }]
+    : Array.isArray(comment.body) ? structuredClone(comment.body) as Array<Record<string, unknown>> : [];
+  if (body.some(paragraph => paragraph?.type !== 'paragraph')) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This comment holds more than plain paragraphs, which replace_comment_text leaves unchanged.');
+  }
+  interface Segment { part: { type?: string; text?: string }; start: number; end: number }
+  const plans: Array<{ paragraph: Record<string, unknown>; occurrences: Array<[number, number]>; segments: Segment[] }> = [];
+  let replacements = 0;
+  for (const paragraph of body) {
+    if (paragraph?.type !== 'paragraph' || !Array.isArray(paragraph.content)) continue;
+    let text = '';
+    const segments: Segment[] = [];
+    const guarded: Array<[number, number]> = [];
+    const barriers = new Set<number>();
+    for (const item of paragraph.content as Array<Record<string, unknown>>) {
+      if (item?.type === 'run' && Array.isArray(item.content)) {
+        for (const part of item.content as Array<{ type?: string; text?: string }>) {
+          if (part?.type === 'text' && typeof part.text === 'string') {
+            segments.push({ part, start: text.length, end: text.length + part.text.length });
+            text += part.text;
+          } else barriers.add(text.length);
+        }
+      } else if (item && COMMENT_MARKERS.has(item.type as string)) barriers.add(text.length);
+      else {
+        const start = text.length;
+        text += guardedText(item);
+        guarded.push([start, text.length]);
+        barriers.add(start);
+        barriers.add(text.length);
+      }
+    }
+    const occurrences: Array<[number, number]> = [];
+    for (let at = text.indexOf(find); at >= 0; at = text.indexOf(find, at + find.length)) {
+      const end = at + find.length;
+      if (guarded.some(([start, stop]) => start < end && at < stop) || [...barriers].some(point => at < point && point < end)) {
+        throw new DocumentToolError('UNSUPPORTED_TARGET', 'The text crosses a field, hyperlink or other non-run content in this comment, which replace_comment_text leaves unchanged.');
+      }
+      occurrences.push([at, end]);
+    }
+    if (occurrences.length) { plans.push({ paragraph, occurrences, segments }); replacements += occurrences.length; }
+  }
+  if (!replacements) {
+    const excerpt = commentText(comment.body).replace(/\n$/, '').slice(0, 80);
+    throw new DocumentToolError('NO_MATCH', `Comment ${id} does not contain ${JSON.stringify(find.slice(0, 80))}. Comment text begins ${JSON.stringify(excerpt)}.`);
+  }
+  for (const { occurrences, segments } of plans) {
+    for (const [start, end] of [...occurrences].reverse()) {
+      const touched = segments.filter(segment => segment.start < end && start < segment.end);
+      const first = touched[0];
+      const last = touched[touched.length - 1];
+      for (const segment of touched) {
+        const prefix = segment === first ? (segment.part.text ?? '').slice(0, start - segment.start) : '';
+        const suffix = segment === last ? (segment.part.text ?? '').slice(end - segment.start) : '';
+        segment.part.text = prefix + (segment === first ? replace : '') + suffix;
+      }
+    }
+  }
+  session.updateComment(id, { body });
+  return replacements;
 }
 
 export function commentText(body: unknown): string {

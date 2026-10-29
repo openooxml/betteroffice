@@ -7,7 +7,7 @@
 //! mark nor the block embeds leading a paragraph are part of it. The accepted view shows pending
 //! insertions and hides pending deletions; the original view does the reverse.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -31,6 +31,8 @@ use crate::{
     DEL, EditCtx, EditingDoc, INS, KIND_KEY, Loc, LocRange, OpError, OpResult, PPR_CHANGE, PPR_DEL,
     PPR_INS, RawOp, StoryRange, map_string, story_ref,
 };
+
+pub use docx_parse::image::DrawingProperties;
 
 /// Paragraphs one read may return.
 const READ_PARAGRAPH_LIMIT: usize = 65_536;
@@ -123,6 +125,127 @@ pub enum AtomKind {
 pub struct TextAtom {
     pub offset: u32,
     pub kind: AtomKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<DrawingProperties>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drawings: Vec<DrawingProperties>,
+}
+
+/// The drawing's `wp:docPr` facts; an image's title, description and placement come from its
+/// live `title`, `alt` and `wrapType`, which image edits change and saves write.
+fn drawing_properties<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+) -> Option<DrawingProperties> {
+    let map = map?;
+    let payload = ["docPr", "title", "alt", "wrapType"]
+        .into_iter()
+        .filter_map(|key| match map.get(txn, key) {
+            Some(Out::Any(value)) => Some((key.to_owned(), value)),
+            _ => None,
+        })
+        .collect();
+    drawing_from_payload(&payload, kind == "image")
+}
+
+pub(crate) fn drawing_from_payload(
+    payload: &HashMap<String, Any>,
+    image: bool,
+) -> Option<DrawingProperties> {
+    let Any::Map(properties) = payload.get("docPr")? else {
+        return None;
+    };
+    let text = |key: &str| match properties.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let live = |key: &str| match payload.get(key) {
+        Some(Any::String(value)) if !value.is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+    let (title, descr) = if image {
+        (live("title"), live("alt"))
+    } else {
+        (text("title"), text("descr"))
+    };
+    let wrap = if image {
+        Some(live("wrapType").unwrap_or_else(|| "inline".to_owned()))
+    } else {
+        None
+    };
+    let flag = |key: &str| matches!(properties.get(key), Some(Any::Bool(true)));
+    let placement = match (wrap.as_deref(), text("placement").as_deref()) {
+        (Some("inline"), _) => docx_parse::image::DrawingPlacement::Inline,
+        (Some(_), _) | (None, Some("anchor")) => docx_parse::image::DrawingPlacement::Anchor,
+        _ => docx_parse::image::DrawingPlacement::Inline,
+    };
+    let drawing_type = match text("type").as_deref() {
+        Some("picture") => docx_parse::image::DrawingType::Picture,
+        Some("shape") => docx_parse::image::DrawingType::Shape,
+        Some("textBox") => docx_parse::image::DrawingType::TextBox,
+        Some("group") => docx_parse::image::DrawingType::Group,
+        Some("chart") => docx_parse::image::DrawingType::Chart,
+        Some("diagram") => docx_parse::image::DrawingType::Diagram,
+        _ => docx_parse::image::DrawingType::Other,
+    };
+    Some(DrawingProperties {
+        doc_pr_id: text("docPrId"),
+        name: text("name"),
+        title,
+        descr,
+        hidden: flag("hidden"),
+        decorative: flag("decorative"),
+        placement,
+        drawing_type,
+    })
+}
+
+fn control_drawings<T: ReadTxn>(
+    kind: &str,
+    map: Option<&MapRef>,
+    txn: &T,
+    view: EditTextView,
+) -> Vec<DrawingProperties> {
+    if kind != "sdt" {
+        return Vec::new();
+    }
+    let Some(Out::Any(Any::Array(content))) = map.and_then(|map| map.get(txn, "content")) else {
+        return Vec::new();
+    };
+    let mut pending: Vec<&Any> = content.iter().rev().collect();
+    let mut drawings = Vec::new();
+    while let Some(item) = pending.pop() {
+        let Any::Map(item) = item else {
+            continue;
+        };
+        let attrs = match item.get("attrs") {
+            Some(Any::Map(attrs)) => Some(attrs),
+            _ => None,
+        };
+        let active = |key| {
+            attrs
+                .and_then(|attrs| attrs.get(key))
+                .is_some_and(|value| *value != Any::Null)
+        };
+        if !visible(view, active(INS), active(DEL)) {
+            continue;
+        }
+        let Some(Any::Map(payload)) = item.get("payload") else {
+            continue;
+        };
+        if matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "sdt") {
+            if let Some(Any::Array(content)) = payload.get("content") {
+                pending.extend(content.iter().rev());
+            }
+        } else if let Some(drawing) = drawing_from_payload(
+            payload,
+            matches!(item.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "image"),
+        ) {
+            drawings.push(drawing);
+        }
+    }
+    drawings
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -285,10 +408,6 @@ impl Mark {
 
     pub fn section(&self) -> bool {
         self.has("sectPr") || self.has("sectionBreakType")
-    }
-
-    pub fn numbering(&self) -> bool {
-        self.has("numPr")
     }
 
     /// The source runs retained for save carry tracked formatting changes.
@@ -591,6 +710,76 @@ impl ParagraphBuilder {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct StoryReadProjection {
+    pub joined_pilcrows: HashSet<u32>,
+    pub removed_tables: HashSet<u32>,
+}
+
+pub(crate) fn story_read_projection<T: ReadTxn>(
+    txn: &T,
+    chunks: &[crate::ops::Chunk],
+    view: EditTextView,
+) -> StoryReadProjection {
+    let (attribute, property) = match view {
+        EditTextView::Accepted => (DEL, PPR_DEL),
+        EditTextView::Original => (INS, PPR_INS),
+    };
+    let removed_tables: HashSet<u32> = chunks
+        .iter()
+        .filter(|chunk| {
+            matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+                if map_string(map, txn, KIND_KEY).as_deref() == Some("table")
+                    && crate::ops::table::table_removed_in_view(
+                        map, txn, view == EditTextView::Accepted))
+        })
+        .map(|chunk| chunk.start)
+        .collect();
+    let removes: Vec<bool> = chunks
+        .iter()
+        .map(|chunk| {
+            removed_tables.contains(&chunk.start)
+                || chunk.attr_active(attribute)
+                || matches!(&chunk.kind, ChunkKind::Pilcrow(map)
+            if matches!(map.get(txn, property), Some(Out::Any(value)) if value != Any::Null))
+        })
+        .collect();
+    let final_pilcrow = chunks
+        .iter()
+        .rposition(|chunk| matches!(chunk.kind, ChunkKind::Pilcrow(_)));
+    let mut content = false;
+    let content_before: Vec<bool> = chunks
+        .iter()
+        .enumerate()
+        .map(|(slot, chunk)| {
+            let before = content;
+            if Some(slot) == final_pilcrow || !removes[slot] {
+                content =
+                    !matches!(chunk.kind, ChunkKind::Pilcrow(_)) && !chunk.is_block_embed(txn);
+            }
+            before
+        })
+        .collect();
+    let mut joined = HashSet::new();
+    let mut next_block = false;
+    for (slot, chunk) in chunks.iter().enumerate().rev() {
+        if matches!(chunk.kind, ChunkKind::Pilcrow(_)) {
+            if removes[slot] && Some(slot) != final_pilcrow && !(next_block && content_before[slot])
+            {
+                joined.insert(chunk.start);
+                continue;
+            }
+            next_block = false;
+        } else if !removes[slot] {
+            next_block = chunk.block_revisions(txn).is_some();
+        }
+    }
+    StoryReadProjection {
+        joined_pilcrows: joined,
+        removed_tables,
+    }
+}
+
 impl StoryView {
     pub fn build<T: ReadTxn>(
         doc: &EditingDoc,
@@ -612,7 +801,7 @@ impl StoryView {
     ) -> Option<(Self, bool)> {
         let story = story_ref(txn, story_id).ok()?;
         let chunks = doc.chunk_snapshot(story_id, &story, txn);
-        Self::from_chunks(doc, txn, story_id, view, limit, &chunks)
+        Self::from_chunks(doc, txn, story_id, view, limit, &chunks, false)
     }
 
     fn from_chunks<T: ReadTxn>(
@@ -622,7 +811,14 @@ impl StoryView {
         view: EditTextView,
         limit: u32,
         chunks: &[crate::ops::Chunk],
+        project: bool,
     ) -> Option<(Self, bool)> {
+        let projection = if project {
+            story_read_projection(txn, chunks, view)
+        } else {
+            StoryReadProjection::default()
+        };
+        let project = project && !projection.joined_pilcrows.is_empty();
         let source = doc.source_metadata();
         let mut paragraphs = Vec::new();
         let mut current = ParagraphBuilder::new(0);
@@ -632,10 +828,22 @@ impl StoryView {
                 complete = false;
                 break;
             }
+            if projection.removed_tables.contains(&chunk.start) {
+                if current.node_start == chunk.start {
+                    current.node_start = chunk.end();
+                }
+                continue;
+            }
             let ins = chunk.attr_active(INS);
             let del = chunk.attr_active(DEL);
             match &chunk.kind {
                 ChunkKind::Pilcrow(map) => {
+                    if projection.joined_pilcrows.contains(&chunk.start) {
+                        if current.node_start == chunk.start {
+                            current.node_start = chunk.end();
+                        }
+                        continue;
+                    }
                     let (para_id, properties) = capture_pilcrow(map, txn);
                     let properties: BTreeMap<String, Any> = properties.into_iter().collect();
                     let revision = ins
@@ -687,7 +895,9 @@ impl StoryView {
                         .as_ref()
                         .and_then(|map| map_string(map, txn, KIND_KEY))
                         .unwrap_or_default();
-                    if chunk.start == current.node_start && is_block_embed(&kind) {
+                    if (chunk.start == current.node_start || (project && current.view_len == 0))
+                        && is_block_embed(&kind)
+                    {
                         current.node_start = chunk.end();
                         continue;
                     }
@@ -699,6 +909,8 @@ impl StoryView {
                         current.atoms.push(TextAtom {
                             offset: current.view_len,
                             kind: atom_kind(&kind),
+                            drawing: drawing_properties(&kind, map.as_ref(), txn),
+                            drawings: control_drawings(&kind, map.as_ref(), txn, view),
                         });
                         current.text.push('\u{FFFC}');
                         current.push(chunk.start, 1, ins || del, true);
@@ -870,7 +1082,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
                 if fresh {
                     let text = story_ref(txn, story).ok()?;
                     let chunks = crate::ops::snapshot(&text, txn);
-                    StoryView::from_chunks(doc, txn, story, view, u32::MAX, &chunks)
+                    StoryView::from_chunks(doc, txn, story, view, u32::MAX, &chunks, false)
                         .map(|(view, _)| Arc::new(view))
                 } else if let Some(epoch) = epoch {
                     let key = story_view_key(story, view);
@@ -916,7 +1128,7 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         if self.fresh {
             let text = story_ref(self.txn, story).ok()?;
             let chunks = crate::ops::snapshot(&text, self.txn);
-            return StoryView::from_chunks(self.doc, self.txn, story, view, limit, &chunks)
+            return StoryView::from_chunks(self.doc, self.txn, story, view, limit, &chunks, false)
                 .map(|(view, complete)| (Arc::new(view), complete));
         }
         if cached || units <= limit {
@@ -1108,6 +1320,44 @@ impl<'a, T: ReadTxn> Views<'a, T> {
         }
     }
 
+    fn read_story(&mut self, story: &str, view: EditTextView) -> Option<Arc<StoryView>> {
+        let built = self.story(story, view)?;
+        if !built
+            .paragraphs
+            .iter()
+            .any(|paragraph| paragraph.mark.revision)
+        {
+            return Some(built);
+        }
+        let text = story_ref(self.txn, story).ok()?;
+        let chunks = if self.fresh {
+            Arc::new(crate::ops::snapshot(&text, self.txn))
+        } else {
+            self.doc.chunk_snapshot(story, &text, self.txn)
+        };
+        StoryView::from_chunks(self.doc, self.txn, story, view, u32::MAX, &chunks, true)
+            .map(|(story, _)| Arc::new(story))
+    }
+
+    fn read_paragraph(&mut self, story: &StoryView, para_id: &str) -> Result<usize, EditFailure> {
+        let target = ParagraphTarget {
+            story: story.story.clone(),
+            para_id: para_id.to_owned(),
+        };
+        self.paragraph(&target, story.view)?;
+        match story.lookup(para_id) {
+            Lookup::One(index) => Ok(index),
+            _ => Err(failure(
+                EditFailureCode::MissingTarget,
+                format!(
+                    "paragraph {para_id:?} joins the following paragraph in the {:?} view",
+                    story.view
+                ),
+                Some(EditTarget::Paragraph(target)),
+            )),
+        }
+    }
+
     fn scope(
         &mut self,
         within: &SearchScope,
@@ -1208,7 +1458,7 @@ fn read_story<T: ReadTxn>(
     view: EditTextView,
     budget: &mut ReadBudget,
 ) -> Result<Vec<ParagraphText>, EditFailure> {
-    let Some(story) = views.story(story_id, view) else {
+    let Some(story) = views.read_story(story_id, view) else {
         return Err(failure(
             EditFailureCode::MissingTarget,
             format!("story {story_id:?} was not found"),
@@ -1225,7 +1475,7 @@ fn read_story<T: ReadTxn>(
                     story: story_id.to_owned(),
                     para_id: para_id.clone(),
                 };
-                let (_, index) = views.paragraph(&target, view)?;
+                let index = views.read_paragraph(&story, &target.para_id)?;
                 indices.push(index);
             }
             indices.sort_unstable();
@@ -1249,9 +1499,6 @@ fn read_story<T: ReadTxn>(
     let facts = views.doc().root_paragraph_facts(views.txn(), root, view);
     let mut paragraphs = Vec::with_capacity(indices.len());
     for index in indices {
-        if story.structurally_revised(index) {
-            return Err(structural_read_failure(&story, index));
-        }
         let paragraph = &story.paragraphs[index];
         budget.text_units += paragraph.len() as usize;
         if budget.text_units > budget.max_text_units {
@@ -1269,21 +1516,6 @@ fn read_story<T: ReadTxn>(
         paragraphs.push(record);
     }
     Ok(paragraphs)
-}
-
-fn structural_read_failure(story: &StoryView, index: usize) -> EditFailure {
-    let paragraph = &story.paragraphs[index];
-    failure(
-        EditFailureCode::Unsupported,
-        format!(
-            "paragraph {:?} has a pending paragraph-mark revision",
-            paragraph.para_id
-        ),
-        Some(EditTarget::Paragraph(ParagraphTarget {
-            story: story.story.clone(),
-            para_id: paragraph.para_id.clone(),
-        })),
-    )
 }
 
 impl EditingDoc {
@@ -1408,13 +1640,29 @@ impl EditingDoc {
                     None,
                 ));
             }
-            let (story, candidates) = views.scope(&request.within, request.view)?;
+            let story_id = match &request.within {
+                SearchScope::Story { story } => story,
+                SearchScope::Paragraph(target) => {
+                    views.paragraph(target, request.view)?;
+                    &target.story
+                }
+            };
+            let story = views.read_story(story_id, request.view).ok_or_else(|| {
+                failure(
+                    EditFailureCode::MissingTarget,
+                    format!("story {story_id:?} was not found"),
+                    None,
+                )
+            })?;
+            let candidates: Vec<usize> = match &request.within {
+                SearchScope::Story { .. } => (0..story.paragraphs.len()).collect(),
+                SearchScope::Paragraph(target) => {
+                    vec![views.read_paragraph(&story, &target.para_id)?]
+                }
+            };
             views.check_story_readable(&story.story)?;
             let mut matches = Vec::new();
             for index in candidates {
-                if story.structurally_revised(index) {
-                    return Err(structural_read_failure(&story, index));
-                }
                 let paragraph = &story.paragraphs[index];
                 for (start, end) in paragraph.occurrences(&request.text) {
                     if matches.len() == limit {
@@ -1667,7 +1915,7 @@ mod tests {
             ("a", "a"),
             ("b", "b"),
             ("c", "c"),
-            ("d", "dddd"),
+            ("d", "ddddd"),
             ("e", "e"),
         ] {
             doc.create_story(story, text, "Normal", "left").unwrap();
@@ -1703,22 +1951,22 @@ mod tests {
             (stories, read.truncated)
         };
         let all = vec![
-            ("a".to_owned(), Some(EditFailureCode::Unsupported)),
+            ("a".to_owned(), None),
             ("b".to_owned(), None),
             ("c".to_owned(), None),
             ("d".to_owned(), Some(EditFailureCode::LimitExceeded)),
             ("e".to_owned(), None),
         ];
-        assert_eq!(read(10, 3), (all.clone(), false));
-        assert_eq!(read(2, 2), (all[..4].to_vec(), true));
-        assert_eq!(read(1, 2), (all[..2].to_vec(), true));
-        assert_eq!(read(2, 1), (all[..2].to_vec(), true));
+        assert_eq!(read(10, 4), (all.clone(), false));
+        assert_eq!(read(2, 2), (all[..2].to_vec(), true));
+        assert_eq!(read(1, 2), (all[..1].to_vec(), true));
+        assert_eq!(read(2, 1), (all[..1].to_vec(), true));
     }
 
     #[test]
     fn read_stories_report_the_full_budget_refusal_and_continue() {
         let doc = EditingDoc::new(100);
-        for (story, text) in [("a", "aa"), ("b", "bbx"), ("c", "c")] {
+        for (story, text) in [("a", "aa"), ("b", "bbxx"), ("c", "c")] {
             doc.create_story(story, text, "Normal", "left").unwrap();
         }
         let ctx = crate::EditCtx::local("", "");
@@ -1734,7 +1982,7 @@ mod tests {
         doc.apply_raw_ops(
             "b",
             vec![RawOp::SetEmbedAttr {
-                index: 4,
+                index: 5,
                 key: PPR_INS.to_owned(),
                 value: Any::from("rev"),
             }],
@@ -1759,12 +2007,45 @@ mod tests {
         assert!(matches!(
             &read.stories[1],
             StoryText::Refused { story, failure }
-                if story == "b" && failure.code == EditFailureCode::Unsupported
+                if story == "b" && failure.code == EditFailureCode::LimitExceeded
         ));
         assert!(matches!(
             &read.stories[2],
             StoryText::Read { story, paragraphs } if story == "c" && paragraphs[0].text == "c"
         ));
+    }
+
+    #[test]
+    fn read_budgets_count_projected_paragraphs_and_text() {
+        let doc = EditingDoc::new(100);
+        doc.create_story("body", "abcd", "Normal", "left").unwrap();
+        let ctx = EditCtx::local("Author", "2026-01-01T00:00:00Z");
+        doc.split_paragraph(&ctx, Position::new("body", 2), None)
+            .unwrap();
+        doc.delete_range(&ctx.suggesting(), StoryRange::new("body", 2, 3))
+            .unwrap();
+        let request = ReadStoriesRequest {
+            stories: None,
+            by_root: false,
+            view: EditTextView::Accepted,
+            expect_version: None,
+        };
+        let read = doc
+            .read_stories_within(&request, ReadBudget::limited(1, 4))
+            .unwrap();
+        assert!(!read.truncated);
+        assert!(
+            matches!(&read.stories[..], [StoryText::Read { paragraphs, .. }]
+            if paragraphs.len() == 1 && paragraphs[0].text == "abcd")
+        );
+        let read = doc
+            .read_stories_within(&request, ReadBudget::limited(1, 3))
+            .unwrap();
+        assert!(!read.truncated);
+        assert!(
+            matches!(&read.stories[..], [StoryText::Refused { failure, .. }]
+            if failure.code == EditFailureCode::LimitExceeded)
+        );
     }
 
     fn texts(story: &StoryView) -> Vec<&str> {

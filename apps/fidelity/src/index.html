@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex" />
     <meta
       name="description"
       content="BetterOffice's visual fidelity and formula accuracy measured against Microsoft Office, its speed against LibreOffice, and the editing latency of its SDKs."
     />
+    <link rel="canonical" href="https://benchmarks.betteroffice.dev/" />
     <title>BetterOffice Benchmarks</title>
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./styles.css" />
@@ -16,7 +16,7 @@
   <body class="min-h-dvh overflow-x-clip bg-bg font-sans text-[15px]/[1.55] text-fg antialiased">
     <header class="sticky top-0 z-20 border-b border-line-soft bg-head backdrop-blur-xl">
       <div class="wrap flex h-16 items-center justify-between gap-6 max-[36rem]:h-auto max-[36rem]:flex-wrap max-[36rem]:gap-y-2 max-[36rem]:py-3.5">
-        <a class="flex items-center gap-2.5 text-[0.9375rem] font-semibold tracking-[-0.015em] whitespace-nowrap no-underline" href="/"><svg class="h-[18px] w-auto text-fg" aria-hidden="true" viewBox="0 0 276 206" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <a class="flex items-center gap-2.5 text-[0.9375rem] font-semibold tracking-[-0.015em] whitespace-nowrap no-underline" href="https://betteroffice.dev"><svg class="h-[18px] w-auto text-fg" aria-hidden="true" viewBox="0 0 276 206" fill="none" xmlns="http://www.w3.org/2000/svg">
 <path d="M130.19 13.5L130.273 14.5H128.323L126.99 13.5H130.19Z" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
 <path d="M197.227 188.5L198.727 203.5H196.643L194.393 188.5H197.227Z" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
 <mask id="path-3-inside-1_40_73" fill="white">
@@ -55,6 +55,7 @@
     <main>
       <section class="wrap pt-12 pb-[clamp(3.5rem,7vw,6rem)] md:pt-20" id="hero">
         <h1 class="max-w-[820px] text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] font-semibold tracking-[-0.045em] text-balance">Benchmarks</h1>
+        <p class="mt-6 max-w-[760px] text-ink">Head-to-head write-ups: <a class="text-fg underline decoration-faint underline-offset-[3px] hover:decoration-fg" href="https://betteroffice.dev/blog/betteroffice-vs-docx-editor">BetterOffice vs docx-editor.dev</a> for DOCX, and <a class="text-fg underline decoration-faint underline-offset-[3px] hover:decoration-fg" href="https://betteroffice.dev/blog/betteroffice-vs-univer">BetterOffice vs Univer</a> for XLSX.</p>
         <dl class="mt-8 flex flex-wrap gap-x-6 gap-y-3 md:gap-x-9" id="facts"></dl>
         <div class="mt-9 grid grid-cols-1 gap-px border border-line-soft bg-line-soft md:grid-cols-2 lg:grid-cols-4" id="kpis">
           <p class="col-span-full bg-bg px-6 py-11 text-[13.5px] text-dim">Loading the latest run…</p>

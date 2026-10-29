@@ -216,7 +216,18 @@ pub struct Slide {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HeaderFooterSettings {
+    pub slide_number: bool,
+    pub footer: bool,
+    pub date: bool,
+    pub header: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SlideLayout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_footer: Option<HeaderFooterSettings>,
     pub part_path: String,
     pub name: Option<String>,
     pub layout_type: Option<String>,
@@ -236,6 +247,8 @@ pub struct SlideLayout {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlideMaster {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_footer: Option<HeaderFooterSettings>,
     pub part_path: String,
     pub name: Option<String>,
     pub theme_part_path: Option<String>,
@@ -347,7 +360,13 @@ impl ShapeNode {
 pub struct ShapeBase {
     pub id: u32,
     pub name: String,
+    /// `cNvPr/@title`, the alternative-text title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub description: Option<String>,
+    /// True when `cNvPr` carries the a16 decorative extension.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
     pub hidden: bool,
     pub placeholder: Option<Placeholder>,
     pub transform: ShapeTransform,

@@ -33,15 +33,25 @@
 // JSON files. Edit the JSON, not this block.
 
 import enJson from '../en.json';
+import arJson from '../ar.json';
 import deJson from '../de.json';
+import esJson from '../es.json';
 import frJson from '../fr.json';
 import heJson from '../he.json';
 import hiJson from '../hi.json';
 import idJson from '../id.json';
+import itJson from '../it.json';
+import jaJson from '../ja.json';
+import koJson from '../ko.json';
+import nlJson from '../nl.json';
 import plJson from '../pl.json';
 import ptBRJson from '../pt-BR.json';
+import ruJson from '../ru.json';
 import trJson from '../tr.json';
+import ukJson from '../uk.json';
+import viJson from '../vi.json';
 import zhCNJson from '../zh-CN.json';
+import zhTWJson from '../zh-TW.json';
 
 /**
  * Full locale string set, auto-derived from `en.json` (the source of truth).
@@ -60,13 +70,39 @@ export type LocaleStrings = typeof en;
  *
  * @public
  */
-export type LocaleCode = 'en' | 'de' | 'fr' | 'he' | 'hi' | 'id' | 'pl' | 'pt-BR' | 'tr' | 'zh-CN';
+export type LocaleCode =
+  | 'en'
+  | 'ar'
+  | 'de'
+  | 'es'
+  | 'fr'
+  | 'he'
+  | 'hi'
+  | 'id'
+  | 'it'
+  | 'ja'
+  | 'ko'
+  | 'nl'
+  | 'pl'
+  | 'pt-BR'
+  | 'ru'
+  | 'tr'
+  | 'uk'
+  | 'vi'
+  | 'zh-CN'
+  | 'zh-TW';
 
 /** English (`en`) — the source of truth, 100% covered. @public */
 export const en = enJson;
 
+/** Arabic (`ar`). Community-maintained; null leaves fall back to English. @public */
+export const ar: PartialLocaleStrings = arJson;
+
 /** German (`de`). Community-maintained; null leaves fall back to English. @public */
 export const de: PartialLocaleStrings = deJson;
+
+/** Spanish (`es`). Community-maintained; null leaves fall back to English. @public */
+export const es: PartialLocaleStrings = esJson;
 
 /** French (`fr`). Community-maintained; null leaves fall back to English. @public */
 export const fr: PartialLocaleStrings = frJson;
@@ -80,17 +116,41 @@ export const hi: PartialLocaleStrings = hiJson;
 /** Indonesian (`id`). Community-maintained; null leaves fall back to English. @public */
 export const id: PartialLocaleStrings = idJson;
 
+/** Italian (`it`). Community-maintained; null leaves fall back to English. @public */
+export const it: PartialLocaleStrings = itJson;
+
+/** Japanese (`ja`). Community-maintained; null leaves fall back to English. @public */
+export const ja: PartialLocaleStrings = jaJson;
+
+/** Korean (`ko`). Community-maintained; null leaves fall back to English. @public */
+export const ko: PartialLocaleStrings = koJson;
+
+/** Dutch (`nl`). Community-maintained; null leaves fall back to English. @public */
+export const nl: PartialLocaleStrings = nlJson;
+
 /** Polish (`pl`). Community-maintained; null leaves fall back to English. @public */
 export const pl: PartialLocaleStrings = plJson;
 
 /** Portuguese (Brazil) (`pt-BR`). Community-maintained; null leaves fall back to English. @public */
 export const ptBR: PartialLocaleStrings = ptBRJson;
 
+/** Russian (`ru`). Community-maintained; null leaves fall back to English. @public */
+export const ru: PartialLocaleStrings = ruJson;
+
 /** Turkish (`tr`). Community-maintained; null leaves fall back to English. @public */
 export const tr: PartialLocaleStrings = trJson;
 
+/** Ukrainian (`uk`). Community-maintained; null leaves fall back to English. @public */
+export const uk: PartialLocaleStrings = ukJson;
+
+/** Vietnamese (`vi`). Community-maintained; null leaves fall back to English. @public */
+export const vi: PartialLocaleStrings = viJson;
+
 /** Simplified Chinese (`zh-CN`). Community-maintained; null leaves fall back to English. @public */
 export const zhCN: PartialLocaleStrings = zhCNJson;
+
+/** Traditional Chinese (`zh-TW`). Community-maintained; null leaves fall back to English. @public */
+export const zhTW: PartialLocaleStrings = zhTWJson;
 
 /**
  * Every shipped locale, keyed by BCP-47 tag. Use for runtime locale
@@ -108,15 +168,25 @@ export const zhCN: PartialLocaleStrings = zhCNJson;
  */
 export const locales: Record<LocaleCode, PartialLocaleStrings> = {
   en,
+  ar,
   de,
+  es,
   fr,
   he,
   hi,
   id,
+  it,
+  ja,
+  ko,
+  nl,
   pl,
   'pt-BR': ptBR,
+  ru,
   tr,
+  uk,
+  vi,
   'zh-CN': zhCN,
+  'zh-TW': zhTW,
 };
 // ─── GENERATED END ───
 

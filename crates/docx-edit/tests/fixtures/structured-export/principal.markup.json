@@ -1467,7 +1467,17 @@
                 "altText": "Company logo",
                 "relationshipId": "rIdImage",
                 "part": "word/media/logo.png",
-                "externalTarget": null
+                "externalTarget": null,
+                "drawing": {
+                  "docPrId": "1",
+                  "name": "logo",
+                  "title": null,
+                  "descr": "Company logo",
+                  "hidden": false,
+                  "decorative": false,
+                  "placement": "inline",
+                  "type": "picture"
+                }
               }
             ]
           }
@@ -2066,7 +2076,17 @@
                 "revisions": [],
                 "kind": "unsupported",
                 "element": "wps:wsp",
-                "altText": "Process arrow"
+                "altText": "Process arrow",
+                "drawing": {
+                  "docPrId": "2",
+                  "name": "Arrow",
+                  "title": null,
+                  "descr": "Process arrow",
+                  "hidden": false,
+                  "decorative": false,
+                  "placement": "inline",
+                  "type": "shape"
+                }
               },
               {
                 "id": "s0.b22.i2",
@@ -2109,7 +2129,8 @@
                 "revisions": [],
                 "kind": "unsupported",
                 "element": "m:oMath",
-                "altText": "x=1"
+                "altText": "x=1",
+                "drawing": null
               },
               {
                 "id": "s0.b22.i4",
@@ -2152,7 +2173,17 @@
                 "revisions": [],
                 "kind": "unsupported",
                 "element": "w:drawing",
-                "altText": null
+                "altText": null,
+                "drawing": {
+                  "docPrId": "3",
+                  "name": "Chart",
+                  "title": null,
+                  "descr": null,
+                  "hidden": false,
+                  "decorative": false,
+                  "placement": "inline",
+                  "type": "chart"
+                }
               },
               {
                 "id": "s0.b22.i6",

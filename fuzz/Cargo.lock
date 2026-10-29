@@ -71,11 +71,12 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
+ "libm",
  "serde",
 ]
 
@@ -93,19 +94,20 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-metafile"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "libm",
 ]
 
 [[package]]
 name = "betteroffice-ooxml-diff"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "rustybuzz",
@@ -118,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "js-sys",
  "quick-xml",
@@ -127,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -142,11 +144,12 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "quick-xml",
  "serde",
  "thiserror",
@@ -154,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -169,13 +172,14 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
@@ -627,9 +631,9 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "lock_api"

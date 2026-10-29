@@ -139,20 +139,22 @@ impl DeckSession {
                 ));
             }
             decode_update_v1(update).map_err(|error| PeerError::new("initialUpdate", error))?;
-            let incoming = doc_with_client_id(crate::BOOTSTRAP_CLIENT_ID);
-            hydrate_doc(&incoming, update)?;
-            let vector = incoming.transact().state_vector();
-            let client_id = match client_id {
-                Some(id) if vector.get(&yrs::ClientID::new(id)) != 0 => {
-                    return Err(PeerError::new(
-                        "clientIdReuse",
-                        "initial update already uses this client id",
-                    ));
+            let client_id = {
+                let incoming = doc_with_client_id(crate::BOOTSTRAP_CLIENT_ID);
+                hydrate_doc(&incoming, update)?;
+                let vector = incoming.transact().state_vector();
+                match client_id {
+                    Some(id) if vector.get(&yrs::ClientID::new(id)) != 0 => {
+                        return Err(PeerError::new(
+                            "clientIdReuse",
+                            "initial update already uses this client id",
+                        ));
+                    }
+                    Some(id) => id,
+                    None => (1..=crate::MAX_SAFE_CLIENT_ID)
+                        .find(|id| vector.get(&yrs::ClientID::new(*id)) == 0)
+                        .ok_or_else(|| PeerError::new("clientIdReuse", "no unused client id"))?,
                 }
-                Some(id) => id,
-                None => (1..=crate::MAX_SAFE_CLIENT_ID)
-                    .find(|id| vector.get(&yrs::ClientID::new(*id)) == 0)
-                    .ok_or_else(|| PeerError::new("clientIdReuse", "no unused client id"))?,
             };
             Self::open_from_update_with_source(update, source, client_id)
                 .map_err(|error| PeerError::new("initialUpdateSource", error))?

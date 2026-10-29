@@ -233,6 +233,10 @@ fn run_key(path: &[String]) -> bool {
         || (path.len() == 2 && children.is_some_and(|keys| keys.contains(&path[1].as_str())))
 }
 
+fn para_key_or_style(path: &[String]) -> bool {
+    para_key(path) || (path.len() == 1 && path[0] == "pStyle")
+}
+
 fn para_key(path: &[String]) -> bool {
     let Some(key) = path.first().map(String::as_str) else {
         return false;
@@ -499,6 +503,38 @@ impl Alignment {
     }
 }
 
+fn single_run_insertion_alignment(
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Option<Vec<(usize, usize)>> {
+    let ([UnitV1::Text { text, .. }], [UnitV1::Text { text: target, .. }]) =
+        (before.units.as_slice(), after.units.as_slice())
+    else {
+        return None;
+    };
+    let boundaries = before.carriers.get("_originalRunBoundaries")?.as_array()?;
+    let [boundary] = boundaries.as_slice() else {
+        return None;
+    };
+    if boundary.get("text").and_then(Value::as_str) != Some(text.as_str())
+        || boundary.get("breaks").is_some()
+        || boundary.get("noteMarks").is_some()
+        || target.len() <= text.len()
+    {
+        return None;
+    }
+    let offset = target
+        .strip_suffix(text.as_str())
+        .map(|prefix| prefix.chars().count())
+        .or_else(|| target.strip_prefix(text.as_str()).map(|_| 0))?;
+    Some(
+        text.chars()
+            .enumerate()
+            .map(|(at, _)| (at, at + offset))
+            .collect(),
+    )
+}
+
 fn alignment(before: &[Token], after: &[Token]) -> Result<Vec<(usize, usize)>, &'static str> {
     const WORK_LIMIT: usize = 4_000_000;
     let prefix = before
@@ -756,7 +792,11 @@ fn validate_indent_kinds(
     before: &Snapshot,
     after: &Snapshot,
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
+    if patchable_restyle {
+        return Ok(());
+    }
     let source = before.carriers.get("_originalFormatting");
     let live = after.carriers.get("_originalFormatting");
     let ambiguous = |key| {
@@ -811,7 +851,11 @@ fn validate_paragraph_clears(
     after: &Snapshot,
     changes: &[AttrDeltaV1],
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
+    if patchable_restyle {
+        return Ok(());
+    }
     let cleared = changes.iter().find_map(|delta| {
         let reset = match &delta.after {
             SlotV1::Missing => true,
@@ -879,8 +923,10 @@ fn validate_theme_fonts(
 fn validate_carriers(
     before: &Snapshot,
     after: &Snapshot,
+    seeded_inherit: &Attrs,
     inherited: &Attrs,
     context: &PatchContext<'_>,
+    patchable_restyle: bool,
 ) -> Result<(), LegacyParagraphV1> {
     for change in deltas(&before.carriers, &after.carriers) {
         let key = change.path[0].as_str();
@@ -891,19 +937,53 @@ fn validate_carriers(
                     path[0] = "pStyle".to_owned();
                 }
                 let target = attr_at(&after.properties, &path);
-                if para_key(&path) && attr_at(&before.properties, &path) == target {
+                if patchable_restyle && path == ["pStyle"] {
+                    true
+                } else if para_key(&path) && attr_at(&before.properties, &path) == target {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
                         format!("key:{} direct property change", path.join(".")),
                     ));
+                } else {
+                    para_key(&path)
+                        && match &change.after {
+                            SlotV1::Missing => {
+                                target.is_none() || target == attr_at(inherited, &path)
+                            }
+                            SlotV1::Present { value } => target == Some(value),
+                        }
                 }
-                para_key(&path)
-                    && match &change.after {
-                        SlotV1::Missing => target.is_none() || target == attr_at(inherited, &path),
-                        SlotV1::Present { value } => target == Some(value),
-                    }
             }
             "bookmarks" => true,
+            "defaultTextFormatting" => {
+                let value = |slot: &SlotV1| match slot {
+                    SlotV1::Present { value } if !value.is_null() => Some(value.clone()),
+                    _ => None,
+                };
+                let direct = |snapshot: &Snapshot| {
+                    snapshot
+                        .carriers
+                        .get("_originalFormatting")
+                        .and_then(|value| value.get("runProperties"))
+                        .and_then(|value| {
+                            change.path[1..]
+                                .iter()
+                                .try_fold(value, |value, key| value.get(key))
+                        })
+                        .is_some_and(|value| !value.is_null())
+                };
+                patchable_restyle
+                    && !direct(before)
+                    && !direct(after)
+                    && value(&change.before)
+                        == attr_at(seeded_inherit, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+                    && value(&change.after)
+                        == attr_at(inherited, &change.path)
+                            .filter(|value| !value.is_null())
+                            .cloned()
+            }
             "spacingExplicit" => {
                 deltas(&before.properties, &after.properties)
                     .iter()
@@ -1013,18 +1093,81 @@ pub(crate) fn diff_paragraph_v1(
             after.properties.remove(key);
         }
     }
-    for key in ["pStyle", "styleId", "numPr"] {
-        if before.properties.get(key) != after.properties.get(key) {
-            return Err(context.restyle(key));
-        }
+    fn original_numpr(snapshot: &Snapshot) -> Option<&Value> {
+        snapshot
+            .carriers
+            .get("_originalFormatting")
+            .and_then(|value| value.get("numPr"))
+            .filter(|value| !value.is_null())
     }
     let (seeded_properties, _) = context.inheritance(&before.properties, &Attrs::new());
     let (para_inherit, _) = context.inheritance(&after.properties, &Attrs::new());
     let seeded_mark = mark_inheritance(&context, &before);
     let mark_inherit = mark_inheritance(&context, &after);
-    if seeded_properties != para_inherit
-        || seeded_mark != mark_inherit
-        || mark_attrs(&before) != mark_attrs(&after)
+    fn slot_value(slot: &SlotV1) -> Option<&Value> {
+        match slot {
+            SlotV1::Present { value } if !value.is_null() => Some(value),
+            _ => None,
+        }
+    }
+    fn inherited_value<'a>(attrs: &'a Attrs, path: &[String]) -> Option<&'a Value> {
+        attr_at(attrs, path).filter(|value| !value.is_null())
+    }
+    fn original_object(snapshot: &Snapshot) -> Option<&serde_json::Map<String, Value>> {
+        snapshot
+            .carriers
+            .get("_originalFormatting")
+            .and_then(Value::as_object)
+    }
+    let mut before_direct = original_object(&before).cloned().unwrap_or_default();
+    let mut after_direct = original_object(&after).cloned().unwrap_or_default();
+    before_direct.remove("styleId");
+    after_direct.remove("styleId");
+    let explained = deltas(&before.properties, &after.properties)
+        .iter()
+        .all(|delta| {
+            if delta.path.first().is_some_and(|key| key == "pStyle") {
+                return true;
+            }
+            let key = &delta.path[0];
+            let direct = [original_object(&before), original_object(&after)]
+                .iter()
+                .any(|object| {
+                    object
+                        .and_then(|object| object.get(key))
+                        .is_some_and(|value| !value.is_null())
+                });
+            let list_indent = matches!(
+                key.as_str(),
+                "indentLeft"
+                    | "indentFirstLine"
+                    | "hangingIndent"
+                    | "indentLeftChars"
+                    | "indentFirstLineChars"
+                    | "hangingIndentChars"
+            );
+            !direct
+                && slot_value(&delta.after) == inherited_value(&para_inherit, &delta.path)
+                && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
+                    || list_indent)
+        });
+    let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
+        && before.properties.get("numPr") == after.properties.get("numPr")
+        && original_numpr(&before).is_some()
+        && original_numpr(&before) == original_numpr(&after)
+        && before_direct == after_direct
+        && explained;
+    for key in ["pStyle", "styleId", "numPr"] {
+        if key == "pStyle" && patchable_restyle {
+            continue;
+        }
+        if before.properties.get(key) != after.properties.get(key) {
+            return Err(context.restyle(key));
+        }
+    }
+    if mark_attrs(&before) != mark_attrs(&after)
+        || (!patchable_restyle
+            && (seeded_properties != para_inherit || seeded_mark != mark_inherit))
     {
         return Err(context.restyle("paragraph inheritance"));
     }
@@ -1033,6 +1176,9 @@ pub(crate) fn diff_paragraph_v1(
         &["numPr"][..],
         &["runProperties", "styleId"][..],
     ] {
+        if patchable_restyle && *path == ["styleId"] {
+            continue;
+        }
         let source_value = |snapshot: &Snapshot| {
             snapshot
                 .carriers
@@ -1056,10 +1202,25 @@ pub(crate) fn diff_paragraph_v1(
         ));
     }
     let para_deltas = deltas(&before.properties, &after.properties);
-    validate_indent_kinds(&before, &after, &context)?;
-    validate_paragraph_clears(&before, &after, &para_deltas, &context)?;
-    validate_carriers(&before, &after, &para_inherit, &context)?;
-    validate_deltas(&para_deltas, para_key, &context)?;
+    validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
+    validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
+    validate_carriers(
+        &before,
+        &after,
+        &seeded_properties,
+        &para_inherit,
+        &context,
+        patchable_restyle,
+    )?;
+    validate_deltas(
+        &para_deltas,
+        if patchable_restyle {
+            para_key_or_style
+        } else {
+            para_key
+        },
+        &context,
+    )?;
     if !verify_changes(&before.properties, &para_deltas, &after.properties) {
         return Err(context.legacy(
             PatchErrorCode::UnsupportedKey,
@@ -1070,8 +1231,14 @@ pub(crate) fn diff_paragraph_v1(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = alignment(&old, &new)
-        .map_err(|detail| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?;
+    let retained = match alignment(&old, &new) {
+        Ok(retained) => retained,
+        Err(detail @ "ambiguous: nonunique content alignment") if patchable_restyle => {
+            single_run_insertion_alignment(&before, &after)
+                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
+        }
+        Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+    };
     let donors = DonorIndex::new(&old);
     let offsets = &donors.offsets;
     let mut text_edits = Vec::new();
@@ -1126,7 +1293,7 @@ pub(crate) fn diff_paragraph_v1(
                         .text_donor(previous.0, i)
                         .map_or(&seeded_mark, |at| old_inherit[at].as_ref());
                     if token.attrs.get("runStyle") != donor_attrs.get("runStyle")
-                        || inherit.as_ref() != donor_inherit
+                        || (!patchable_restyle && inherit.as_ref() != donor_inherit)
                     {
                         return Err(context.restyle("inserted run inheritance"));
                     }
@@ -1164,7 +1331,7 @@ pub(crate) fn diff_paragraph_v1(
         }
         if i < old.len() {
             if old[i].attrs.get("runStyle") != new[j].attrs.get("runStyle")
-                || !same_attrs(&old_inherit[i], &new_inherit[j])
+                || (!patchable_restyle && !same_attrs(&old_inherit[i], &new_inherit[j]))
             {
                 return Err(context.restyle("run inheritance"));
             }
@@ -1495,6 +1662,115 @@ mod tests {
                 assert_eq!(legacy.detail, format!("key:{key}.{leaf}"));
             }
         }
+    }
+
+    #[test]
+    fn numbered_restyle_with_direct_numbering_stays_a_patch() {
+        let numbering = json!({"numId": 43, "ilvl": 0});
+        let before = paragraph(
+            "x",
+            json!({
+                "pStyle": "ListParagraph",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "ListParagraph", "numPr": numbering.clone()}
+            }),
+        );
+        let after = paragraph(
+            "x",
+            json!({
+                "pStyle": "Heading1",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "Heading1", "numPr": numbering.clone()}
+            }),
+        );
+        let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+        assert_eq!(patch.para_deltas.len(), 1);
+        assert_eq!(patch.para_deltas[0].path, ["pStyle"]);
+    }
+
+    #[test]
+    fn numbered_restyle_refuses_repeated_alignment_without_one_source_run() {
+        for boundaries in [
+            Value::Null,
+            json!([{"text": "Some "}, {"text": "heading"}]),
+            json!([{"text": "other text"}]),
+        ] {
+            let paragraph = |text, style| {
+                paragraph(
+                    text,
+                    json!({
+                        "pStyle": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "_originalFormatting": {
+                            "styleId": style, "numPr": {"numId": 43, "ilvl": 0}
+                        },
+                        "_originalRunBoundaries": boundaries
+                    }),
+                )
+            };
+            let legacy = diff_paragraph_v1(
+                &paragraph("Some heading", "ListParagraph"),
+                &paragraph("Some Some heading", "Heading1"),
+                context(),
+            )
+            .unwrap_err();
+            assert_eq!(legacy.code, PatchErrorCode::AmbiguousAlignment);
+            assert_eq!(legacy.detail, "ambiguous: nonunique content alignment");
+        }
+    }
+
+    #[test]
+    fn numbered_restyle_with_a_direct_change_is_not_a_patch() {
+        let numbering = json!({"numId": 43, "ilvl": 0});
+        let before = paragraph(
+            "x",
+            json!({
+                "pStyle": "ListParagraph",
+                "numPr": numbering.clone(),
+                "_originalFormatting": {"styleId": "ListParagraph", "numPr": numbering.clone()}
+            }),
+        );
+        let after = paragraph(
+            "x",
+            json!({
+                "pStyle": "Heading1",
+                "numPr": numbering.clone(),
+                "alignment": "center",
+                "_originalFormatting": {
+                    "styleId": "Heading1", "numPr": numbering.clone(), "alignment": "center"
+                }
+            }),
+        );
+        let legacy = diff_paragraph_v1(&before, &after, context()).unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedStructure);
+        assert!(legacy.detail.starts_with("restyle:"));
+    }
+
+    #[test]
+    fn numbered_restyle_with_an_unexplained_mark_change_is_not_a_patch() {
+        let paragraph = |style: &str, italic: bool| {
+            paragraph(
+                "x",
+                json!({
+                    "pStyle": style,
+                    "numPr": {"numId": 43, "ilvl": 0},
+                    "defaultTextFormatting": {"italic": italic},
+                    "_originalFormatting": {
+                        "styleId": style,
+                        "numPr": {"numId": 43, "ilvl": 0},
+                        "runProperties": {"italic": true}
+                    }
+                }),
+            )
+        };
+        let legacy = diff_paragraph_v1(
+            &paragraph("ListParagraph", true),
+            &paragraph("Heading1", false),
+            context(),
+        )
+        .unwrap_err();
+        assert_eq!(legacy.code, PatchErrorCode::UnsupportedKey);
+        assert_eq!(legacy.detail, "key:defaultTextFormatting.italic");
     }
 
     #[test]

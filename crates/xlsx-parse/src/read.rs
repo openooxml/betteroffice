@@ -188,13 +188,26 @@ fn typed_part<'a>(
     type_suffix: &str,
     fallback: &str,
 ) -> Result<Option<&'a [u8]>, ParseError> {
+    let path = typed_part_name(wb_rels, type_suffix, fallback)?;
+    Ok(find_part(parts, &path))
+}
+
+#[doc(hidden)]
+pub fn styles_part_name(wb_rels: Option<&[u8]>) -> Result<String, ParseError> {
+    typed_part_name(wb_rels, "styles", "xl/styles.xml")
+}
+
+fn typed_part_name(
+    wb_rels: Option<&[u8]>,
+    type_suffix: &str,
+    fallback: &str,
+) -> Result<String, ParseError> {
     if let Some(rels) = wb_rels
         && let Some(target) = rel_target_by_type(rels, type_suffix)?
     {
-        let path = resolve_part_path("xl", &target);
-        return Ok(find_part(parts, &path));
+        return Ok(resolve_part_path("xl", &target));
     }
-    Ok(find_part(parts, fallback))
+    Ok(fallback.to_string())
 }
 
 /// find the `Target` of the first `Relationship` whose `Type` ends with
@@ -487,7 +500,7 @@ fn row_count_attr(
 
 /// Decode the `_xHHHH_` escapes excel writes for characters a name cannot hold
 /// literally; `_x005F_` is its own escape for a leading underscore.
-fn unescape_name(source: &str) -> String {
+pub(crate) fn unescape_name(source: &str) -> String {
     if !source.contains("_x") && !source.contains("_X") {
         return source.to_string();
     }

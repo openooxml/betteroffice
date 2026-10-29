@@ -88,21 +88,37 @@ function count(value: unknown, what: string): number {
   return value as number;
 }
 
-/** npm's point API 404s for a package published within the last day; that is zero, not a failure. */
-async function npmDownloads(pacer: Pacer): Promise<number> {
+/** The 30 UTC days ending yesterday, as npm's range API names them; today's count is still partial. */
+export function npmRange(now: Date): string {
+  const end = new Date(now);
+  end.setUTCHours(0, 0, 0, 0);
+  end.setUTCDate(end.getUTCDate() - 1);
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 29);
+  return `${start.toISOString().slice(0, 10)}:${end.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * Explicit date ranges, because npm's `point/last-month` window can stop advancing.
+ * The range API 404s for a package published within the last day; that is zero, not a failure.
+ */
+async function npmDownloads(pacer: Pacer, now: number): Promise<number> {
   const listing = await request(pacer, "https://registry.npmjs.org/-/org/betteroffice/package?format=cli");
   if (!listing.ok) throw new Error(`npm org listing failed: ${listing.status}`);
   const names = officialPackageNames((await listing.json()) as Record<string, string>);
   if (names.length === 0) throw new Error("no @betteroffice packages found");
 
+  const range = npmRange(new Date(now));
   let total = 0;
   for (const name of names) {
     const response = await request(
       pacer,
-      `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(name)}`,
+      `https://api.npmjs.org/downloads/range/${range}/${encodeURIComponent(name)}`,
     );
     if (response.status === 404) continue;
-    total += count(((await response.json()) as { downloads?: unknown }).downloads, name);
+    const days = ((await response.json()) as { downloads?: unknown }).downloads;
+    if (!Array.isArray(days)) throw new Error(`invalid ${name} download count`);
+    for (const day of days) total += count((day as { downloads?: unknown })?.downloads, name);
   }
   return total;
 }
@@ -163,7 +179,7 @@ export async function refreshDownloadStats(
     started: false,
   };
   const collectors: Record<Registry, () => Promise<number>> = {
-    npm: () => npmDownloads(pacer),
+    npm: () => npmDownloads(pacer, now()),
     pypi: () => pypiDownloads(pacer),
     crates: () => cratesDownloads(pacer, now()),
   };

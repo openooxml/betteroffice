@@ -1,5 +1,26 @@
 # @betteroffice/pptx-react
 
+## 0.5.1
+
+### Patch Changes
+
+- fa6fd11: Registers supplied fonts at their actual weight and style by default, allowing browser synthesis when only a regular face is available. Avoids duplicate registrations for the same family, weight, and style.
+- 70e3441: Presentations open and show every slide when font downloads fail. Text falls back to available fonts and the editor logs one console warning.
+- 375cbc3: Adds effective paragraph lists and slide titles, visibility and layout details to plugin content reads. Available by default with optional fields for compatibility with older engines.
+- Updated dependencies [3d4b60c]
+- Updated dependencies [baf21df]
+- Updated dependencies [acbd0df]
+- Updated dependencies [b1fb96b]
+- Updated dependencies [27590d9]
+- Updated dependencies [d9c0a82]
+- Updated dependencies [70e3441]
+- Updated dependencies [375cbc3]
+- Updated dependencies [4eaba8b]
+- Updated dependencies [59deeda]
+- Updated dependencies [02818de]
+  - @betteroffice/pptx@0.5.1
+  - @betteroffice/pptx-i18n@0.5.1
+
 ## 0.5.0
 
 ### Minor Changes

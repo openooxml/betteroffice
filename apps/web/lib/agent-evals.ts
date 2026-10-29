@@ -1,4 +1,4 @@
-import { publishedTiers, type PublishedTier } from "../../../shared/eval-publication";
+import { landingTiers, type PublishedTier } from "../../../shared/eval-publication";
 import { quantity, type FidelityBar } from "./fidelity";
 
 export type AgentEvalRow = { format: string; ours: string; theirs: string };
@@ -12,7 +12,7 @@ export function agentEvalsSection(readme: string): string {
   return readme.match(SECTION)?.[0] ?? "";
 }
 
-export function parseAgentEvals(readme: string, allowlist: readonly PublishedTier[] = publishedTiers): AgentEvals | null {
+export function parseAgentEvals(readme: string, allowlist: readonly PublishedTier[] = landingTiers): AgentEvals | null {
   const section = agentEvalsSection(readme);
   const tables = [...section.matchAll(/^\|.*\|[ \t]*\r?$(?:\r?\n^\|.*\|[ \t]*\r?$)+/gm)];
   const table = tables.find(match => {

@@ -1,5 +1,23 @@
 # @betteroffice/xlsx
 
+## 0.5.1
+
+### Patch Changes
+
+- e5718f5: Adds opt-in `protectedSheets: "allow"` to agent cell writes, formatting, sorting and find/replace. Protection is kept, and `protectedCells` reports edits through protection. The default remains `"refuse"`.
+- 3d4b60c: Bar and column data labels sit where PowerPoint and Excel put them: past a negative bar's end for outside end, inside the bar for inside end and inside base, centred on horizontal bars, and centred by default on stacked charts.
+- baf21df: Pie and doughnut data labels sit where PowerPoint and Excel put them: centred on their slice, just inside the rim for best fit and inside end, just outside for outside end, and in the middle of a doughnut's ring.
+- acbd0df: Chart axes honour their tick label position: none hides the labels and gives the plot their room, high moves them to the far side of the plot, and a deleted category axis draws no labels.
+- b1fb96b: A zero-valued bar or column's data label sits on the side its value axis gives it, including on a reversed axis, as for other bars.
+- 23018b6: Dashboards that sum large data sheets with `SUMPRODUCT((range=key)*...*values)` inside array (Ctrl+Shift+Enter) formulas now calculate every cell instead of stopping with #NUM! partway through.
+- f694c05: Dashboards whose `SUMPRODUCT` data columns contain a few formula cells now calculate every cell instead of stopping with #NUM! partway through.
+- ef5eaa7: Formulas coerce currency text when workbook number formats supply currency evidence. Formula entry and formatting edits use the same evidence as recalculation.
+- d8f4d03: INDIRECT now resolves references written in lowercase and in R1C1 style (`INDIRECT("R5C2", FALSE)`), and a formula pointing at a deleted cell on another sheet (`'Sheet'!#REF!`) shows #REF! as in Excel, instead of a blank or a stale value.
+- 361b113: Adds `sheets[].visibility` to `readCells` results by default, including `unknown` when visibility cannot be determined. Exports the `XlsxSheetVisibility` type from both package roots.
+- ae3902a: Keeps worksheet titles and sheet-qualified named-range titles in workbook properties current when sheets are renamed or moved. Preserves properties unchanged when their worksheet titles cannot be mapped reliably.
+- f0f9ffe: Sheets styled on more than 65,536 rows now open, edit and save instead of failing with "worksheet row style count exceeded cap". Live collaboration on a sheet with more than about 333,000 styled rows is refused for now.
+- 3b3af14: Dashboards that sum large data sheets with `SUMPRODUCT((range=key)*...*values)` now calculate every cell instead of stopping with #NUM! partway through.
+
 ## 0.5.0
 
 ### Minor Changes

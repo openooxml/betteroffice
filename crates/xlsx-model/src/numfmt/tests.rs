@@ -431,6 +431,25 @@ fn text_values_and_placeholder() {
     assert_eq!(colored.color, Some("#FF0000".to_string()));
 }
 
+/// literal spaces at the edges of a section are part of the format, not
+/// padding to trim: excel keeps them in TEXT results and in cell display.
+#[test]
+fn literal_spaces_at_section_edges_survive() {
+    // 45962 is 2025-11-01 in the 1900 system.
+    assert_eq!(fv(45962.0, "MMMM YYYY "), "November 2025 ");
+    assert_eq!(fv(45962.0, " d mmm"), " 1 Nov");
+    assert_eq!(fv(1.5, "0.0 "), "1.5 ");
+    assert_eq!(fv(5.0, " 0"), " 5");
+    let hello = CellValue::Text {
+        value: "hello".to_string(),
+    };
+    assert_eq!(format_value(&hello, "@ ", DateSystem::V1900).text, "hello ");
+    assert_eq!(format_value(&hello, " @", DateSystem::V1900).text, " hello");
+    assert_eq!(fv(5.0, "0 ;(0) "), "5 ");
+    assert_eq!(fv(-5.0, "0 ;(0) "), "(5) ");
+    assert_eq!(fv(0.0, "0 ;(0) "), "0 ");
+}
+
 #[test]
 fn bools_errors_empty() {
     assert_eq!(

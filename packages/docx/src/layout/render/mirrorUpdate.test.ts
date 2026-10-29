@@ -65,6 +65,18 @@ test('a one-character edit rebuilds only the edited paragraph and shifts the res
   expect(after.getAttribute('data-doc-start')).toBe(String(100 + 21 * 27 + 1));
 });
 
+test('canvas substitute scaling leaves mirror geometry unchanged', () => {
+  const page = prose(1);
+  const corrected: DisplayPage = {
+    ...page,
+    primitives: page.primitives.map((primitive) => primitive.kind === 'text'
+      ? { ...primitive, substituteScale: 0.8 }
+      : primitive),
+  };
+  expect(canonical(buildMirrorPage(corrected, options))).toBe(canonical(buildMirrorPage(page, options)));
+  expect(update(buildMirrorPage(page, options), corrected)).toHaveLength(0);
+});
+
 test('a page whose positions only shifted keeps every element', () => {
   const mirror = buildMirrorPage(prose(40), options);
   expect(update(mirror, prose(40, -1, 7))).toHaveLength(0);

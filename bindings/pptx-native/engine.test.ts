@@ -1,0 +1,341 @@
+import { readFileSync } from 'node:fs';
+import { beforeAll, describe, expect, test } from 'bun:test';
+import initWasm, * as wasm from '../../packages/pptx/src/wasm/generated/pptx_wasm.js';
+import { expectSavedPartsEqual } from '../native-parity';
+
+type Engine = Pick<typeof wasm,
+  | 'PptxDocument'
+  | 'PptxRenderer'
+  | 'parsePptxJson'
+  | 'parsePptxJsonWithoutMedia'
+  | 'exportPptxStructuredJson'
+  | 'exportPptxMarkdownJson'
+  | 'renderPptxMarkdownJson'
+  | 'compileSlideJson'
+  | 'rendererVersion'
+  | 'decodeTiffPng'
+>;
+
+const native = require('./index.js') as Engine & { engineVersion(): string };
+const fixture = readFileSync(new URL('../../apps/demo/public/betteroffice-demo.pptx', import.meta.url));
+const bytes = () => new Uint8Array(fixture);
+const normalized = (json: string): unknown => JSON.parse(json.replace(/[0-9a-f]{16}-\d+/g, '<version>'));
+
+type Snapshot = {
+  slides: { id: string; shapes: { textStories: { id: string }[] }[] }[];
+};
+
+beforeAll(async () => {
+  await initWasm({
+    module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
+  });
+});
+
+function storyId(doc: wasm.PptxDocument): string {
+  const snapshot = JSON.parse(doc.snapshotJson()) as Snapshot;
+  const story = snapshot.slides.flatMap((slide) => slide.shapes)
+    .flatMap((shape) => shape.textStories)[0];
+  expect(story).toBeDefined();
+  return story.id;
+}
+
+function expectPlainBytes(value: Uint8Array) {
+  expect(value).toBeInstanceOf(Uint8Array);
+  expect(Buffer.isBuffer(value)).toBe(false);
+  expect(Object.getPrototypeOf(value)).toBe(Uint8Array.prototype);
+  expect(value.byteOffset).toBe(0);
+  expect(value.buffer.byteLength).toBe(value.byteLength);
+}
+
+function caughtValue(call: () => unknown): unknown {
+  try {
+    call();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected the engine call to throw');
+}
+
+function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown): unknown {
+  const expected = caughtValue(wasmCall);
+  const actual = caughtValue(nativeCall);
+  expect(typeof actual).toBe(typeof expected);
+  expect(actual instanceof Error).toBe(expected instanceof Error);
+  if (actual instanceof Error && expected instanceof Error) {
+    expect(actual.name).toBe(expected.name);
+    expect(actual.message).toBe(expected.message);
+    expect((actual as Error & { code?: string }).code)
+      .toBe((expected as Error & { code?: string }).code);
+  } else {
+    expect(actual).toBe(expected);
+  }
+  return actual;
+}
+
+function runScript(engine: Engine) {
+  const doc = engine.PptxDocument.openCollaborative(bytes(), 7);
+  const other = engine.PptxDocument.openCollaborative(bytes(), 8);
+  const renderer = new engine.PptxRenderer();
+  try {
+    expect(doc.clientId).toBe(7);
+    const snapshot = doc.snapshotJson();
+    const metadata = doc.sessionMetadataJson();
+    const content = doc.readContentJson('{}');
+    const id = storyId(doc);
+    const story = doc.storyJson(JSON.stringify({ storyId: id }));
+    const withKeys = renderer.snapshotWithLayoutKeysJson(doc);
+    const slides = (JSON.parse(snapshot) as Snapshot).slides;
+    const layouts = slides.map((slide, index) => {
+      const layout = renderer.layoutSlideJson(doc, index);
+      const hit = renderer.hitTestJson(40.5, 40.25);
+      const key = renderer.slideLayoutKey(doc, index);
+      const active = renderer.setActiveSlide(doc, slide.id, key);
+      expect(active).toBe(true);
+      const slideHit = renderer.hitTestSlideJson(doc, slide.id, 40.5, 40.25);
+      return { layout: normalized(layout), hit: normalized(hit), key, active, slideHit: normalized(slideHit) };
+    });
+    const anchor = doc.anchorCaretJson(JSON.stringify({ storyId: id, index: 0 }));
+    const resolved = doc.resolveCaretAnchorJson(anchor);
+    expect(JSON.parse(resolved)).toBe(0);
+    doc.startUpdateObservation();
+    const edited = doc.insertTextJson(JSON.stringify({ storyId: id, index: 0, text: 'Parity ' }));
+    const movedAnchor = doc.resolveCaretAnchorJson(anchor);
+    const drained = doc.drainUpdateEvent();
+    expect(drained.byteLength).toBeGreaterThan(1);
+    expect(drained[0]).toBe(0);
+    expect(doc.drainUpdateEvent().byteLength).toBe(0);
+    const stateVector = doc.encodeStateVector();
+    const update = doc.encodeStateAsUpdate();
+    const diff = doc.encodeDiff(new Uint8Array([0]));
+    const applied = other.applyUpdateJson(update);
+    expect(normalized(other.snapshotJson())).toEqual(normalized(doc.snapshotJson()));
+    const structured = doc.exportStructuredJson('{}');
+    const markdown = doc.exportMarkdownJson('{}');
+    const saved = renderer.saveBytes(doc);
+    const undone = doc.undoJson();
+    const restoredAnchor = doc.resolveCaretAnchorJson(anchor);
+    expect(JSON.parse(restoredAnchor)).toBe(0);
+    const undoVector = doc.encodeStateVector();
+    const undoUpdate = doc.encodeStateAsUpdate();
+    return {
+      json: {
+        snapshot: normalized(snapshot), metadata: normalized(metadata), content: normalized(content),
+        story: normalized(story), withKeys: normalized(withKeys), layouts,
+        anchor: normalized(anchor), resolved: normalized(resolved), movedAnchor: normalized(movedAnchor),
+        edited: normalized(edited), applied: normalized(applied),
+        structured: normalized(structured), markdown: normalized(markdown), undone: normalized(undone),
+        restoredAnchor: normalized(restoredAnchor),
+      },
+      drained, stateVector, update, diff, undoVector, undoUpdate, saved,
+    };
+  } finally {
+    renderer.free();
+    other.free();
+    doc.free();
+  }
+}
+
+function runOpens(engine: Engine) {
+  const source = bytes();
+  const baseline = engine.PptxDocument.openReplayBaseline(source, 7);
+  const documents = [baseline];
+  try {
+    const update = baseline.encodeStateAsUpdate();
+    const identity = baseline.peerHydrationJson('[]');
+    const peer = engine.PptxDocument.openPeerDeckJson(source, identity);
+    documents.push(peer);
+    peer.registerPeerFontsJson('[]');
+    peer.adoptPeerIdentity();
+    expect(peer.documentVersion()).toBe(baseline.documentVersion());
+    const updatedPeer = engine.PptxDocument.openPeerDeckJson(source, identity, update);
+    documents.push(updatedPeer);
+    updatedPeer.registerPeerFontsJson('[]');
+    updatedPeer.adoptPeerIdentity();
+    const joined = engine.PptxDocument.openCollaborativeFromUpdate(update, 8, source);
+    documents.push(joined);
+    const bare = engine.PptxDocument.openCollaborativeFromUpdate(update, 9);
+    documents.push(bare);
+    const replay = engine.PptxDocument.openReplayBaseline(source, 10, update);
+    documents.push(replay);
+    const defaultReplay = engine.PptxDocument.openReplayBaseline(source);
+    documents.push(defaultReplay);
+    const nullReplay = engine.PptxDocument.openReplayBaseline(source, null, null);
+    documents.push(nullReplay);
+    return documents.map((doc) => ({
+      snapshot: normalized(doc.snapshotJson()), clientId: doc.clientId,
+      mode: doc.undoCaptureMode(), version: normalized(JSON.stringify(doc.documentVersion())),
+    }));
+  } finally {
+    for (const doc of documents) doc.free();
+  }
+}
+
+describe('pptx native engine parity', () => {
+  test('wasm and native run the same synchronous script', async () => {
+    const expected = runScript(wasm);
+    const actual = runScript(native);
+    expect(actual.json).toEqual(expected.json);
+    for (const key of ['drained', 'stateVector', 'update', 'diff', 'undoVector', 'undoUpdate'] as const) {
+      expectPlainBytes(actual[key]);
+      expect(actual[key]).toEqual(expected[key]);
+    }
+    expectPlainBytes(actual.saved);
+    await expectSavedPartsEqual(actual.saved, expected.saved);
+  });
+
+  test('static opens preserve arguments, optional inputs and peer identity', () => {
+    expect(runOpens(native)).toEqual(runOpens(wasm));
+  });
+
+  test('free functions return identical results', () => {
+    const run = (engine: Engine) => {
+      const parsed = engine.parsePptxJson(bytes());
+      const metadata = engine.parsePptxJsonWithoutMedia(bytes());
+      const structured = engine.exportPptxStructuredJson(bytes(), '{}');
+      const markdown = engine.exportPptxMarkdownJson(bytes(), '{}');
+      const rendered = engine.renderPptxMarkdownJson(JSON.stringify(JSON.parse(structured).content), '{}');
+      const compiled = engine.compileSlideJson(JSON.stringify({ widthPx: 960, heightPx: 540, shapes: [] }));
+      return [parsed, metadata, structured, markdown, rendered, compiled].map(normalized);
+    };
+    expect(run(native)).toEqual(run(wasm));
+    const failure = expectThrownParity(
+      () => wasm.decodeTiffPng(new Uint8Array([1, 2, 3])),
+      () => native.decodeTiffPng(new Uint8Array([1, 2, 3])),
+    );
+    expect(typeof failure).toBe('string');
+  });
+
+  test('native versions differ between sessions opened from the same bytes and client id', () => {
+    const first = native.PptxDocument.openCollaborative(bytes(), 7);
+    const second = native.PptxDocument.openCollaborative(bytes(), 7);
+    try {
+      expect(first.documentVersion()).toMatch(/^[0-9a-f]{16}-\d+$/);
+      expect(second.documentVersion()).toMatch(/^[0-9a-f]{16}-\d+$/);
+      expect(first.documentVersion()).not.toBe(second.documentVersion());
+    } finally {
+      first.free();
+      second.free();
+    }
+  });
+
+  test('message, decode and peer errors throw the same values', () => {
+    const wasmDoc = wasm.PptxDocument.openCollaborative(bytes(), 7);
+    const nativeDoc = native.PptxDocument.openCollaborative(bytes(), 7);
+    try {
+      expect(typeof expectThrownParity(
+        () => wasmDoc.insertTextJson('{'),
+        () => nativeDoc.insertTextJson('{'),
+      )).toBe('string');
+      const decode = expectThrownParity(
+        () => wasmDoc.validateEditsJson('{'),
+        () => nativeDoc.validateEditsJson('{'),
+      );
+      expect(decode).toBeInstanceOf(Error);
+      expect((decode as Error).name).toBe('PptxEditDecodeError');
+      const peer = expectThrownParity(
+        () => wasm.PptxDocument.openReplayBaseline(bytes(), 0.5),
+        () => native.PptxDocument.openReplayBaseline(bytes(), 0.5),
+      );
+      expect(peer).toBeInstanceOf(Error);
+      expect((peer as Error).name).toBe('PresentationPeerError');
+      expect((peer as Error & { code: string }).code).toBe('clientId');
+      expect(typeof expectThrownParity(
+        () => wasm.PptxDocument.openCollaborative(bytes(), 0),
+        () => native.PptxDocument.openCollaborative(bytes(), 0),
+      )).toBe('string');
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
+  test('stale proposal acceptance throws the same string', () => {
+    const docs = [wasm.PptxDocument.openCollaborative(bytes(), 7), native.PptxDocument.openCollaborative(bytes(), 7)];
+    try {
+      const proposals = docs.map((doc) => {
+        const id = storyId(doc);
+        const proposal = JSON.parse(doc.proposeJson(JSON.stringify({
+          agentId: 'parity', edits: [{ type: 'replaceText', storyId: id, start: 0, end: 1, text: 'P' }],
+        })));
+        doc.insertTextJson(JSON.stringify({ storyId: id, index: 0, text: 'Changed ' }));
+        return proposal.id as string;
+      });
+      const failure = expectThrownParity(
+        () => docs[0].acceptProposalJson(JSON.stringify({ id: proposals[0] })),
+        () => docs[1].acceptProposalJson(JSON.stringify({ id: proposals[1] })),
+      );
+      expect(typeof failure).toBe('string');
+      expect(JSON.parse(failure as string).code).toBe('staleProposal');
+    } finally {
+      for (const doc of docs) doc.free();
+    }
+  });
+
+  test('native byte results have transferable ArrayBuffers and independent copies', () => {
+    const doc = native.PptxDocument.openCollaborative(bytes(), 7);
+    const renderer = new native.PptxRenderer();
+    try {
+      doc.startUpdateObservation();
+      doc.insertTextJson(JSON.stringify({ storyId: storyId(doc), index: 0, text: 'Bytes ' }));
+      const drained = doc.drainUpdateEvent();
+      const copied = drained.slice();
+      const first = drained[0];
+      copied[0] ^= 0xff;
+      expect(drained[0]).toBe(first);
+      const metadata = JSON.parse(native.parsePptxJsonWithoutMedia(bytes())) as {
+        media: { partPath: string }[];
+      };
+      const media = metadata.media.map((part) => doc.mediaBytes(part.partPath));
+      for (const value of [
+        drained, doc.drainUpdateEvent(), doc.encodeStateVector(), doc.encodeStateAsUpdate(),
+        doc.encodeDiff(new Uint8Array([0])), doc.saveBytes(), renderer.saveBytes(doc), ...media,
+      ]) {
+        expectPlainBytes(value);
+        const expected = value.slice();
+        const transferred = structuredClone(value, { transfer: [value.buffer as ArrayBuffer] });
+        expect(value.byteLength).toBe(0);
+        expect(transferred).toEqual(expected);
+        expectPlainBytes(transferred);
+      }
+      expectPlainBytes(doc.encodeStateAsUpdate());
+    } finally {
+      renderer.free();
+      doc.free();
+    }
+  });
+
+  test('native free drops state and later calls throw Errors', () => {
+    const doc = native.PptxDocument.openCollaborative(bytes(), 7);
+    const renderer = new native.PptxRenderer();
+    doc.free();
+    for (const call of [
+      () => doc.snapshotJson(), () => doc.clientId, () => doc.documentVersion(),
+      () => doc.canUndo(), () => doc.encodeStateVector(), () => doc.insertTextJson('{}'),
+      () => doc.clearUpdateObservation(), () => doc.saveBytes(),
+      () => renderer.layoutSlideJson(doc, 0), () => renderer.saveBytes(doc),
+      () => renderer.setActiveSlide(doc, 'slide', 'key'),
+    ]) {
+      const failure = caughtValue(call);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe('PptxDocument was freed');
+    }
+    renderer.free();
+    for (const call of [
+      () => renderer.hitTestJson(0, 0), () => renderer.layoutSlideJson(doc, 0),
+      () => renderer.saveBytes(doc), () => renderer.setActiveSlide(doc, 'slide', 'key'),
+      () => renderer.registerFont('Arial', false, false, new Uint8Array()),
+    ]) {
+      const failure = caughtValue(call);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe('PptxRenderer was freed');
+    }
+    doc.free();
+    renderer.free();
+  });
+
+  test('shared versions match wasm and the binding reports its package version', () => {
+    expect(native.PptxDocument.version()).toBe(wasm.PptxDocument.version());
+    expect(native.rendererVersion()).toBe(wasm.rendererVersion());
+    expect(native.engineVersion()).toBe(require('./package.json').version);
+  });
+});

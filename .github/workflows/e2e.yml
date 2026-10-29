@@ -39,7 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ROUTE_GROUPS: browser:2 corpus
-          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '5' }}
+          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '6' }}
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
           BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
@@ -118,7 +118,7 @@ jobs:
           bun run typecheck:e2e
           bun run test:e2e:harness
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         if: matrix.suite == 'corpus'
         with:
           version: '0.11.8'
@@ -171,7 +171,7 @@ jobs:
 
       - name: Upload corpus results
         if: always() && matrix.suite == 'corpus'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-timings
           path: ${{ runner.temp }}/e2e-results
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload browser report and failure traces
         if: always() && matrix.suite == 'browser'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-browser-${{ matrix.shard }}
           path: ${{ runner.temp }}/browser-results
