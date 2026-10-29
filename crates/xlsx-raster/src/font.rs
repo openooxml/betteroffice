@@ -1,10 +1,11 @@
-//! embedded font stack: shapes (rustybuzz) and rasterizes single-line text runs
+//! embedded font stack: shapes and rasterizes single-line text runs
 //! with a bundled carlito regular (metric-compatible with calibri). deterministic.
 
-use std::sync::LazyLock;
+use std::cell::RefCell;
 
-use rustybuzz::ttf_parser::{self, OutlineBuilder};
-use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
+use ooxml_raster::{CachedGlyph, GlyphCache};
+use ooxml_text::{FontId, FontMetrics, FontStore, ShapedGlyph};
+use tiny_skia::{Color, FillRule, Paint, Path, Pixmap, Rect, Transform};
 
 use unicode_segmentation::UnicodeSegmentation;
 use xlsx_render::{Align, NumberFormatLayout, Rect as DlRect, TextValign};
@@ -16,10 +17,57 @@ const BOLD_OFFSET_PX: f32 = 0.35;
 const ITALIC_SHEAR: f32 = 0.21;
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/Carlito-Regular.ttf");
+const CARLITO_UNDERLINE_POSITION: i16 = -103;
+const CARLITO_UNDERLINE_THICKNESS: i16 = 194;
+const CARLITO_STRIKEOUT_POSITION: i16 = 512;
+const CARLITO_STRIKEOUT_THICKNESS: i16 = 134;
 
-static FACE: LazyLock<rustybuzz::Face<'static>> = LazyLock::new(|| {
-    rustybuzz::Face::from_slice(FONT_BYTES, 0).expect("embedded carlito is a valid font")
-});
+thread_local! {
+    static FONT: EmbeddedFont = EmbeddedFont::new();
+}
+
+struct EmbeddedFont {
+    store: FontStore,
+    id: FontId,
+    metrics: FontMetrics,
+    cache: RefCell<GlyphCache>,
+}
+
+impl EmbeddedFont {
+    fn new() -> Self {
+        let mut store = FontStore::new();
+        let id = store
+            .register(FONT_BYTES.to_vec())
+            .expect("embedded carlito is a valid font");
+        let metrics = *store.metrics(id).expect("embedded carlito has metrics");
+        Self {
+            store,
+            id,
+            metrics,
+            cache: RefCell::new(GlyphCache::default()),
+        }
+    }
+
+    fn units_per_em(&self) -> u16 {
+        self.metrics.units_per_em
+    }
+
+    fn ascender(&self) -> i16 {
+        if self.metrics.use_typo_metrics() {
+            self.metrics.os2_typo_ascender
+        } else {
+            self.metrics.hhea_ascender
+        }
+    }
+
+    fn descender(&self) -> i16 {
+        if self.metrics.use_typo_metrics() {
+            self.metrics.os2_typo_descender
+        } else {
+            self.metrics.hhea_descender
+        }
+    }
+}
 
 const PX_PER_PT: f32 = 96.0 / 72.0;
 pub const STACKED_LINE_HEIGHT_RATIO: f32 = 1.2;
@@ -35,11 +83,12 @@ fn rotated_available_length(cell: &DlRect, deg: f32, font_size_pt: f32) -> f32 {
 
 /// advance width in px of `text` at `font_size_pt` with the embedded font.
 pub fn measure_text(text: &str, font_size_pt: f32) -> f32 {
-    let face = &*FACE;
-    let scale = font_size_pt * PX_PER_PT / face.units_per_em() as f32;
-    let glyphs = shape(face, text);
-    let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
-    total as f32 * scale
+    FONT.with(|face| {
+        let scale = font_size_pt * PX_PER_PT / face.units_per_em() as f32;
+        let glyphs = shape(face, text);
+        let total = total_advance(&glyphs);
+        total * scale
+    })
 }
 
 /// a single-line text run; `x`/`y` are the align anchor and alphabetic baseline.
@@ -64,16 +113,18 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
         return;
     }
+    FONT.with(|face| paint_text_with_font(pixmap, run, face));
+}
 
-    let face = &*FACE;
+fn paint_text_with_font(pixmap: &mut Pixmap, run: &TextRun, face: &EmbeddedFont) {
     let scale = run.font_size_pt * PX_PER_PT / face.units_per_em() as f32;
     let glyphs = shape(face, run.text);
 
-    let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
+    let total = total_advance(&glyphs);
     let pen = match run.align {
         Align::Left => run.x,
-        Align::Center => run.x - total as f32 * scale / 2.0,
-        Align::Right => run.x - total as f32 * scale,
+        Align::Center => run.x - total * scale / 2.0,
+        Align::Right => run.x - total * scale,
     };
 
     let mut paint = Paint::default();
@@ -84,7 +135,7 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     // paint directly, overflowing runs paint into a clip-sized scratch and blit.
     let ascent = face.ascender() as f32 * scale;
     let descent = face.descender() as f32 * scale;
-    let run_width = total as f32 * scale;
+    let run_width = total * scale;
     let fully_inside = pen >= run.clip.x
         && pen + run_width <= run.clip.x + run.clip.w
         && run.y - ascent >= run.clip.y
@@ -129,8 +180,8 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
 #[allow(clippy::too_many_arguments)]
 fn paint_run(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
-    glyphs: &rustybuzz::GlyphBuffer,
+    face: &EmbeddedFont,
+    glyphs: &[ShapedGlyph],
     pen: f32,
     run: &TextRun,
     scale: f32,
@@ -143,13 +194,13 @@ fn paint_run(
     paint_glyphs(
         target, face, glyphs, pen, run.y, scale, paint, run.bold, run.italic, ox, oy,
     );
-    paint_decorations(target, face, run, pen, run_width, scale, paint, ox, oy);
+    paint_decorations(target, run, pen, run_width, scale, paint, ox, oy);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn paint_highlight(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
+    face: &EmbeddedFont,
     run: &TextRun,
     pen: f32,
     run_width: f32,
@@ -179,8 +230,8 @@ fn paint_highlight(
 #[allow(clippy::too_many_arguments)]
 fn paint_glyphs(
     pixmap: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
-    glyphs: &rustybuzz::GlyphBuffer,
+    face: &EmbeddedFont,
+    glyphs: &[ShapedGlyph],
     start_pen: f32,
     baseline: f32,
     scale: f32,
@@ -192,26 +243,26 @@ fn paint_glyphs(
 ) {
     let shear = if italic { ITALIC_SHEAR * scale } else { 0.0 };
     let mut pen = start_pen;
-    for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-        if let Some(path) = glyph_path(face, info.glyph_id as u16) {
+    let mut cache = face.cache.borrow_mut();
+    for pos in glyphs {
+        if let Some(path) = glyph_path(face, &mut cache, pos.glyph_id) {
             // outlines are y-up in font units; -scale flips into y-down pixel space.
-            let tx = pen + pos.x_offset as f32 * scale - ox;
-            let ty = baseline - pos.y_offset as f32 * scale - oy;
+            let tx = pen + pos.x_offset * scale - ox;
+            let ty = baseline - pos.y_offset * scale - oy;
             let transform = Transform::from_row(scale, 0.0, shear, -scale, tx, ty);
-            pixmap.fill_path(&path, paint, FillRule::Winding, transform, None);
+            pixmap.fill_path(path, paint, FillRule::Winding, transform, None);
             if bold {
                 let embolden = transform.post_translate(BOLD_OFFSET_PX, 0.0);
-                pixmap.fill_path(&path, paint, FillRule::Winding, embolden, None);
+                pixmap.fill_path(path, paint, FillRule::Winding, embolden, None);
             }
         }
-        pen += pos.x_advance as f32 * scale;
+        pen += pos.x_advance * scale;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn paint_decorations(
     target: &mut Pixmap,
-    face: &rustybuzz::Face<'_>,
     run: &TextRun,
     pen: f32,
     run_width: f32,
@@ -223,7 +274,6 @@ fn paint_decorations(
     if run_width <= 0.0 {
         return;
     }
-    let em = face.units_per_em() as f32;
     let mut bar = |center_up: f32, thickness: f32| {
         let h = (thickness * scale).max(0.5);
         let cy = run.y - center_up * scale - oy;
@@ -232,21 +282,18 @@ fn paint_decorations(
         }
     };
     if run.underline {
-        let m = face.underline_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(-0.1 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = CARLITO_UNDERLINE_POSITION as f32;
+        let thick = CARLITO_UNDERLINE_THICKNESS as f32;
         bar(pos, thick);
     }
     if run.strike {
-        let m = face.strikeout_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(0.26 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = CARLITO_STRIKEOUT_POSITION as f32;
+        let thick = CARLITO_STRIKEOUT_THICKNESS as f32;
         bar(pos, thick);
     }
     if run.dashed_underline {
-        let m = face.underline_metrics();
-        let pos = m.map(|m| m.position as f32).unwrap_or(-0.1 * em);
-        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let pos = CARLITO_UNDERLINE_POSITION as f32;
+        let thick = CARLITO_UNDERLINE_THICKNESS as f32;
         let h = (thick * scale).max(0.5);
         let y = run.y - pos * scale - oy - h / 2.0;
         let dash = 3.0_f32.max(h * 2.0);
@@ -273,7 +320,20 @@ pub fn paint_rotated_text(
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 || cell.w <= 0.0 || cell.h <= 0.0 {
         return;
     }
-    let face = &*FACE;
+    FONT.with(|face| {
+        paint_rotated_text_with_font(pixmap, run, deg, cell, valign, number_format, face)
+    });
+}
+
+fn paint_rotated_text_with_font(
+    pixmap: &mut Pixmap,
+    run: &TextRun,
+    deg: f32,
+    cell: &DlRect,
+    valign: TextValign,
+    number_format: Option<&NumberFormatLayout>,
+    face: &EmbeddedFont,
+) {
     let scale = run.font_size_pt * PX_PER_PT / face.units_per_em() as f32;
     let (segments, run_width) = match number_format {
         Some(layout) => {
@@ -359,13 +419,14 @@ pub fn paint_rotated_text(
     } else {
         0.0
     };
+    let mut cache = face.cache.borrow_mut();
     for (segment, segment_offset) in &segments {
         let glyphs = shape(face, segment);
         let mut pen = 0.0_f32;
-        for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
-            if let Some(path) = glyph_path(face, info.glyph_id as u16) {
-                let tx0 = segment_offset + pen + pos.x_offset as f32 * scale - run_width / 2.0;
-                let ty0 = -pos.y_offset as f32 * scale - center_y_local;
+        for pos in &glyphs {
+            if let Some(path) = glyph_path(face, &mut cache, pos.glyph_id) {
+                let tx0 = segment_offset + pen + pos.x_offset * scale - run_width / 2.0;
+                let ty0 = -pos.y_offset * scale - center_y_local;
                 let e = cos * tx0 - sin * ty0 + cx - ox;
                 let f = sin * tx0 + cos * ty0 + cy - oy;
                 let transform = Transform::from_row(
@@ -376,7 +437,7 @@ pub fn paint_rotated_text(
                     e,
                     f,
                 );
-                scratch.fill_path(&path, &paint, FillRule::Winding, transform, None);
+                scratch.fill_path(path, &paint, FillRule::Winding, transform, None);
                 if run.bold {
                     let bold = Transform::from_row(
                         cos * scale,
@@ -386,14 +447,13 @@ pub fn paint_rotated_text(
                         e + cos * BOLD_OFFSET_PX,
                         f + sin * BOLD_OFFSET_PX,
                     );
-                    scratch.fill_path(&path, &paint, FillRule::Winding, bold, None);
+                    scratch.fill_path(path, &paint, FillRule::Winding, bold, None);
                 }
             }
-            pen += pos.x_advance as f32 * scale;
+            pen += pos.x_advance * scale;
         }
     }
     if run.underline || run.strike || run.dashed_underline {
-        let em = face.units_per_em() as f32;
         let mut bar = |center_up: f32, thickness: f32| {
             let h = (thickness * scale).max(0.5);
             let y_local = -center_up * scale - center_y_local;
@@ -403,17 +463,15 @@ pub fn paint_rotated_text(
             }
         };
         if run.underline || run.dashed_underline {
-            let m = face.underline_metrics();
             bar(
-                m.map(|m| m.position as f32).unwrap_or(-0.1 * em),
-                m.map(|m| m.thickness as f32).unwrap_or(0.05 * em),
+                CARLITO_UNDERLINE_POSITION as f32,
+                CARLITO_UNDERLINE_THICKNESS as f32,
             );
         }
         if run.strike {
-            let m = face.strikeout_metrics();
             bar(
-                m.map(|m| m.position as f32).unwrap_or(0.26 * em),
-                m.map(|m| m.thickness as f32).unwrap_or(0.05 * em),
+                CARLITO_STRIKEOUT_POSITION as f32,
+                CARLITO_STRIKEOUT_THICKNESS as f32,
             );
         }
     }
@@ -475,44 +533,30 @@ pub fn paint_stacked_text(pixmap: &mut Pixmap, run: &TextRun, cell: &DlRect, val
     }
 }
 
-fn shape<'a>(face: &rustybuzz::Face<'a>, text: &str) -> rustybuzz::GlyphBuffer {
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    rustybuzz::shape(face, &[], buffer)
+fn shape(face: &EmbeddedFont, text: &str) -> Vec<ShapedGlyph> {
+    ooxml_text::shape(&face.store, face.id, text, face.units_per_em() as f32, &[])
+        .expect("embedded carlito shapes text")
 }
 
-fn glyph_path(face: &ttf_parser::Face, glyph_id: u16) -> Option<Path> {
-    let mut builder = PathCollector {
-        pb: PathBuilder::new(),
-    };
-    face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)?;
-    builder.pb.finish()
+fn total_advance(glyphs: &[ShapedGlyph]) -> f32 {
+    glyphs.iter().map(|pos| pos.x_advance as i32).sum::<i32>() as f32
 }
 
-struct PathCollector {
-    pb: PathBuilder,
-}
-
-impl OutlineBuilder for PathCollector {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.pb.move_to(x, y);
-    }
-
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.pb.line_to(x, y);
-    }
-
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.pb.quad_to(x1, y1, x, y);
-    }
-
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.pb.cubic_to(x1, y1, x2, y2, x, y);
-    }
-
-    fn close(&mut self) {
-        self.pb.close();
-    }
+fn glyph_path<'a>(
+    face: &EmbeddedFont,
+    cache: &'a mut GlyphCache,
+    glyph_id: u32,
+) -> Option<&'a Path> {
+    let CachedGlyph { path, .. } = cache
+        .lookup(
+            &face.store,
+            face.id,
+            glyph_id,
+            || Ok(glyph_id as u16),
+            |cmds| Ok(ooxml_raster::outline_path(cmds)),
+        )
+        .ok()?;
+    path.as_ref()
 }
 
 #[cfg(test)]
@@ -535,5 +579,52 @@ mod tests {
     #[test]
     fn wider_text_measures_wider() {
         assert!(measure_text("mmmm", 11.0) > measure_text("ii", 11.0));
+    }
+
+    #[test]
+    fn carlito_metrics_match_font() {
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        let underline = face.underline_metrics().unwrap();
+        assert_eq!(CARLITO_UNDERLINE_POSITION, underline.position);
+        assert_eq!(CARLITO_UNDERLINE_THICKNESS, underline.thickness);
+        let strikeout = face.strikeout_metrics().unwrap();
+        assert_eq!(CARLITO_STRIKEOUT_POSITION, strikeout.position);
+        assert_eq!(CARLITO_STRIKEOUT_THICKNESS, strikeout.thickness);
+        FONT.with(|font| {
+            assert_eq!(i32::from(font.units_per_em()), face.units_per_em());
+            assert_eq!(font.ascender(), face.ascender());
+            assert_eq!(font.descender(), face.descender());
+        });
+    }
+
+    #[test]
+    fn measure_text_matches_rustybuzz() {
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        let long = "a".repeat(32_767);
+        for text in [
+            "",
+            "Hello, world!",
+            "   ",
+            "AV To ffi office",
+            "e\u{301} A\u{30a}",
+            "مرحبا بالعالم",
+            "אבג 123",
+            "中文",
+            long.as_str(),
+        ] {
+            for font_size_pt in [-11.0, -0.0, 0.0, 1.0, 8.5, 11.0, 22.0, 72.0] {
+                let scale = font_size_pt * PX_PER_PT / face.units_per_em() as f32;
+                let mut buffer = rustybuzz::UnicodeBuffer::new();
+                buffer.push_str(text);
+                let glyphs = rustybuzz::shape(&face, &[], buffer);
+                let total: i32 = glyphs.glyph_positions().iter().map(|p| p.x_advance).sum();
+                let expected = total as f32 * scale;
+                assert_eq!(
+                    measure_text(text, font_size_pt).to_bits(),
+                    expected.to_bits(),
+                    "{text:?} at {font_size_pt}pt"
+                );
+            }
+        }
     }
 }
