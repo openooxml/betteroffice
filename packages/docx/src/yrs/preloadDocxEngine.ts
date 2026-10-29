@@ -5,17 +5,12 @@ import { preloadResidentEngineWorker } from './residentEngineWorkerClient';
  * @experimental
  */
 export async function preloadDocxEngine(): Promise<void> {
-  const main = [
-    import('./wasm/index').then((wasm) => wasm.preloadEditWasm()),
-    import('../docx/wasm').then((opc) => opc.preloadOpcWasm()),
-    import('../docx/parseWasm').then((parse) => parse.preloadParseWasm()),
-    import('../layout/wasm/index').then((layout) => layout.preloadLayoutWasm()),
-  ];
+  const main = import('./wasm/index').then((wasm) => wasm.preloadEditWasm());
   let worker: Promise<void>;
   try {
     worker = preloadResidentEngineWorker();
   } catch (error) {
     worker = Promise.reject(error);
   }
-  await Promise.all([...main, worker]);
+  await Promise.all([main, worker]);
 }

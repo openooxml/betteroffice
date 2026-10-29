@@ -1965,3 +1965,117 @@ fn format_facets_released_snapshot_recovery_saves_the_source_xfs() {
         assert_eq!(part(&saved, "xl/styles.xml"), styles);
     }
 }
+
+fn precision_source() -> Vec<u8> {
+    let bytes = package(
+        r#"<xf/><xf numFmtId="2"/>"#,
+        r#"<c r="A1"><v>6.125</v></c><c r="B1" s="1"><f>A1</f><v>6.125</v></c>"#,
+        false,
+    );
+    let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let workbook = &mut parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap()
+        .1;
+    *workbook = String::from_utf8(workbook.clone())
+        .unwrap()
+        .replace("</workbook>", r#"<calcPr fullPrecision="0"/></workbook>"#)
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn old_precision_snapshot(workbook: &Workbook, budget: SnapshotBudget) -> Vec<Vec<u8>> {
+    let mut records = decoded_snapshot(&encode(workbook, budget));
+    for (kind, ordinal, payload) in &mut records {
+        if *kind == ChunkKind::Model && *ordinal == 0 {
+            payload[1] &= 1;
+        }
+        if *kind == ChunkKind::AuthorityBase {
+            let mut reader = Reader::new(payload);
+            let mut writer = Writer::new();
+            while !reader.clone().rest().is_empty() {
+                let mut record = reader.bytes().unwrap().to_vec();
+                if matches!(record[0], 0 | 20 | 22 | 24) {
+                    let mut fields = Reader::new(&record[1..]);
+                    fields.var_u64().unwrap();
+                    let at = record.len() - fields.rest().len();
+                    record[at] &= 1;
+                }
+                writer.bytes(&record);
+            }
+            *payload = writer.into_bytes();
+        }
+    }
+    transport_records(records, budget)
+}
+
+#[test]
+fn old_snapshot_derives_missing_precision_from_the_source_file() {
+    let bytes = precision_source();
+    let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let workbook_xml = &mut parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap()
+        .1;
+    *workbook_xml = String::from_utf8(workbook_xml.clone())
+        .unwrap()
+        .replace(r#" fullPrecision="0""#, "")
+        .into_bytes();
+    let released = ooxml_opc::rezip_parts(&parts).unwrap();
+    let workbook = released_reading_of(&bytes, &released);
+    assert!(workbook.model().full_precision);
+    for budget in budgets() {
+        let mut peer = restore(&old_precision_snapshot(&workbook, budget), budget);
+        assert!(!peer.model().full_precision);
+        assert_eq!(peer.save().unwrap(), bytes);
+        peer.edit_cell(SheetId(0), CellRef::new(0, 0), "6.126", context())
+            .unwrap();
+        assert_eq!(
+            peer.model().sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 6.13 }
+        );
+    }
+}
+
+#[test]
+fn snapshots_keep_displayed_precision_and_derive_full_precision_from_the_source() {
+    let bytes = precision_source();
+    let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let workbook_xml = &mut parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap()
+        .1;
+    *workbook_xml = String::from_utf8(workbook_xml.clone())
+        .unwrap()
+        .replace(r#"fullPrecision="0""#, r#"fullPrecision="1""#)
+        .into_bytes();
+    let precise = ooxml_opc::rezip_parts(&parts).unwrap();
+    for precision in [false, true] {
+        let workbook = if precision {
+            Workbook::open(&precise).unwrap()
+        } else {
+            released_reading_of(&precise, &bytes)
+        };
+        for budget in budgets() {
+            let mut peer = restore(&encode(&workbook, budget), budget);
+            assert_eq!(peer.model().full_precision, precision);
+            peer.edit_cell(SheetId(0), CellRef::new(0, 0), "6.126", context())
+                .unwrap();
+            assert_eq!(
+                peer.model().sheets[0]
+                    .cell(CellRef::new(0, 1))
+                    .unwrap()
+                    .value,
+                CellValue::Number {
+                    value: if precision { 6.126 } else { 6.13 }
+                }
+            );
+        }
+    }
+}

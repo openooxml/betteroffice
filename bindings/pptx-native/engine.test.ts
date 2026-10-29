@@ -205,6 +205,39 @@ describe('pptx native engine parity', () => {
     expect(typeof failure).toBe('string');
   });
 
+  test('requested font faces match for the deck, each slide and an unknown slide', () => {
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(bytes(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        const slides = (JSON.parse(doc.snapshotJson()) as Snapshot).slides;
+        const deck = renderer.requestedFontFacesJson(doc);
+        expect(JSON.parse(deck).faces.length).toBeGreaterThan(0);
+        const perSlide = slides.map((slide) => renderer.requestedFontFacesJson(doc, slide.id));
+        return { deck, perSlide };
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+    const wasmDoc = wasm.PptxDocument.openCollaborative(bytes(), 7);
+    const nativeDoc = native.PptxDocument.openCollaborative(bytes(), 7);
+    const wasmRenderer = new wasm.PptxRenderer();
+    const nativeRenderer = new native.PptxRenderer();
+    try {
+      expectThrownParity(
+        () => wasmRenderer.requestedFontFacesJson(wasmDoc, 'missing-slide'),
+        () => nativeRenderer.requestedFontFacesJson(nativeDoc, 'missing-slide'),
+      );
+    } finally {
+      wasmRenderer.free();
+      nativeRenderer.free();
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);

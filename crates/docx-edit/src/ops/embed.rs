@@ -86,7 +86,6 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
 }
 
 /// [`embed_by_id`] with the embed's story index.
-#[cfg(feature = "wasm")]
 fn embed_position_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, u32)> {
     let (story_id, target) = embed_by_id(txn, embed_id)?;
     let story = story_ref(txn, &story_id)?;
@@ -104,7 +103,6 @@ fn embed_position_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String
 
 impl EditingDoc {
     /// The story and story index of the embed carrying `embed_id`.
-    #[cfg(feature = "wasm")]
     pub(crate) fn embed_position(&self, embed_id: &str) -> OpResult<(String, u32)> {
         embed_position_by_id(&self.yrs_doc().transact(), embed_id)
     }
