@@ -732,6 +732,7 @@
     "@betteroffice/fonts-cjk": ["@betteroffice/fonts-cjk@workspace:packages/fonts-cjk"],
 
     "@betteroffice/fonts-intl": ["@betteroffice/fonts-intl@workspace:packages/fonts-intl"],
+
     "@betteroffice/fonts-latin": ["@betteroffice/fonts-latin@workspace:packages/fonts-latin"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],

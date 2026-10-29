@@ -54,7 +54,7 @@ test('decodes every installed Latin face with consumer-owned buffers', async () 
     const entry = pack.faces.find((entry) => entry.file === face.file)!;
     const first = await loadBundledFontBytes(face);
     const second = await loadBundledFontBytes(face);
-    expect(entry.family).toBe(face.family);
+    expect(entry.family).toBe(face.file.slice(0, face.file.indexOf('-')));
     expect(face.byteLength).toBe(entry.byteLength);
     expect(first.byteLength).toBe(face.byteLength);
     expect(createHash('sha256').update(new Uint8Array(first)).digest('hex')).toBe(entry.sha256);
