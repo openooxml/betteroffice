@@ -91,6 +91,8 @@ export interface OpenPresentationOptions {
    * and `save()` throws.
    */
   initialUpdate?: Uint8Array;
+  /** @internal Retains the source bytes for `fork()` and `layouts()`; worker sessions pass false. */
+  retainSource?: boolean;
 }
 
 export type UndoCaptureMode = 'auto' | 'manual';
@@ -565,18 +567,18 @@ function openPresentationInternal(
     ...(options.fallbackFonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: true })),
   ] : [];
   const peerUpdate = peer && options.initialUpdate !== undefined
-    ? new Uint8Array(options.initialUpdate) : undefined;
+    ? options.initialUpdate : undefined;
   const collaborationClientId = peer ? options.clientId : options.clientId ?? clientId();
   const doc = construct(() => peer
     ? peer.kind === 'baseline'
-      ? PptxDocument.openReplayBaseline(new Uint8Array(bytes), collaborationClientId, peerUpdate)
-      : PptxDocument.openPeerDeckJson(new Uint8Array(bytes), peer.identity, peerUpdate)
+      ? PptxDocument.openReplayBaseline(bytes, collaborationClientId, peerUpdate)
+      : PptxDocument.openPeerDeckJson(bytes, peer.identity, peerUpdate)
     : options.initialUpdate === undefined
       ? PptxDocument.openCollaborative(bytes, collaborationClientId!)
       : PptxDocument.openCollaborativeFromUpdate(
-          options.initialUpdate.slice(),
+          options.initialUpdate,
           collaborationClientId!,
-          bytes.slice()
+          bytes
         )
   );
   let renderer: PptxRenderer;
@@ -695,11 +697,12 @@ function openPresentationInternal(
     observerInstalled = false;
   };
 
-  const sourceBytes = new Uint8Array(bytes);
+  const sourceBytes = peer || options.retainSource === false ? undefined : new Uint8Array(bytes);
   let collaborative = false;
   const handle: PresentationHandle = {
     fork() {
       assertAlive();
+      if (!sourceBytes) throw new Error('Presentation source is unavailable for fork');
       const forked = openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
       if (collaborative) forked.setCollaborative();
       return forked;
@@ -713,6 +716,7 @@ function openPresentationInternal(
     },
     layouts() {
       assertAlive();
+      if (!sourceBytes) throw new Error('Presentation source is unavailable for layouts');
       type LayoutShape = { id: number; name: string; placeholder?: { placeholderType: string | null; index: number | null } | null; children?: LayoutShape[] };
       const placeholders = (shapes: LayoutShape[]): ReturnType<PresentationHandle['layouts']>[number]['placeholders'] => shapes.flatMap(shape => [
         ...(shape.placeholder ? [{ id: String(shape.id), name: shape.name, type: shape.placeholder.placeholderType, idx: shape.placeholder.index }] : []),

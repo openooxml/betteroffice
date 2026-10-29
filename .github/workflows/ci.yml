@@ -103,11 +103,17 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      - name: Check UI strings and locale parity
+        run: bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
+
       - name: Type check
         run: |
           bun run typecheck:shared
           bun run typecheck:packages
           bun run --filter '@betteroffice/collaboration-relay' typecheck
+
+      - name: Check API surface
+        run: bun scripts/api-surface.ts --check xlsx
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
@@ -446,8 +452,11 @@ jobs:
             bun test "$package/index.test.ts"
           done
 
+      - name: Check engine surface
+        run: bun scripts/check-engine-surface.ts xlsx
+
       - name: Check native and wasm parity
-        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts
+        run: bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'

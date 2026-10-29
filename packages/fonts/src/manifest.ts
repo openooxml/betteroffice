@@ -347,6 +347,17 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   times: 'times new roman',
   courier: 'courier new',
 
+  // Legacy Windows names and PostScript spellings Office draws with the core
+  // families, read off the faces its exports embed.
+  helv: 'arial',
+  'arial mt': 'arial',
+  arialmt: 'arial',
+  'tms rmn': 'times new roman',
+  'times roman': 'times new roman',
+  timesnewroman: 'times new roman',
+  timesnewromanps: 'times new roman',
+  timesnewromanpsmt: 'times new roman',
+
   // Metric-compatible clones of the core families. A deck that asks for one
   // was laid out against those metrics, so it resolves to the same face rather
   // than through the last-resort pick (#797).

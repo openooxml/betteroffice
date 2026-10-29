@@ -64,6 +64,7 @@ const DEFAULT_SINGLE_LINE_RATIO: f32 = 1.15;
 /// Everything the filler needs that is fixed for the whole paragraph.
 pub(super) struct FillParams<'a> {
     pub justify: bool,
+    pub space_shrink_limit: f32,
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
     /// The paragraph's runs, index-aligned with `prepared`.
@@ -635,7 +636,7 @@ impl Filler<'_> {
                 && fitting_width > 0.0
                 && self.cur.width + wrap_width
                     - if self.p.justify {
-                        self.cur.space_width * 0.25
+                        self.cur.space_width * self.p.space_shrink_limit
                     } else {
                         0.0
                     }
@@ -808,7 +809,8 @@ impl Filler<'_> {
                 .map(|part| part.advance.max(0.0))
                 .sum::<f32>();
             if visible_width > self.cur.available && space_width > 0.0 {
-                let compression = (visible_width - self.cur.available).min(space_width * 0.25);
+                let compression = (visible_width - self.cur.available)
+                    .min(space_width * self.p.space_shrink_limit);
                 for part in parts.iter_mut().filter(|part| part.is_space) {
                     part.advance -= part.advance.max(0.0) / space_width * compression;
                 }
@@ -1422,6 +1424,7 @@ mod tests {
         let run_snaps = vec![true; prepared.len()];
         fill(FillParams {
             justify: false,
+            space_shrink_limit: 0.25,
             store: &{
                 let mut s = FontStore::new();
                 s.register(FIXTURE.to_vec()).unwrap();

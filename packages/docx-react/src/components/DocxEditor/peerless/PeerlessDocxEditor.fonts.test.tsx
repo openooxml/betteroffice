@@ -50,7 +50,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     if (hold) await new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
   };
   const client = {
-    onFontEnvironment: () => () => {}, onMemory: () => () => {},
+    onFontEnvironment: () => () => {}, onMemory: () => () => {}, onFontRequirementsHint: () => () => {},
     prewarm: async () => {}, openSource: async () => ({ document: { package: { document: { comments: [] }, settings: {} } } }), fontRequirements: async () => '[]',
     async commandInit(value: DocxCommandInitRequest) {
       await initialize(value);
@@ -69,6 +69,7 @@ async function openFontConnection(hold = false, fontKeys: readonly string[] = ['
     releaseResident: { current: null },
     takePreloadedResidentEngineWorker: () => null,
     controller: { fontChoices() {} }, fontSource: { current: null }, fontAbort: { current: null }, fontJob: { current: null },
+    refreshFonts: { current() {} },
     fontEnvironmentForRegistrations,
     worker: { current: null },
     sourceComments: { current: [] },

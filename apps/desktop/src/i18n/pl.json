@@ -1,0 +1,54 @@
+{
+  "_lang": "pl",
+  "titleBar": {
+    "edited": "Edytowano",
+    "collaborate": "Współpracuj",
+    "connecting": "Łączenie…",
+    "home": "Strona główna",
+    "open": "Otwórz…",
+    "save": "Zapisz"
+  },
+  "notice": {
+    "dismissError": "Zamknij błąd"
+  },
+  "room": {
+    "roomId": "Identyfikator pokoju",
+    "yourName": "Twoje imię",
+    "joinRoom": "Dołącz do pokoju",
+    "leaveRoom": "Opuść pokój",
+    "hint": "Otwórz ten sam plik i wprowadź ten sam identyfikator pokoju, aby edytować wspólnie.",
+    "saveBeforeJoining": "Zapisz zmiany przed dołączeniem do pokoju. Wszyscy powinni otworzyć ten sam plik."
+  },
+  "editor": {
+    "opening": "Otwieranie edytora…",
+    "viewing": "Wyświetlanie",
+    "editing": "Edytowanie",
+    "connected": "Połączono",
+    "workbookDisposed": "Edytor skoroszytu został zamknięty.",
+    "presentationDisposed": "Edytor prezentacji został zamknięty.",
+    "documentDisposed": "Edytor dokumentu został zamknięty.",
+    "stillOpening": "Edytor nadal otwiera plik. Spróbuj ponownie za chwilę.",
+    "disconnected": "Rozłączono"
+  },
+  "start": {
+    "dropFileHere": "Upuść plik tutaj",
+    "openDocument": "Otwórz dokument",
+    "openSpreadsheet": "Otwórz arkusz kalkulacyjny",
+    "openPresentation": "Otwórz prezentację",
+    "intro": "Kontynuuj od miejsca, w którym skończyłeś.",
+    "openFile": "Otwórz plik…",
+    "opening": "Otwieranie…",
+    "dropHint": "lub upuść plik tutaj",
+    "recentFiles": "Ostatnie pliki",
+    "recent": "Ostatnie"
+  },
+  "dialogs": {
+    "discardUnsavedChanges": "Odrzucić niezapisane zmiany?"
+  },
+  "errors": {
+    "openInApp": "Otwórz pliki .{ext} w BetterOffice {app}.",
+    "couldNotRead": "Nie można odczytać pliku {name}.",
+    "chooseFile": "Wybierz plik .{ext}.",
+    "unsupportedFile": "Wybierz dokument programu Word, arkusz kalkulacyjny programu Excel lub prezentację programu PowerPoint."
+  }
+}

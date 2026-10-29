@@ -323,7 +323,13 @@ export class FileSession {
   /** Joins a user to this file session. */
   join(input: JoinInput): Promise<JoinResult> {
     this.#pendingJoins += 1;
-    return this.#enqueue(() => this.#joinInternal(input)).finally(() => {
+    return this.#enqueue(() => this.#joinInternal(input).catch((err: unknown) => {
+      if (err instanceof WopiHostError && err.kind === "unauthorized") {
+        const user = this.#history.find((candidate) => candidate.accessToken === input.accessToken);
+        if (user) this.#markTokenDead(user);
+      }
+      throw err;
+    })).finally(() => {
       this.#pendingJoins -= 1;
     });
   }
@@ -337,16 +343,7 @@ export class FileSession {
     if (connectedCount >= max) {
       throw new SessionError("tooManyEditors", "max editors per file reached");
     }
-    let info: CheckFileInfo;
-    try {
-      info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
-    } catch (err) {
-      if (err instanceof WopiHostError && err.kind === "unauthorized") {
-        const user = this.#history.find((candidate) => candidate.accessToken === input.accessToken);
-        if (user) this.#markTokenDead(user);
-      }
-      throw err;
-    }
+    const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
     const wantsWrite = input.mode === "edit" && info.UserCanWrite === true && info.ReadOnly !== true;
     const first = this.#replica === null;
     if (first) {
@@ -419,7 +416,7 @@ export class FileSession {
       accessTokenTtl: input.accessTokenTtl,
       userId: info.UserId,
       friendlyName: info.UserFriendlyName ?? info.UserId,
-      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost"),
+      canWrite: wantsWrite && (this.#viewOnlyReason === null || this.#viewOnlyReason === "lockLost" || this.#viewOnlyReason === "journalBroken"),
       joinedAt: now,
       postMessageOrigin: info.PostMessageOrigin ?? "",
       closeUrl: info.CloseUrl ?? "",
@@ -430,8 +427,8 @@ export class FileSession {
     this.#scheduleUserTimers(user);
     await this.#refreshLeader(lockJustAcquired);
     canWrite = user.canWrite && this.#viewOnlyReason === null;
-    if (canWrite && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
-    if (this.#holdPending && canWrite) {
+    if (this.#isConnectedEditor(user) && this.dirty && !this.#holdPending && this.#autosaveTimer === null) this.#scheduleAutosave();
+    if (this.#holdPending && this.#isConnectedEditor(user)) {
       this.#holdPending = false;
       this.#clearTimer("hold");
       if (this.dirty) {
@@ -648,7 +645,9 @@ export class FileSession {
       if (current === null) {
         try {
           current = (await this.#host.getLock({ wopiSrc: this.wopiSrc, accessToken })).lock;
-        } catch {}
+        } catch (lockErr) {
+          if (lockErr instanceof WopiHostError && lockErr.kind === "unauthorized") throw lockErr;
+        }
       }
       if (current && current.startsWith(OUR_LOCK_PREFIX)) {
         try {

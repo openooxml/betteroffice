@@ -166,6 +166,18 @@ export interface NoBreakHyphenContent {
   type: 'noBreakHyphen';
 }
 
+/** A drawing's own `wp:docPr` properties, with its placement and kind. */
+export interface DocxDrawing {
+  docPrId: string | null;
+  name: string | null;
+  title: string | null;
+  descr: string | null;
+  hidden: boolean;
+  decorative: boolean;
+  placement: 'inline' | 'anchor';
+  type: 'picture' | 'shape' | 'textBox' | 'group' | 'chart' | 'diagram' | 'other';
+}
+
 /**
  * Drawing/image reference
  */
@@ -173,6 +185,7 @@ export interface DrawingContent {
   type: 'drawing';
   /** Image data */
   image: Image;
+  drawing?: DocxDrawing;
 }
 
 /**
@@ -182,6 +195,7 @@ export interface ShapeContent {
   type: 'shape';
   /** Shape data */
   shape: Shape;
+  drawing?: DocxDrawing;
 }
 
 /**
@@ -191,6 +205,7 @@ export interface ChartContent {
   type: 'chart';
   /** Parsed chart data */
   chart: Chart;
+  drawing?: DocxDrawing;
 }
 
 /**
@@ -205,6 +220,7 @@ export interface OpaqueDrawingContent {
   preview?: Image;
   previews?: Image[];
   textBox?: Shape;
+  drawing?: DocxDrawing;
 }
 
 /**

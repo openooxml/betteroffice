@@ -368,8 +368,10 @@ async function paintTurns(page: Page) {
   }));
 }
 
+/** Commands sent since `start`, without the font environments typing in a new script brings. */
 async function commandsSince(page: Page, start: number) {
-  return page.evaluate((start) => window.__docxPeerlessInput.commands.slice(start), start);
+  return page.evaluate((start) => window.__docxPeerlessInput.commands.slice(start)
+    .filter((command) => command.kind !== 'setFontEnvironment'), start);
 }
 
 async function commandCount(page: Page) {

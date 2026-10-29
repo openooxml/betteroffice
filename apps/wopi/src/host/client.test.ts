@@ -112,6 +112,29 @@ describe("host client requests", () => {
 });
 
 describe("retries", () => {
+  test("retries without waiting for response cancellation and aborts discarded requests", async () => {
+    for (const rejects of [false, true]) {
+      let calls = 0;
+      let cancellations = 0;
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const client = makeClient(async (_input, init) => {
+        calls += 1;
+        if (calls === 3) return jsonResponse(validInfo());
+        signals.push(init?.signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancellations += 1;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        }), { status: 503 });
+      });
+      expect((await client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })).BaseFileName).toBe("a.docx");
+      expect(calls).toBe(3);
+      expect(cancellations).toBe(2);
+      expect(signals.every((signal) => signal?.aborted)).toBe(true);
+    }
+  }, 2000);
+
   test("retries an idempotent op on 503 and then succeeds", async () => {
     let calls = 0;
     const client = makeClient(async () => {
@@ -159,6 +182,62 @@ describe("retries", () => {
     expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("server");
     expect(calls).toBe(1);
   });
+});
+
+describe("body cancellation", () => {
+  test("successful saves and lock operations do not wait for response cancellation", async () => {
+    for (const rejects of [false, true]) {
+      let cancellations = 0;
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const client = makeClient(async (_input, init) => {
+        signals.push(init?.signal);
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancellations += 1;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        }), { headers: { "X-WOPI-ItemVersion": "7", "X-WOPI-Lock": "holder" } });
+      });
+      const input = { wopiSrc: SRC, accessToken: TOKEN, lock: "holder" };
+      expect((await client.putFile({ ...input, body: new Uint8Array([1]) })).itemVersion).toBe("7");
+      await client.lock(input);
+      await client.refreshLock(input);
+      await client.unlock(input);
+      await client.unlockAndRelock({ ...input, oldLock: "old" });
+      expect((await client.getLock(input)).lock).toBe("holder");
+      expect(cancellations).toBe(6);
+      expect(signals.every((signal) => signal?.aborted)).toBe(true);
+    }
+  }, 1000);
+
+  test("cancelling either stream wrapper does not wait for its source", async () => {
+    for (const direction of ["download", "upload"]) {
+      for (const rejects of [false, true]) {
+        let cancelledWith: unknown;
+        let signal: AbortSignal | null | undefined;
+        const source = new ReadableStream<Uint8Array>({
+          cancel(reason) {
+            cancelledWith = reason;
+            return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+          },
+        });
+        const client = makeClient(async (_input, init) => {
+          signal = init?.signal;
+          if (direction === "download") return new Response(source);
+          await (init?.body as ReadableStream<Uint8Array>).cancel("stop");
+          return new Response(null);
+        });
+        if (direction === "download") {
+          const result = await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+          await result.stream.cancel("stop");
+        } else {
+          await client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source });
+        }
+        expect(cancelledWith).toBe("stop");
+        expect(signal?.aborted).toBe(true);
+      }
+    }
+  }, 1000);
 });
 
 describe("streaming", () => {
@@ -238,6 +317,62 @@ describe("streaming", () => {
     expect(sourceCancelled).toBe(true);
   });
 
+  test("download cap failures abort without waiting for source cancellation", async () => {
+    for (const announced of [false, true]) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64));
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(stream, { headers: announced ? { "Content-Length": "128" } : {} });
+      }, 100, { timeoutMs: 5000, bodyIdleTimeoutMs: 5000 });
+      const err = await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }));
+      expect(err.kind).toBe("tooLarge");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
+  test("upload cap failures abort without waiting for source cancellation", async () => {
+    for (const op of ["putFile", "putRelativeFile"] as const) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64));
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        const reader = (init?.body as ReadableStream<Uint8Array>).getReader();
+        try {
+          for (;;) {
+            if ((await reader.read()).done) break;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        return new Response(null);
+      }, 100, { timeoutMs: 5000, bodyIdleTimeoutMs: 5000 });
+      const err = await kindOf(client[op]({ wopiSrc: SRC, accessToken: TOKEN, body: source, suggestedTarget: "copy.docx" }));
+      expect(err.kind).toBe("tooLarge");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
   test("a 64 MiB generated body streams through getFile and readFile by checksum", async () => {
     const total = 64 * 1024 * 1024;
     const chunkSize = 64 * 1024;
@@ -292,15 +427,34 @@ describe("timeouts and body reads", () => {
     expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
   });
 
-  test("a stalled CheckFileInfo body uses the header timeout as its total budget", async () => {
-    const stream = new ReadableStream<Uint8Array>({
-      pull() {
-        return new Promise<void>(() => {});
-      },
-    });
-    const client = makeClient(async () => new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } }), 1024, { timeoutMs: 20, bodyIdleTimeoutMs: 60000 });
-    expect((await kindOf(client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("timeout");
-  });
+  test("metadata body timeouts cancel the reader, abort and release the body lock", async () => {
+    for (const op of ["CheckFileInfo", "PutRelativeFile", "RenameFile", "error"] as const) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>(() => {});
+        },
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(stream, { status: op === "error" ? 500 : 200 });
+      }, 1024, { timeoutMs: 20, bodyIdleTimeoutMs: 60000 });
+      const input = { wopiSrc: SRC, accessToken: TOKEN };
+      const pending = op === "CheckFileInfo" ? client.checkFileInfo(input)
+        : op === "PutRelativeFile" ? client.putRelativeFile({ ...input, body: new Uint8Array([1]), suggestedTarget: "copy.docx" })
+        : op === "RenameFile" ? client.renameFile({ ...input, requestedName: "renamed" })
+        : client.getLock(input);
+      expect((await kindOf(pending)).kind).toBe("timeout");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      expect(stream.locked).toBe(false);
+    }
+  }, 1000);
 
   test("a steady stream longer than the header timeout still completes", async () => {
     let sent = 0;
@@ -578,6 +732,94 @@ describe("body caps", () => {
 });
 
 describe("content length and truncation", () => {
+  test("excess download bytes fail without waiting for cancellation and abort the request", async () => {
+    for (const rejects of [false, true]) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+        },
+        cancel() {
+          cancelled = true;
+          return rejects ? Promise.reject(new Error("cancel failed")) : new Promise<void>(() => {});
+        },
+      });
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(source, { headers: { "Content-Length": "1" } });
+      });
+      expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  }, 1000);
+
+  test("every operation rejects success statuses other than 200", async () => {
+    const calls: Array<[string, (client: ReturnType<typeof makeClient>) => Promise<unknown>]> = [
+      ["CheckFileInfo", (client) => client.checkFileInfo({ wopiSrc: SRC, accessToken: TOKEN })],
+      ["Lock", (client) => client.lock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["RefreshLock", (client) => client.refreshLock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["Unlock", (client) => client.unlock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L" })],
+      ["UnlockAndRelock", (client) => client.unlockAndRelock({ wopiSrc: SRC, accessToken: TOKEN, lock: "L", oldLock: "O" })],
+      ["GetLock", (client) => client.getLock({ wopiSrc: SRC, accessToken: TOKEN })],
+      ["RenameFile", (client) => client.renameFile({ wopiSrc: SRC, accessToken: TOKEN, requestedName: "renamed" })],
+    ];
+    for (const status of [202, 204]) {
+      for (const [op, call] of calls) {
+        let signal: AbortSignal | null | undefined;
+        const client = makeClient(async (_input, init) => {
+          signal = init?.signal;
+          return new Response(status === 204 ? null : "{}", { status, headers: { "X-WOPI-Lock": "" } });
+        });
+        const err = await kindOf(call(client));
+        expect([op, err.kind]).toEqual([op, "invalidResponse"]);
+        expect(signal?.aborted).toBe(true);
+      }
+    }
+  });
+
+  test("a streamed download errors on premature EOF and on excess bytes", async () => {
+    for (const [bytes, length] of [[new Uint8Array([1, 2, 3]), "10"], [new Uint8Array([1, 2, 3]), "2"]] as const) {
+      const client = makeClient(async () => new Response(bytes, { status: 200, headers: { "Content-Length": length } }));
+      const { stream } = await client.getFile({ wopiSrc: SRC, accessToken: TOKEN });
+      const reader = stream.getReader();
+      const err = await kindOf((async () => {
+        for (;;) if ((await reader.read()).done) return;
+      })());
+      expect(err.kind).toBe("invalidResponse");
+    }
+  });
+
+  test("writes reject success statuses other than 200", async () => {
+    for (const status of [202, 204]) {
+      let signal: AbortSignal | null | undefined;
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(status === 204 ? null : "queued", { status });
+      });
+      expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]) }))).kind).toBe("invalidResponse");
+      expect(signal?.aborted).toBe(true);
+      expect((await kindOf(client.putRelativeFile({ wopiSrc: SRC, accessToken: TOKEN, body: new Uint8Array([1]), suggestedTarget: ".docx" }))).kind).toBe("invalidResponse");
+    }
+  });
+
+  test("GetFile rejects partial and empty success statuses", async () => {
+    for (const [status, body, headers] of [
+      [206, new Uint8Array([1, 2, 3]), { "Content-Length": "3", "Content-Range": "bytes 0-2/10" }],
+      [204, null, {}],
+    ] as const) {
+      let signal: AbortSignal | null | undefined;
+      const client = makeClient(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(body, { status, headers });
+      });
+      expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect((await kindOf(client.getFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
+      expect(signal?.aborted).toBe(true);
+    }
+  });
+
   test("readFile fails on premature EOF instead of returning a truncated file", async () => {
     const client = makeClient(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Length": "10" } }));
     expect((await kindOf(client.readFile({ wopiSrc: SRC, accessToken: TOKEN }))).kind).toBe("invalidResponse");
@@ -666,6 +908,7 @@ describe("putRelativeFile and renameFile validation", () => {
       },
       cancel() {
         cancelled = true;
+        return new Promise<void>(() => {});
       },
     });
     const client = makeClient(async () => {
@@ -675,7 +918,7 @@ describe("putRelativeFile and renameFile validation", () => {
     expect((await kindOf(client.putFile({ wopiSrc: SRC, accessToken: TOKEN, body: source, size: 11 }))).kind).toBe("tooLarge");
     expect(cancelled).toBe(true);
     expect(calls).toBe(0);
-  });
+  }, 1000);
 });
 
 describe("redaction through the client", () => {

@@ -477,6 +477,7 @@ describe("locks, conflicts and permissions", () => {
       expect(saved).not.toHaveProperty("conflictUrl");
       expect(conflicts[0]).not.toHaveProperty("url");
       expect(conflicts[0]).not.toHaveProperty("copyUrl");
+      expect(JSON.stringify(conflicts)).not.toContain("access_token");
       expect(h.host.files.get("file1")!.bytes).toEqual(originalBytes);
       const copies = [...h.host.files.values()].filter((f) => f.name.includes("(conflict"));
       expect(copies.length).toBe(1);
@@ -1097,6 +1098,58 @@ describe("session safety regressions", () => {
       expect(session.leader?.id).toBe(writer.user.id);
       expect(session.state).toBe("open");
       expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a 401 from a later host call during a relaunch also invalidates handles sharing the token", async () => {
+    let relaunchChecks: number | null = null;
+    const h = makeHarness({
+      beforeCheckFileInfo: async () => {
+        if (relaunchChecks === null) return;
+        relaunchChecks += 1;
+        if (relaunchChecks === 2) h.host.tokens.delete("tok-shared");
+      },
+    });
+    addToken(h, "tok-shared", "shared-user");
+    addToken(h, "tok-unrelated", "unrelated-user");
+    const viewer = await joinEditor(h, "tok-shared", "view");
+    const session = viewer.session;
+    const invalidated: unknown[] = [];
+    session.on("userInvalidated", (event) => invalidated.push(event));
+    try {
+      expect(session.lockHeld).toBe(false);
+      relaunchChecks = 0;
+      await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
+      expect(relaunchChecks).toBe(2);
+      expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
+      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(JSON.stringify(invalidated)).not.toContain("tok-shared");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a 401 from the GetLock fallback during a relaunch fails the join and invalidates handles sharing the token", async () => {
+    let relaunching = false;
+    const h = makeHarness({
+      lockStatus: () => relaunching ? 409 : null,
+      getLockStatus: () => relaunching ? 401 : null,
+    });
+    addToken(h, "tok-shared", "shared-user");
+    addToken(h, "tok-unrelated", "unrelated-user");
+    const viewer = await joinEditor(h, "tok-shared", "view");
+    const session = viewer.session;
+    const invalidated: unknown[] = [];
+    session.on("userInvalidated", (event) => invalidated.push(event));
+    try {
+      relaunching = true;
+      await expect(joinEditor(h, "tok-shared", "edit")).rejects.toMatchObject({ kind: "unauthorized", status: 401 });
+      expect(h.calls.some((call) => call.override === "GET_LOCK")).toBe(true);
+      expect(invalidated).toContainEqual({ userId: viewer.user.id, reason: "unauthorized" });
+      expect(session.getUser(viewer.user.id)?.isTokenValidAt(h.clock.t)).toBe(false);
+      expect(session.viewOnlyReason).not.toBe("lockedElsewhere");
     } finally {
       await session.close();
     }

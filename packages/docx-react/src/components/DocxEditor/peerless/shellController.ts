@@ -89,6 +89,8 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
   perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<DocxFontEnvironment | void>;
+  /** The worker accepted `environment` from {@link prepareFontFamily}. */
+  fontEnvironmentApplied?(environment: DocxFontEnvironment): void;
   pickImage?(insert: (image: Readonly<Record<string, unknown>>) => Promise<DocxCommandResult>): void;
   openSplitCell?(defaults: { initialRows: number; initialCols: number; minRows: number; minCols: number },
     apply: (rows: number, columns: number) => Promise<DocxCommandResult>): void;
@@ -538,6 +540,7 @@ export function createPeerlessShellController(initial: Options) {
             try {
               const prepared = await settleCommand(current, current.commands.submit({ kind: 'setFontEnvironment', payload: fonts }, { fence: true }));
               if (!prepared.ok) return prepared;
+              options.fontEnvironmentApplied?.(fonts);
             } finally { fonts.faces.length = 0; }
           }
         }

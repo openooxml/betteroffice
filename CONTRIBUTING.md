@@ -68,6 +68,14 @@ Contributors are required to sign our [Contributor License Agreement](CLA.md). T
    ```
 6. **Submit a PR** against `main` — the CLA bot will prompt you on your first one
 
+## Translations
+
+Editor UI text lives in `packages/docx-i18n`, `packages/xlsx-i18n` and `packages/pptx-i18n`. `en.json` is the source; every other locale file has the same keys, placeholders and the plural categories of its language. A new key needs a translation in every locale file of that package. Use the Office terms in `shared/i18n-glossary/<locale>.json`. React code never renders literal text: use `t()` (allowed exceptions go in `scripts/hardcoded-ui-strings.allowlist.json` with a reason). Check with:
+
+```bash
+bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
+```
+
 ## Reporting Bugs
 
 Open an issue at [github.com/openooxml/betteroffice/issues](https://github.com/openooxml/betteroffice/issues) with:

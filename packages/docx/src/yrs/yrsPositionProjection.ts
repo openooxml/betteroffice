@@ -22,7 +22,7 @@ export type YrsPositionOutline = Record<string, {
 type InlineControls = ReadonlyArray<readonly [number, number]>;
 
 /** Display units of an inline control with `payload`: its content and its two boundaries, as the layout counts them. */
-function inlineControlDisplaySize(payload: Record<string, unknown>): number {
+export function inlineControlDisplaySize(payload: Record<string, unknown>): number {
   if (!Array.isArray(payload.content)) return 2;
   let size = 2;
   for (const child of payload.content as unknown[]) {

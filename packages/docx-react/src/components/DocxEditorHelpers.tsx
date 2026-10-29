@@ -95,6 +95,7 @@ function FailureState({ title, description, details, action }: {
   const { t } = useTranslation();
   return (
     <div
+      dir="ltr"
       role="alert"
       style={{
         display: 'flex',

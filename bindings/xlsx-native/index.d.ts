@@ -71,6 +71,92 @@ export declare class Workbook {
 }
 export type XlsxWorkbook = Workbook
 
+export declare class XlsxDocument {
+  free(): void
+  get clientId(): number
+  recoveryCheckpoint(throughSeq: number, preserveHistory?: boolean | undefined | null): Uint8Array
+  beginPeerSnapshot(records: number, bytes: number): void
+  nextPeerSnapshotChunk(): Uint8Array | undefined
+  endPeerSnapshot(): void
+  adoptPeerVersion(version: string): void
+  peerHydrationJson(): string
+  setCalculationContextJson(context: string): void
+  encodeStateVector(): Uint8Array
+  encodeStateAsUpdate(): Uint8Array
+  encodeDiff(remoteStateVector: Uint8Array): Uint8Array
+  applyUpdateJson(update: Uint8Array): string
+  startUpdateObservation(): void
+  clearUpdateObservation(): void
+  drainUpdateEvent(): Uint8Array
+  printDisplayListJson(args: string): string
+  displayListJson(viewportJson: string): string
+  displayListForJson(sheet: number, viewportJson: string): string
+  displayListProfiledJson(viewportJson: string): string
+  chartAtPointJson(args: string): string
+  moveChartJson(args: string): string
+  renderPng(viewportJson: string): Uint8Array
+  renderRangePng(args: string): Uint8Array
+  sheetInfoJson(): string
+  sheetCount(): number
+  sheetInfoForJson(sheet: number): string
+  selectionDataJson(args: string): string
+  cellRectJson(args: string): string
+  calculationStatusJson(): string
+  setActiveSheet(index: number): void
+  editCellJson(args: string): string
+  editCellProfiledJson(args: string): string
+  editCellsJson(args: string): string
+  moveRangeJson(args: string): string
+  applyOpsJson(transactionJson: string): string
+  chartsJson(sheet: number): string
+  editChartsJson(edits: string): string
+  conditionalFormatsJson(sheet: number): string
+  applyOpsProfiledJson(transactionJson: string): string
+  undoJson(): string
+  redoJson(): string
+  cellJson(args: string): string
+  searchTextJson(args: string): string
+  cellPositionJson(args: string): string
+  rangeCellsJson(args: string): string
+  patchRangeStyleJson(args: string): string
+  setRangeNumberFormatJson(args: string): string
+  selectionFormattingJson(args: string): string
+  captureFormatJson(args: string): string
+  applyFormatJson(args: string): string
+  mergedRangesJson(args: string): string
+  visibleMergedRangesJson(sheet: number, viewportJson: string): string
+  historyStateJson(): string
+  proposeJson(args: string): string
+  listProposalsJson(): string
+  acceptProposalJson(args: string): string
+  rejectProposalJson(args: string): string
+  documentVersion(): string
+  readCellsJson(request: string): string
+  listDefinedNamesJson(request: string): string
+  findTextJson(request: string): string
+  validateEditsJson(request: string): string
+  applyEditsJson(request: string): string
+  exportStructuredJson(options: string): string
+  exportMarkdownJson(options: string, markdownOptions: string): string
+  saveBytes(): Uint8Array
+  static open(bytes: Uint8Array): XlsxDocument
+  static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
+  static openRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number): XlsxDocument
+  static openCollaborative(bytes: Uint8Array, clientId: number): XlsxDocument
+  static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument
+  static version(): string
+}
+
+export declare class XlsxSnapshotBuilder {
+  constructor()
+  push(chunk: Uint8Array): void
+  advance(records: number, bytes: number): boolean
+  finish(): XlsxDocument
+  free(): void
+}
+
+export declare function allocationFailure(): number
+
 export interface BorderPatch {
   preset?: 'all' | 'inner' | 'horizontal' | 'vertical' | 'outer' | 'left' | 'top' | 'right' | 'bottom' | 'none'
   style?: 'solid' | 'dashed' | 'dotted' | 'double'
@@ -101,6 +187,14 @@ export interface CellValue {
   input: string
   formula: boolean
 }
+
+export declare function displayListCellLimit(): number
+
+export declare function engineVersion(): string
+
+export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdownOptions: string): string
+
+export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
 export interface HistoryState {
   canUndo: boolean
@@ -166,6 +260,8 @@ export interface RenderSheetOptions {
   maxWidth?: number
   maxHeight?: number
 }
+
+export declare function renderXlsxMarkdownJson(content: string, options: string): string
 
 export interface SheetInfo {
   ids: Array<string>

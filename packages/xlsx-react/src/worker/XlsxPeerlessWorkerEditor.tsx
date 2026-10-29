@@ -1456,7 +1456,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     <PeerlessChromeContext.Provider value={true}>
     <PeerlessWorkerInputs onNavigate={navigateFromNameBox} controller={draftController} presentation={presentation} run={run} active={active}
       selectedChart={selectedChart !== null} error={Boolean(error)} readOnly={Boolean(props.readOnly)} navigation={navigation}>
-      <div ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
+      <div dir="ltr" ref={rootRef} className={props.className} role="application" aria-label={t('editor.appLabel')}
         onKeyDownCapture={(event) => {
           if (!fromPlugin(event) && event.key === 'Escape') { cellClipboard.cancelCut(); setFormatToken(null); commands.refresh(); }
         }}

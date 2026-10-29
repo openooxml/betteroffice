@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -197,6 +197,8 @@ struct EncodeWire<'a> {
     source_length: u64,
     comment_baseline: CommentBaseline,
     source: &'a SourceMetadata,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    seed_identities: BTreeMap<String, (u32, u32)>,
     index: &'a SourceIndex,
     media: MediaWire,
 }
@@ -208,6 +210,8 @@ struct DecodeWire {
     source_length: u64,
     comment_baseline: CommentBaseline,
     source: SourceMetadata,
+    #[serde(default)]
+    seed_identities: BTreeMap<String, (u32, u32)>,
     index: SourceIndex,
     media: MediaWire,
 }
@@ -297,6 +301,7 @@ pub(crate) fn encode(document: &EditingDoc) -> Result<Vec<u8>, PeerMetadataError
         source_length: index.bytes().len() as u64,
         comment_baseline: CommentBaseline::RebaseOnFirstLoad,
         source: &source,
+        seed_identities: source.seed_identities(),
         index: &index,
         media: MediaWire {
             parts,
@@ -396,6 +401,9 @@ pub(crate) fn decode(
     }
     wire.source
         .rebuild_peer_metadata()
+        .map_err(PeerMetadataError::InvalidMetadata)?;
+    wire.source
+        .restore_seed_identities(wire.seed_identities)
         .map_err(PeerMetadataError::InvalidMetadata)?;
     wire.index
         .attach_peer_source(retained_source.clone())
@@ -885,6 +893,55 @@ mod tests {
         let read: ReadSource =
             serde_json::from_value(serde_json::to_value(wire.source.read()).unwrap()).unwrap();
         assert_eq!(read.settings.as_ref().unwrap(), settings);
+    }
+
+    #[test]
+    fn peer_bootstrap_preserves_seed_content_identity_proof() {
+        let source: PackageBytes =
+            fixture::Package::new(&fixture::para("00000001", &fixture::run("aa")))
+                .bytes()
+                .into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        for retained in [true, false] {
+            let metadata = if retained {
+                metadata.clone()
+            } else {
+                let (json, blobs) = sections(&metadata).unwrap();
+                let mut wire: Value = serde_json::from_slice(json).unwrap();
+                wire.as_object_mut().unwrap().remove("seed_identities");
+                frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap()
+            };
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                .unwrap();
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            let unchanged = || {
+                let txn = peer.yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                peer.source_metadata()
+                    .unwrap()
+                    .paragraph_content_unchanged(&txn, &story, "body", 0, 2)
+            };
+            assert_eq!(unchanged(), retained);
+            peer.delete_range(
+                &crate::EditCtx::local("", ""),
+                crate::StoryRange::new("body", 0, 1),
+            )
+            .unwrap();
+            peer.insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 1),
+                "a",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+            assert!(!unchanged());
+        }
     }
 
     #[test]
@@ -2834,6 +2891,11 @@ mod tests {
         let mut bad = wire.clone();
         bad["comment_baseline"] = json!("CopyWorkerWrites");
         assert!(matches!(check(&bad), PeerMetadataError::Json(_)));
+        for identity in [json!([0, 0]), json!([u32::MAX, 1])] {
+            let mut bad = wire.clone();
+            bad["seed_identities"] = json!({"body": identity});
+            assert!(matches!(check(&bad), PeerMetadataError::InvalidMetadata(_)));
+        }
         let mut bad = wire.clone();
         bad["media"]["parts"][0]["display"] = json!({"offset": 1, "length": 0});
         assert_eq!(check(&bad), PeerMetadataError::InvalidLength);
