@@ -1381,7 +1381,11 @@ impl ImageCache {
     ) -> Option<DecodedImage> {
         let metafile = ooxml_metafile::is_metafile(bytes);
         let source = key.0;
-        let key = if metafile { metafile_key(key, fonts) } else { key };
+        let key = if metafile {
+            metafile_key(key, fonts)
+        } else {
+            key
+        };
         if let Some(image) = self.decoded.get(&key) {
             return Some(image.clone());
         }
