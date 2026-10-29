@@ -554,6 +554,16 @@ fn enum_fields_round_trip_every_tag() {
 }
 
 #[test]
+fn captured_format_facets_must_match_its_formats() {
+    let mut format = captured();
+    format.kept.pop();
+    let bytes = encoded(&format);
+    assert!(CapturedFormat::read(&mut Reader::new(&bytes)).is_err());
+    format.kept.clear();
+    round_trip(format);
+}
+
+#[test]
 fn malformed_metadata_tags_counts_and_truncations_are_refused() {
     fn invalid_tag<T: Codec>() {
         assert!(T::read(&mut Reader::new(&[255])).is_err());

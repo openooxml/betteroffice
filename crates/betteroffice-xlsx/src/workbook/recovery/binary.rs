@@ -101,7 +101,9 @@ record_codec!(StylePatch = 0 {
     horizontal_alignment, vertical_alignment, text_wrapping, clear
 } => validate_style_patch);
 record_codec!(BorderPatch = 0 { preset, style, color });
-record_codec!(CapturedFormat = 0 { rows, columns, formats, kept, source_styles, source_formats });
+record_codec!(CapturedFormat = 0 {
+    rows, columns, formats, kept, source_styles, source_formats
+} => validate_captured_format);
 record_codec!(KeptFacets = 0 {
     protection, xf_id, quote_prefix, pivot_button, text_rotation, indent, relative_indent,
     justify_last_line, reading_order
@@ -161,6 +163,16 @@ fn validate_cell_value(value: &CellValue) -> SnapshotResult<()> {
         | CellValue::Text { .. }
         | CellValue::Bool { .. }
         | CellValue::Error { .. } => Ok(()),
+    }
+}
+
+fn validate_captured_format(format: &CapturedFormat) -> SnapshotResult<()> {
+    if format.kept.is_empty() || format.kept.len() == format.formats.len() {
+        Ok(())
+    } else {
+        Err(SnapshotError::new(
+            "recovery captured format facets do not match its formats",
+        ))
     }
 }
 

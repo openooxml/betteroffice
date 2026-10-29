@@ -253,21 +253,35 @@ fn kept() -> S<KeptFacets> {
 }
 
 fn captured_format() -> S<CapturedFormat> {
-    record!(CapturedFormat {
-        rows: 1u32..4,
-        columns: 1u32..4,
-        formats: prop::collection::vec(cell_format(), 0..4),
-        kept: prop::collection::vec(kept(), 0..4),
-        source_styles: prop::collection::vec(opt(any::<u32>()), 0..4),
-        source_formats: prop::collection::vec(
+    (
+        1u32..4,
+        1u32..4,
+        prop::collection::vec((cell_format(), kept()), 0..4),
+        any::<bool>(),
+        prop::collection::vec(opt(any::<u32>()), 0..4),
+        prop::collection::vec(
             record!(PreservedCellFormat {
                 format: cell_format(),
                 source_xf: opt(any::<u32>()),
                 derived_from: opt(any::<u32>()),
             }),
-            0..4
+            0..4,
         ),
-    })
+    )
+        .prop_map(
+            |(rows, columns, cells, with_kept, source_styles, source_formats)| {
+                let (formats, kept): (Vec<_>, Vec<_>) = cells.into_iter().unzip();
+                CapturedFormat {
+                    rows,
+                    columns,
+                    formats,
+                    kept: if with_kept { kept } else { Vec::new() },
+                    source_styles,
+                    source_formats,
+                }
+            },
+        )
+        .boxed()
 }
 
 fn number_mutation() -> S<NumberFormatMutation> {
