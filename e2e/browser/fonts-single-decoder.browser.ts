@@ -75,9 +75,9 @@ for (const { format, editorFonts } of [
     }
     await expect.poll(() => painted(canvas), { timeout: 30_000 }).toBe(true);
     expect(requests.some(url => new URL(url).pathname.endsWith('.zst'))).toBe(true);
-    for (const family of ['Carlito', 'NotoSansDevanagari']) for (const style of ['Regular', 'Bold']) {
-      const face = new RegExp(`/${family}-${style}(-[\\w-]+)?\\.ttf\\.zst$`);
-      expect(requests.some(url => face.test(new URL(url).pathname))).toBe(true);
+    for (const face of ['Carlito-Regular', 'Carlito-Bold', 'NotoSansDevanagari-Regular']) {
+      const asset = new RegExp(`/${face}\\.ttf(-[\\w-]+)?\\.zst$`);
+      expect(requests.some(url => asset.test(new URL(url).pathname)), face).toBe(true);
     }
     expect(requests.filter(url => new URL(url).pathname.endsWith('fontpack.wasm'))).toEqual([]);
     expect(errors).toEqual([]);
