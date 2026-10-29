@@ -162,6 +162,9 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     setBanner(kind === "baseline" ? "Preserving local edits before reopening the document..." : "This session has ended. Checking for local edits...");
     void recoverDocument(editorApi.current, {
       signal: controller.signal,
+      hasActiveComposition: () => compositionActive.current,
+      blockInput: () => { if (editorContainer.current) editorContainer.current.inert = true; },
+      onFlushed: () => setReadOnly(true),
       hasUnacknowledgedUpdates: () => transportRef.current?.hasUnacknowledgedUpdates() ?? false,
       ...(kind === "baseline" ? { upload: (bytes: Uint8Array, signal: AbortSignal) => {
         serialized = bytes;
@@ -185,8 +188,9 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
         return;
       }
       setRecoveryFailed(true);
+      if (!compositionActive.current) setReadOnly(true);
       const message = failure instanceof Error ? failure.message : "Could not preserve local edits.";
-      setBanner(`${message} Your document is still open read-only. Retry recovery to preserve your edits.`);
+      setBanner(`${message} Your document is still open. Retry recovery to preserve your edits.`);
     }).finally(() => {
       if (recoveryController.current === controller) recoveryController.current = null;
     });
@@ -197,8 +201,6 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     sessionEnded.current = true;
     handleClosed.resolve();
     transportRef.current?.disconnect();
-    if (editorContainer.current) editorContainer.current.inert = true;
-    setReadOnly(true);
     if (finalSaved.current) completeClose();
     else recover("local");
   }, [completeClose, handleClosed, lifetime, recover]);
@@ -206,8 +208,6 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const rejoin = useCallback(() => {
     if (lifetime.signal.aborted || rejoining.current || sessionEnded.current) return;
     rejoining.current = true;
-    if (editorContainer.current) editorContainer.current.inert = true;
-    setReadOnly(true);
     lifetime.abort(new Error("rejoinRequired"));
     transportRef.current?.disconnect();
     recover("baseline");
@@ -369,7 +369,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const createTransport = useCallback(
     (_roomId: string) => {
       wopiDebug({ transportCreated: true });
-      const transport = createWopiTransport({ handle: config.sessionHandle, baselineGeneration: loaded.join.baselineGeneration, origin: window.location.origin, checkSession: () => api.isActive(lifetime.signal) });
+      const transport = createWopiTransport({ handle: config.sessionHandle, baselineGeneration: loaded.join.baselineGeneration, origin: window.location.origin, checkSession: (signal) => api.isActive(signal) });
       transportRef.current = transport;
       return {
         ...transport,

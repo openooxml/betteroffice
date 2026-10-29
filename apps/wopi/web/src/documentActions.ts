@@ -2,12 +2,15 @@ import type { SaveOptions } from "./postMessage";
 import type { SaveBarrier, SocketSaveBarrier } from "../../src/relay/sequence";
 
 interface InputEditor {
-  flushPendingInput(): Promise<void>;
+  flushPendingInput(options?: { terminateEdit?: boolean }): Promise<void>;
   hasPendingUpdates(): boolean;
 }
 
 interface RecoveryOptions {
   signal?: AbortSignal;
+  hasActiveComposition?(): boolean;
+  blockInput?(): void;
+  onFlushed?(): void;
   hasUnacknowledgedUpdates(): boolean;
   upload?(bytes: Uint8Array, signal: AbortSignal): Promise<{ copyName: string }>;
 }
@@ -60,6 +63,19 @@ async function bounded<T>(operation: () => Promise<T>, timeoutMs: number, reason
   }
 }
 
+async function waitForComposition(
+  hasActiveComposition: (() => boolean) | undefined,
+  deadline: number,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  while (hasActiveComposition?.()) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(reason);
+    await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, reason, signal);
+  }
+}
+
 export async function recoverDocument(
   editor: (InputEditor & { serialize(): Promise<Uint8Array> }) | null,
   options: RecoveryOptions,
@@ -67,8 +83,15 @@ export async function recoverDocument(
   const controller = new AbortController();
   try {
     if (!editor) throw new Error("The editor is not ready to preserve local work.");
-    await bounded(() => editor.flushPendingInput(), 3000, "Recovery input flush timed out.", options.signal);
-    options.signal?.throwIfAborted();
+    const flushDeadline = Date.now() + 3000;
+    do {
+      await waitForComposition(options.hasActiveComposition, flushDeadline, "Recovery composition timed out. Finish typing, then retry recovery.", options.signal);
+      options.signal?.throwIfAborted();
+      options.blockInput?.();
+      await bounded(() => editor.flushPendingInput(), Math.max(0, flushDeadline - Date.now()), "Recovery input flush timed out.", options.signal);
+      options.signal?.throwIfAborted();
+    } while (options.hasActiveComposition?.());
+    options.onFlushed?.();
     if (!editor.hasPendingUpdates() && !options.hasUnacknowledgedUpdates()) return null;
     const bytes = await bounded(() => editor.serialize(), 10_000, "Recovery serialization timed out.", options.signal);
     options.signal?.throwIfAborted();
@@ -100,19 +123,13 @@ export async function saveDocument(
     const flushDeadline = Date.now() + (options.inputTimeoutMs ?? 3000);
     do {
       step = "composition";
-      while (options.hasActiveComposition?.()) {
-        const remaining = flushDeadline - Date.now();
-        if (remaining <= 0) throw new Error("compositionActive");
-        await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "compositionActive", options.signal);
-      }
+      await waitForComposition(options.hasActiveComposition, flushDeadline, "compositionActive", options.signal);
       step = "flush";
-      if (!options.DontTerminateEdit) {
-        await bounded(() => editor.flushPendingInput(), Math.max(0, flushDeadline - Date.now()), "flushPendingInputTimeout", options.signal);
-      }
+      await bounded(() => editor.flushPendingInput({ terminateEdit: !options.DontTerminateEdit }), Math.max(0, flushDeadline - Date.now()), "flushPendingInputTimeout", options.signal);
       options.signal?.throwIfAborted();
       options.onFlushed?.();
       step = "flushed";
-      progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
+      progress({ saveFlushedAt: Date.now(), saveInputFlushed: true });
       step = "drain";
       while (options.hasPendingResync?.() || editor.hasPendingUpdates()) {
         const remaining = flushDeadline - Date.now();

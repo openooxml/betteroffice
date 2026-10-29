@@ -3,6 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { collabUrl, createWopiTransport, type WebSocketLike } from "./transport";
 import { decodeSequencedFrame, encodeSequenceAck } from "../../src/relay/sequence";
 import { closeDocument, saveDocument } from "./documentActions";
+import { SessionApi } from "./api";
 import { CollaborationProvider } from "../../../../packages/xlsx/src/collaboration/provider";
 import type { CollaborationReplica } from "../../../../packages/xlsx/src/collaboration/types";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
@@ -481,6 +482,133 @@ test("a rejected reconnect upgrade probes the handle and stops on an ended sessi
   transport.connect();
   expect(sockets).toHaveLength(1);
   transport.disconnect();
+});
+
+test("a stalled session probe aborts at its deadline and later connectivity restores Save", async () => {
+  const sockets: FakeSocket[] = [];
+  const local = new Doc();
+  const server = new Doc();
+  const signals: Array<AbortSignal | null | undefined> = [];
+  let probes = 0;
+  const api = new SessionApi("h", async (_input, init) => {
+    signals.push(init?.signal);
+    probes += 1;
+    if (probes === 1) return new Promise<Response>(() => {});
+    return new Response(null, { status: 503 });
+  });
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const callbacks = new Map<ReturnType<typeof setTimeout>, { delay: number; run(): void }>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    const timer = schedule(() => {}, 60_000);
+    callbacks.set(timer, { delay, run: callback });
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    callbacks.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  const tick = async (delay: number) => {
+    const pending = [...callbacks].filter(([, callback]) => callback.delay === delay);
+    expect(pending).toHaveLength(1);
+    for (const [timer, callback] of pending) { callbacks.delete(timer); cancel(timer); callback.run(); }
+    await new Promise((resolve) => schedule(resolve, 0));
+  };
+  const transport = createWopiTransport({
+    handle: "h", baselineGeneration: 1, origin: "https://office.example",
+    checkSession: (signal) => api.isActive(signal),
+    createSocket() {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  const provider = new CollaborationProvider({
+    clientId: local.clientID, encodeStateVector: () => encodeStateVector(local),
+    encodeStateAsUpdate: (vector) => encodeStateAsUpdate(local, vector),
+    applyUpdate: (update) => { applyUpdate(local, update); }, onUpdate: () => () => {},
+  }, transport);
+  const seen: unknown[] = [];
+  transport.onEvent((event) => { seen.push(event); });
+  try {
+    provider.connect();
+    sockets[0]!.readyState = 3;
+    sockets[0]!.onclose?.({ code: 1006 });
+    await new Promise((resolve) => schedule(resolve, 0));
+    expect(probes).toBe(1);
+    expect(sockets).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+    await tick(3000);
+    expect(signals[0]?.aborted).toBe(true);
+    await tick(250);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.readyState = 3;
+    sockets[1]!.onclose?.({ code: 1006 });
+    await new Promise((resolve) => schedule(resolve, 0));
+    expect(probes).toBe(2);
+    await tick(500);
+    expect(sockets).toHaveLength(3);
+    local.getText("body").insert(0, "edit made offline");
+    const connected = sockets[2]!;
+    connected.readyState = 1;
+    connected.onopen?.();
+    connected.onmessage?.({ data: encodeSyncStep2(encodeStateAsUpdate(server)) });
+    connected.onmessage?.({ data: encodeSyncStep1(encodeStateVector(server)) });
+    expect(provider.synced).toBe(true);
+    for (const data of connected.sent.slice(1)) {
+      for (const message of classifyFrame(decodeSequencedFrame(new Uint8Array(data))!.payload).messages) {
+        if (message.type === "sync-step-2" || message.type === "update") applyUpdate(server, message.update);
+      }
+    }
+    let hostText = "";
+    await saveDocument({
+      flushPendingInput: async () => {}, hasPendingUpdates: () => provider.pendingBytes > 0,
+    }, { async save(barrier) {
+      expect(barrier).toEqual(transport.captureSaveBarrier()!);
+      hostText = server.getText("body").toString();
+    } }, {
+      hasPendingResync: () => transport.hasPendingResync(), captureBarrier: () => transport.captureSaveBarrier(),
+    });
+    expect(hostText).toBe("edit made offline");
+    expect(seen).not.toContainEqual({ type: "close", code: 4401, reason: "session ended" });
+  } finally {
+    provider.destroy(); transport.disconnect(); local.destroy(); server.destroy();
+    for (const timer of callbacks.keys()) cancel(timer);
+    timers.mockRestore(); cancellations.mockRestore();
+  }
+});
+
+test.each(["disconnect", "connect"])("%s aborts an obsolete session probe and ignores its late ended answer", async (action) => {
+  const sockets: FakeSocket[] = [];
+  let signal: AbortSignal | undefined;
+  let settle!: (active: boolean) => void;
+  const probe = new Promise<boolean>((resolve) => { settle = resolve; });
+  const transport = createWopiTransport({
+    handle: "h", baselineGeneration: 1, origin: "https://office.example",
+    checkSession: (requestSignal) => { signal = requestSignal; return probe; },
+    createSocket() { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+  });
+  const seen: unknown[] = [];
+  transport.onEvent((event) => { seen.push(event); });
+  try {
+    transport.connect();
+    sockets[0]!.readyState = 3;
+    sockets[0]!.onclose?.({ code: 1006 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(signal?.aborted).toBe(false);
+    if (action === "disconnect") transport.disconnect();
+    else transport.connect();
+    expect(signal?.aborted).toBe(true);
+    settle(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sockets).toHaveLength(action === "disconnect" ? 1 : 2);
+    expect(seen).not.toContainEqual({ type: "close", code: 4401, reason: "session ended" });
+    if (action === "connect") {
+      sockets[1]!.readyState = 1;
+      sockets[1]!.onopen?.();
+      expect(transport.captureSaveBarrier()).not.toBeNull();
+    }
+  } finally { settle(false); transport.disconnect(); }
 });
 
 test("offline local updates remain unacknowledged even when the provider queue is empty", () => {

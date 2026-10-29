@@ -146,6 +146,18 @@ test("a stalled input flush fails without posting a save", async () => {
   } finally { warning.mockRestore(); }
 });
 
+test("DontTerminateEdit still bounds the dispatched command fence", async () => {
+  const h = setup();
+  h.editor.flushPendingInput = () => new Promise<void>(() => {});
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, h.api, {
+      ...h.saveOptions, DontTerminateEdit: true, inputTimeoutMs: 5,
+    })).rejects.toThrow("flushPendingInputTimeout");
+    expect(h.calls).toEqual([]);
+  } finally { warning.mockRestore(); }
+});
+
 test("a disconnected save never reads the state vector", async () => {
   const h = setup();
   h.editor.encodeStateVector = () => { throw new Error("worker-hosted replica"); };
@@ -223,8 +235,17 @@ test("unmodified close still performs an ordered save", async () => {
 
 test("host save options preserve editing and still perform an ordered save", async () => {
   const h = setup();
-  await saveDocument(h.editor, h.api, { DontTerminateEdit: true, DontSaveIfUnmodified: true, ...h.saveOptions });
-  expect(h.calls).toEqual(["sequence", "save"]);
+  const termination: Array<boolean | undefined> = [];
+  const editor = {
+    ...h.editor,
+    async flushPendingInput(options?: { terminateEdit?: boolean }) {
+      termination.push(options?.terminateEdit);
+      await h.editor.flushPendingInput();
+    },
+  };
+  await saveDocument(editor, h.api, { DontTerminateEdit: true, DontSaveIfUnmodified: true, ...h.saveOptions });
+  expect(h.calls).toEqual(["flush", "sequence", "save"]);
+  expect(termination).toEqual([false]);
 });
 
 test("close selects UI_Close only when requested and otherwise navigates the top window", () => {

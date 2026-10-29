@@ -139,7 +139,7 @@ export async function prepareFile(
 }
 
 export interface EditorApi {
-  flushPendingInput(): Promise<void>;
+  flushPendingInput(options?: { terminateEdit?: boolean }): Promise<void>;
   hasPendingUpdates(): boolean;
   whenReady(): Promise<void>;
   encodeStateVector(): Promise<Uint8Array>;
@@ -394,12 +394,18 @@ export default function Editor({
         const current = providerRef.current;
         return !current || current.pendingBytes > 0;
       },
-      async flushPendingInput() {
+      async flushPendingInput(options) {
         if (file.format === "docx") {
           if (!active || !docx.current) throw new Error(text.current.documentDisposed);
           await docx.current.flushPendingInput();
         } else if (file.format === "xlsx") {
-          await (await whenReady(xlsx)).version();
+          const api = await whenReady(xlsx);
+          if (options?.terminateEdit === false) {
+            const current = replicas.current.replica;
+            if (!current) throw new Error("The collaboration replica is not ready.");
+            await ("async" in current ? current.async : current).encodeStateVector();
+            if (!active || current !== replicas.current.replica) throw disposed;
+          } else await api.version();
         } else {
           await (await whenReady(pptx)).flushPendingInput();
         }

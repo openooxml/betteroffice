@@ -18,7 +18,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 const mounts: EditorProps[] = [];
 const lifecycle: string[] = [];
-let flush = async () => {};
+let flush: EditorApi["flushPendingInput"] = async () => {};
 let hasPendingUpdates = () => false;
 let serialize: EditorApi["serialize"] = async () => Uint8Array.of(1);
 let publish = (_update: Uint8Array) => false;
@@ -42,7 +42,7 @@ mock.module("../../../../shared/editor-host/Editor", () => ({
       });
       transport.connect();
       const api: EditorApi = {
-        hasPendingUpdates: () => hasPendingUpdates(), flushPendingInput: () => flush(), whenReady: async () => {},
+        hasPendingUpdates: () => hasPendingUpdates(), flushPendingInput: (options) => flush(options), whenReady: async () => {},
         encodeStateVector: async () => Uint8Array.of(0), serialize: () => serialize(),
         focus() {}, print() {},
       };
@@ -54,7 +54,7 @@ mock.module("../../../../shared/editor-host/Editor", () => ({
         props.onReady(null);
       };
     }, []);
-    return <div data-testid="editor" />;
+    return <div data-testid="editor" data-readonly={String(props.readOnly ?? false)} />;
   },
 }));
 
@@ -202,6 +202,54 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
 
 const compositionSaves = (["docx", "xlsx", "pptx"] as const).flatMap((format) =>
   (["Action_Save", "Save button", "Close"] as const).map((action) => [format, action] as const));
+
+test.each(["docx", "xlsx", "pptx"] as const)("%s DontTerminateEdit waits for the worker commit after compositionend", async (format) => {
+  const h = await mount(false, format);
+  const local = new Doc();
+  const input = h.view.getByTestId("editor");
+  let release!: () => void;
+  const worker = new Promise<void>((resolve) => { release = resolve; });
+  let commit = Promise.resolve();
+  let draft = "unfinished draft";
+  const flushing = mock(async (options?: { terminateEdit?: boolean }) => {
+    if (options?.terminateEdit !== false) draft = "";
+    await commit;
+  });
+  flush = flushing;
+  input.tabIndex = 0;
+  input.focus();
+  input.addEventListener("compositionend", () => {
+    commit = worker.then(() => {
+      local.getText("body").insert(0, "漢字");
+      expect(publish(encodeStateAsUpdate(local))).toBe(true);
+      mounts[0]!.onChange();
+    });
+  });
+  try {
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      h.loaded.bridge.handleMessage({ origin: "https://host.example", data: {
+        MessageId: "Action_Save", Values: { Notify: true, DontTerminateEdit: true },
+      } });
+    });
+    expect(flushing).not.toHaveBeenCalled();
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    expect(flushing).toHaveBeenCalledTimes(1);
+    expect(draft).toBe("unfinished draft");
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([]);
+    expect(document.activeElement).toBe(input);
+    await act(async () => { release(); await commit; });
+    expect(h.hostText).toBe("漢字");
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+    expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+      { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: true } },
+    ]);
+  } finally { release(); await commit; local.destroy(); }
+});
 
 test.each(compositionSaves)("%s %s waits for compositionend and saves the composed edit", async (format, action) => {
   const h = await mount(false, format);
@@ -627,6 +675,104 @@ test.each(["provider", "unacknowledged", "none"])("expired reconnect preserves %
   }
 });
 
+test.each(["docx", "xlsx", "pptx"] as const)("%s baseline recovery waits for composition and preserves its worker commit", async (format) => {
+  const h = await mount(false, format);
+  const input = h.view.getByTestId("editor");
+  const local = new Doc();
+  const recovered = new Doc();
+  let release!: () => void;
+  const worker = new Promise<void>((resolve) => { release = resolve; });
+  let commit = Promise.resolve();
+  const flushing = mock(async () => { await commit; });
+  flush = flushing;
+  serialize = async () => encodeStateAsUpdate(local);
+  input.addEventListener("compositionend", () => {
+    if (input.dataset.readonly === "true" || h.view.container.querySelector("main")!.inert) return;
+    commit = worker.then(() => {
+      local.getText("body").insert(0, "漢字");
+      mounts[0]!.onLocalUpdate!();
+    });
+  });
+  try {
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      sockets[0]!.drop(4409);
+    });
+    expect(h.view.getByTestId("editor")).toBe(input);
+    expect(input.dataset.readonly).toBe("false");
+    expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.copies).toHaveLength(0);
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    expect(flushing).toHaveBeenCalledTimes(1);
+    expect(h.copies).toHaveLength(0);
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => { release(); await commit; });
+    expect(h.copies).toHaveLength(1);
+    applyUpdate(recovered, h.copies[0]!);
+    expect(recovered.getText("body").toString()).toBe("漢字");
+    expect(mounts).toHaveLength(2);
+  } finally { release(); await commit; local.destroy(); recovered.destroy(); }
+});
+
+test("baseline recovery retains unfinished composition after its deadline and Retry preserves it", async () => {
+  const h = await mount(false, "pptx");
+  const input = h.view.getByTestId("editor");
+  const local = new Doc();
+  const recovered = new Doc();
+  const flushing = mock(async () => {});
+  flush = flushing;
+  serialize = async () => encodeStateAsUpdate(local);
+  input.addEventListener("compositionend", () => {
+    if (input.dataset.readonly === "true" || h.view.container.querySelector("main")!.inert) return;
+    local.getText("body").insert(0, "漢字");
+    mounts[0]!.onLocalUpdate!();
+  });
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay < 100 || delay > 3000) return schedule(callback, delay);
+    const timer = schedule(() => {}, delay);
+    deadlines.set(timer, callback);
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  try {
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      sockets[0]!.drop(4409);
+    });
+    expect(deadlines.size).toBe(1);
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
+    expect(h.view.getByRole("alert").textContent).toMatch(/composition.*timed out/i);
+    expect(h.view.getByTestId("editor")).toBe(input);
+    expect(input.dataset.readonly).toBe("false");
+    expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.copies).toHaveLength(0);
+    expect(h.calls.filter((path) => path.endsWith("/source"))).toHaveLength(0);
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => input.dispatchEvent(new Event("compositionend", { bubbles: true })));
+    await act(async () => h.view.getByRole("button", { name: "Retry" }).click());
+    expect(h.copies).toHaveLength(1);
+    applyUpdate(recovered, h.copies[0]!);
+    expect(recovered.getText("body").toString()).toBe("漢字");
+    expect(mounts).toHaveLength(2);
+  } finally {
+    for (const timer of deadlines.keys()) cancel(timer);
+    timers.mockRestore(); cancellations.mockRestore();
+    local.destroy(); recovered.destroy();
+  }
+});
+
 test.each(["flush", "serialization", "upload"])("a stalled recovery %s times out and can be retried", async (stage) => {
   const h = await mount();
   hasPendingUpdates = () => true;
@@ -641,7 +787,7 @@ test.each(["flush", "serialization", "upload"])("a stalled recovery %s times out
   const cancel = globalThis.clearTimeout;
   const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
   const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
-    if (delay !== 3000 && delay !== 10_000) return schedule(callback, delay);
+    if ((delay < 100 || delay > 3000) && delay !== 10_000) return schedule(callback, delay);
     const timer = schedule(() => {}, delay);
     deadlines.set(timer, callback);
     return timer;

@@ -20,7 +20,7 @@ export interface WopiTransportOptions {
   handle: string;
   baselineGeneration: number;
   origin?: string;
-  checkSession?: () => Promise<boolean>;
+  checkSession?: (signal: AbortSignal) => Promise<boolean>;
   createSocket?: (url: string, protocols: string[]) => WebSocketLike;
 }
 
@@ -36,6 +36,7 @@ const CONNECTING = 0;
 const MAX_BUFFERED_BYTES = 1024 * 1024;
 const INITIAL_RETRY_MS = 250;
 const MAX_RETRY_MS = 5000;
+const SESSION_CHECK_TIMEOUT_MS = 3000;
 
 /** The /collab endpoint for a page origin. */
 export function collabUrl(origin: string): string {
@@ -67,6 +68,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
   let retryMs = INITIAL_RETRY_MS;
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let sessionProbe: AbortController | null = null;
 
   const emit = (event: CollaborationTransportEvent): void => {
     for (const listener of [...listeners]) listener(event);
@@ -96,8 +98,48 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
     retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
   };
 
+  const stopProbe = (): void => {
+    const current = sessionProbe;
+    sessionProbe = null;
+    current?.abort();
+  };
+
+  const checkSession = async (): Promise<void> => {
+    stopProbe();
+    const controller = new AbortController();
+    sessionProbe = controller;
+    const timer = setTimeout(() => controller.abort(new Error("sessionCheckTimeout")), SESSION_CHECK_TIMEOUT_MS);
+    let onAbort: (() => void) | undefined;
+    try {
+      const active = await Promise.race([
+        Promise.resolve().then(() => {
+          controller.signal.throwIfAborted();
+          return options.checkSession!(controller.signal);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(controller.signal.reason);
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+      if (sessionProbe !== controller || !wantsConnection || socket !== null) return;
+      if (active === false) {
+        rejoinRequired = true;
+        wantsConnection = false;
+        emit({ type: "close", code: 4401, reason: "session ended" });
+      } else scheduleReconnect();
+    } catch {
+      if (sessionProbe === controller) scheduleReconnect();
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) controller.signal.removeEventListener("abort", onAbort);
+      if (sessionProbe === controller) sessionProbe = null;
+      controller.abort();
+    }
+  };
+
   const open = (): void => {
     if (!wantsConnection || socket?.readyState === OPEN || socket?.readyState === CONNECTING) return;
+    stopProbe();
     const next = createSocket(url, protocols);
     next.binaryType = "arraybuffer";
     socket = next;
@@ -145,14 +187,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
       }
       emit({ type: "close", code: event.code, reason: event.reason });
       if (!opened && wantsConnection && options.checkSession) {
-        void options.checkSession().then((active) => {
-          if (!wantsConnection || socket !== null) return;
-          if (!active) {
-            rejoinRequired = true;
-            wantsConnection = false;
-            emit({ type: "close", code: 4401, reason: "session ended" });
-          } else scheduleReconnect();
-        }).catch(() => scheduleReconnect());
+        void checkSession();
       } else scheduleReconnect();
     };
   };
@@ -170,6 +205,7 @@ export function createWopiTransport(options: WopiTransportOptions): WopiTranspor
     disconnect() {
       wantsConnection = false;
       stopDrain();
+      stopProbe();
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
