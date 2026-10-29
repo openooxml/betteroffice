@@ -110,6 +110,7 @@ invalid.
 | `WOPI_MAX_EDITORS_PER_FILE` | `50` | Positive integer. Maximum simultaneous editors in one file session. |
 | `WOPI_JOURNAL_DIR` | unset (off) | Directory for the opt-in crash journal (see Security). Unset means no journal and nothing is written to disk. |
 | `WOPI_INSTANCE_ID` | random per start | Stable id for this instance. Used in lock ids. Set it when you want recognisable lock owners in host logs. |
+| `WOPI_RECONNECT_GRACE_MS` | `30000` | Positive integer, in milliseconds. How long a user whose connection dropped keeps their session and lock before the app saves and releases it. A reconnect within this time resumes without a save and unlock cycle. |
 | `PORT` | `3000` | Integer from 1 to 65535. Port the server listens on. The image exposes 3000. |
 
 Example `WOPI_HOSTS` with two hosts:
