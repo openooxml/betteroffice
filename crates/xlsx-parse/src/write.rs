@@ -2424,14 +2424,30 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
+    let full_calc = edited && holds_formulas(wb, package, sheets);
+    let precision_changed = wb.full_precision != package.original_workbook.full_precision;
+    let calc_pr = if full_calc || precision_changed {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
-        set_attribute(
-            &mut attributes,
-            "fullCalcOnLoad",
-            "fullCalcOnLoad",
-            "1".to_owned(),
-        );
+        if full_calc {
+            set_attribute(
+                &mut attributes,
+                "fullCalcOnLoad",
+                "fullCalcOnLoad",
+                "1".to_owned(),
+            );
+        }
+        if precision_changed {
+            if wb.full_precision {
+                remove_attribute(&mut attributes, "fullPrecision");
+            } else {
+                set_attribute(
+                    &mut attributes,
+                    "fullPrecision",
+                    "fullPrecision",
+                    "0".to_owned(),
+                );
+            }
+        }
         Some(fragment(|writer| {
             write_empty_element(writer, "calcPr", &attributes)
         })?)

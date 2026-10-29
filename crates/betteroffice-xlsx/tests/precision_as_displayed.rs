@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRef, CellValue, Sheet, SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellRange, CellRef, CellValue, NumberFormatMutation, Sheet, SheetId,
+    Workbook, WorkbookModel,
 };
 use xlsx_model::{CellProvider, Xf};
 
@@ -174,4 +175,36 @@ fn collaboration_rejects_a_base_with_different_calculation_precision() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn number_format_changes_and_their_undo_recalculate_displayed_precision() {
+    let bytes = source(r#" fullPrecision="0""#);
+    for collaborative in [false, true] {
+        let mut workbook = if collaborative {
+            Workbook::open_collaborative(&bytes, 123).unwrap()
+        } else {
+            Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap()
+        };
+        if collaborative {
+            workbook.recalculate_all(CalculationOptions::default());
+        }
+        assert_value(&workbook, 1, 6.1);
+        assert_value(&workbook, 2, 61.0);
+        workbook
+            .set_range_number_format(
+                SheetId(0),
+                CellRange::new(CellRef::new(0, 1), CellRef::new(0, 1)),
+                NumberFormatMutation::Custom {
+                    pattern: "0.00".into(),
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_value(&workbook, 1, 6.13);
+        assert_value(&workbook, 2, 6.13 * 10.0);
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_value(&workbook, 1, 6.1);
+        assert_value(&workbook, 2, 61.0);
+    }
 }

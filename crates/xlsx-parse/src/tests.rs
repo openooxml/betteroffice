@@ -8035,6 +8035,39 @@ fn calc_pr_attributes_round_trip_byte_identically() {
 }
 
 #[test]
+fn changed_precision_is_saved_into_the_source_calc_pr() {
+    for (calc_pr, full_precision, expected) in [
+        (
+            r#"<calcPr calcId="191029" custom="kept"/>"#,
+            false,
+            r#"<calcPr calcId="191029" custom="kept" fullPrecision="0"/>"#,
+        ),
+        (
+            r#"<calcPr calcId="191029" fullPrecision="0" custom="kept"/>"#,
+            true,
+            r#"<calcPr calcId="191029" custom="kept"/>"#,
+        ),
+        ("", false, r#"<calcPr fullPrecision="0"/>"#),
+    ] {
+        let mut parts = package("<sheetData/>", &[], false);
+        let xml = String::from_utf8(parts[0].1.clone()).unwrap();
+        parts[0].1 = xml
+            .replace("</workbook>", &format!("{calc_pr}</workbook>"))
+            .into_bytes();
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let mut workbook = parsed.workbook.clone();
+        workbook.full_precision = full_precision;
+        let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+        let written = String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap();
+        assert!(written.contains(expected), "{calc_pr}: {written}");
+        assert_eq!(
+            parse_workbook(&saved).unwrap().full_precision,
+            full_precision
+        );
+    }
+}
+
+#[test]
 fn full_precision_false_survives_serializing_a_new_workbook() {
     let workbook = Workbook {
         full_precision: false,

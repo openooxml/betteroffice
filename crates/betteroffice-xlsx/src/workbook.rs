@@ -5060,8 +5060,9 @@ enum CalculationScope {
 impl CalculationScope {
     /// What `ops` require of the engine, judged against `model` before they
     /// apply. The engine reads values, formulas, sheet names, defined names,
-    /// tables, array extents and used extents; styles, merges, panes and
-    /// charts never reach it.
+    /// tables, array extents and used extents; merges, panes and charts never
+    /// reach it, and styles reach it only through the number formats a
+    /// workbook that calculates with precision as displayed rounds to.
     fn of(model: &WorkbookModel, ops: &[Op]) -> Self {
         ops.iter()
             .map(|op| Self::of_op(model, op))
@@ -5071,6 +5072,15 @@ impl CalculationScope {
 
     fn of_op(model: &WorkbookModel, op: &Op) -> Self {
         match op {
+            Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
+            | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
+                if !model.full_precision =>
+            {
+                Self::Full
+            }
             Op::PatchRangeStyle { .. }
             | Op::SetRangeNumberFormat { .. }
             | Op::ApplyRangeFormat { .. }
@@ -5090,7 +5100,13 @@ impl CalculationScope {
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
             Op::SetCell { sheet, at, cell } => {
-                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref()) {
+                let style = model
+                    .sheet(*sheet)
+                    .and_then(|sheet| sheet.cell(*at))
+                    .and_then(|cell| cell.style);
+                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref())
+                    && (model.full_precision || style == cell.style)
+                {
                     Self::Kept
                 } else {
                     Self::Full
