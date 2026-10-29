@@ -19,9 +19,12 @@ dist
 __pycache__
 .env
 .env.*
+**/.env
+**/.env.*
 .dev.vars
 **/.dev.vars
 fuzz
+data
 apps/wopi/data
 apps/wopi/web/dist
 packages/*/src/wasm/generated/**
