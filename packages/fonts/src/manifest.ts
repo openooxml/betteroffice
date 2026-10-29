@@ -1,4 +1,5 @@
 import intlSizes from './intl-sizes.json';
+import latinManifest from '../../fonts-latin/assets/manifest.json';
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript =
@@ -44,7 +45,7 @@ export interface BundledFontFace {
   metricCompatWith?: string;
   weight: 400 | 700;
   style: 'normal' | 'italic';
-  /** Asset filename under this package's `assets/` directory. */
+  /** Asset filename within its font pack. */
   file: string;
   byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
@@ -112,8 +113,7 @@ function intlFamilyFaces(
   });
 }
 
-/** Complete face manifest, ordered by script fallback preference. */
-export const BUNDLED_FONTS: BundledFontFace[] = [
+const bundledFaces: BundledFontFace[] = [
   ...familyFaces(
     'Carlito',
     'Calibri',
@@ -388,6 +388,14 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     script: 'cjk-kr',
   },
 ];
+
+const latinFaces = new Map(latinManifest.faces.map((face) => [face.source, face]));
+
+/** Complete face manifest, ordered by script fallback preference. */
+export const BUNDLED_FONTS: BundledFontFace[] = bundledFaces.map((face) => {
+  const packed = latinFaces.get(face.file);
+  return packed === undefined ? face : { ...face, file: packed.file, byteLength: packed.byteLength };
+});
 
 /**
  * Alternate Word font names that resolve to the same bundled face as a

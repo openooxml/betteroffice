@@ -45,15 +45,15 @@ License: SIL Open Font License, Version 1.1
 
 ---
 
-## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`, `packages/fonts-intl`)
+## Bundled font binaries (`packages/fonts`, `packages/fonts-latin`, `packages/fonts-cjk`, `packages/fonts-intl`)
 
 Font binaries are vendored and redistributed in the published
-`@betteroffice/fonts`, `@betteroffice/fonts-cjk`, and `@betteroffice/fonts-intl` packages. All are licensed
+`@betteroffice/fonts-latin`, `@betteroffice/fonts-cjk`, and `@betteroffice/fonts-intl` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
 
-`packages/fonts/assets` - 70 faces:
+`packages/fonts/assets` sources and `packages/fonts-latin/assets` pack - 70 faces:
 
 - **Carlito** (4 faces) — Copyright 2013 The Carlito Project Authors, with
   Reserved Font Name "Carlito". From google/fonts `ofl/carlito`; upstream

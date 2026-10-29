@@ -20,13 +20,12 @@
   },
   "files": [
     "dist",
-    "assets",
     "LICENSE",
     "LICENSES",
     "README.md"
   ],
   "scripts": {
-    "prebuild": "bun run --filter '@betteroffice/fonts-cjk' --filter '@betteroffice/fonts-intl' build",
+    "prebuild": "bun run --filter '@betteroffice/fonts-cjk' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-latin' build",
     "build": "tsup && bun ../../scripts/build-fonts-decoder.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -48,7 +47,8 @@
     "@types/bun": "^1.0.0",
     "@types/node": "^26.0.0",
     "tsup": "^8.0.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "esbuild": "^0.28.1"
   },
   "keywords": [
     "docx",
@@ -75,5 +75,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@betteroffice/fonts-latin": "workspace:^0"
   }
 }
