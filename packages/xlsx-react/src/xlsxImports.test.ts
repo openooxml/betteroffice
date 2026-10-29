@@ -45,10 +45,8 @@ test('default editor static chunks exclude the legacy and in-thread editors', as
     .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path)));
   const staticInputs = inputs([...seen]);
   const deferredInputs = inputs(Object.keys(outputs).filter((path) => !seen.has(path)));
-  for (const path of deferredModules) {
-    expect(staticInputs.has(path)).toBe(false);
-    expect(deferredInputs.has(path)).toBe(true);
-  }
+  expect(deferredModules.map((path) => [path, staticInputs.has(path), deferredInputs.has(path)]))
+    .toEqual(deferredModules.map((path) => [path, false, true]));
   expect(staticInputs.has('packages/xlsx-react/src/worker/XlsxWorkerEditor.tsx')).toBe(true);
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
