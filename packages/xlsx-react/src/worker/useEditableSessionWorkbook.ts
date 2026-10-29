@@ -13,7 +13,6 @@ import {
   type XlsxWorkerEditorApi, XlsxWorkerEditorCollaborationError,
 } from './createWorkerEditorApi';
 export { asError } from './asError';
-import { XlsxWorkerSessionFailedError } from './workerEditorErrors';
 export { XlsxWorkerSessionFailedError } from './workerEditorErrors';
 
 export const editableWorkbookSessionBackend = {

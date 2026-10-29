@@ -11,7 +11,7 @@ import {
   WorkerInputNotReadyError, WorkerInputRefusal, inputRefusal, type WorkerInputCoordinator, type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
 
-import { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './workerEditorErrors';
+import { XlsxPeerNotReadyError } from './workerEditorErrors';
 export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './workerEditorErrors';
 
 export interface WorkerEditorSessionAccess {
