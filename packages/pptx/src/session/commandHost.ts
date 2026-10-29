@@ -3,6 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
+import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -69,6 +70,10 @@ export interface PresentationCommandRegistration {
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   dispose(): void;
+}
+
+function engineVersion(): string | undefined {
+  try { return PptxDocument.version(); } catch { return undefined; }
 }
 
 export function registerPresentationCommandHandlers(
@@ -1546,13 +1551,15 @@ export function registerPresentationCommandHandlers(
         const fonts = loading instanceof Promise ? await loading : undefined;
         if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
-        const recoveryUpdate = ownedBuffer(handle.encodeStateAsUpdate());
+        const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
+        const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         if (requestedFonts) loadDefaultFonts();
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate,
+          activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
+          recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}),
           ...(fonts ? { defaultFonts: fonts } : {}) },
-        [...result.transfer, recoveryUpdate, ...(fonts ?? []).map((face) => face.bytes)]);
+          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : []), ...(fonts ?? []).map((face) => face.bytes)]);
       } catch (error) {
         dispose();
         throw error;

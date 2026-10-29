@@ -1777,6 +1777,10 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
 }
 
 fn open_numbered_restyle(body: &str) -> EditingDoc {
+    open_package(&numbered_restyle_package(body))
+}
+
+fn numbered_restyle_package(body: &str) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
     let styles = format!(
         r#"<w:styles {NS}>{STYLES}<w:style w:type="paragraph" w:styleId="Body24"><w:name w:val="Body24"/><w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="Fixed24"><w:name w:val="Fixed24"/><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="Footnote Reference"/><w:rPr><w:sz w:val="18"/><w:vertAlign w:val="superscript"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptBody"><w:name w:val="ScriptBody"/><w:basedOn w:val="Body24"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="ScriptHeading"><w:name w:val="ScriptHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:bCs/><w:iCs/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="SuperHeading"><w:name w:val="SuperHeading"/><w:basedOn w:val="Heading1"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style></w:styles>"#
@@ -1786,7 +1790,86 @@ fn open_numbered_restyle(body: &str) -> EditingDoc {
         .find(|(name, _)| name == "word/styles.xml")
         .unwrap()
         .1 = styles.into_bytes();
-    open_package(&ooxml_opc::rezip_parts(&parts).unwrap())
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn export_restyled_field_paragraph(doc: &EditingDoc, bytes: &[u8]) -> Vec<u8> {
+    let package = docx_parse::parse_docx_s9_wire(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let mut document = serde_json::to_value(&package.document).unwrap();
+    document.as_object_mut().unwrap().remove("sections");
+    let mut content = Vec::new();
+    for segment in doc.story_segments("body").unwrap() {
+        match segment.content {
+            SegmentContent::Text(text) => {
+                let mut formatting = serde_json::Map::new();
+                for key in ["bold", "italic"] {
+                    if active(&segment.attributes, key) {
+                        formatting.insert(key.to_owned(), serde_json::json!(true));
+                    }
+                }
+                if let Some(Any::Map(size)) = segment.attributes.get("fontSize") {
+                    for (key, property) in [("size", "fontSize"), ("sizeCs", "fontSizeCs")] {
+                        if let Some(size) = number(size.get(key)) {
+                            formatting.insert(property.to_owned(), serde_json::json!(size));
+                        }
+                    }
+                }
+                content.push(serde_json::json!({
+                    "type": "run", "formatting": formatting,
+                    "content": [{"type": "text", "text": text}]
+                }));
+            }
+            SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                let Some(Any::String(data)) = payload.get("fieldData") else {
+                    panic!("missing field source")
+                };
+                content.push(serde_json::from_str(data).unwrap());
+            }
+            SegmentContent::Pilcrow(paragraph) => {
+                document["content"][0]["formatting"]["styleId"] =
+                    serde_json::to_value(paragraph.values.get("pStyle")).unwrap();
+            }
+            _ => panic!("unexpected paragraph content"),
+        }
+    }
+    document["content"][0]["content"] = serde_json::json!(content);
+    let plan = doc.paragraph_save_plan();
+    let patched_parts: Vec<_> = plan
+        .patched_parts
+        .iter()
+        .map(|(part, ids)| serde_json::json!({"part": part, "paraIds": ids}))
+        .collect();
+    let spliced_parts: Vec<_> = plan
+        .spliced_parts
+        .iter()
+        .map(|part| {
+            serde_json::json!({
+                "part": part.part, "sha256": part.sha256, "paragraphs": [0],
+                "changed": part.changed, "paragraphPatches": part.paragraph_patches,
+                "legacyParagraphs": part.legacy_paragraphs
+            })
+        })
+        .collect();
+    let request = serde_json::from_value(serde_json::json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "footnotes": package.footnotes.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"patchedParts": patched_parts, "splicedParts": spliced_parts}
+    }))
+    .unwrap();
+    docx_parse::serializer::write_docx_s13(request, bytes).unwrap()
 }
 
 #[test]
@@ -2366,12 +2449,129 @@ fn restyle_numbered_field_results_keep_their_live_formatting() {
             panic!("missing field result size")
         };
         assert_eq!(number(size.get("size")), Some(24.0));
+        assert!(active(&attrs, "bold"));
         let text = marks(&doc, "body", "Chapter 1");
         let Some(Any::Map(size)) = text.get("fontSize") else {
             panic!("missing run size")
         };
         assert_eq!(number(size.get("size")), Some(32.0));
         assert!(active(&text, "bold"));
+    }
+}
+
+#[test]
+fn restyle_field_results_follow_the_style_and_keep_direct_formatting() {
+    for numbered in [false, true] {
+        for complex in [false, true] {
+            for edited in [false, true] {
+                for (formatting, expected_size, bold) in [
+                    (r#"<w:rPr><w:sz w:val="24"/></w:rPr>"#, 24.0, true),
+                    ("", 32.0, true),
+                    (
+                        r#"<w:rPr><w:b w:val="0"/><w:sz w:val="24"/></w:rPr>"#,
+                        24.0,
+                        false,
+                    ),
+                ] {
+                    let result = format!("<w:r>{formatting}<w:t>1</w:t></w:r>");
+                    let field = if complex {
+                        format!(
+                            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                        )
+                    } else {
+                        format!(r#"<w:fldSimple w:instr="PAGE">{result}</w:fldSimple>"#)
+                    };
+                    let numbering = if numbered {
+                        r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr>"#
+                    } else {
+                        ""
+                    };
+                    let body = format!(
+                        r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>{numbering}</w:pPr><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>young People</w:t></w:r>{field}</w:p>"#
+                    );
+                    let bytes = numbered_restyle_package(&body);
+                    let doc = open_package(&bytes);
+                    let field_before = doc
+                        .story_segments("body")
+                        .unwrap()
+                        .into_iter()
+                        .find_map(|segment| match segment.content {
+                            SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                                Some(payload)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    if edited {
+                        doc.replace_range(
+                            &EditCtx::local("", ""),
+                            StoryRange::new("body", 6, 7),
+                            "p",
+                        )
+                        .unwrap();
+                    }
+                    apply(
+                        &doc,
+                        &UndoSession::new(),
+                        vec![set_style("00000001", "Heading1")],
+                    );
+                    let attrs = embed_marks(&doc, "field");
+                    let Some(Any::Map(size)) = attrs.get("fontSize") else {
+                        panic!("missing field result size")
+                    };
+                    assert_eq!(number(size.get("size")), Some(expected_size));
+                    assert_eq!(active(&attrs, "bold"), bold);
+                    assert!(!active(&attrs, "italic"));
+                    assert!(doc.story_segments("body").unwrap().iter().any(|segment| {
+                        matches!(&segment.content,
+                            SegmentContent::OtherEmbed { kind, payload }
+                                if kind == "field" && payload == &field_before)
+                    }));
+                    let saved = export_restyled_field_paragraph(&doc, &bytes);
+                    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+                        .unwrap()
+                        .into_iter()
+                        .find(|(path, _)| path == "word/document.xml")
+                        .unwrap();
+                    let xml = String::from_utf8(xml).unwrap();
+                    assert!(xml.contains(r#"<w:pStyle w:val="Heading1"/>"#), "{xml}");
+                    assert!(xml.contains(&result), "{xml}");
+                    if complex {
+                        assert!(
+                            xml.contains(
+                                r#"<w:instrText xml:space="preserve"> PAGE </w:instrText>"#
+                            ),
+                            "{xml}"
+                        );
+                    } else {
+                        assert!(xml.contains(&field), "{xml}");
+                    }
+                    assert_eq!(embed_marks(&open_package(&saved), "field"), attrs);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn restyle_comment_reference_marks_stay_unchanged() {
+    for numbered in [false, true] {
+        let numbering = if numbered {
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/></w:numPr>"#
+        } else {
+            ""
+        };
+        let doc = open_numbered_restyle(&format!(
+            r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Body24"/>{numbering}</w:pPr><w:r><w:t>Chapter 1</w:t></w:r><w:r><w:rPr><w:b/><w:sz w:val="24"/></w:rPr><w:commentReference w:id="9"/></w:r></w:p>"#
+        ));
+        let before = embed_marks(&doc, "field");
+        assert!(before.is_empty());
+        apply(
+            &doc,
+            &UndoSession::new(),
+            vec![set_style("00000001", "Heading1")],
+        );
+        assert_eq!(embed_marks(&doc, "field"), before);
     }
 }
 

@@ -25,7 +25,7 @@ import type { RustDisplayListQueryEngine } from './rustDisplayList';
 import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
 
 const WASM = resolve(import.meta.dir, '../../wasm/generated/edit/docx_edit_bg.wasm');
-const LAYOUT_WASM = resolve(import.meta.dir, '../../wasm/generated/layout/docx_layout_bg.wasm');
+const LAYOUT_WASM = resolve(import.meta.dir, '../../wasm/generated/edit/docx_edit_bg.wasm');
 const hasEditWasm = existsSync(WASM);
 const hasLayoutWasm = hasEditWasm && existsSync(LAYOUT_WASM);
 let createEditSession: typeof import('../../wasm/edit').createEditSession;
