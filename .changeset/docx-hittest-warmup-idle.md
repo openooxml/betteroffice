@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": patch
 ---
 
-Scrolling a Word document stays smoother: hit-test preparation waits until scrolling pauses and runs only in idle time.
+Word documents stay more responsive during typing and scrolling. Hit-test preparation waits for scrolling to pause and, while the editor is focused, for two seconds without document changes; larger pages wait for more idle time.

@@ -30,6 +30,9 @@ import { useTranslation } from '../../../i18n';
 type PageGeometry = PeerlessFrameGeometry['pages'][number];
 const emptyPages: readonly PageGeometry[] = [];
 const SCROLL_SETTLE_MS = 150;
+const HIT_TEST_TYPING_IDLE_MS = 2000;
+const HIT_TEST_LARGE_PAGE_PRIMITIVES = 2000;
+const HIT_TEST_LARGE_PAGE_IDLE_MS = 12;
 const TOUCH_TAP_SLOP_PX = 8;
 const TOUCH_LONG_PRESS_MS = 500;
 const pictureHandles = [
@@ -319,6 +322,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     (page.pageIndex >= displayWindow[0] && page.pageIndex < displayWindow[1])), [pages, caretPage, displayWindow]);
   const warmed = useRef(new WeakSet<NonNullable<ReturnType<typeof pageQueries.get>>>());
   const lastInput = useRef(Number.NEGATIVE_INFINITY);
+  const lastDocumentChange = useRef(Number.NEGATIVE_INFINITY);
+  const layoutRevision = useRef(geometry?.layoutRevision);
+  useLayoutEffect(() => {
+    if (layoutRevision.current !== undefined && layoutRevision.current !== geometry?.layoutRevision) lastDocumentChange.current = performance.now();
+    layoutRevision.current = geometry?.layoutRevision;
+  }, [geometry?.layoutRevision]);
   useEffect(() => {
     const input = () => { lastInput.current = performance.now(); };
     for (const type of ['keydown', 'beforeinput', 'compositionupdate']) document.addEventListener(type, input, true);
@@ -331,10 +340,14 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     let active = true;
     let cancel: (() => void) | null = null;
     let due: number | null = null;
+    const editor = column.current?.closest('[data-docx-worker-editor]');
+    const typingDelay = () => input.current === document.activeElement || editor?.contains(document.activeElement)
+      ? Math.max(0, lastDocumentChange.current + HIT_TEST_TYPING_IDLE_MS - performance.now()) : 0;
     const warm = (deadline?: IdleDeadline) => {
       cancel = null;
       if (!active) return;
       if (chromeHold.held) { schedule(); return; }
+      if (typingDelay() > 0) { due = null; schedule(); return; }
       const quiet = performance.now() - lastInput.current;
       if (quiet < 500) {
         due = null;
@@ -344,10 +357,12 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       }
       const overdue = !!deadline && (deadline.didTimeout || (due !== null && performance.now() >= due));
       while (index < presented.length) {
-        if (deadline && !overdue && deadline.timeRemaining() < 4) break;
-        const queries = pageQueries.get(presented[index]!);
+        const page = presented[index]!;
+        const budget = page.primitives.length > HIT_TEST_LARGE_PAGE_PRIMITIVES ? HIT_TEST_LARGE_PAGE_IDLE_MS : 4;
+        if (deadline && !overdue && deadline.timeRemaining() < budget) break;
+        const queries = pageQueries.get(page);
         if (queries && !warmed.current.has(queries)) {
-          if (deadline && !overdue && deadline.timeRemaining() < 4) break;
+          if (deadline && !overdue && deadline.timeRemaining() < budget) break;
           queries.hitTestRegions(0, 0, 0);
           warmed.current.add(queries);
           index++;
@@ -359,8 +374,13 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
     };
     const schedule = () => {
       if (cancel || !active || index >= presented.length || !queryEngineReady) return;
+      const delay = typingDelay();
       if (chromeHold.held) {
         cancel = chromeHold.whenReleased(() => { cancel = null; schedule(); });
+      } else if (delay > 0) {
+        due = null;
+        const id = setTimeout(() => { cancel = null; schedule(); }, delay);
+        cancel = () => clearTimeout(id);
       } else if (typeof requestIdleCallback === 'function') {
         due ??= performance.now() + 1000;
         const id = requestIdleCallback(warm, { timeout: Math.max(1, due - performance.now()) });
@@ -371,9 +391,18 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
       }
     };
     const pause = () => { cancel?.(); cancel = null; due = null; schedule(); };
+    const focus = () => { queueMicrotask(() => { if (active) pause(); }); };
+    editor?.addEventListener('focusin', focus);
+    editor?.addEventListener('focusout', focus);
     pauseWarm.current = pause;
     schedule();
-    return () => { active = false; cancel?.(); if (pauseWarm.current === pause) pauseWarm.current = null; };
+    return () => {
+      active = false;
+      cancel?.();
+      editor?.removeEventListener('focusin', focus);
+      editor?.removeEventListener('focusout', focus);
+      if (pauseWarm.current === pause) pauseWarm.current = null;
+    };
   }, [pageQueries, visiblePages, geometry?.layoutRevision, queryEngineReady, chromeHold]);
   const dragPointer = useRef<number | null>(null);
   const picture = useRef<{ pointerId: number; host: HTMLDivElement; start: { x: number; y: number }; drag: PictureDrag } | null>(null);
