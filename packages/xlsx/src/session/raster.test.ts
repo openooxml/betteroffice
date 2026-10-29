@@ -56,7 +56,7 @@ test('shares a failed raster initialization and retries on the next export', asy
     fetched();
     return requests.length === 1 ? pending : new Response();
   }) as Fetch);
-  const renderer = createRenderer(fetch);
+  const renderer = createRenderer(fetch as unknown as Fetch);
   const failing = Promise.allSettled([renderer.renderPng('first'), renderer.renderPng('concurrent')]);
   await started;
   expect(fetch).toHaveBeenCalledTimes(1);
