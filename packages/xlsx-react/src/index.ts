@@ -23,9 +23,9 @@ export type { XlsxAsyncEditorApi, XlsxProposalRequest, XlsxProposalResult } from
 /** @experimental */
 export type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 /** @experimental */
-export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/createWorkerEditorApi';
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './worker/workerEditorErrors';
 /** @experimental */
-export { XlsxWorkerSessionFailedError } from './worker/useEditableSessionWorkbook';
+export { XlsxWorkerSessionFailedError } from './worker/workerEditorErrors';
 export { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {

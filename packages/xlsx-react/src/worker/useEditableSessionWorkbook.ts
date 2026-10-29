@@ -13,6 +13,8 @@ import {
   type XlsxWorkerEditorApi, XlsxWorkerEditorCollaborationError,
 } from './createWorkerEditorApi';
 export { asError } from './asError';
+import { XlsxWorkerSessionFailedError } from './workerEditorErrors';
+export { XlsxWorkerSessionFailedError } from './workerEditorErrors';
 
 export const editableWorkbookSessionBackend = {
   open: openWorkbookSession,
@@ -203,14 +205,6 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
         reject(error);
       });
     });
-  }
-}
-
-export class XlsxWorkerSessionFailedError extends Error {
-  readonly code = 'worker-session-failed';
-  constructor(readonly cause: unknown) {
-    super(`Workbook worker session failed: ${asError(cause).message}`);
-    this.name = 'XlsxWorkerSessionFailedError';
   }
 }
 
