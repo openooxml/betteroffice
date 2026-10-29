@@ -46,7 +46,8 @@ Text anchors are `PptxAnchor::Range` batch targets.
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.
 
-Pre-1.0: the API may change between minor versions.
+Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
+in minor releases and are listed in the changelog, and deprecations are announced before removal.
 
 ## Saving
 

@@ -416,9 +416,12 @@ The heavy operations release the GIL while they run (`open`, `open_path`,
 `register_font`, and `apply_update`), as do the file writes in `Media.write`,
 `DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
-## Status
+## Compatibility
 
-Pre-1.0: the API may change between minor versions. Saving patches edited XML,
+Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
+in minor releases and are listed in the changelog, and deprecations are announced before removal.
+
+Saving patches edited XML,
 preserves untouched parts and rebuilds the ZIP container.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows

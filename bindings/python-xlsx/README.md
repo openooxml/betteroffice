@@ -302,9 +302,10 @@ are the last four in that order. `StaleProposalError.cells` lists the changed A1
 addresses and `targets` their sheets and coordinates, and an unknown proposal ID
 raises `KeyError`.
 
-## Status
+## Compatibility
 
-Pre-1.0: the API may change between minor versions.
+Releases are versioned with Changesets and follow semantic versioning: breaking changes ship
+in minor releases and are listed in the changelog, and deprecations are announced before removal.
 
 `save` keeps the parts the model does not represent (charts, drawings, pivot
 tables, comments, macros, custom XML, and their relationships) rather than
