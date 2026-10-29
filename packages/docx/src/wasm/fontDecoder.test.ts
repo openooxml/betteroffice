@@ -40,7 +40,7 @@ test('the root font decoder returns ArrayBuffers and rejects with engine errors'
     if (decoded.payload !== undefined) expect(decoded.payload).toBeInstanceOf(ArrayBuffer);
     expectFontFace({ font: new Uint8Array(decoded.font),
       ...(decoded.payload === undefined ? {} : { payload: new Uint8Array(decoded.payload) }) }, entry);
-    expect(backing.subarray(1, -1)).toEqual(entry.bytes);
+    expect(backing.subarray(1, -1)).toEqual(new Uint8Array(entry.bytes));
   }
   for (const entry of fontErrorCases()) {
     await expect(decodePublicFontFace(entry.bytes.slice(), entry)).rejects.toThrow(new Error(entry.message));
