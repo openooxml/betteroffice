@@ -24,7 +24,7 @@ const PAGE = renderToStaticMarkup(createElement(Home));
 const COVERAGE = {
   hero: ["office suite", "written in Rust", "agent", `(${DEMO})`, `(${DOCS})`, `(${REPO})`],
   "used-by": [usedByLine()],
-  suite: [...EDITORS.map((editor) => editor.format.toUpperCase()), "published on npm", "source preview", "edited in their own format"],
+  suite: [...EDITORS.map((editor) => editor.format.toUpperCase()), "published on npm", "from source", "edited in their own format"],
   foundation: ["tracked changes", "undoes as one step", "Untouched file parts", "self-hostable", `(${DOCS}/docs)`],
   benchmarks: [
     `(${BENCHMARKS})`, `(${BENCHMARKS_SITE})`, `(${SITE}/#benchmarks)`, "LibreOffice", "render and recalculation time", "scripts/office-quality",

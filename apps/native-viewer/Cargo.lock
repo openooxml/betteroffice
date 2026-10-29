@@ -244,6 +244,7 @@ name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "libm",
 ]
 
 [[package]]
@@ -341,6 +342,7 @@ dependencies = [
  "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "quick-xml",
  "serde",
  "thiserror 2.0.20",
@@ -370,6 +372,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libm",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

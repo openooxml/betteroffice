@@ -26,6 +26,12 @@ retries. Failure screenshots, traces, reports, and saved files go under
 `bunx playwright test --config e2e/browser/playwright.config.ts` reruns
 just the browser tests.
 
+CI splits both browser configs into shards by measured time per file
+(`e2e/browser/shard-weights.json`), set with `BETTEROFFICE_BROWSER_SHARD=1/3`.
+After the suite changes a lot, refresh the weights from a CI run's
+`report.json` and `plugin-host-report.json` files:
+`bun scripts/browser-shard-weights.ts <reports>...`.
+
 This covers browser editing and persistence for all three formats. Browser
 collaboration transport/reconnect, additional browsers, and visual fidelity
 across the full corpus remain separate coverage areas. The existing

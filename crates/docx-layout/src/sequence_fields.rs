@@ -170,10 +170,19 @@ fn collect_paragraph<'a>(
     nested: &mut HashSet<String>,
 ) {
     for run in &mut paragraph.runs {
-        let Run::Field(field) = run else { continue };
-        nested.extend(field.nested_sequences.iter().cloned());
-        if field.raw_type.as_deref() == Some("SEQ") {
-            fields.push(field);
+        match run {
+            Run::Field(field) => {
+                nested.extend(field.nested_sequences.iter().cloned());
+                if field.raw_type.as_deref() == Some("SEQ") {
+                    fields.push(field);
+                }
+            }
+            Run::Image(image) => {
+                if let Some(shape) = &mut image.inline_shape {
+                    collect_shape(shape, fields, nested);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -358,6 +367,55 @@ fn letters(value: i64) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inline_shapes_number_nested_fields_and_keep_opaque_sequences() {
+        let figure = json!({
+            "kind": "field", "fieldType": "OTHER", "rawType": "SEQ",
+            "instruction": "SEQ Figure", "fallback": "7"
+        });
+        let nested = json!({
+            "kind": "image", "src": "", "width": 20, "height": 20,
+            "inlineShape": {
+                "id": "nested", "shapeType": "rect", "width": 20, "height": 20,
+                "geometryPath": [], "children": [],
+                "innerText": [{"id": "nested-text", "runs": [figure]}]
+            }
+        });
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "outer", "runs": [{
+                "kind": "image", "src": "", "width": 60, "height": 40,
+                "inlineShape": {
+                    "id": "box", "shapeType": "rect", "width": 60, "height": 40,
+                    "geometryPath": [], "nestedSequences": ["table"],
+                    "innerText": [{"id": "box-text", "runs": [figure, nested]}],
+                    "children": [{
+                        "id": "child", "shapeType": "rect", "width": 20, "height": 20,
+                        "geometryPath": [], "children": [],
+                        "innerText": [{"id": "child-text", "runs": [figure]}]
+                    }]
+                }
+            }]},
+            {"kind": "paragraph", "id": "caption", "runs": [figure, {
+                "kind": "field", "fieldType": "OTHER", "rawType": "SEQ",
+                "instruction": "SEQ Table", "fallback": "9"
+            }]}
+        ]))
+        .unwrap();
+        assert!(reads_sequence_fields(&blocks[..1]));
+        number_sequence_fields(&mut blocks);
+        let value = serde_json::to_value(&blocks).unwrap();
+        let shape = &value[0]["runs"][0]["inlineShape"];
+        assert_eq!(shape["innerText"][0]["runs"][0]["fallback"], "1");
+        let nested = &shape["innerText"][0]["runs"][1]["inlineShape"];
+        assert_eq!(nested["innerText"][0]["runs"][0]["fallback"], "2");
+        assert_eq!(
+            shape["children"][0]["innerText"][0]["runs"][0]["fallback"],
+            "3"
+        );
+        assert_eq!(value[1]["runs"][0]["fallback"], "4");
+        assert_eq!(value[1]["runs"][1]["fallback"], "9");
+    }
 
     #[test]
     fn spelled_results_stop_at_the_generated_text_budget() {

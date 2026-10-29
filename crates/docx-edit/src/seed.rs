@@ -303,6 +303,61 @@ pub(crate) struct SourceMetadata {
     read: ReadSource,
     #[serde(skip)]
     peer_patch_table_styles: OnceLock<PatchTableStyles>,
+    #[serde(skip)]
+    patch_paragraph_styles: OnceLock<Option<PatchParagraphStyles>>,
+}
+
+struct PatchParagraphStyles {
+    defaults_supported: bool,
+    unsupported: BTreeSet<String>,
+}
+
+impl PatchParagraphStyles {
+    fn from_source(source: &SourceIndex) -> Option<Self> {
+        let limits = docx_parse::ParseLimits::default();
+        let parts =
+            ooxml_opc::unzip_parts_where(&source.bytes(), limits.max_xml_bytes as u64, |name| {
+                name.eq_ignore_ascii_case("word/styles.xml")
+            })
+            .ok()?;
+        let (name, bytes) = parts.first()?;
+        let mut budget = docx_parse::ParseBudget::new(&limits);
+        let xml = docx_parse::xml::parse_xml(bytes, name, &mut budget).ok()?;
+        let root = xml.root()?;
+        let supported = |properties: Option<&docx_parse::XmlElement>| {
+            properties.is_none_or(|properties| {
+                properties.child_elements().all(|property| {
+                    property.namespace_prefix() == Some("w")
+                        && matches!(
+                            property.local_name(),
+                            "jc" | "outlineLvl"
+                                | "spacing"
+                                | "ind"
+                                | "keepNext"
+                                | "keepLines"
+                                | "widowControl"
+                                | "pageBreakBefore"
+                                | "contextualSpacing"
+                                | "pBdr"
+                                | "rPr"
+                        )
+                })
+            })
+        };
+        let defaults = root
+            .child("w", "docDefaults")
+            .and_then(|defaults| defaults.child("w", "pPrDefault"))
+            .and_then(|defaults| defaults.child("w", "pPr"));
+        let unsupported = root
+            .children_named("w", "style")
+            .filter(|style| !supported(style.child("w", "pPr")))
+            .filter_map(|style| style.attribute(Some("w"), "styleId").map(str::to_owned))
+            .collect();
+        Some(Self {
+            defaults_supported: supported(defaults),
+            unsupported,
+        })
+    }
 }
 
 /// A paragraph's style-derived pilcrow properties and run formatting.
@@ -351,6 +406,46 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn plain_patch_style_supported(
+        &self,
+        story: &str,
+        paragraph_style: Option<&str>,
+        source: &SourceIndex,
+    ) -> bool {
+        let Some(styles) = self
+            .patch_paragraph_styles
+            .get_or_init(|| PatchParagraphStyles::from_source(source))
+        else {
+            return false;
+        };
+        let table = self.structure.patch_table_styles.get(story).or_else(|| {
+            self.peer_patch_table_styles
+                .get()
+                .and_then(|styles| styles.get(story))
+        });
+        if !styles.defaults_supported
+            || table.is_some_and(|(paragraph, _)| {
+                object(paragraph.as_ref()).is_some_and(|properties| !properties.is_empty())
+            })
+        {
+            return false;
+        }
+        let mut current = paragraph_style.or(self.styles.default_paragraph.as_deref());
+        for _ in 0..64 {
+            let Some(id) = current else {
+                return true;
+            };
+            if styles.unsupported.contains(id) {
+                return false;
+            }
+            let Some(style) = self.styles.style(id) else {
+                return false;
+            };
+            current = string(field(Some(style), "basedOn"));
+        }
+        false
+    }
+
     pub(crate) fn seed_identities(&self) -> BTreeMap<String, (u32, u32)> {
         self.structure
             .seeded_content
@@ -2316,6 +2411,13 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
 }
 
+fn with_doc_pr(mut payload: JsonObject, content: &Value) -> JsonObject {
+    if let Some(properties) = field(Some(content), "drawing").filter(|value| value.is_object()) {
+        payload.insert("docPr".to_owned(), properties.clone());
+    }
+    payload
+}
+
 pub(crate) fn image_payload(image: &Value) -> JsonObject {
     let size = field(Some(image), "size");
     let wrap = field(Some(image), "wrap");
@@ -2453,6 +2555,24 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
     !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
+    let kind = string(field(Some(field_value), "type"));
+    let key = if kind == Some("simpleField") {
+        "content"
+    } else {
+        "fieldResult"
+    };
+    array(field(Some(field_value), key))
+        .iter()
+        .filter(|child| string(field(Some(child), "type")) == Some("run"))
+        .find_map(|child| field(Some(child), "formatting"))
+        .or_else(|| {
+            (kind == Some("complexField"))
+                .then(|| field(Some(field_value), "formatting"))
+                .flatten()
+        })
+}
+
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
@@ -2465,7 +2585,6 @@ fn field_payload(
         array(field(Some(field_value), "fieldResult"))
     };
     let mut display_text = String::new();
-    let mut field_formatting = None;
     for child in runs {
         if string(field(Some(child), "type")) != Some("run") {
             continue;
@@ -2475,15 +2594,8 @@ fn field_payload(
                 display_text.push_str(string(field(Some(content), "text")).unwrap_or_default());
             }
         }
-        if field_formatting.is_none() {
-            field_formatting = field(Some(child), "formatting");
-        }
     }
-    let formatting = field_formatting.or_else(|| {
-        (kind == "complexField")
-            .then(|| field(Some(field_value), "formatting"))
-            .flatten()
-    });
+    let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
@@ -2809,7 +2921,10 @@ fn run_content_to_units(
         }
         "drawing" => vec![embed_unit(
             "image",
-            image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+            with_doc_pr(
+                image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+                content,
+            ),
             &drawing_marks(marks),
             1,
         )],
@@ -2821,18 +2936,24 @@ fn run_content_to_units(
         )],
         "shape" => vec![embed_unit(
             "shape",
-            shape_payload(
-                field(Some(content), "shape").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                shape_payload(
+                    field(Some(content), "shape").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
         )],
         "chart" => vec![embed_unit(
             "chart",
-            chart_payload(
-                field(Some(content), "chart").unwrap_or(&Value::Null),
-                source,
+            with_doc_pr(
+                chart_payload(
+                    field(Some(content), "chart").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             &drawing_marks(marks),
             1,
@@ -2862,7 +2983,7 @@ fn run_content_to_units(
             }
             vec![embed_unit(
                 "opaqueDrawing",
-                payload,
+                with_doc_pr(payload, content),
                 &drawing_marks(marks),
                 1,
             )]
@@ -5757,7 +5878,12 @@ fn visit_story(
                     let runs = units
                         .iter()
                         .map(|unit| {
-                            json!({"text": unit_story_text(unit), "formatting": unit.direct_formatting.as_deref()})
+                            json!({
+                                "text": unit_story_text(unit),
+                                "formatting": unit.direct_formatting.as_deref(),
+                                "formatsRun": matches!(&unit.content, UnitContent::Text(_))
+                                    || matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "noteRef")
+                            })
                         })
                         .collect();
                     context
@@ -6227,7 +6353,6 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
 }
 
 /// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
-#[cfg(feature = "wasm")]
 pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
     if digest.len() == 64
         && digest
@@ -6243,7 +6368,6 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
@@ -6579,6 +6703,7 @@ fn seed_lowered(
             structure,
             read,
             peer_patch_table_styles: OnceLock::new(),
+            patch_paragraph_styles: OnceLock::new(),
         },
         0,
     );
@@ -6742,7 +6867,6 @@ pub(crate) fn seed_blocks(
 
 /// Source metadata, identity index and referenced fonts for a package whose stories arrive
 /// another way, such as shared state, from one lowering.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
@@ -6774,6 +6898,7 @@ pub(crate) fn replica_source(
             structure: context.source,
             read,
             peer_patch_table_styles: OnceLock::new(),
+            patch_paragraph_styles: OnceLock::new(),
         },
         index,
         referenced_fonts.into_iter().collect(),

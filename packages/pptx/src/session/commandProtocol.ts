@@ -249,6 +249,8 @@ export interface PresentationCommandOpenOptions
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {
+  recoveryBaseline?: 'source' | 'update';
+  recoveryEngine?: string;
   recoveryUpdate?: ArrayBuffer;
   slides: PresentationSlideSummary[];
   size: { width: number; height: number };

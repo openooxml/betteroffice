@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::drawing::PathCommand;
+use crate::fmath;
 use crate::player::{
     Brush, Combine, GdiObject, IDENTITY, LogFont, Pen, Player, axis_aligned_rect, concat,
     stock_object,
@@ -722,7 +723,10 @@ fn full_record<const FULL: bool>(
             let radius = f64::from(u32_at(bytes, body + 8)?);
             let (start, sweep) = (finite_at(bytes, body + 12)?, finite_at(bytes, body + 16)?);
             let (from, sweep) = (-start.to_radians(), -sweep.to_radians());
-            let first = (cx + radius * from.cos(), cy + radius * from.sin());
+            let first = (
+                cx + radius * fmath::cos(from),
+                cy + radius * fmath::sin(from),
+            );
             player.line_to(first.0, first.1);
             player.append_sweep((cx, cy), (radius, radius), from, sweep);
             player.pending_stroke = !player.bracketed;

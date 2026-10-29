@@ -16,6 +16,10 @@ use crate::{
     UpdateEvent, UpdateOrigin, outcome_json, oversized_request,
 };
 
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EngineError {
     pub kind: ErrorKind,

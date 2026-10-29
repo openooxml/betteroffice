@@ -19,6 +19,11 @@ if (ownsDom) GlobalRegistrator.register();
 const restoreCompositionEvent = installCompositionEventPolyfill();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const restorers: (() => void)[] = [];
+const caretAt = (target: HTMLElement | CSSStyleDeclaration | null | undefined) => {
+  const style = target && 'style' in target ? target.style : target;
+  const match = /^translate\((-?[\d.]+)px, (-?[\d.]+)px\)$/.exec(style?.transform ?? '');
+  return match ? { left: `${match[1]}px`, top: `${match[2]}px` } : undefined;
+};
 afterEach(() => {
   cleanup();
   for (const restore of restorers.splice(0).reverse()) restore();
@@ -388,7 +393,8 @@ test('worker caret blinks on the hybrid interval only while the input is focused
   tick(530);
   expect(caret().opacity).toBe('0');
   editor.present(frame(2, 0));
-  expect(caret().left).toBe('20px');
+  expect(caretAt(caret())?.left).toBe('20px');
+  expect([caret().left, caret().top, caret().willChange]).toEqual(['0px', '0px', 'transform']);
   expect(caret().opacity).toBe('1');
   tick(529);
   expect(caret().opacity).toBe('1');
@@ -735,8 +741,8 @@ test('mount requests the query engine before input and the first click uses it a
   expect(editor.queries).not.toHaveBeenCalled();
   await editor.finishEngineLoad();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.caret()?.style.left).toBe('77px');
-  expect(editor.caret()?.style.top).toBe('1206px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
+  expect(caretAt(editor.caret())?.top).toBe('1206px');
   expect(editor.queries).toHaveBeenCalledWith({ pages: [editor.displayPage] }, editor.native);
   expect(editor.load).toHaveBeenCalledTimes(1);
 });
@@ -774,8 +780,8 @@ for (const detail of [0, 1]) {
     const editor = await provisionalEditor();
     const before = editor.binding.viewStore.getSnapshot();
     fireEvent.pointerDown(editor.host, { ...editor.point, detail });
-    expect(editor.caret()?.style.left).toBe('77px');
-    expect(editor.caret()?.style.top).toBe('1206px');
+    expect(caretAt(editor.caret())?.left).toBe('77px');
+    expect(caretAt(editor.caret())?.top).toBe('1206px');
     expect(editor.caret()?.style.height).toBe('18px');
     expect(editor.caret()?.style.opacity).toBe('1');
     expect(editor.binding.viewStore.getSnapshot().geometry).toBe(before.geometry);
@@ -845,12 +851,12 @@ test('consecutive detail-zero presses exclude double and triple clicks from the 
 test('a covering frame replaces the provisional caret with its authoritative caret', async () => {
   const editor = await provisionalEditor();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   await editor.acknowledge(0, 'applied', { version: 0 });
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   editor.present(frame(2, editor.commands[0]!.seq));
-  await waitFor(() => expect(editor.caret()?.style.left).toBe('95px'));
-  expect(editor.caret()?.style.top).toBe('1208px');
+  await waitFor(() => expect(caretAt(editor.caret())?.left).toBe('95px'));
+  expect(caretAt(editor.caret())?.top).toBe('1208px');
   expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
 });
 
@@ -871,7 +877,7 @@ for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pendin
       isPrimary: excluded !== 'nonprimary press', button: excluded === 'secondary button' ? 2 : 0,
       ctrlKey: excluded === 'modified click', detail: excluded === 'double-click' ? 2 : excluded === 'triple-click' ? 3 : 0 });
     expect(editor.binding.viewStore.getSnapshot().provisionalCaret ?? null).toBeNull();
-    expect(editor.caret()?.style.left).not.toBe('77px');
+    expect(caretAt(editor.caret())?.left).not.toBe('77px');
     expect(editor.caretRect).not.toHaveBeenCalled();
     if (excluded !== 'non-body hit') expect(editor.queries).toHaveBeenCalledTimes(queryCount);
     expect(editor.load).toHaveBeenCalledTimes(excluded === 'unloaded engine' ? 1 : 0);
@@ -881,7 +887,7 @@ for (const excluded of ['shift-click', 'non-body hit', 'stale geometry', 'pendin
 test('a navigate intent drops the provisional caret before another frame', async () => {
   const editor = await provisionalEditor();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   await editor.acknowledge(0, 'applied');
   fireEvent.keyDown(editor.textarea, { key: 'ArrowRight', code: 'ArrowRight' });
   expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
@@ -892,28 +898,86 @@ test('a navigate intent drops the provisional caret before another frame', async
 test('composition start drops the provisional caret', async () => {
   const editor = await provisionalEditor();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   preedit(editor.textarea, 'compositionstart');
   expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
   expect(editor.caret()).toBeNull();
 });
 
-test('typing waits for the click frame before echo replaces the provisional caret', async () => {
+test('typing waits for the click frame before echo paints the predicted caret', async () => {
   const editor = await provisionalEditor();
   fireEvent.pointerDown(editor.host, editor.point);
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   beforeinput(editor.textarea, 'insertText', 'x');
   expect(editor.events).not.toContain('echo:x');
-  expect(editor.caret()?.style.left).toBe('77px');
+  expect(caretAt(editor.caret())?.left).toBe('77px');
   await editor.acknowledge(0, 'applied');
   await editor.acknowledge(1, 'applied');
-  const clear = spyOn(editor.binding.viewStore, 'setProvisionalCaret');
-  restorers.push(() => clear.mockRestore());
+  const setCaret = spyOn(editor.binding.viewStore, 'setProvisionalCaret');
+  restorers.push(() => setCaret.mockRestore());
   editor.present(frame(2, editor.commands[0]!.seq));
   await waitFor(() => expect(editor.events).toContain('echo:x'));
-  expect(clear).toHaveBeenCalledWith(null);
+  const predicted = { source: 'echo' as const, throughSeq: editor.commands[1]!.seq, pageIndex: 0,
+    rect: { x: 40, y: 1200, width: 1, height: 40 } };
+  expect(setCaret).toHaveBeenCalledWith(predicted);
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toEqual(predicted);
+  expect(caretAt(editor.caret())?.left).toBe('40px');
+  expect(caretAt(editor.caret())?.top).toBe('1200px');
+});
+
+test('typing paints the predicted caret before any acknowledgement and holds it until covering geometry', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 0 : 10);
+  const caret = () => editor.container.querySelector<HTMLElement>('[aria-hidden="true"]');
+  expect(caretAt(caret())?.left).toBe('0px');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  expect(editor.events).toContain('echo:x');
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.source).toBe('echo');
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.rect).toEqual({ x: 10, y: 0, width: 1, height: 40 });
+  expect(caretAt(caret())?.left).toBe('10px');
+  await editor.acknowledge(0, 'applied');
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).not.toBeNull();
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.throughSeq).toBe(editor.commands[0]!.seq);
+  expect(caret()).not.toBeNull();
+  expect(caretAt(caret())?.left).toBe('10px');
+  editor.present(frame(2, editor.commands[0]!.seq, 'x'));
   expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBeNull();
-  expect(editor.caret()).toBeNull();
+  expect(caretAt(caret())?.left).toBe('10px');
+});
+
+test('typing a predicted key moves only the caret without republishing the editor snapshot', async () => {
+  const editor = await mount(false, false, false, undefined, () => 0);
+  const caret = () => editor.container.querySelector<HTMLElement>('[aria-hidden="true"]');
+  expect(caretAt(caret())?.left).toBe('0px');
+  let renders = 0;
+  const off = editor.binding.viewStore.subscribe(() => { renders += 1; });
+  try {
+    beforeinput(editor.textarea, 'insertText', 'x');
+    expect(editor.events).toContain('echo:x');
+    expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.source).toBe('echo');
+    expect(caretAt(caret())?.left).toBe('10px');
+    expect(renders).toBe(0);
+  } finally { off(); }
+});
+
+test('an echo clear does not remove a click caret the painter did not publish', async () => {
+  const editor = await provisionalEditor();
+  fireEvent.pointerDown(editor.host, editor.point);
+  expect(caretAt(editor.caret())?.left).toBe('77px');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  await editor.acknowledge(0, 'applied');
+  await editor.acknowledge(1, 'applied');
+  editor.present(frame(2, editor.commands[0]!.seq));
+  await waitFor(() => expect(editor.events).toContain('echo:x'));
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.source).toBe('echo');
+  let clickSeq = 999;
+  const click = { source: 'click' as const, get throughSeq() { return clickSeq; }, pageIndex: 0,
+    rect: { x: 77, y: 1206, width: 1, height: 18 } };
+  act(() => { editor.binding.viewStore.setProvisionalCaret(click); });
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBe(click);
+  act(() => { editor.binding.echoPainter.disable('unsupported'); });
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret).toBe(click);
+  clickSeq = 1000;
+  expect(editor.binding.viewStore.getSnapshot().provisionalCaret?.throughSeq).toBe(1000);
 });
 
 test('touch presses allow native panning without selecting or focusing the input', async () => {

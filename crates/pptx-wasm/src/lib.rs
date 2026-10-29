@@ -66,6 +66,18 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
+    /// requested font faces before layout, for one slide or the whole deck.
+    #[wasm_bindgen(js_name = requestedFontFacesJson)]
+    pub fn requested_font_faces_json(
+        &self,
+        document: &PptxDocument,
+        slide_id: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.inner
+            .requested_font_faces_json(document.session(), slide_id.as_deref())
+            .map_err(js_error)
+    }
+
     /// `layoutSlideJson` with its stages timed, returned as
     /// `{"layout": ..., "profile": {"scopeMs", "layoutMs", "serializeMs"}}`.
     #[wasm_bindgen(js_name = layoutSlideProfiledJson)]
@@ -191,7 +203,7 @@ pub fn compile_slide_json(slide_json: &str) -> Result<String, JsValue> {
 
 #[wasm_bindgen(js_name = rendererVersion)]
 pub fn renderer_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    pptx_engine::renderer_version().to_owned()
 }
 
 #[wasm_bindgen(js_name = decodeTiffPng)]
