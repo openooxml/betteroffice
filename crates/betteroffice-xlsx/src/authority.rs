@@ -913,7 +913,7 @@ impl WorkbookAuthority {
             hidden_dimensions: Codec::read(&mut reader)?,
             shared_strings: Codec::read(&mut reader)?,
             tables: Codec::read(&mut reader)?,
-            styles: serde_json::from_slice(reader.bytes()?)
+            styles: serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?,
         };
         if client_id == base.bootstrap_client_id {
@@ -925,12 +925,12 @@ impl WorkbookAuthority {
         if row_styles {
             base.row_styles = Codec::read(&mut reader)?;
             if !reader.is_empty() {
-                base.conditional_formats = serde_json::from_slice(reader.bytes()?)
+                base.conditional_formats = serde_json::from_str(reader.str()?)
                     .map_err(|error| SnapshotError::new(error.to_string()))?;
             }
         }
         if !reader.is_empty() {
-            base.auto_filters = serde_json::from_slice(reader.bytes()?)
+            base.auto_filters = serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?;
         }
         reader.finish()?;
