@@ -29,6 +29,15 @@ export const FORMATS: Record<string, FormatConfig> = {
       "./collaboration": "src/collaboration/index.ts",
     },
   },
+  pptx: {
+    packageDir: "packages/pptx",
+    packageName: "@betteroffice/pptx",
+    entries: {
+      ".": "src/index.ts",
+      "./worker": "src/worker.ts",
+      "./collaboration": "src/collaboration/index.ts",
+    },
+  },
 };
 
 export function entryFileName(entry: string): string {
