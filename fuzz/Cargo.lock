@@ -89,7 +89,9 @@ dependencies = [
  "betteroffice-pptx-parse",
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
+ "betteroffice-xlsx-ops",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]
@@ -183,6 +185,33 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-xlsx-calc"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-model",
+ "libm",
+]
+
+[[package]]
+name = "betteroffice-xlsx-model"
+version = "0.5.1"
+dependencies = [
+ "libm",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-xlsx-ops"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-xlsx-calc",
+ "betteroffice-xlsx-model",
+ "quick-xml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
