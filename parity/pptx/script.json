@@ -115,9 +115,9 @@
     { "op": "readCommandContent", "args": { "slideIds": ["slide:0:256"] } },
     { "op": "duplicateSlide", "args": { "slideId": "slide:0:256", "toIndex": 1 } },
     { "op": "bringShapeToFront", "args": { "slideId": "slide:0:256", "shapeId": "slide:0:256:shape:0" } },
-    { "op": "readContent", "args": {} },
-    { "op": "exportStructured", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
-    { "op": "exportMarkdown", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": true, "maxBlocks": 1000, "maxBytes": 1048576 } },
+    { "op": "readContent", "args": { "slideIds": ["slide:4242:2"] } },
+    { "op": "exportStructured", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": false, "maxBlocks": 90, "maxBytes": 1048576 } },
+    { "op": "exportMarkdown", "args": { "includeNotes": true, "includeComments": true, "includeFormatting": false, "maxBlocks": 90, "maxBytes": 1048576 } },
     { "op": "save", "args": {} }
   ]
 }
