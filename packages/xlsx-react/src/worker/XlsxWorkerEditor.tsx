@@ -54,6 +54,8 @@ import { PeerlessXlsxEditorLoader } from './PeerlessXlsxEditorLoader';
 import type { WorkerPaintRequest, WorkerPaintResult } from './WorkerPaintSource';
 import { WorkerPaintSource } from './WorkerPaintSource';
 import { WorkbookFailure } from '../components/WorkbookFailure';
+import { XlsxWorkerEditorChunkLoadError } from './XlsxWorkerEditorChunkLoadError';
+export { XlsxWorkerEditorChunkLoadError } from './XlsxWorkerEditorChunkLoadError';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -119,14 +121,6 @@ function revealAxis(position: number, size: number, frozen: boolean, scroll: num
 export const xlsxPeerlessEditorLoader = { load: () => import('./XlsxPeerlessWorkerEditor') };
 // Browsers cache a failed module fetch for the page's lifetime, so only a reload fetches the chunk again.
 const reloadPage = () => globalThis.location?.reload();
-
-export class XlsxWorkerEditorChunkLoadError extends Error {
-  readonly code = 'chunk-load-failed';
-  constructor(readonly cause: unknown) {
-    super('Failed to load the editor code. Reload the page to retry.');
-    this.name = 'XlsxWorkerEditorChunkLoadError';
-  }
-}
 
 type PeerlessEditorBoundaryProps = Pick<PeerlessSessionWorkbookProps, 'onError' | 'className' | 'style'> & {
   children: ReactNode;

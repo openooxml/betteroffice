@@ -1,10 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
-import { useEffect, useState } from 'react';
+import { StrictMode, useEffect, useState } from 'react';
 import type { XlsxInThreadEditorProps } from './XlsxEditor';
 import type { XlsxAsyncEditorApi } from './worker/createAsyncEditorApi';
 import { xlsxCommandController } from './commands/createXlsxCommandStore';
+import { LEGACY_SYNC_API } from './runtimeOptions';
+import { XlsxWorkerEditorChunkLoadError } from './worker/XlsxWorkerEditorChunkLoadError';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -38,6 +40,8 @@ mock.module('./viewer/XlsxSessionViewer', () => ({
 }));
 const { resetXlsxEngineWarningsForTests } = await import('./engineWarnings');
 const { XlsxEditor } = await import('./XlsxEditor');
+const { xlsxEditorLoaders } = await import('./XlsxEditorLoader');
+const originalLoaders = { ...xlsxEditorLoaders };
 
 function availableWorker() {
   Object.defineProperty(globalThis, 'Worker', { configurable: true, writable: true, value: class {} });
@@ -123,6 +127,7 @@ afterEach(async () => {
   await act(async () => { cleanup(); });
   for (const restore of restorers.reverse()) restore();
   restorers.length = 0;
+  Object.assign(xlsxEditorLoaders, originalLoaders);
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
@@ -136,17 +141,19 @@ describe('XlsxEditor engine dispatch', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('mounts the hybrid only with legacySyncApi and experimentalWorkerOpen and warns once across remounts', () => {
-    const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
+  it('mounts the hybrid only with legacySyncApi and experimentalWorkerOpen and warns once across remounts', async () => {
+    let view!: ReturnType<typeof render>;
+    await act(async () => { view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />); });
     expect(view.getByTestId('worker-editor').getAttribute('data-backend')).toBe('legacy');
     view.unmount();
-    render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />);
+    await act(async () => { render(<XlsxEditor legacySyncApi experimentalWorkerOpen file={file} />); });
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain('removed in 0.6.0');
   });
 
-  it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', () => {
-    const view = render(<XlsxEditor legacySyncApi file={file} />);
+  it('runs the in-thread engine for legacySyncApi without experimentalWorkerOpen', async () => {
+    let view!: ReturnType<typeof render>;
+    await act(async () => { view = render(<XlsxEditor legacySyncApi file={file} />); });
     expectInThread(view);
     view.rerender(<XlsxEditor legacySyncApi file={file} readOnly />);
     expectInThread(view);
@@ -168,13 +175,16 @@ describe('XlsxEditor engine dispatch', () => {
       const ready = mock((_api: XlsxAsyncEditorApi) => {});
       const props = { file, onReady: ready, experimentalWorkerOpen: reason === 'experimentalWorkerOpen' ? false : undefined };
       const view = render(<XlsxEditor {...props} />);
-      expectInThread(view);
       await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      expectInThread(view);
       const api = ready.mock.calls[0]![0];
       expect(api.hydrated).toBe(true);
       expect('handle' in api).toBe(false);
       expect(api.save).toBeFunction();
       await api.whenHydrated();
+      expect(host.open).toHaveBeenCalledTimes(1);
+      await act(async () => { view.rerender(<XlsxEditor {...props} readOnly plugins={[]} />); });
+      expect(ready).toHaveBeenCalledTimes(1);
       expect(host.open).toHaveBeenCalledTimes(1);
       view.unmount();
       render(<XlsxEditor {...props} />);
@@ -183,6 +193,99 @@ describe('XlsxEditor engine dispatch', () => {
       expect(warn.mock.calls[0]?.[0]).toContain('deprecated in-thread engine');
     });
   }
+
+  for (const engine of ['legacy', 'inThread'] as const) {
+    it(`opens the ${engine} lazy editor once across rerenders and cleans up on unmount`, async () => {
+      const host = inThreadWorkbook();
+      const dispose = mock(() => {});
+      const ready = mock(() => dispose);
+      const load = spyOn(xlsxEditorLoaders, engine);
+      restorers.push(() => load.mockRestore());
+      const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
+        : { file, experimentalWorkerOpen: false as const };
+      const view = render(<XlsxEditor {...props} onReady={ready} />);
+      await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(host.open).toHaveBeenCalledTimes(1);
+      await act(async () => { view.rerender(<XlsxEditor {...props} onReady={ready} readOnly plugins={[]} />); });
+      expect(ready).toHaveBeenCalledTimes(1);
+      expect(dispose).not.toHaveBeenCalled();
+      expect(host.open).toHaveBeenCalledTimes(1);
+      expect(load).toHaveBeenCalledTimes(1);
+      view.unmount();
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+
+    for (const failure of ['rejected', 'thrown'] as const) {
+      it(`reports a ${failure} ${engine} chunk once and retries after remount`, async () => {
+        inThreadWorkbook();
+        const cause = new TypeError('Chunk fetch failed');
+        const load = spyOn(xlsxEditorLoaders, engine);
+        if (failure === 'rejected') load.mockRejectedValueOnce(cause);
+        else load.mockImplementationOnce(() => { throw cause; });
+        const errors = spyOn(console, 'error').mockImplementation(() => {});
+        restorers.push(() => load.mockRestore(), () => errors.mockRestore());
+        const onError = mock((_error: Error) => { throw new Error('Host callback failed'); });
+        const ready = mock(() => {});
+        const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
+          : { file, experimentalWorkerOpen: false as const };
+        const failed = render(<StrictMode>
+          <XlsxEditor {...props} onReady={ready} onError={onError} style={{ height: 123 }} />
+        </StrictMode>);
+        await waitFor(() => expect(failed.queryByTestId('xlsx-error')).not.toBeNull());
+        expect(failed.getByRole('alert').getAttribute('data-failure')).toBe('load');
+        expect(failed.getByRole('alert').style.height).toBe('123px');
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError.mock.calls[0]![0]).toBeInstanceOf(XlsxWorkerEditorChunkLoadError);
+        expect(onError.mock.calls[0]![0]).toMatchObject({ code: 'chunk-load-failed', cause });
+        expect(ready).not.toHaveBeenCalled();
+        failed.unmount();
+        render(<XlsxEditor {...props} onReady={ready} onError={onError} />);
+        await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+        expect(load).toHaveBeenCalledTimes(2);
+        expect(onError).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    it(`ignores a rejected ${engine} chunk after unmount`, async () => {
+      let reject!: (cause: unknown) => void;
+      const pending = new Promise<never>((_resolve, fail) => { reject = fail; });
+      const load = spyOn(xlsxEditorLoaders, engine).mockReturnValue(pending);
+      const errors = spyOn(console, 'error').mockImplementation(() => {});
+      restorers.push(() => load.mockRestore(), () => errors.mockRestore());
+      const onError = mock((_error: Error) => {});
+      const props = engine === 'legacy' ? { file, [LEGACY_SYNC_API]: true as const }
+        : { file, experimentalWorkerOpen: false as const };
+      const view = render(<XlsxEditor {...props} onError={onError} />);
+      await act(async () => {});
+      expect(load).toHaveBeenCalledTimes(1);
+      view.unmount();
+      await act(async () => { reject(new TypeError('Unmounted chunk failure')); });
+      expect(onError).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+    });
+  }
+
+  it('shows the supplied indicator while the in-thread chunk loads and keeps the pending editor on rerender', async () => {
+    const host = inThreadWorkbook();
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => { resolve = done; });
+    const load = spyOn(xlsxEditorLoaders, 'inThread').mockImplementation(() => pending.then(originalLoaders.inThread));
+    restorers.push(() => load.mockRestore());
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const props = { file, experimentalWorkerOpen: false as const, onReady: ready,
+      loadingIndicator: <span>Opening workbook</span> };
+    const view = render(<XlsxEditor {...props} />);
+    expect(view.queryByText('Opening workbook')).not.toBeNull();
+    view.rerender(<XlsxEditor {...props} readOnly plugins={[]} />);
+    expect(view.queryByText('Opening workbook')).not.toBeNull();
+    expect(host.open).not.toHaveBeenCalled();
+    resolve();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    expect(view.queryByText('Opening workbook')).toBeNull();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(host.open).toHaveBeenCalledTimes(1);
+  });
 
   it('retains the worker-only session when readOnly and plugins change', () => {
     const ready = mock((_api: XlsxAsyncEditorApi) => {});

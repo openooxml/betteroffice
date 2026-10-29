@@ -14,9 +14,9 @@ export type {
   XlsxEditorCollaborationOptions,
   XlsxWorkerViewerApi,
   XlsxWorkerViewerProps,
-} from './XlsxEditor';
+} from './XlsxEditor.types';
 /** @experimental */
-export type { XlsxAsyncEditorProps, XlsxWorkerEditorProps } from './XlsxEditor';
+export type { XlsxAsyncEditorProps, XlsxWorkerEditorProps } from './XlsxEditor.types';
 /** @experimental */
 export { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 export type { XlsxAsyncEditorApi, XlsxProposalRequest, XlsxProposalResult } from './worker/createAsyncEditorApi';
