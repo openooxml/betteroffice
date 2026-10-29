@@ -21,6 +21,7 @@ import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from '.
 import { preloadEditWasm } from './wasm/index';
 import * as editWasm from './wasm/index';
 import { preloadOpcWasm } from '../wasm/opc';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces } from '../utils/embeddedFonts';
 import { PeerMetadataError } from './peerMetadata';
 import { RESIDENT_WORKER_SILENCE_MS, ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
 import { createDocxCommandConnection } from './residentCommandConnection';
@@ -63,6 +64,10 @@ beforeAll(async () => {
   const scheduler = resolve(import.meta.dir, 'residentScheduler.ts');
   const modules: Record<string, string> = {
     './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unexpected source decode"); };',
+    '../utils/embeddedFonts': `
+      export const extractEmbeddedFontFaces = (...args) => testHarness.extractEmbeddedFontFaces(...args);
+      export const getEmbeddedFontFaces = (...args) => testHarness.getEmbeddedFontFaces(...args);
+    `,
     './residentEngineSession':
       `export const createResidentEngineSession = async (heapLimitBytes) => {
         await testHarness.preload();
@@ -184,6 +189,7 @@ function worker() {
   };
   const harness = {
     encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine,
+    extractEmbeddedFontFaces, getEmbeddedFontFaces,
     createSession: null as ((heapLimitBytes?: number) => Promise<ResidentEngineSession>) | null,
     installCommands: null as ((factory: DocxCommandHooksFactory) => void) | null,
     scheduler: null as ResidentScheduler | null,

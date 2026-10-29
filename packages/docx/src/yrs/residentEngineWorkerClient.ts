@@ -786,7 +786,11 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     return response.revisionCount;
   }
 
-  async warm(): Promise<void> {
+  async warm(hostModule = false): Promise<void> {
+    if (!hostModule) {
+      await this.request({ type: 'warm' });
+      return;
+    }
     const response = this.request({ type: 'warm', hostModule: true });
     const postModule = (module: WebAssembly.Module | null): void => {
       if (this.terminalError) return;
