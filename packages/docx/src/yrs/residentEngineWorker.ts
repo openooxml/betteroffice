@@ -1405,6 +1405,10 @@ scope.onmessage = (
     resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
     return;
   }
+  if (message.type === 'prepare-save') {
+    scheduleSaveWasmPreload();
+    return;
+  }
   scheduler.submit(classify(message));
 };
 scope.onmessageerror = () => resolveHostEditModule(null);
@@ -1415,7 +1419,9 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
+type ScheduledRequest = Exclude<DocxEngineWorkerRequest, { type: 'prepare-save' }>;
+
+function classify(request: ScheduledRequest): SchedulerMessage {
   const run = () => runRequest(request);
   switch (request.type) {
     case 'edit': {
@@ -1507,7 +1513,7 @@ function isLegacyMutation(request: DocxEngineWorkerRequest): boolean {
     (request.type === 'proposal' && request.operation.kind !== 'snapshot');
 }
 
-async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
+async function runRequest(request: ScheduledRequest): Promise<void> {
   runningIds.add(request.id);
   progressReported = performance.now();
   try {
@@ -1585,7 +1591,7 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
   });
 }
 
-async function handle(request: DocxEngineWorkerRequest): Promise<void> {
+async function handle(request: ScheduledRequest): Promise<void> {
   if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);
@@ -3865,6 +3871,4 @@ function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
     memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
-  if (response.ok && (response.frame || response.commandInitial?.frame || response.commandAck?.frame ||
-    response.commandFrame?.frame)) scheduleSaveWasmPreload();
 }

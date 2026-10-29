@@ -149,7 +149,7 @@ type PendingRequest = {
 
 type AwaitedRequest = Exclude<
   ResidentEngineWorkerRequestWithoutId,
-  { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
+  { type: 'applyUpdate' | 'eraseCaret' | 'prepare-save' | 'destroy' }
 >;
 
 /**
@@ -772,6 +772,12 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
       updates: response.updates.map((update) => new Uint8Array(update)),
       version: response.version,
     };
+  }
+
+  prepareSave(): void {
+    if (this.terminalError) return;
+    const id = this.nextId++;
+    try { this.worker.postMessage({ id, type: 'prepare-save' }); } catch {}
   }
 
   async revisionCount(): Promise<number> {
