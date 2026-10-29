@@ -248,7 +248,13 @@ export async function saveEditorDocument(
   yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
   if (yieldSave) await yieldSave();
-  const capture = projected.originalBuffer ? captureSessionSave(session) : null;
+  let identities: DocxSessionSave['identities'] | undefined;
+  if (yieldSave && projected.originalBuffer) {
+    identities = session.paragraphIdentities();
+    engineProgress();
+    await yieldSave();
+  }
+  const capture = projected.originalBuffer ? captureSessionSave(session, identities) : null;
   engineProgress();
   if (yieldSave) await yieldSave();
   const document = withSavedComments(projected, session, comments, record);

@@ -295,8 +295,10 @@ export interface DocxSessionSave {
 }
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
-export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  const identities = session.paragraphIdentities();
+export function captureSessionSave(
+  session: YrsSession,
+  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities()
+): DocxSessionSave {
   engineProgress();
   const plan = session.paragraphSavePlan();
   engineProgress();

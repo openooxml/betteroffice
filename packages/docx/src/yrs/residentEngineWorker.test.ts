@@ -2426,6 +2426,8 @@ describe('resident display page release', () => {
 });
 
 describe('document worker warmup', () => {
+  const SAVE_WARMUP_IDLE_MS = 300;
+  const SAVE_WARMUP_INPUT_IDLE_MS = 600;
   const timers = new Map<number, { callback: () => void; ms: number }>();
   const realSetTimeout = globalThis.setTimeout;
   const realClearTimeout = globalThis.clearTimeout;
@@ -2491,7 +2493,7 @@ describe('document worker warmup', () => {
     return arm;
   }
 
-  test('save warmup waits for save intent, wasm loading and two seconds after commands, then runs once', async () => {
+  test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker();
     w.harness.now = () => now;
     const loading = deferred();
@@ -2503,7 +2505,7 @@ describe('document worker warmup', () => {
       client.prepareSave();
       advanceTimers(0);
       await client.edit(commandEnvelope(1));
-      advanceTimers(2_000);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
       expect(w.harness.warmSave).not.toHaveBeenCalled();
       loading.resolve();
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
@@ -2516,6 +2518,29 @@ describe('document worker warmup', () => {
       expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
     } finally {
       loading.resolve();
+      client.destroy();
+    }
+  });
+
+  test('save warmup starts within 600 ms of the first edit when typing stays idle', async () => {
+    const { w, client } = await preparedSaveWorker();
+    let startedAt: number | null = null;
+    w.harness.warmSave.mockImplementation(async (yieldSave) => {
+      startedAt = now;
+      await yieldSave();
+    });
+    try {
+      advanceTimers(SAVE_WARMUP_IDLE_MS);
+      await client.edit(commandEnvelope(1));
+      const editedAt = now;
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+      expect(w.harness.warmSave).not.toHaveBeenCalled();
+      advanceTimers(1);
+      await settleWarmup(() => w.harness.saveWarmupState!().finished);
+      expect(w.harness.warmSave).toHaveBeenCalledTimes(1);
+      expect(startedAt as number | null).toBe(editedAt + SAVE_WARMUP_INPUT_IDLE_MS);
+    } finally {
       client.destroy();
     }
   });
@@ -2549,7 +2574,7 @@ describe('document worker warmup', () => {
     const peerUpdates = mock(() => {});
     w.harness.updateListeners.add(peerUpdates);
     try {
-      advanceTimers(1_999);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
       expect(w.harness.warmSave).not.toHaveBeenCalled();
       advanceTimers(1);
@@ -2574,15 +2599,15 @@ describe('document worker warmup', () => {
     }
   });
 
-  test('every incoming request postpones save warmup and commands hold it for two seconds', async () => {
+  test('every incoming request postpones save warmup and commands restart input idle', async () => {
     const { w, client } = await preparedSaveWorker();
     try {
-      advanceTimers(1_500);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS * 3 / 4);
       await client.revisionCount();
-      advanceTimers(999);
+      advanceTimers(SAVE_WARMUP_IDLE_MS - 1);
       expect(w.harness.warmSave).not.toHaveBeenCalled();
       await client.edit(commandEnvelope(1));
-      advanceTimers(1_999);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS - 1);
       expect(w.harness.warmSave).not.toHaveBeenCalled();
       advanceTimers(1);
       await settleWarmup(() => w.harness.saveWarmupState!().finished);
@@ -2602,7 +2627,7 @@ describe('document worker warmup', () => {
       after();
     });
     if (started) {
-      advanceTimers(2_000);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
       await settleWarmup(() => w.harness.warmSave.mock.calls.length === 1);
     }
     client.destroy();
@@ -2625,7 +2650,7 @@ describe('document worker warmup', () => {
     });
     try {
       for (let attempt = 1; attempt <= 2; attempt += 1) {
-        advanceTimers(2_000);
+        advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
         await settleWarmup(() => w.harness.warmSave.mock.calls.length === attempt);
         await client.edit(commandEnvelope(attempt));
         phase.resolve();
@@ -2658,7 +2683,7 @@ describe('document worker warmup', () => {
       after();
     });
     try {
-      advanceTimers(2_000);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
       await settleWarmup(() => blocked);
       expect((await client.save({ comments: [] })).bytes.byteLength).toBe(4);
       expect(w.harness.saveWarmupState!().saveDelayMs).toBeGreaterThanOrEqual(0);
@@ -2679,7 +2704,7 @@ describe('document worker warmup', () => {
     const save = mock(async () => new ArrayBuffer(4));
     Object.assign(w.harness.session, { save, commentProjection: () => null });
     try {
-      advanceTimers(2_000);
+      advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
       await settleWarmup(() => w.harness.saveWarmupState!().finished);
       expect((await client.save({ comments: [] })).bytes.byteLength).toBe(4);
       client.prepareSave();

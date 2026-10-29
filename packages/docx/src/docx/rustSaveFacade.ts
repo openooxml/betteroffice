@@ -159,6 +159,7 @@ export async function writeDocumentWithRust(
   const { bytes, warnings } = writeDocxS13WithWarningsWire(wire, new Uint8Array(originalBuffer));
   engineProgress();
   const buffer = exactArrayBuffer(bytes);
+  if (yieldSave) await yieldSave();
   if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
   return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }

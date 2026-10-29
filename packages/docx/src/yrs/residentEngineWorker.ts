@@ -1282,8 +1282,8 @@ interface SaveWarmup {
   reject?: (error: unknown) => void;
 }
 let saveWarmup: SaveWarmup | null = null;
-const SAVE_WARMUP_IDLE_MS = 1_000;
-const SAVE_WARMUP_INPUT_IDLE_MS = 2_000;
+const SAVE_WARMUP_IDLE_MS = 300;
+const SAVE_WARMUP_INPUT_IDLE_MS = 600;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
