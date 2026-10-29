@@ -16,6 +16,7 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
+    pub source: Option<&'a crate::identity::SourceIndex>,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -53,6 +54,17 @@ impl PatchContext<'_> {
                 .collect()
         };
         (normalize(properties), normalize(run))
+    }
+
+    fn plain_style_supported(&self, properties: &Attrs) -> bool {
+        match (self.metadata, self.source) {
+            (Some(metadata), Some(source)) => metadata.plain_patch_style_supported(
+                self.story,
+                properties.get("pStyle").and_then(Value::as_str),
+                source,
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -1164,7 +1176,9 @@ pub(crate) fn diff_paragraph_v1(
                             .is_none_or(|formatting| formatting.is_empty())
                     })
                 }))
-        && para_deltas.iter().all(|delta| para_key_or_style(&delta.path));
+        && para_deltas.iter().all(|delta| para_key_or_style(&delta.path))
+        && context.plain_style_supported(&before.properties)
+        && context.plain_style_supported(&after.properties);
     let patchable_restyle = before.properties.get("pStyle") != after.properties.get("pStyle")
         && before.properties.get("numPr") == after.properties.get("numPr")
         && (original_numpr(&before).is_some() || plain_restyle)
@@ -1587,6 +1601,7 @@ mod tests {
             session_key: "p1",
             story: "body",
             metadata: None,
+            source: None,
             seeded_markers: &[],
             live_markers: &[],
         }

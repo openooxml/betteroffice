@@ -303,6 +303,63 @@ pub(crate) struct SourceMetadata {
     read: ReadSource,
     #[serde(skip)]
     peer_patch_table_styles: OnceLock<PatchTableStyles>,
+    #[serde(skip)]
+    patch_paragraph_styles: OnceLock<Option<PatchParagraphStyles>>,
+}
+
+struct PatchParagraphStyles {
+    defaults_supported: bool,
+    unsupported: BTreeSet<String>,
+}
+
+impl PatchParagraphStyles {
+    fn from_source(source: &SourceIndex) -> Option<Self> {
+        let limits = docx_parse::ParseLimits::default();
+        let parts = ooxml_opc::unzip_parts_where(
+            &source.bytes(),
+            limits.max_xml_bytes as u64,
+            |name| name.eq_ignore_ascii_case("word/styles.xml"),
+        )
+        .ok()?;
+        let (name, bytes) = parts.first()?;
+        let mut budget = docx_parse::ParseBudget::new(&limits);
+        let xml = docx_parse::xml::parse_xml(bytes, name, &mut budget).ok()?;
+        let root = xml.root()?;
+        let supported = |properties: Option<&docx_parse::XmlElement>| {
+            properties.is_none_or(|properties| {
+                properties.child_elements().all(|property| {
+                    property.namespace_prefix() == Some("w")
+                        && matches!(
+                            property.local_name(),
+                            "jc"
+                                | "outlineLvl"
+                                | "spacing"
+                                | "ind"
+                                | "keepNext"
+                                | "keepLines"
+                                | "widowControl"
+                                | "pageBreakBefore"
+                                | "contextualSpacing"
+                                | "pBdr"
+                                | "rPr"
+                        )
+                })
+            })
+        };
+        let defaults = root
+            .child("w", "docDefaults")
+            .and_then(|defaults| defaults.child("w", "pPrDefault"))
+            .and_then(|defaults| defaults.child("w", "pPr"));
+        let unsupported = root
+            .children_named("w", "style")
+            .filter(|style| !supported(style.child("w", "pPr")))
+            .filter_map(|style| style.attribute(Some("w"), "styleId").map(str::to_owned))
+            .collect();
+        Some(Self {
+            defaults_supported: supported(defaults),
+            unsupported,
+        })
+    }
 }
 
 /// A paragraph's style-derived pilcrow properties and run formatting.
@@ -351,6 +408,46 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn plain_patch_style_supported(
+        &self,
+        story: &str,
+        paragraph_style: Option<&str>,
+        source: &SourceIndex,
+    ) -> bool {
+        let Some(styles) = self
+            .patch_paragraph_styles
+            .get_or_init(|| PatchParagraphStyles::from_source(source))
+        else {
+            return false;
+        };
+        let table = self.structure.patch_table_styles.get(story).or_else(|| {
+            self.peer_patch_table_styles
+                .get()
+                .and_then(|styles| styles.get(story))
+        });
+        if !styles.defaults_supported
+            || table.is_some_and(|(paragraph, _)| {
+                object(paragraph.as_ref()).is_some_and(|properties| !properties.is_empty())
+            })
+        {
+            return false;
+        }
+        let mut current = paragraph_style.or(self.styles.default_paragraph.as_deref());
+        for _ in 0..64 {
+            let Some(id) = current else {
+                return true;
+            };
+            if styles.unsupported.contains(id) {
+                return false;
+            }
+            let Some(style) = self.styles.style(id) else {
+                return false;
+            };
+            current = string(field(Some(style), "basedOn"));
+        }
+        false
+    }
+
     pub(crate) fn seed_identities(&self) -> BTreeMap<String, (u32, u32)> {
         self.structure
             .seeded_content
@@ -6593,6 +6690,7 @@ fn seed_lowered(
             structure,
             read,
             peer_patch_table_styles: OnceLock::new(),
+            patch_paragraph_styles: OnceLock::new(),
         },
         0,
     );
@@ -6787,6 +6885,7 @@ pub(crate) fn replica_source(
             structure: context.source,
             read,
             peer_patch_table_styles: OnceLock::new(),
+            patch_paragraph_styles: OnceLock::new(),
         },
         index,
         referenced_fonts.into_iter().collect(),

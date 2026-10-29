@@ -972,7 +972,7 @@ fn plain_restyle_saves_style_properties_as_inherited() {
             assert_eq!(attrs.get("indentLeft"), Some(&Any::Number(left)));
             let defaults =
                 serde_json::to_value(attrs.get("defaultTextFormatting").unwrap()).unwrap();
-            assert_eq!(defaults["fontSize"], json!(size));
+            assert_eq!(defaults["fontSize"].as_f64(), Some(size));
             let borders = serde_json::to_value(attrs.get("borders").unwrap()).unwrap();
             assert_eq!(borders["bottom"]["color"]["rgb"], json!(color));
             let Some(Any::Map(direct)) = attrs.get("_originalFormatting") else {
@@ -1224,6 +1224,72 @@ fn restyle_unsupported_paragraph_inheritance_replaces() {
         "",
         "<w:pPr><w:bidi/></w:pPr>",
     );
+}
+
+#[test]
+fn plain_restyle_with_unmodelled_paragraph_properties_replaces() {
+    let content = "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>x</w:t></w:r>";
+    for property in [
+        "<w:pPr><w:bidi/></w:pPr>",
+        "<w:pPr><w:textDirection w:val=\"tbRl\"/></w:pPr>",
+        "<w:pPr><w:suppressAutoHyphens/></w:pPr>",
+        "<w:pPr><w:framePr w:w=\"1440\" w:h=\"720\"/></w:pPr>",
+        "<w:pPr><w:snapToGrid/></w:pPr>",
+    ] {
+        for (previous, next) in [(property, ""), ("", property), (property, property)] {
+            assert_paragraph_restyle(content, previous, next);
+        }
+    }
+}
+
+#[test]
+fn plain_restyle_with_unmodelled_inherited_style_properties_replaces() {
+    let content = "<w:pPr><w:pStyle w:val=\"A\"/></w:pPr><w:r><w:t>x</w:t></w:r>";
+    for defaults in [false, true] {
+        let (_, bytes, _) = restyle_source(
+            content,
+            "",
+            if defaults {
+                ""
+            } else {
+                "<w:basedOn w:val=\"Parent\"/>"
+            },
+        );
+        let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+        let (_, styles) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/styles.xml")
+            .unwrap();
+        let inherited = if defaults {
+            concat!(
+                "<w:docDefaults><w:pPrDefault><w:pPr><w:textDirection w:val=\"tbRl\"/>",
+                "</w:pPr></w:pPrDefault></w:docDefaults>",
+            )
+        } else {
+            concat!(
+                "<w:style w:type=\"paragraph\" w:styleId=\"Parent\"><w:name w:val=\"Parent\"/>",
+                "<w:pPr><w:textDirection w:val=\"tbRl\"/></w:pPr></w:style>",
+            )
+        };
+        *styles = std::str::from_utf8(styles)
+            .unwrap()
+            .replace("</w:styles>", &format!("{inherited}</w:styles>"))
+            .into_bytes();
+        let styles = StyleResolver::from_parts(&parts).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let doc = EditingDoc::new(71);
+        seed_from_docx(&doc, &bytes).unwrap();
+        doc.restyle_paragraphs(
+            &ctx(),
+            &ParaSelector::One("00000001".to_owned()),
+            "B",
+            &styles,
+        )
+        .unwrap();
+        assert_restyle_replace(&doc, &bytes, |paragraph| {
+            paragraph["formatting"]["styleId"] = json!("B");
+        });
+    }
 }
 
 #[test]

@@ -3111,6 +3111,7 @@ impl EditingDoc {
                             session_key: key,
                             story,
                             metadata: metadata.as_deref(),
+                            source: Some(&source),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
