@@ -42,7 +42,6 @@
 //! Story lengths, selection indices and every other unit count in this module
 //! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
-use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -58,21 +57,23 @@ use crate::compare::CompareOutcome;
 use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
 use crate::engine::RelayoutTrigger;
 use crate::presence::{encode_sticky, resolve_sticky_selection};
-use crate::segments::SegKind;
+use crate::session::args::{
+    AdjacentStoryUnit, DeleteDirection, IndexedLoc, adjacent_story_unit, attrs_value,
+    comment_ranges, embed_at, find_para_span, index_loc, json_to_any, loc_index,
+    parse_change_target, parse_inline_format_delta, tri_state_value,
+};
 use crate::session::{
     EditSessionCore, EngineError, EngineErrorKind, Host, LocalCellPoint, LocalCellSelection,
     LocalSelection, ParagraphIdentitiesCache,
 };
 use crate::structured::ExportOptions;
 use crate::{
-    AnchorResolution, AnchorUnsupported, CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx,
-    EditRefusal, EditRequest, EditTextView, EditingDoc, FindTextRequest, FontFamilyPatch,
-    FormatPolicy, InlineFormatDelta, Loc, LocRange, MergeDirection, OpError, ParaAttrDelta,
-    ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal,
-    ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position, RawOp,
-    ReadParagraphsRequest, ReadStoriesRequest, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode,
+    AnchorResolution, AnchorUnsupported, ChangeKind, EditCtx, EditRefusal, EditRequest,
+    EditTextView, FindTextRequest, Loc, LocRange, MergeDirection, OpError, ParagraphAnchor,
+    ParagraphIdDiagnostic, ParagraphIdOrigin, ParagraphIdRefusal, ParagraphOrigin, ParagraphRef,
+    PersistedParagraphIds, Position, ReadParagraphsRequest, ReadStoriesRequest, SegmentContent,
+    SourceParagraphRef, SourceStory, SourceStoryKind, SpliceAnchor, StoryRange, TableLocator,
+    TableRange, TextTarget, UndoCaptureMode,
 };
 
 #[wasm_bindgen]
@@ -106,22 +107,6 @@ fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
         ));
     }
     Ok(epoch as u64)
-}
-
-/// `{"revisionId", "range"}` for a text edit's receipt.
-fn text_receipt_json(receipt: crate::Receipt) -> String {
-    let range = receipt.range.map(|range| {
-        json!({
-            "story": range.start.story,
-            "start": { "paraId": range.start.para, "offset": range.start.offset },
-            "end": { "paraId": range.end.para, "offset": range.end.offset },
-        })
-    });
-    json!({
-        "revisionId": receipt.revision_ids.into_iter().next(),
-        "range": range,
-    })
-    .to_string()
 }
 
 fn js_err(error: impl std::fmt::Display) -> JsValue {
@@ -166,645 +151,6 @@ fn js_entropy() -> u64 {
         0
     }
 }
-/// Builds the op [`EditCtx`]. Suggesting mode crosses the boundary as an
-/// optional `(name, date)` pair — both-or-neither; a plain local edit uses an
-/// empty author (author/date are stamped only in suggesting mode).
-fn edit_ctx(name: Option<String>, date: Option<String>) -> Result<EditCtx, JsValue> {
-    match (name, date) {
-        (None, None) => Ok(EditCtx::local(String::new(), String::new())),
-        (Some(name), Some(date)) => Ok(EditCtx::local(name, date).suggesting()),
-        _ => Err(js_err(
-            "suggesting requires both an author name and an ISO date",
-        )),
-    }
-}
-
-fn parse_any_object(json: &str, label: &str) -> Result<HashMap<String, Any>, JsValue> {
-    match Any::from_json(json).map_err(js_err)? {
-        Any::Map(value) => Ok(value.as_ref().clone()),
-        _ => Err(js_err(format!("{label} must be a JSON object"))),
-    }
-}
-
-struct ParaSpan {
-    /// Story index of the paragraph's first unit (after the previous pilcrow).
-    start: u32,
-    /// Story index of the paragraph's own pilcrow embed.
-    pilcrow: u32,
-}
-
-struct IndexedLoc {
-    para_id: String,
-    offset: u32,
-    node_offset: u32,
-}
-
-#[derive(Clone, Copy)]
-enum DeleteDirection {
-    Backward,
-    Forward,
-}
-
-#[derive(Clone, Copy)]
-enum AdjacentStoryUnit {
-    Content(u32),
-    Pilcrow,
-    Table,
-}
-
-/// Resolves a paragraph to its story span via the committed paragraph index.
-/// Story-scoped: a `para_id` that lives in another story is "not found".
-fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
-    doc.paragraph_index(story)
-        .map_err(js_err)?
-        .para_span(para_id)
-        .map(|(start, pilcrow)| ParaSpan { start, pilcrow })
-        .ok_or_else(|| {
-            js_err(format!(
-                "paragraph {para_id:?} was not found in story {story:?}"
-            ))
-        })
-}
-
-/// `Loc { story, paraId, offset }` -> transient story-global index.
-fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Result<u32, JsValue> {
-    let span = find_para_span(doc, story, para_id)?;
-    let para_len = span.pilcrow - span.start;
-    if offset > para_len {
-        return Err(js_err(format!(
-            "offset {offset} exceeds the length {para_len} of paragraph {para_id:?}"
-        )));
-    }
-    Ok(span.start + offset)
-}
-
-fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> Result<Vec<StoryRange>, JsValue> {
-    let value: Value = serde_json::from_str(ranges_json).map_err(js_err)?;
-    let entries = value
-        .as_array()
-        .ok_or_else(|| js_err("expected an array of comment ranges"))?;
-    let mut ranges = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let get_str = |key: &str| {
-            entry
-                .get(key)
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err(format!("a comment range requires a string {key:?}")))
-        };
-        let get_offset = |key: &str| {
-            entry
-                .get(key)
-                .and_then(Value::as_u64)
-                .ok_or_else(|| js_err(format!("a comment range requires a non-negative {key:?}")))
-                .and_then(|offset| {
-                    u32::try_from(offset).map_err(|_| js_err("comment offset exceeds u32"))
-                })
-        };
-        let story = get_str("story")?;
-        let start = loc_index(
-            doc,
-            story,
-            get_str("startPara")?,
-            get_offset("startOffset")?,
-        )?;
-        let end = loc_index(doc, story, get_str("endPara")?, get_offset("endOffset")?)?;
-        ranges.push(StoryRange::new(story, start, end));
-    }
-    Ok(ranges)
-}
-
-/// Transient story-global index -> public paragraph-keyed location. Sticky
-/// awareness positions resolve to story indices; the JS facade never exposes
-/// that internal coordinate system.
-fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
-    let paragraphs = doc.paragraph_index(story).map_err(js_err)?;
-    let para = paragraphs.para_at(index).ok_or_else(|| {
-        js_err(format!(
-            "selection index {index} does not resolve in story {story:?}"
-        ))
-    })?;
-    Ok(IndexedLoc {
-        para_id: para.para_id.to_string(),
-        offset: index.saturating_sub(para.start),
-        node_offset: index.saturating_sub(para.node_start),
-    })
-}
-
-fn adjacent_story_unit(
-    doc: &EditingDoc,
-    story: &str,
-    index: u32,
-    direction: DeleteDirection,
-) -> Result<Option<AdjacentStoryUnit>, JsValue> {
-    let segments = doc.segment_index(story).map_err(js_err)?;
-    let position = match direction {
-        DeleteDirection::Backward => index.checked_sub(1),
-        DeleteDirection::Forward => Some(index),
-    };
-    let Some(segment) = position.and_then(|pos| segments.segment_at(pos)) else {
-        return Ok(None);
-    };
-    Ok(Some(match &segment.kind {
-        SegKind::Text(text) => {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            let relative = (index - segment.start) as usize;
-            let width = match direction {
-                DeleteDirection::Backward
-                    if relative > 1
-                        && (0xdc00..=0xdfff).contains(&units[relative - 1])
-                        && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
-                {
-                    2
-                }
-                DeleteDirection::Forward
-                    if relative + 1 < units.len()
-                        && (0xd800..=0xdbff).contains(&units[relative])
-                        && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
-                {
-                    2
-                }
-                _ => 1,
-            };
-            AdjacentStoryUnit::Content(width)
-        }
-        SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
-        SegKind::Embed if table_embed_at(doc, story, segment.start)? => AdjacentStoryUnit::Table,
-        SegKind::Embed => AdjacentStoryUnit::Content(1),
-    }))
-}
-
-fn table_embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
-    let txn = doc.yrs_doc().transact();
-    let text = crate::story_ref(&txn, story).map_err(js_err)?;
-    let chunks = crate::ops::snapshot_range(&text, &txn, index, index.saturating_add(1));
-    Ok(chunks.first().is_some_and(|chunk| {
-        matches!(
-            &chunk.kind,
-            crate::ops::ChunkKind::Embed(Some(map))
-                if crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("table")
-        )
-    }))
-}
-
-fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> {
-    let segments = doc.segment_index(story).map_err(js_err)?;
-    Ok(segments
-        .segment_at(index)
-        .is_some_and(|segment| matches!(segment.kind, SegKind::Embed)))
-}
-
-/// Applies one boundary mark to `range`. `mark_json`:
-/// `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
-/// {"type":"fontFamily"|"color","value":string} |
-/// {"type":"fontSize","value":number}`. The six simple types toggle; font,
-/// size and color set.
-fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -> Result<(), JsValue> {
-    let value: Value = serde_json::from_str(mark_json).map_err(js_err)?;
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| js_err("mark JSON requires a string \"type\""))?;
-    // Formatting is never itself a tracked change, so the caret's suggest mode
-    // is irrelevant here.
-    let ctx = EditCtx::local(String::new(), String::new());
-    let simple = match kind {
-        "bold" => Some(SimpleFormat::Bold),
-        "italic" => Some(SimpleFormat::Italic),
-        "underline" => Some(SimpleFormat::Underline),
-        "strike" => Some(SimpleFormat::Strike),
-        "superscript" => Some(SimpleFormat::Superscript),
-        "subscript" => Some(SimpleFormat::Subscript),
-        _ => None,
-    };
-    if let Some(format) = simple {
-        doc.toggle_format(&ctx, range, format).map_err(js_err)?;
-        return Ok(());
-    }
-    let delta = match kind {
-        "fontFamily" => {
-            let family = value
-                .get("value")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("mark type \"fontFamily\" requires a string \"value\""))?;
-            InlineFormatDelta {
-                font_family: Patch::Set(FontFamilyPatch {
-                    ascii: family.to_owned(),
-                    h_ansi: None,
-                }),
-                ..Default::default()
-            }
-        }
-        "fontSize" => {
-            let size = value
-                .get("value")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| js_err("mark type \"fontSize\" requires a numeric \"value\""))?;
-            InlineFormatDelta {
-                font_size: Patch::Set(size),
-                ..Default::default()
-            }
-        }
-        "color" => {
-            let color = value
-                .get("value")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("mark type \"color\" requires a string \"value\""))?;
-            InlineFormatDelta {
-                color: Patch::Set(ColorPatch::Rgb(color.to_owned())),
-                ..Default::default()
-            }
-        }
-        other => return Err(js_err(format!("unknown mark type {other:?}"))),
-    };
-    doc.format_range(&ctx, range, &delta).map_err(js_err)?;
-    Ok(())
-}
-
-/// Decodes a tri-state inline-formatting delta. An omitted key is
-/// [`Patch::Keep`], `null` is [`Patch::Clear`], any typed value is
-/// [`Patch::Set`]. Boolean `false` also clears.
-fn parse_inline_format_delta(delta_json: &str) -> Result<InlineFormatDelta, JsValue> {
-    let value: Value = serde_json::from_str(delta_json).map_err(js_err)?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| js_err("format_range expects a JSON object delta"))?;
-    crate::format::parse_inline_format_delta(object).map_err(js_err)
-}
-
-/// Decodes the public facade's tri-state paragraph-property delta. Typed
-/// fields lower to [`ParaAttrDelta`]; list/render metadata and other passive
-/// pPr fields use its `other` bag. Omitted fields are kept and `null` clears.
-fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
-    let value: Value = serde_json::from_str(attrs_json).map_err(js_err)?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| js_err("set_paragraph_attrs expects a JSON object"))?;
-
-    let string_patch = |key: &str| -> Result<Patch<String>, JsValue> {
-        match object.get(key) {
-            None => Ok(Patch::Keep),
-            Some(Value::Null) => Ok(Patch::Clear),
-            Some(Value::String(value)) => Ok(Patch::Set(value.clone())),
-            Some(_) => Err(js_err(format!(
-                "paragraph attribute {key:?} must be a string or null"
-            ))),
-        }
-    };
-    let number_patch =
-        |key: &str| -> Result<Patch<f64>, JsValue> {
-            match object.get(key) {
-                None => Ok(Patch::Keep),
-                Some(Value::Null) => Ok(Patch::Clear),
-                Some(Value::Number(value)) => Ok(Patch::Set(value.as_f64().ok_or_else(|| {
-                    js_err(format!("paragraph attribute {key:?} must be finite"))
-                })?)),
-                Some(_) => Err(js_err(format!(
-                    "paragraph attribute {key:?} must be a number or null"
-                ))),
-            }
-        };
-    let bool_patch = |key: &str| -> Result<Patch<bool>, JsValue> {
-        match object.get(key) {
-            None => Ok(Patch::Keep),
-            Some(Value::Null) => Ok(Patch::Clear),
-            Some(Value::Bool(value)) => Ok(Patch::Set(*value)),
-            Some(_) => Err(js_err(format!(
-                "paragraph attribute {key:?} must be a boolean or null"
-            ))),
-        }
-    };
-
-    let tabs = match object.get("tabs") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::Array(values)) => {
-            let mut stops = Vec::with_capacity(values.len());
-            for value in values {
-                let stop = value
-                    .as_object()
-                    .ok_or_else(|| js_err("each paragraph tab must be an object"))?;
-                let pos = stop
-                    .get("position")
-                    .and_then(Value::as_f64)
-                    .ok_or_else(|| js_err("a paragraph tab requires numeric \"position\""))?;
-                let alignment = stop
-                    .get("alignment")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| js_err("a paragraph tab requires string \"alignment\""))?;
-                let leader =
-                    stop.get("leader")
-                        .map(|entry| {
-                            entry.as_str().map(str::to_owned).ok_or_else(|| {
-                                js_err("a paragraph tab \"leader\" must be a string")
-                            })
-                        })
-                        .transpose()?;
-                stops.push(TabStop {
-                    pos,
-                    alignment: alignment.to_owned(),
-                    leader,
-                });
-            }
-            Patch::Set(stops)
-        }
-        Some(_) => {
-            return Err(js_err(
-                "paragraph attribute \"tabs\" must be an array or null",
-            ));
-        }
-    };
-
-    let default_text_formatting = match object.get("defaultTextFormatting") {
-        None => Patch::Keep,
-        Some(Value::Null) => Patch::Clear,
-        Some(Value::Object(values)) => {
-            let mut formatting = BTreeMap::new();
-            for (key, value) in values {
-                formatting.insert(key.clone(), json_to_any(value)?);
-            }
-            Patch::Set(formatting)
-        }
-        Some(_) => {
-            return Err(js_err(
-                "paragraph attribute \"defaultTextFormatting\" must be an object or null",
-            ));
-        }
-    };
-
-    const TYPED_KEYS: [&str; 13] = [
-        "alignment",
-        "lineSpacing",
-        "lineSpacingRule",
-        "spaceBefore",
-        "spaceAfter",
-        "indentLeft",
-        "indentRight",
-        "indentFirstLine",
-        "hangingIndent",
-        "bidi",
-        "tabs",
-        "defaultTextFormatting",
-        "other",
-    ];
-    let mut other = BTreeMap::new();
-    for (key, value) in object {
-        if TYPED_KEYS.contains(&key.as_str()) {
-            continue;
-        }
-        other.insert(
-            key.clone(),
-            if value.is_null() {
-                None
-            } else {
-                Some(json_to_any(value)?)
-            },
-        );
-    }
-    if let Some(value) = object.get("other") {
-        let entries = value
-            .as_object()
-            .ok_or_else(|| js_err("paragraph attribute \"other\" must be an object"))?;
-        for (key, value) in entries {
-            other.insert(
-                key.clone(),
-                if value.is_null() {
-                    None
-                } else {
-                    Some(json_to_any(value)?)
-                },
-            );
-        }
-    }
-
-    Ok(ParaAttrDelta {
-        alignment: string_patch("alignment")?,
-        line_spacing: number_patch("lineSpacing")?,
-        line_spacing_rule: string_patch("lineSpacingRule")?,
-        space_before: number_patch("spaceBefore")?,
-        space_after: number_patch("spaceAfter")?,
-        indent_left: number_patch("indentLeft")?,
-        indent_right: number_patch("indentRight")?,
-        indent_first_line: number_patch("indentFirstLine")?,
-        hanging_indent: number_patch("hangingIndent")?,
-        bidi: bool_patch("bidi")?,
-        tabs,
-        default_text_formatting,
-        other,
-    })
-}
-
-fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
-    serde_json::to_string(attrs)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .ok_or_else(|| JsValue::from_str("serialize attrs"))
-}
-
-fn tri_state_value(state: TriState) -> Value {
-    match state {
-        TriState::On => Value::Bool(true),
-        TriState::Off => Value::Bool(false),
-        TriState::Mixed => Value::String("mixed".to_owned()),
-    }
-}
-
-fn json_to_any(value: &Value) -> Result<Any, JsValue> {
-    Any::from_json(&value.to_string()).map_err(js_err)
-}
-
-/// Image geometry JSON → payload entries, with a nested `"other"` object
-/// flattened alongside the named fields.
-fn image_geometry_entries(geometry_json: &str) -> Result<Vec<(String, Any)>, JsValue> {
-    let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| js_err("image geometry must be a JSON object"))?;
-    let mut entries = Vec::new();
-    for (key, value) in object {
-        if key == "other" {
-            let other = value
-                .as_object()
-                .ok_or_else(|| js_err("image geometry \"other\" must be an object"))?;
-            for (other_key, other_value) in other {
-                entries.push((other_key.clone(), json_to_any(other_value)?));
-            }
-        } else {
-            entries.push((key.clone(), json_to_any(value)?));
-        }
-    }
-    Ok(entries)
-}
-
-/// A JSON object → yrs text/format attributes (`Arc<str>` keys, `Any` values).
-fn parse_attrs(value: Option<&Value>) -> Result<yrs::types::Attrs, JsValue> {
-    let mut attrs = yrs::types::Attrs::new();
-    if let Some(Value::Object(map)) = value {
-        for (key, entry) in map {
-            attrs.insert(std::sync::Arc::from(key.as_str()), json_to_any(entry)?);
-        }
-    }
-    Ok(attrs)
-}
-
-/// A JSON object → ordered `(key, Any)` embed payload entries.
-fn parse_payload(value: Option<&Value>) -> Result<Vec<(String, Any)>, JsValue> {
-    let mut out = Vec::new();
-    if let Some(Value::Object(map)) = value {
-        for (key, entry) in map {
-            out.push((key.clone(), json_to_any(entry)?));
-        }
-    }
-    Ok(out)
-}
-
-/// Parses one `{ "op", "index", … }` raw operation.
-fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
-    let op = value
-        .get("op")
-        .and_then(Value::as_str)
-        .ok_or_else(|| js_err("a raw op requires a string \"op\""))?;
-    let index = value
-        .get("index")
-        .and_then(Value::as_u64)
-        .map(|i| i as u32)
-        .ok_or_else(|| js_err("a raw op requires a non-negative \"index\""));
-    let u32_field = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .ok_or_else(|| js_err(format!("op {op:?} requires a non-negative {key:?}")))
-    };
-    match op {
-        "insert" => Ok(RawOp::Insert {
-            index: index?,
-            text: value
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            attrs: parse_attrs(value.get("attrs"))?,
-        }),
-        "delete" => Ok(RawOp::Delete {
-            index: index?,
-            len: u32_field("len")?,
-        }),
-        "format" => Ok(RawOp::Format {
-            index: index?,
-            len: u32_field("len")?,
-            attrs: parse_attrs(value.get("attrs"))?,
-        }),
-        "insertEmbed" => Ok(RawOp::InsertEmbed {
-            index: index?,
-            kind: value
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            payload: parse_payload(value.get("payload"))?,
-            attrs: parse_attrs(value.get("attrs"))?,
-        }),
-        "setEmbedAttr" => Ok(RawOp::SetEmbedAttr {
-            index: index?,
-            key: value
-                .get("key")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("setEmbedAttr requires a string \"key\""))?
-                .to_owned(),
-            value: json_to_any(value.get("value").unwrap_or(&Value::Null))?,
-        }),
-        "setComment" => {
-            let ranges_value = value
-                .get("ranges")
-                .and_then(Value::as_array)
-                .ok_or_else(|| js_err("setComment requires an array \"ranges\""))?;
-            let mut ranges = Vec::with_capacity(ranges_value.len());
-            for entry in ranges_value {
-                let pair = entry
-                    .as_array()
-                    .filter(|pair| pair.len() == 2)
-                    .ok_or_else(|| js_err("a setComment range must be a [start, end] pair"))?;
-                let bound = |index: usize| {
-                    pair[index]
-                        .as_u64()
-                        .map(|bound| bound as u32)
-                        .ok_or_else(|| {
-                            js_err("a setComment range bound must be a non-negative integer")
-                        })
-                };
-                ranges.push((bound(0)?, bound(1)?));
-            }
-            Ok(RawOp::SetComment {
-                id: value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| js_err("setComment requires a string \"id\""))?
-                    .to_owned(),
-                ranges,
-                author: value
-                    .get("author")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                date: value
-                    .get("date")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                body: json_to_any(value.get("body").unwrap_or(&Value::Null))?,
-            })
-        }
-        "removeComment" => Ok(RawOp::RemoveComment {
-            id: value
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| js_err("removeComment requires a string \"id\""))?
-                .to_owned(),
-        }),
-        other => Err(js_err(format!("unknown raw op {other:?}"))),
-    }
-}
-
-fn parse_raw_ops(ops_json: &str) -> Result<Vec<RawOp>, JsValue> {
-    let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
-    let entries = value
-        .as_array()
-        .ok_or_else(|| js_err("apply_raw_ops expects an array of ops"))?;
-    entries.iter().map(parse_raw_op).collect()
-}
-
-/// Parses an accept/reject target from JSON: `{"revisionId": string}` (one
-/// coalesced revision, any story) or a Loc range
-/// `{"story","startPara","startOffset","endPara","endOffset"}`.
-fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarget, JsValue> {
-    let value: Value = serde_json::from_str(target_json).map_err(js_err)?;
-    if let Some(id) = value.get("revisionId").and_then(Value::as_str) {
-        return Ok(ChangeTarget::Revision(id.to_owned()));
-    }
-    let get_str = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .ok_or_else(|| js_err(format!("a change range requires a string {key:?}")))
-    };
-    let get_offset = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_u64)
-            .map(|offset| offset as u32)
-            .ok_or_else(|| js_err(format!("a change range requires a non-negative {key:?}")))
-    };
-    let story = get_str("story")?;
-    let start = loc_index(
-        doc,
-        story,
-        get_str("startPara")?,
-        get_offset("startOffset")?,
-    )?;
-    let end = loc_index(doc, story, get_str("endPara")?, get_offset("endOffset")?)?;
-    Ok(ChangeTarget::Range(StoryRange::new(story, start, end)))
-}
-
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
 /// "pageContentHeight": number|null, "numericIds": {yrsId: number},
@@ -2454,12 +1800,6 @@ impl EditSession {
         self.undo.select_story(story);
     }
 
-    fn select_embed_story(&self, embed_id: &str) -> Result<(), JsValue> {
-        let story = self.engine.doc().embed_story(embed_id).map_err(js_err)?;
-        self.undo.select_story(&story);
-        Ok(())
-    }
-
     /// Reverts the latest local-origin step and reports whether anything was
     /// reverted. Remote and system transactions are excluded by the manager's
     /// tracked-origin policy; `false` before tracking starts.
@@ -2884,14 +2224,17 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_table(&ctx, Position::new(story, index), rows, columns)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .insert_table(
+                story,
+                para_id,
+                offset,
+                rows,
+                columns,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Inserts a clipboard table fragment at `(story, para_id, offset)`.
@@ -2907,20 +2250,22 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let fragment: Value = serde_json::from_str(fragment_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_table_fragment(&ctx, Position::new(story, index), &fragment)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .insert_table_fragment(
+                story,
+                para_id,
+                offset,
+                fragment_json,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     pub fn validate_table_fragment(&self, fragment_json: &str) -> Result<(), JsValue> {
-        let fragment: Value = serde_json::from_str(fragment_json).map_err(js_err)?;
-        EditingDoc::validate_table_fragment(&fragment).map_err(js_err)
+        self.core
+            .validate_table_fragment(fragment_json)
+            .map_err(JsValue::from)
     }
 
     /// Inserts a row above (`after = false`) or below (`after = true`) the
@@ -2932,26 +2277,17 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_row(&ctx, &at, after)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .insert_row(at_json, after, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// Inserts a column left (`after = false`) or right (`after = true`) of
     /// the cell `at_json` ([`CellLoc`]) names. Always a plain local edit.
     pub fn insert_column(&self, at_json: &str, after: bool) -> Result<String, JsValue> {
-        let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_column(&EditCtx::local("", ""), &at, after)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .insert_column(at_json, after)
+            .map_err(JsValue::from)
     }
 
     /// Deletes every row the [`TableRange`] `range_json` covers. In suggesting
@@ -2962,35 +2298,22 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self.engine.doc().delete_row(&ctx, &range).map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .delete_row(range_json, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// Deletes every column the [`TableRange`] `range_json` covers, along with
     /// the stories of the cells removed. Always a plain local edit.
     pub fn delete_column(&self, range_json: &str) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .delete_column(&EditCtx::local("", ""), &range)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core.delete_column(range_json).map_err(JsValue::from)
     }
 
     /// Removes the table `table_json` ([`TableLocator`]) names plus every one
     /// of its reachable cell stories. Always a plain local edit; the receipt
     /// has `deletedTable: true`.
     pub fn delete_table(&self, table_json: &str) -> Result<String, JsValue> {
-        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .delete_table(&EditCtx::local("", ""), &table)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core.delete_table(table_json).map_err(JsValue::from)
     }
 
     /// Merges the rectangle the [`TableRange`] `range_json` covers into its
@@ -2998,13 +2321,7 @@ impl EditSession {
     /// deleted. Always a plain local edit. Errors when the range covers fewer
     /// than two cells or has no top-left anchor cell.
     pub fn merge_cells(&self, range_json: &str) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .merge_cells(&EditCtx::local("", ""), &range)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core.merge_cells(range_json).map_err(JsValue::from)
     }
 
     /// Splits the cell `at_json` ([`CellLoc`]) covers into a `rows` x
@@ -3019,13 +2336,9 @@ impl EditSession {
         rows: Option<u32>,
         columns: Option<u32>,
     ) -> Result<String, JsValue> {
-        let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .split_cell_grid(&EditCtx::local("", ""), &at, rows, columns)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .split_cell(at_json, rows, columns)
+            .map_err(JsValue::from)
     }
 
     /// Sets every selected cell's background to `color` (hex, with or without
@@ -3036,13 +2349,9 @@ impl EditSession {
         range_json: &str,
         color: Option<String>,
     ) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_cell_shading(&EditCtx::local("", ""), &range, color.as_deref())
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_cell_shading(range_json, color)
+            .map_err(JsValue::from)
     }
 
     /// Merges the JSON object `patch_json` into every selected cell's `tcPr`;
@@ -3054,14 +2363,9 @@ impl EditSession {
         range_json: &str,
         patch_json: &str,
     ) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let patch = parse_any_object(patch_json, "cell format patch")?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_cell_text_format(&EditCtx::local("", ""), &range, &patch)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_cell_text_format(range_json, patch_json)
+            .map_err(JsValue::from)
     }
 
     /// Merges the sides of the JSON object `borders_json` into every selected
@@ -3073,40 +2377,27 @@ impl EditSession {
         range_json: &str,
         borders_json: &str,
     ) -> Result<String, JsValue> {
-        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
-        let borders = parse_any_object(borders_json, "cell borders")?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_cell_borders(&EditCtx::local("", ""), &range, &borders)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_cell_borders(range_json, borders_json)
+            .map_err(JsValue::from)
     }
 
     /// Sets the grid width, in twips, of the column holding the cell `at_json`
     /// ([`CellLoc`]) names. Always a plain local edit. Errors unless
     /// `width_twips` is finite and positive.
     pub fn set_column_width(&self, at_json: &str, width_twips: f64) -> Result<String, JsValue> {
-        let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_column_width(&EditCtx::local("", ""), &at, width_twips)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_column_width(at_json, width_twips)
+            .map_err(JsValue::from)
     }
 
     /// Sets the preferred width, in twips, of the table `table_json`
     /// ([`TableLocator`]) names. Always a plain local edit. Errors unless
     /// `width_twips` is finite and positive.
     pub fn set_table_width(&self, table_json: &str, width_twips: f64) -> Result<String, JsValue> {
-        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_table_width(&EditCtx::local("", ""), &table, width_twips)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_table_width(table_json, width_twips)
+            .map_err(JsValue::from)
     }
 
     pub fn set_table_properties(
@@ -3114,14 +2405,9 @@ impl EditSession {
         table_json: &str,
         patch_json: &str,
     ) -> Result<String, JsValue> {
-        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
-        let patch = parse_any_object(patch_json, "table properties patch")?;
-        let receipt = self
-            .engine
-            .doc()
-            .set_table_properties(&EditCtx::local("", ""), &table, &patch)
-            .map_err(js_err)?;
-        serde_json::to_string(&receipt).map_err(js_err)
+        self.core
+            .set_table_properties(table_json, patch_json)
+            .map_err(JsValue::from)
     }
 
     /// Inserts `text` at `(story, para_id, offset)`. It must contain no
@@ -3139,48 +2425,9 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let doc = self.engine.doc();
-        let before = doc.committed_epoch();
-        let indexed = doc
-            .paragraph_index(story)
-            .map_err(js_err)?
-            .para_at(at)
-            .is_some_and(|paragraph| paragraph.node_start <= at && at <= paragraph.pilcrow);
-        let mut attrs = None;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_text_observed(
-                &ctx,
-                Position::new(story, at),
-                text,
-                FormatPolicy::Inherit,
-                |effective| attrs = Some(effective.clone()),
-            )
-            .map_err(js_err)?;
-        if indexed {
-            if let Some(attrs) = attrs.as_ref() {
-                doc.advance_indexes_after_formatted_text_insert(
-                    story,
-                    before,
-                    doc.committed_epoch(),
-                    at,
-                    text,
-                    Some(attrs),
-                );
-            } else {
-                doc.advance_indexes_after_text_insert(
-                    story,
-                    before,
-                    doc.committed_epoch(),
-                    at,
-                    text,
-                );
-            }
-        }
-        Ok(text_receipt_json(receipt))
+        self.core
+            .insert_text(story, para_id, offset, text, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// A plain local text edit that the resident lowering records, so the next
@@ -3200,36 +2447,9 @@ impl EditSession {
         end_offset: u32,
         text: Option<String>,
     ) -> Result<String, JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        if text.is_some() && start != end {
-            return Err(js_err("resident text insertion needs a collapsed range"));
-        }
-        if !self
-            .engine
-            .takes_resident_text_edit(story, start_para, end_para, text.as_deref())
-        {
-            self.resident_text_edit.replace(None);
-            return match text {
-                Some(text) => self.insert_text(story, start_para, start_offset, &text, None, None),
-                None => self.delete_range(
-                    story,
-                    start_para,
-                    start_offset,
-                    end_para,
-                    end_offset,
-                    None,
-                    None,
-                ),
-            };
-        }
-        let receipt = self
-            .engine
-            .edit_resident_text(StoryRange::new(story, start, end), text.as_deref(), true)
-            .map_err(js_err)?;
-        self.resident_text_edit
-            .replace(Some((story.to_owned(), self.engine.doc_epoch())));
-        Ok(text_receipt_json(receipt))
+        self.core
+            .edit_text_resident(story, start_para, start_offset, end_para, end_offset, text)
+            .map_err(JsValue::from)
     }
 
     /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
@@ -3248,30 +2468,17 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let doc = self.engine.doc();
-        let before = doc.committed_epoch();
-        let indexed = !ctx.is_suggesting()
-            && doc
-                .segment_index(story)
-                .map_err(js_err)?
-                .is_text_range(start, end)
-            && doc
-                .paragraph_index(story)
-                .map_err(js_err)?
-                .para_at(start)
-                .is_some_and(|paragraph| paragraph.node_start <= start && end <= paragraph.pilcrow);
-        let receipt = self
-            .engine
-            .doc()
-            .delete_range(&ctx, StoryRange::new(story, start, end))
-            .map_err(js_err)?;
-        if indexed {
-            doc.advance_indexes_after_text_delete(story, before, doc.committed_epoch(), start, end);
-        }
-        Ok(text_receipt_json(receipt))
+        self.core
+            .delete_range(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
@@ -3290,15 +2497,18 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .replace_range(&ctx, StoryRange::new(story, start, end), text)
-            .map_err(js_err)?;
-        Ok(text_receipt_json(receipt))
+        self.core
+            .replace_range(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                text,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     pub fn insert_line_break(
@@ -3309,14 +2519,9 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_hard_break(&ctx, Position::new(story, at))
-            .map_err(js_err)?;
-        Ok(text_receipt_json(receipt))
+        self.core
+            .insert_line_break(story, para_id, offset, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
@@ -3334,28 +2539,9 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let receipt = if author_name.is_none() && author_date.is_none() {
-            let receipt = self
-                .engine
-                .split_resident_paragraph(Position::new(story, at))
-                .map_err(js_err)?;
-            self.resident_text_edit
-                .replace(Some((story.to_owned(), self.engine.doc_epoch())));
-            receipt
-        } else {
-            let ctx = edit_ctx(author_name, author_date)?;
-            self.engine
-                .doc()
-                .split_paragraph(&ctx, Position::new(story, at), None)
-                .map_err(js_err)?
-        };
-        Ok(json!({
-            "firstParaId": receipt.first_para_id,
-            "secondParaId": receipt.second_para_id,
-            "revisionId": receipt.revision_ids.into_iter().next(),
-        })
-        .to_string())
+        self.core
+            .split_paragraph(story, para_id, offset, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// Merges `para_id` with the FOLLOWING paragraph by deleting (plain) or
@@ -3371,15 +2557,9 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        // Validate story membership (story-scoped "not found") before merging.
-        find_para_span(self.engine.doc(), story, para_id)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .merge_paragraphs(&ctx, para_id, MergeDirection::Forward)
-            .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        self.core
+            .merge_paragraphs(story, para_id, author_name, author_date)
+            .map_err(JsValue::from)
     }
 
     /// Applies one run mark over `[start, end)`. `mark_json`:
@@ -3400,13 +2580,16 @@ impl EditSession {
         end_offset: u32,
         mark_json: &str,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        apply_mark(
-            self.engine.doc(),
-            StoryRange::new(story, start, end),
-            mark_json,
-        )
+        self.core
+            .toggle_mark(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                mark_json,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Applies a set-valued, tri-state inline formatting delta over
@@ -3440,15 +2623,16 @@ impl EditSession {
         end_offset: u32,
         delta_json: &str,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let delta = parse_inline_format_delta(delta_json)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .format_range(&ctx, StoryRange::new(story, start, end), &delta)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .format_range(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                delta_json,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Sets or clears the hyperlink attribute over `[start, end)`.
@@ -3466,22 +2650,16 @@ impl EditSession {
         end_offset: u32,
         hyperlink_json: &str,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let value: Value = serde_json::from_str(hyperlink_json).map_err(js_err)?;
-        let hyperlink = if value.is_null() {
-            None
-        } else if value.is_object() {
-            Some(json_to_any(&value)?)
-        } else {
-            return Err(js_err("set_hyperlink expects an object or null"));
-        };
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .set_hyperlink(&ctx, StoryRange::new(story, start, end), hyperlink)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .set_hyperlink(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                hyperlink_json,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Clears every direct run-formatting attribute over `[start, end)`.
@@ -3496,14 +2674,9 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .clear_formatting(&ctx, StoryRange::new(story, start, end))
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .clear_formatting(story, start_para, start_offset, end_para, end_offset)
+            .map_err(JsValue::from)
     }
 
     /// The style a paragraph break at `(story, para_id, offset)` gives the new paragraph: the
@@ -3515,21 +2688,9 @@ impl EditSession {
         para_id: &str,
         offset: u32,
     ) -> Result<Option<String>, JsValue> {
-        let span = find_para_span(self.engine.doc(), story, para_id)?;
-        if offset != span.pilcrow - span.start {
-            return Ok(None);
-        }
-        let styles = self.paragraph_style_resolver()?;
-        let Some(styles) = styles.as_ref() else {
-            return Ok(None);
-        };
-        let current = self
-            .engine
-            .doc()
-            .selection_context(&StoryRange::new(story, span.pilcrow, span.pilcrow))
-            .map_err(js_err)?
-            .style_id;
-        Ok(styles.next_paragraph_style(current.as_deref()))
+        self.core
+            .next_paragraph_style(story, para_id, offset)
+            .map_err(JsValue::from)
     }
 
     /// Applies a paragraph style and rebases inherited character formatting, preserving direct
@@ -3546,28 +2707,18 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let selector = ParaSelector::Range(StoryRange::new(story, start, end));
-        let ctx = edit_ctx(author_name, author_date)?;
-        let styles = self.paragraph_style_resolver()?;
-        if let Some(styles) = styles.as_ref() {
-            self.engine
-                .doc()
-                .restyle_paragraphs(&ctx, &selector, style_id, styles)
-                .map(|_| ())
-                .map_err(js_err)
-        } else {
-            let mut delta = ParaAttrDelta::default();
-            delta
-                .other
-                .insert("pStyle".to_owned(), Some(Any::from(style_id)));
-            self.engine
-                .doc()
-                .set_paragraph_attrs(&ctx, &selector, &delta)
-                .map(|_| ())
-                .map_err(js_err)
-        }
+        self.core
+            .apply_paragraph_style(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                style_id,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Applies a tri-state paragraph-property delta to every paragraph
@@ -3596,16 +2747,18 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<(), JsValue> {
-        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
-        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let selector = ParaSelector::Range(StoryRange::new(story, start, end));
-        let delta = parse_para_attr_delta(attrs_json)?;
-        let ctx = edit_ctx(author_name, author_date)?;
-        self.engine
-            .doc()
-            .set_paragraph_attrs(&ctx, &selector, &delta)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .set_paragraph_attrs(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                attrs_json,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Inserts one inline image embed at `(story, para_id, offset)`.
@@ -3622,24 +2775,16 @@ impl EditSession {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let Any::Map(payload) = Any::from_json(payload_json).map_err(js_err)? else {
-            return Err(js_err("insert_image expects a JSON object"));
-        };
-        let mut entries: Vec<_> = payload
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        if !payload.contains_key("noChangeAspect") {
-            entries.push(("noChangeAspect".to_owned(), Any::Bool(true)));
-        }
-        let ctx = edit_ctx(author_name, author_date)?;
-        let receipt = self
-            .engine
-            .doc()
-            .insert_embed(&ctx, Position::new(story, index), "image", entries)
-            .map_err(js_err)?;
-        Ok(text_receipt_json(receipt))
+        self.core
+            .insert_image(
+                story,
+                para_id,
+                offset,
+                payload_json,
+                author_name,
+                author_date,
+            )
+            .map_err(JsValue::from)
     }
 
     /// Moves one inline embed in one local transaction.
@@ -3653,19 +2798,9 @@ impl EditSession {
         to_para_id: &str,
         to_offset: u32,
     ) -> Result<String, JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let to_index = loc_index(self.engine.doc(), to_story, to_para_id, to_offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        let receipt = self
-            .engine
-            .doc()
-            .move_embed(
-                &ctx,
-                Position::new(story, index),
-                Position::new(to_story, to_index),
-            )
-            .map_err(js_err)?;
-        Ok(text_receipt_json(receipt))
+        self.core
+            .move_embed(story, para_id, offset, to_story, to_para_id, to_offset)
+            .map_err(JsValue::from)
     }
 
     /// Sets the authored `value` (any JSON) on the content-control embed
@@ -3678,18 +2813,9 @@ impl EditSession {
         embed_id: &str,
         value_json: &str,
     ) -> Result<(), JsValue> {
-        let value = Any::from_json(value_json).map_err(js_err)?;
-        self.select_embed_story(embed_id)?;
-        let (story, index) = self.engine.doc().embed_position(embed_id).map_err(js_err)?;
-        if self.fill_text_control(&story, index, &value)? {
-            return Ok(());
-        }
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .set_embed_attrs_by_id(&ctx, embed_id, vec![("value".to_owned(), value)])
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .set_content_control_value(embed_id, value_json)
+            .map_err(JsValue::from)
     }
 
     /// Sets the authored `value` on the content-control embed at
@@ -3705,62 +2831,18 @@ impl EditSession {
         offset: u32,
         value_json: &str,
     ) -> Result<(), JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let value = Any::from_json(value_json).map_err(js_err)?;
-        if self.fill_text_control(story, index, &value)? {
-            return Ok(());
-        }
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .set_embed_attrs(
-                &ctx,
-                Position::new(story, index),
-                vec![("value".to_owned(), value)],
-            )
-            .map(|_| ())
-            .map_err(js_err)
-    }
-
-    /// Fills the text control at `index` of `story` with a string value; `false` when the embed
-    /// there is not a text control.
-    fn fill_text_control(&self, story: &str, index: u32, value: &Any) -> Result<bool, JsValue> {
-        let doc = self.engine.doc();
-        if !doc.text_control_at(story, index).map_err(js_err)? {
-            return Ok(false);
-        }
-        let Any::String(text) = value else {
-            return Err(js_err(
-                "a plain- or rich-text content control takes a string value",
-            ));
-        };
-        match doc
-            .fill_text_control_at(story, index, text, &self.undo)
-            .map_err(js_err)?
-        {
-            Ok(_) => Ok(true),
-            Err(refusal) => Err(js_err(format!(
-                "{}: {}",
-                serde_json::to_value(refusal.failure.code)
-                    .ok()
-                    .and_then(|code| code.as_str().map(str::to_owned))
-                    .unwrap_or_default(),
-                refusal.failure.message
-            ))),
-        }
+        self.core
+            .set_content_control_value_at(story, para_id, offset, value_json)
+            .map_err(JsValue::from)
     }
 
     /// Removes the authored `value` from the content-control embed carrying
     /// `embed_id`, leaving the control and its content in place: it never
     /// erases a text control's text. Errors when no embed has that id.
     pub fn clear_content_control_value(&self, embed_id: &str) -> Result<(), JsValue> {
-        self.select_embed_story(embed_id)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .set_embed_attrs_by_id(&ctx, embed_id, vec![("value".to_owned(), Any::Null)])
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .clear_content_control_value(embed_id)
+            .map_err(JsValue::from)
     }
 
     /// Writes geometry fields onto the image embed carrying `embed_id` in one
@@ -3770,14 +2852,9 @@ impl EditSession {
     /// `geometry_json` or its `"other"` is not an object, and when no embed
     /// has that id.
     pub fn set_image_geometry(&self, embed_id: &str, geometry_json: &str) -> Result<(), JsValue> {
-        let entries = image_geometry_entries(geometry_json)?;
-        self.select_embed_story(embed_id)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .set_embed_attrs_by_id(&ctx, embed_id, entries)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .set_image_geometry(embed_id, geometry_json)
+            .map_err(JsValue::from)
     }
 
     /// [`EditSession::set_image_geometry`] for the image embed at
@@ -3791,18 +2868,9 @@ impl EditSession {
         offset: u32,
         geometry_json: &str,
     ) -> Result<(), JsValue> {
-        let entries = image_geometry_entries(geometry_json)?;
-        let doc = self.engine.doc();
-        let at = Position::new(story, loc_index(doc, story, para_id, offset)?);
-        if doc.embed_kind(&at).map_err(js_err)?.as_deref() != Some("image") {
-            return Err(js_err(format!(
-                "offset {offset} of paragraph {para_id:?} holds no image"
-            )));
-        }
-        let ctx = EditCtx::local(String::new(), String::new());
-        doc.set_embed_attrs(&ctx, at, entries)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .set_image_geometry_at(story, para_id, offset, geometry_json)
+            .map_err(JsValue::from)
     }
 
     /// Inserts a page-break embed at `(story, para_id, offset)`, occupying one
@@ -3813,13 +2881,9 @@ impl EditSession {
         para_id: &str,
         offset: u32,
     ) -> Result<(), JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .insert_embed(&ctx, Position::new(story, index), "pageBreak", vec![])
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .insert_page_break(story, para_id, offset)
+            .map_err(JsValue::from)
     }
 
     /// Inserts a section-break embed at `(story, para_id, offset)`.
@@ -3832,24 +2896,9 @@ impl EditSession {
         offset: u32,
         break_type: &str,
     ) -> Result<(), JsValue> {
-        if !matches!(
-            break_type,
-            "nextPage" | "continuous" | "oddPage" | "evenPage"
-        ) {
-            return Err(js_err(format!("unknown section break type {break_type:?}")));
-        }
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .insert_embed(
-                &ctx,
-                Position::new(story, index),
-                "sectionBreak",
-                vec![("type".to_owned(), Any::from(break_type))],
-            )
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .insert_section_break(story, para_id, offset, break_type)
+            .map_err(JsValue::from)
     }
 
     /// Inserts a watermark embed at `(story, para_id, offset)`, its payload
@@ -3862,18 +2911,9 @@ impl EditSession {
         offset: u32,
         watermark_json: &str,
     ) -> Result<(), JsValue> {
-        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let value: Value = serde_json::from_str(watermark_json).map_err(js_err)?;
-        if !value.is_object() {
-            return Err(js_err("insert_watermark expects a JSON object"));
-        }
-        let payload = parse_payload(Some(&value))?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .insert_embed(&ctx, Position::new(story, index), "watermark", payload)
-            .map(|_| ())
-            .map_err(js_err)
+        self.core
+            .insert_watermark(story, para_id, offset, watermark_json)
+            .map_err(JsValue::from)
     }
 
     /// Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
@@ -3887,11 +2927,9 @@ impl EditSession {
         key: &str,
         value_json: &str,
     ) -> Result<(), JsValue> {
-        let value = Any::from_json(value_json).map_err(js_err)?;
-        self.engine
-            .doc()
-            .set_paragraph_attr(para_id, key, value)
-            .map_err(js_err)
+        self.core
+            .set_paragraph_attr(para_id, key, value_json)
+            .map_err(JsValue::from)
     }
 
     /// Adds a comment anchored to one or more ranges. `ranges_json`:
@@ -4051,24 +3089,16 @@ impl EditSession {
     /// or a missing required field, and leaves the story untouched — parsing
     /// completes before the transaction opens.
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
-        let ops = parse_raw_ops(ops_json)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .apply_raw_ops(story, ops, &ctx)
-            .map_err(js_err)
+        self.core
+            .apply_raw_ops(story, ops_json)
+            .map_err(JsValue::from)
     }
 
     /// Applies seed raw operations with deterministic item ordering.
     pub fn apply_seed_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
-        let ops = parse_raw_ops(ops_json)?;
-        let ctx = EditCtx::local(String::new(), String::new());
-        self.engine
-            .doc()
-            .apply_raw_story_batches(vec![(story.to_owned(), ops)], &ctx)
-            .map_err(js_err)?;
-        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
-        Ok(())
+        self.core
+            .apply_seed_raw_ops(story, ops_json)
+            .map_err(JsValue::from)
     }
 
     // -- version-checked host edits --
@@ -5255,7 +4285,7 @@ pub fn render_docx_markdown_with_pages_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditCtx, RawOp, UndoSession, story_ref};
+    use crate::{EditCtx, EditingDoc, FormatPolicy, RawOp, TriState, UndoSession, story_ref};
     use yrs::{IndexedSequence, Map};
 
     #[test]
