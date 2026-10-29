@@ -99,6 +99,18 @@ class PptxSlideNotesStep(_Step):
     text: str
 
 
+class PptxSlideBackgroundStep(_Step):
+    op: Literal["setSlideBackground"]
+    target: PptxSlideTarget
+    background: Union[Dict[str, Any], None]
+
+
+class PptxShapeAdjustStep(TypedDict):
+    op: Literal["setShapeAdjust"]
+    target: PptxShapeTarget
+    adjustments: Dict[str, float]
+
+
 class PptxShapeRectStep(_Step):
     op: Literal["setShapeRect"]
     target: PptxShapeTarget
@@ -124,6 +136,8 @@ PptxEditStep = Union[
     PptxFormatTextStep,
     PptxParagraphAlignmentStep,
     PptxSlideNotesStep,
+    PptxSlideBackgroundStep,
+    PptxShapeAdjustStep,
     PptxShapeRectStep,
     PptxShapeFillStep,
     PptxShapeStrokeStep,

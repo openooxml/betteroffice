@@ -44,6 +44,14 @@ impl ListState {
             ..Self::default()
         }
     }
+
+    pub(crate) fn first_picture_bullet(&self) -> Option<&docx_parse::numbering::PictureBulletSize> {
+        self.numbering
+            .as_ref()?
+            .definitions
+            .first_picture_bullet
+            .as_ref()
+    }
 }
 
 /// The level a numbering property names, when it is one of the nine OOXML defines.
