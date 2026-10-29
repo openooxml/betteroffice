@@ -1,6 +1,7 @@
 //! GDI raster operations without a source bitmap, and `GRADIENTFILL`.
 
 use crate::drawing::{Paint, PathCommand, Rgba};
+use crate::fmath;
 use crate::player::Player;
 use crate::read::{i32_at, u16_at, u32_at};
 
@@ -202,7 +203,7 @@ fn shade_triangle<const FULL: bool>(player: &mut Player<FULL>, corner: [Gradient
             channel(0) | channel(1) << 8 | channel(2) << 16,
         ))
     };
-    let length = slope[dominant].0.hypot(slope[dominant].1);
+    let length = fmath::hypot(slope[dominant].0, slope[dominant].1);
     if !length.is_normal() {
         fill_polygon(player, &points, colour_at(points[0]));
         return;

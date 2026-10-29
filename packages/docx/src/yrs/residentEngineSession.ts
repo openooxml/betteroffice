@@ -50,6 +50,7 @@ import type { DocxSvgMedia } from './residentCommandProtocol';
 import { projectResidentComments, type ResidentCommentRecoveryState, type ResidentCommentProjection } from './residentCommentProjection';
 import { DirtyProjectionStories } from './dirtyProjectionStories';
 import { resolveHostJsonCommentMedia } from './hostMedia';
+import { editSessionUpdateEvents } from './updateEvents';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
 import { decodeDocxHostJson, forgetMaterializedSource, seedDocxCommentMetadata, wrapSession } from './yrsSessionFacade';
 import { documentToYrs } from './documentToYrs';
@@ -283,7 +284,8 @@ export async function createResidentEngineSession(
   requireUnreservedClientId(clientId);
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
-  const session = createEditSession(requireUnreservedClientId(clientId));
+  const hub = editSessionUpdateEvents(createEditSession(requireUnreservedClientId(clientId)));
+  const session = hub.session;
   let partBase: Document | undefined;
   const commentAliases = new Map<string, number>();
   let commentsInitialized = false;
@@ -457,28 +459,36 @@ export async function createResidentEngineSession(
     undoTracked = true;
   };
 
+  let unsubscribeUpdates: (() => void) | null = null;
+
   const detachObserver = (): void => {
     if (destroyed || !observing || listeners.size > 0) return;
-    session.clear_update_observer();
+    const unsubscribe = unsubscribeUpdates;
+    unsubscribeUpdates = null;
     observing = false;
+    unsubscribe?.();
   };
 
   const destroyNative = (): void => {
     if (observing) {
-      session.clear_update_observer();
+      const unsubscribe = unsubscribeUpdates;
+      unsubscribeUpdates = null;
       observing = false;
+      unsubscribe?.();
     }
     session.free();
   };
 
   const ensureObserver = (): void => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array, origin: number) => {
-      if (origin !== 0 && origin !== 1) return;
+    unsubscribeUpdates = hub.subscribe((update, origin) => {
       dispatchingUpdates = true;
       try {
         for (const listener of [...listeners]) {
-          listener(update, origin === 0 ? 'local' : 'remote');
+          if (!listeners.has(listener)) continue;
+          try {
+            listener(update.slice(), origin);
+          } catch {}
         }
       } finally {
         dispatchingUpdates = false;

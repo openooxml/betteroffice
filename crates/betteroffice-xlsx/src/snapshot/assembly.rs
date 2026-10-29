@@ -1865,7 +1865,7 @@ impl WorkbookSnapshotBuilder {
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
         authority.set_snapshot_projection_valid(projection_valid);
-        let model = self
+        let mut model = self
             .model
             .take()
             .ok_or_else(|| error("snapshot model builder is missing"))?
@@ -1898,6 +1898,13 @@ impl WorkbookSnapshotBuilder {
             .map(SourceBuilder::finish)
             .transpose()
             .map_err(error)?;
+        if !model.styles.has_xf_xml_markers()
+            && let Some(source) = &source_container
+            && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
+        {
+            model.styles.inherit_xf_xml_markers(&styles);
+            authority.inherit_xf_xml_markers(&styles);
+        }
         let source_package = if package_present {
             let facts = self
                 .facts

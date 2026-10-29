@@ -27,7 +27,8 @@ const DRAWING: DocxGeometryTarget = {
 };
 const FRAME = { x: 30, y: 40, w: 50, h: 20, docStart: 10 };
 
-async function shell(painted = true) {
+async function shell(painted = true, control = false) {
+  const drawingFrame = { ...FRAME, docStart: control ? 13 : 10 };
   const container = document.createElement('div');
   const host = document.createElement('div');
   host.setAttribute('data-docx-pages-host', '');
@@ -54,8 +55,12 @@ async function shell(painted = true) {
         pageIndex,
         primitives:
           painted && pageIndex === 0
-            ? [{ kind: 'image', relId: 'r1', ...FRAME }]
+            ? [{ kind: 'image', relId: 'r1', ...drawingFrame }]
             : [],
+        footer: {
+          rId: 'rFoot', kind: 'footer', y: 460, height: 40,
+          primitives: painted ? [{ kind: 'image', relId: 'r2', ...drawingFrame }] : [],
+        },
         positionSpan: [pageIndex * 100, pageIndex * 100 + 99],
       },
     })),
@@ -74,7 +79,11 @@ async function shell(painted = true) {
   const reads: { targets: DocxGeometryTarget[]; resolve(): void }[] = [];
   const answerOf = (asked: DocxGeometryTarget): ProposalGeometryTarget =>
     asked.kind === 'drawing'
-      ? ({ ok: true, drawing: true, ranges: [{ from: 10, to: 11 }], paragraph: 10 } as ProposalGeometryTarget)
+      ? ({
+          ok: true, drawing: true,
+          ranges: [{ from: drawingFrame.docStart, to: drawingFrame.docStart + 1 }], paragraph: 10,
+          ...(asked.paragraph.kind === 'session' && asked.paragraph.story === 'hf:rFoot' ? { root: 'hf:rFoot', rIds: ['rFoot'] } : {}),
+        } as ProposalGeometryTarget)
       : ({ ok: true, ranges: [{ from: 10, to: 15 }], paragraph: 10 } as ProposalGeometryTarget);
   const controller = {
     getSnapshot: () => ({ status: 'ready', view }),
@@ -159,4 +168,35 @@ test('a worker drawing that is not painted is missing once the layout is complet
   await s.answer();
   const [result] = await read;
   expect(result).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+});
+
+test('a worker indexed control drawing uses its resolved inner position', async () => {
+  const s = await shell(true, true);
+  const target: DocxGeometryTarget = { ...DRAWING, index: 0 };
+  const read = s.plugin.geometry()!.readAnchorGeometries([target]);
+  await Promise.resolve();
+  expect(s.reads.flatMap(({ targets }) => targets)).toEqual([target]);
+  await s.answer();
+  const [result] = await read;
+  expect(result).toMatchObject({
+    ok: true,
+    rects: [{ pageIndex: 0, x: FRAME.x, y: FRAME.y, width: FRAME.w, height: FRAME.h }],
+  });
+});
+
+test('a worker footer control drawing answers on every painted page', async () => {
+  const s = await shell(true, true);
+  const target: DocxGeometryTarget = {
+    kind: 'drawing',
+    paragraph: { kind: 'session', sessionId: 's', story: 'hf:rFoot', paraId: 'fp' },
+    offset: 2, index: 0,
+  };
+  const read = s.plugin.geometry()!.readAnchorGeometries([target]);
+  await Promise.resolve();
+  await s.answer();
+  const [result] = await read;
+  expect(result).toMatchObject({
+    ok: true,
+    rects: [0, 1].map((pageIndex) => ({ pageIndex, x: FRAME.x, y: FRAME.y + pageIndex * (PAGE.height + GAP), width: FRAME.w, height: FRAME.h })),
+  });
 });

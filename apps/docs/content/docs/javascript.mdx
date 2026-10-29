@@ -105,7 +105,7 @@ in `ToolbarOverflow` to give it an entry there.
 Host-owned tools install through the `plugins` prop. A plugin created with
 `defineDocxPlugin` can contribute a docked panel, an overlay, sidebar cards and
 commands; it reads and edits through restricted clients, never the session. The
-plugin API is experimental and may change in minor releases:
+plugin API can change in minor releases; changes are listed in the changelog:
 
 ```tsx
 import { DocxEditor, defineDocxPlugin } from "@betteroffice/docx-react";
@@ -229,7 +229,13 @@ An atom whose embed is a drawing carries `drawing`: the drawing's own `wp:docPr`
 properties (`docPrId`, `name`, `title` and `descr`, each null when the attribute
 is absent or empty, plus `hidden` and `decorative`), its `placement` (`inline`
 or `anchor`) and its `type` (`picture`, `shape`, `textBox`, `group`, `chart`,
-`diagram` or `other`). Structured export image and unsupported inlines carry
+`diagram` or `other`). Content-control atoms carry `drawings` when nonempty,
+listing the same properties in document order, including nested controls and
+hyperlinks, projected to the requested revision view;
+drawings inside field results are not listed, except drawings in a tracked
+change inside a complex field's result, which reads treat as content beside the
+field, inside or outside a control.
+Structured export image and unsupported inlines carry
 the same object as `drawing`, null when the drawing has none, and an image
 inline's `altText` is its `descr`, falling back to its `title`. Sessions seeded
 before these fields existed read them as absent until the document is reseeded.
@@ -258,7 +264,10 @@ and its anchor on the first; one that no laid-out page paints, built or not, is
 A `{ kind: 'drawing', paragraph, offset }` target answers with the drawn frame
 box of the drawing atom at `offset` in that paragraph, the UTF-16 atom offset a
 story read reports, on every page that paints it, with the first frame as its
-`anchor`. An offset that is not on a drawing atom is `missing-target`, and so
+`anchor`. Add `index` to address the zero-based entry of `drawings` from an
+accepted-view read on a content-control atom at that offset: `{ kind: 'drawing', paragraph, offset, index: 0 }`.
+An index outside that list or on another atom is `missing-target`.
+An offset that is not on a drawing atom is `missing-target`, and so
 is a drawing no page paints once the layout is complete; while a page that may
 hold it is not laid out yet it is `layout-unavailable`. A picture's `title`,
 `descr` and `placement` follow edits to its alt text and wrapping. Find a tagged picture
@@ -311,8 +320,7 @@ provisional. `geometry.getPageRect(pageIndex)` returns a page box in
 overlay-layer pixels with `built`, and `geometry.isPageBuilt(pageIndex)` says
 whether a page is laid out without measuring the DOM; once their layout is no
 longer shown they answer `null` and `false`.
-`geometry.dom` is experimental
-and may be replaced by a data-only facade. Overlays
+`geometry.dom` can be replaced by a data-only facade in a minor release. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
 anchor to `{ version, story, paraId }` and appear only while that version is
 current and the body paragraph is unique; a card's `render` receives its `item`,
@@ -397,8 +405,8 @@ caret anchors that later edits, undo and remote updates move along; with
 `pluginGrants` and `onPluginError` props as the DOCX editor, on the default
 editor and with `legacySyncApi`. A plugin created with `definePptxPlugin`
 contributes a docked panel, an overlay on the slide and
-commands, and works through restricted clients. The plugin API is experimental
-and may change in minor releases:
+commands, and works through restricted clients. The plugin API can change in
+minor releases; changes are listed in the changelog:
 
 ```tsx
 import { PptxEditor, definePptxPlugin } from "@betteroffice/pptx-react";
@@ -564,8 +572,8 @@ rails move groups into an accessible More menu; wrap other host content in
 `XlsxEditor` installs host-owned tools through the same `plugins`,
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
 created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
-grid and commands, and works through restricted clients. The plugin API is
-experimental and may change in minor releases:
+grid and commands, and works through restricted clients. The plugin API
+can change in minor releases; changes are listed in the changelog:
 
 ```tsx
 import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
@@ -728,11 +736,11 @@ changes. Versions belong to one session and change with every committed edit.
 The React editor exposes the same `readParagraphs`, `findText`, `validateEdits`
 and `applyEdits` on its ref, flushing pending input first. Paragraph and style
 steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
-list numbering is a v1 limitation: numbered paragraphs and styles that define or
-inherit numbering refuse with `unsupported` until a follow-up retains numbering
-definitions. Steps also refuse content-locked controls, existing tracked changes
-they would touch (tracked run formatting included) and pending paragraph-mark
-revisions; paragraph and style steps cannot be suggested, and an inserted
+list numbering is not supported: numbered paragraphs and styles that define or
+inherit numbering refuse with `unsupported`. Steps also refuse content-locked
+controls, existing tracked changes they would touch (tracked run formatting
+included) and pending paragraph-mark revisions; paragraph and style steps
+cannot be suggested, and an inserted
 paragraph takes only its style's defaults, so it is never numbered. Deleting a
 span that holds tables, controls, section breaks, opaque XML, fields' cached
 results, or comments and bookmarks crossing it refuses, as does a step after
@@ -1052,7 +1060,7 @@ tags are the template author's names. Checkbox, dropdown and date controls keep
 `setContentControlValue`; passing a string to it fills a text control the same
 way. The React editor exposes `listContentControls` and `findContentControls` on
 its ref. Filling needs a session opened from DOCX bytes; rich-text run input is
-not supported yet. Controls the session does not hold as controls, such as those
+not supported. Controls the session does not hold as controls, such as those
 in text boxes, are left out as a coverage gap (`complete: false`), and while one
 exists, tag and `ooxmlId` fills refuse with `provenance-unavailable`.
 
@@ -1090,7 +1098,7 @@ bounds. The result is reopened and checked against both inputs before it is
 returned: accepting every change gives the revised text and formatting,
 rejecting every change gives the original. Review in BetterOffice is tested;
 Word validation is reported separately. Native Rust and Python comparison is
-not available yet.
+not available.
 
 ## Operation profiles
 

@@ -2246,7 +2246,6 @@ impl EditingDoc {
     }
 
     /// Whether an opening has written this document's generation.
-    #[cfg(feature = "wasm")]
     pub(crate) fn has_opening(&self) -> bool {
         let txn = self.yrs_doc().transact();
         txn.get_map(SESSION)

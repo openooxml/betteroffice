@@ -2460,6 +2460,24 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
     !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
+    let kind = string(field(Some(field_value), "type"));
+    let key = if kind == Some("simpleField") {
+        "content"
+    } else {
+        "fieldResult"
+    };
+    array(field(Some(field_value), key))
+        .iter()
+        .filter(|child| string(field(Some(child), "type")) == Some("run"))
+        .find_map(|child| field(Some(child), "formatting"))
+        .or_else(|| {
+            (kind == Some("complexField"))
+                .then(|| field(Some(field_value), "formatting"))
+                .flatten()
+        })
+}
+
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
@@ -2472,7 +2490,6 @@ fn field_payload(
         array(field(Some(field_value), "fieldResult"))
     };
     let mut display_text = String::new();
-    let mut field_formatting = None;
     for child in runs {
         if string(field(Some(child), "type")) != Some("run") {
             continue;
@@ -2482,15 +2499,8 @@ fn field_payload(
                 display_text.push_str(string(field(Some(content), "text")).unwrap_or_default());
             }
         }
-        if field_formatting.is_none() {
-            field_formatting = field(Some(child), "formatting");
-        }
     }
-    let formatting = field_formatting.or_else(|| {
-        (kind == "complexField")
-            .then(|| field(Some(field_value), "formatting"))
-            .flatten()
-    });
+    let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
@@ -5773,7 +5783,12 @@ fn visit_story(
                     let runs = units
                         .iter()
                         .map(|unit| {
-                            json!({"text": unit_story_text(unit), "formatting": unit.direct_formatting.as_deref()})
+                            json!({
+                                "text": unit_story_text(unit),
+                                "formatting": unit.direct_formatting.as_deref(),
+                                "formatsRun": matches!(&unit.content, UnitContent::Text(_))
+                                    || matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "noteRef")
+                            })
                         })
                         .collect();
                     context
@@ -6243,7 +6258,6 @@ pub(crate) fn package_digest(bytes: &[u8]) -> String {
 }
 
 /// `digest` as a package digest: the lowercase hex form [`package_digest`] gives.
-#[cfg(feature = "wasm")]
 pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
     if digest.len() == 64
         && digest
@@ -6259,7 +6273,6 @@ pub(crate) fn checked_package_digest(digest: &str) -> Result<String, String> {
 /// Parses a DOCX for editing with the inflated parts the identity index
 /// reads. `digest` is its [`package_digest`], so the parser does not hash the
 /// package again.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn parse_docx_package_with_digest(
     bytes: &[u8],
     digest: String,
@@ -6758,7 +6771,6 @@ pub(crate) fn seed_blocks(
 
 /// Source metadata, identity index and referenced fonts for a package whose stories arrive
 /// another way, such as shared state, from one lowering.
-#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,

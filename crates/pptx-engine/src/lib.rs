@@ -8,35 +8,12 @@ use std::fmt;
 
 use pptx_edit::structured;
 
+pub use pptx_edit::engine::{Document, EngineError, ErrorKind, Host, version};
 pub use renderer::Renderer;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineError {
-    pub kind: ErrorKind,
-    pub message: String,
+pub fn renderer_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorKind {
-    Message,
-}
-
-impl EngineError {
-    pub fn message(message: impl Into<String>) -> Self {
-        Self {
-            kind: ErrorKind::Message,
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for EngineError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for EngineError {}
 
 pub(crate) fn engine_error(error: impl fmt::Display) -> EngineError {
     EngineError::message(error.to_string())
