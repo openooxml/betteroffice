@@ -8,7 +8,7 @@ use std::collections::{HashMap, hash_map::Entry};
 pub use font::measure_text;
 
 use tiny_skia::{
-    Color, FillRule, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, StrokeDash,
+    Color, FillRule, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
     Transform,
 };
 
@@ -74,7 +74,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     ..Paint::default()
                 };
                 if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
+                    let bounds = reach(rect.left(), rect.top(), rect.right(), rect.bottom(), 1.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, |target, transform, mask| {
                         target.fill_rect(rect, &paint, transform, mask);
                         Ok(())
                     })?;
@@ -96,7 +97,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 paint.set_color(parse_color(color)?);
                 paint.anti_alias = true;
                 if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, |target, transform, mask| {
+                    let bounds = reach(rect.left(), rect.top(), rect.right(), rect.bottom(), 1.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, |target, transform, mask| {
                         target.fill_rect(rect, &paint, transform, mask);
                         Ok(())
                     })?;
@@ -125,7 +127,9 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         ),
                     };
                 if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, paint)?;
+                    let pen = width.abs().max(rail.map_or(0.0, f32::abs)).max(1.0);
+                    let bounds = reach(*x1, *y1, *x2, *y2, 2.0 * pen + 2.0);
+                    clip_surface.paint(&mut pixmap, *clip, bounds, paint)?;
                 } else {
                     paint(&mut pixmap, Transform::identity(), None)?;
                 }
@@ -166,7 +170,16 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         Ok(())
                     };
                 if let Some(clip) = clip {
-                    clip_surface.paint(&mut pixmap, *clip, paint_path)?;
+                    let pen = stroke.as_ref().map_or(0.0, |(_, width)| width.abs());
+                    let area = path.bounds();
+                    let bounds = reach(
+                        area.left(),
+                        area.top(),
+                        area.right(),
+                        area.bottom(),
+                        2.0 * pen + 2.0,
+                    );
+                    clip_surface.paint(&mut pixmap, *clip, bounds, paint_path)?;
                 } else {
                     pixmap.fill_path(
                         &path,
@@ -447,14 +460,46 @@ struct ClipSurface {
     origin: (i32, i32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
+    dirty: Option<IntRect>,
 }
 
 fn pixel_round(value: f32) -> f32 {
     (value + 0.5).floor()
 }
 
+/// past this many pixels f32 pixel centers and the tiler's rect translations
+/// stop being exact, so a cropped composite could shift; such targets
+/// composite the whole surface.
+const F32_EXACT_PIXELS: u32 = 1 << 23;
+
+/// target-space edges (left, top, right, bottom) of a segment or rectangle,
+/// grown by `pad` on every side; `None`, meaning the whole clip, when any input
+/// is non-finite.
+fn reach(x1: f32, y1: f32, x2: f32, y2: f32, pad: f32) -> Option<[f64; 4]> {
+    if ![x1, y1, x2, y2, pad].iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    let (x1, y1, x2, y2) = (f64::from(x1), f64::from(y1), f64::from(x2), f64::from(y2));
+    let pad = f64::from(pad).abs();
+    Some([
+        x1.min(x2) - pad,
+        y1.min(y2) - pad,
+        x1.max(x2) + pad,
+        y1.max(y2) + pad,
+    ])
+}
+
 impl ClipSurface {
-    fn paint<F>(&mut self, target: &mut Pixmap, clip: DlRect, painter: F) -> Result<(), String>
+    /// paint through the clip mask, then composite onto `target`. `bounds` must
+    /// cover every pixel the painter can touch: only that part of the surface is
+    /// cleared and blitted, and the untouched rest would composite as a no-op.
+    fn paint<F>(
+        &mut self,
+        target: &mut Pixmap,
+        clip: DlRect,
+        bounds: Option<[f64; 4]>,
+        painter: F,
+    ) -> Result<(), String>
     where
         F: FnOnce(&mut Pixmap, Transform, Option<&Mask>) -> Result<(), String>,
     {
@@ -482,23 +527,76 @@ impl ClipSurface {
             self.pixmap =
                 Some(Pixmap::new(width, height).ok_or_else(|| "invalid clip size".to_string())?);
             self.mask = Some(mask);
+            self.dirty = None;
         }
         let pixmap = self
             .pixmap
             .as_mut()
             .ok_or_else(|| "clip surface is unavailable".to_string())?;
-        pixmap.fill(Color::TRANSPARENT);
+        if let Some(dirty) = self.dirty.take() {
+            clear(pixmap, dirty);
+        }
+        let exact = target.width().max(target.height()) <= F32_EXACT_PIXELS;
+        let bounds = bounds.filter(|_| exact);
+        let dirty = surface_rect(bounds, self.origin, pixmap.width(), pixmap.height());
+        self.dirty = dirty;
         let transform = Transform::from_translate(-(self.origin.0 as f32), -(self.origin.1 as f32));
         painter(pixmap, transform, self.mask.as_ref())?;
-        target.draw_pixmap(
-            self.origin.0,
-            self.origin.1,
-            pixmap.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
+        let Some(dirty) = dirty else {
+            return Ok(());
+        };
+        let rect = Rect::from_xywh(
+            (dirty.x() + self.origin.0) as f32,
+            (dirty.y() + self.origin.1) as f32,
+            dirty.width() as f32,
+            dirty.height() as f32,
+        )
+        .ok_or_else(|| "invalid clip composite".to_string())?;
+        let paint = Paint {
+            shader: tiny_skia::Pattern::new(
+                pixmap.as_ref(),
+                tiny_skia::SpreadMode::Pad,
+                tiny_skia::FilterQuality::Nearest,
+                1.0,
+                Transform::from_translate(self.origin.0 as f32, self.origin.1 as f32),
+            ),
+            anti_alias: false,
+            ..Paint::default()
+        };
+        target.fill_rect(rect, &paint, Transform::identity(), None);
         Ok(())
+    }
+}
+
+/// the part of a `width` x `height` surface at `origin` that `bounds` covers;
+/// `None` covers all of it.
+fn surface_rect(
+    bounds: Option<[f64; 4]>,
+    origin: (i32, i32),
+    width: u32,
+    height: u32,
+) -> Option<IntRect> {
+    let Some([left, top, right, bottom]) = bounds else {
+        return IntRect::from_xywh(0, 0, width, height);
+    };
+    let (x, y) = (f64::from(origin.0), f64::from(origin.1));
+    let (w, h) = (f64::from(width), f64::from(height));
+    let left = (left.floor() - x).clamp(0.0, w);
+    let top = (top.floor() - y).clamp(0.0, h);
+    let right = (right.ceil() - x).clamp(0.0, w);
+    let bottom = (bottom.ceil() - y).clamp(0.0, h);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    IntRect::from_ltrb(left as i32, top as i32, right as i32, bottom as i32)
+}
+
+fn clear(pixmap: &mut Pixmap, rect: IntRect) {
+    let stride = pixmap.width() as usize * 4;
+    let (left, right) = (rect.left() as usize * 4, rect.right() as usize * 4);
+    let data = pixmap.data_mut();
+    for row in rect.top() as usize..rect.bottom() as usize {
+        data[row * stride + left..row * stride + right].fill(0);
     }
 }
 
@@ -1296,6 +1394,145 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(trace, fixture.trace);
+    }
+
+    fn page(width: f32, height: f32, commands: Vec<DrawCmd>) -> DisplayList {
+        DisplayList {
+            truncated: false,
+            width,
+            height,
+            commands,
+            grid: xlsx_render::GridMeta::default(),
+            hyperlinks: Vec::new(),
+            charts: Vec::new(),
+        }
+    }
+
+    fn clipped_fill(x: f32, clip: DlRect) -> DrawCmd {
+        DrawCmd::FillRect {
+            x,
+            y: 2.0,
+            w: 6.0,
+            h: 6.0,
+            color: "#00000080".into(),
+            clip: Some(clip),
+        }
+    }
+
+    #[test]
+    fn a_shared_clip_composites_each_command_once() {
+        let clip = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 40.0,
+            h: 20.0,
+        };
+        let alone = render_png(&page(40.0, 20.0, vec![clipped_fill(2.0, clip)])).unwrap();
+        let alone = Pixmap::decode_png(&alone).unwrap();
+        let commands = vec![
+            clipped_fill(2.0, clip),
+            clipped_fill(20.0, clip),
+            clipped_fill(30.0, clip),
+        ];
+        let shared = Pixmap::decode_png(&render_png(&page(40.0, 20.0, commands)).unwrap()).unwrap();
+        assert!(alone.pixel(4, 4).unwrap().red() < 255);
+        assert_eq!(shared.pixel(4, 4), alone.pixel(4, 4));
+        assert_eq!(shared.pixel(22, 4), alone.pixel(4, 4));
+        assert_eq!(shared.pixel(32, 4), alone.pixel(4, 4));
+    }
+
+    #[test]
+    fn a_mitered_stroke_tip_outside_its_path_bounds_is_composited() {
+        let clip = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 64.0,
+        };
+        let path = DrawCmd::Path {
+            commands: vec![
+                GeometryPathCommand::Move { x: 19.3, y: 60.0 },
+                GeometryPathCommand::Line { x: 30.0, y: 20.0 },
+                GeometryPathCommand::Line { x: 40.7, y: 60.0 },
+            ],
+            fill: "#ffffff00".into(),
+            stroke: Some(xlsx_render::PathStroke {
+                color: "#000000".into(),
+                width: 8.0,
+            }),
+            clip: Some(clip),
+        };
+        let pixels =
+            Pixmap::decode_png(&render_png(&page(60.0, 64.0, vec![path])).unwrap()).unwrap();
+        assert_eq!(pixels.pixel(30, 10).unwrap().red(), 0);
+        assert_eq!(pixels.pixel(30, 1).unwrap().red(), 255);
+    }
+
+    #[test]
+    fn extreme_and_negative_geometry_keeps_its_pixels() {
+        let full = |w: f32, h: f32| DlRect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+        };
+        let render = |w: f32, h: f32, command: DrawCmd| {
+            Pixmap::decode_png(&render_png(&page(w, h, vec![command])).unwrap()).unwrap()
+        };
+        let far_line = DrawCmd::Line {
+            x1: -268_435_456.0,
+            y1: 4.5,
+            x2: 10.0,
+            y2: 4.5,
+            width: 1.0,
+            color: "#000000".into(),
+            style: None,
+            rail: None,
+            clip: Some(full(20.0, 10.0)),
+        };
+        assert_eq!(render(20.0, 10.0, far_line).pixel(5, 4).unwrap().red(), 0);
+        let far_fill = DrawCmd::FillRect {
+            x: -1e20,
+            y: 2.0,
+            w: 1e20,
+            h: 6.0,
+            color: "#000000".into(),
+            clip: Some(DlRect {
+                x: 1.0,
+                y: 0.0,
+                w: 9.0,
+                h: 10.0,
+            }),
+        };
+        assert_eq!(render(10.0, 10.0, far_fill).pixel(5, 5).unwrap().red(), 255);
+        let square = DrawCmd::Path {
+            commands: vec![
+                GeometryPathCommand::Move { x: 2.0, y: 2.0 },
+                GeometryPathCommand::Line { x: 18.0, y: 2.0 },
+                GeometryPathCommand::Line { x: 18.0, y: 18.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 18.0 },
+                GeometryPathCommand::Close,
+            ],
+            fill: "#000000".into(),
+            stroke: Some(xlsx_render::PathStroke {
+                color: "#000000".into(),
+                width: -2.0,
+            }),
+            clip: Some(full(20.0, 20.0)),
+        };
+        assert_eq!(render(20.0, 20.0, square).pixel(3, 10).unwrap().red(), 0);
+        let rails = DrawCmd::Line {
+            x1: 5.0,
+            y1: 15.0,
+            x2: 30.0,
+            y2: 15.0,
+            width: -20.0,
+            color: "#000000".into(),
+            style: Some("double".into()),
+            rail: Some(2.0),
+            clip: Some(full(40.0, 40.0)),
+        };
+        assert_eq!(render(40.0, 40.0, rails).pixel(10, 4).unwrap().red(), 0);
     }
 }
 
