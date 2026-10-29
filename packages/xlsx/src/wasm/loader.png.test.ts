@@ -42,7 +42,7 @@ async function loaderFactory(native = false): Promise<(fetch: Fetch) => Loader> 
     }],
   });
   if (!result.success) throw new Error(result.logs.join('\n'));
-  const code = (await result.outputs[0].text()).replaceAll('import.meta.url', JSON.stringify(pathToFileURL(entry).href));
+  const code = (await result.outputs[0].text()).split('import.meta.url').join(JSON.stringify(pathToFileURL(entry).href));
   const load = new Function('testHarness', 'fetch', code);
   return (fetch) => {
     const harness = { loader: undefined as unknown as Loader };
