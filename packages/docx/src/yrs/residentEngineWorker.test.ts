@@ -75,6 +75,7 @@ beforeAll(async () => {
     './wasm/index': `
       export const preloadEditWasm = () => testHarness.preload();
       export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+      export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
     `,
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadSave("opc");',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadSave("parse");',
@@ -216,6 +217,9 @@ function worker() {
     sessionsCreated: 0,
     wasmReady: false,
     failWarm: null as Error | null,
+    decodePackedFontFace: mock((_bytes: Uint8Array, _codec: string, _dict?: Uint8Array, _maxOutput?: number) => ({
+      font: new Uint8Array([0, 1, 0, 0]), payload: new Uint8Array([7, 8]),
+    })),
     preloadBlock: null as Promise<void> | null,
     preloadInputs: [] as (WebAssembly.Module | undefined)[],
     preloadSave: mock(async (_module: string) => {}),
@@ -615,6 +619,25 @@ function commandEnvelope(seq: number, text = '!'): DocxCommandEnvelope {
     basis: { epoch: COMMAND_INIT.epoch, version: 0 }, seq, kind: 'insertText', payload: { text },
   };
 }
+
+test('font decoding initializes the resident engine before open and transfers font and payload', async () => {
+  const w = worker();
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+  const dict = new Uint8Array([4, 5]).buffer;
+  const response = await w.send({ type: 'decodeFontFace', bytes, codec: 'woff2t+zstd', dict, maxOutput: 100 });
+  expect(response.ok).toBe(true);
+  if (!response.ok) throw new Error(response.error);
+  expect(w.harness.initializations).toBe(1);
+  expect(w.harness.sessionsCreated).toBe(0);
+  expect(w.harness.decodePackedFontFace).toHaveBeenCalledWith(new Uint8Array(bytes), 'woff2t+zstd', new Uint8Array(dict), 100);
+  expect(new Uint8Array(response.decodedFontFace!.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+  expect(w.transfers.get(response.id)).toEqual([response.decodedFontFace!.font, response.decodedFontFace!.payload!]);
+  const message = 'Font face is corrupt or uses a wrong dictionary';
+  w.harness.decodePackedFontFace.mockImplementationOnce(() => { throw new Error(message); });
+  const failure = await w.send({ type: 'decodeFontFace', bytes, codec: 'zstd' });
+  expect(failure).toMatchObject({ ok: false, error: message, commandError: { name: 'Error', message } });
+  expect(w.harness.sessionsCreated).toBe(0);
+});
 
 test('selection noop sends its retained echo context before building the deferred frame', async () => {
   const arm = await commandWorker();

@@ -10,6 +10,7 @@ export interface WasmTestWorker {
   readonly sources: Array<ArrayBuffer | WebAssembly.Module>;
   readonly modules: WebAssembly.Module[];
   readonly terminated: boolean;
+  terminate(): void;
   crash(): void;
 }
 
@@ -54,6 +55,13 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
                 }
               }
               export const decodeTiffImage = () => { throw new Error('decodeTiffImage is not stubbed'); };
+              export const decodeFontFace = async (bytes, options) => {
+                if (options.codec !== 'zstd' && options.codec !== 'woff2t+zstd') {
+                  throw new Error('unsupported font face codec: ' + options.codec);
+                }
+                return { font: (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).slice().buffer };
+              };
+              export const inspectPresentation = () => ({});
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const presentationStoryFormatting = () => { throw new Error('presentationStoryFormatting is not stubbed'); };

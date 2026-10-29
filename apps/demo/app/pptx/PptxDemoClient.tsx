@@ -8,11 +8,6 @@ import {
   type CollaborationUser,
   type PptxFontFace,
 } from "@betteroffice/pptx";
-import {
-  loadBundledFontBytes,
-  resolveLastResortFace,
-  resolveMetricCompatFace,
-} from "@betteroffice/fonts";
 import type {
   PptxAsyncEditorProps,
   PptxPlugin,
@@ -115,11 +110,10 @@ export function PptxDemoClient() {
     let cancelled = false;
     Promise.all([
       loadPresentation(),
-      loadPresentationFonts(),
       loadCollaborationSeed(),
     ]).then(
-      ([file, fonts, seed]) => {
-        if (!cancelled) setAssets({ file, fonts, seed });
+      ([file, seed]) => {
+        if (!cancelled) setAssets({ file, fonts: [], seed });
       },
       (value: unknown) => {
         if (!cancelled) {
@@ -262,27 +256,4 @@ async function loadCollaborationSeed(): Promise<Uint8Array> {
   const response = await fetch("/seeds/pptx.bin");
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return new Uint8Array(await response.arrayBuffer());
-}
-
-async function loadPresentationFonts(): Promise<PptxFontFace[]> {
-  const styles = [
-    { bold: false, italic: false },
-    { bold: true, italic: false },
-    { bold: false, italic: true },
-    { bold: true, italic: true },
-  ];
-  return Promise.all(
-    styles.map(async ({ bold, italic }) => {
-      const face =
-        resolveMetricCompatFace("Arial", bold, italic) ??
-        resolveLastResortFace("Arial", bold, italic);
-      const bytes = await loadBundledFontBytes(face);
-      return {
-        family: "Arial",
-        bold,
-        italic,
-        bytes: new Uint8Array(bytes.slice(0)),
-      };
-    }),
-  );
 }

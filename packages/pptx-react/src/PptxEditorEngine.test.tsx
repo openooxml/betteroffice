@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { StrictMode, useEffect } from 'react';
 import * as pptx from '@betteroffice/pptx';
+import * as defaultFonts from './defaultFonts';
 import type { PptxWorkerViewerProps } from './PptxEditor';
 import type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 import { definePptxPlugin } from './plugins/definePptxPlugin';
@@ -57,8 +58,9 @@ beforeEach(() => {
   availableWorker();
   warn = spyOn(console, 'warn').mockImplementation(() => {});
   const init = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
+  const fonts = spyOn(defaultFonts, 'prepareDefaultFonts').mockResolvedValue([]);
   const open = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw new Error('In-thread open'); });
-  restorers.push(() => warn.mockRestore(), () => init.mockRestore(), () => open.mockRestore(),
+  restorers.push(() => warn.mockRestore(), () => init.mockRestore(), () => fonts.mockRestore(), () => open.mockRestore(),
     () => {
       if (worker) Object.defineProperty(globalThis, 'Worker', worker);
       else Reflect.deleteProperty(globalThis, 'Worker');

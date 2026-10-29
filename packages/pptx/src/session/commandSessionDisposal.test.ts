@@ -3,6 +3,8 @@ import { isClientMessage, type ClientMessage } from '../../../../shared/office-s
 import { createPptxWorkerSession } from './commandSession';
 import type { PresentationCommandOpenOptions, PresentationCommandOpenResult } from './commandProtocol';
 import { createPresentationCommandProjection } from './commandSharedAdapter';
+import { bindPresentationFontPreparation } from './fontPreparation';
+import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
 
 function heldWorker() {
   const events = new EventTarget();
@@ -43,7 +45,7 @@ function heldWorker() {
     },
     terminate,
   } as unknown as Worker;
-  return { worker, terminate,
+  return { worker, terminate, calls,
     listenerCount: () => [...listeners.values()].reduce((count, active) => count + active.size, 0),
     waitFor(method: string) {
       if (calls.some((call) => call.method === method)) return Promise.resolve();
@@ -100,6 +102,44 @@ test('disposing before open settles ready and removes connection listeners', asy
     await expect(session.ready).rejects.toMatchObject({ name: 'PptxWorkerEditorDisposedError' });
     expect(endpoint.terminate).toHaveBeenCalledTimes(1);
     expect(endpoint.listenerCount()).toBe(0);
+  } finally {
+    await session.dispose();
+    process.off('unhandledRejection', unhandled);
+  }
+});
+
+test('disposing during a stalled font load settles without pending worker work', async () => {
+  const endpoint = heldWorker();
+  const unhandled = mock((_reason: unknown) => {});
+  const onError = mock(() => {});
+  let started!: () => void;
+  const loading = new Promise<void>(resolve => { started = resolve; });
+  let decoder!: FontDecoder;
+  const options = bindPresentationFontPreparation({ worker: () => endpoint.worker, onError }, async runtime => {
+    decoder = runtime.decoder;
+    started();
+    return new Promise<never>(() => {});
+  });
+  process.on('unhandledRejection', unhandled);
+  const session = createPptxWorkerSession(new Uint8Array(), options);
+  try {
+    await loading;
+    const decoding = decoder(new Uint8Array([0, 1, 0, 0]), { codec: 'zstd' });
+    const rejected = decoding.catch((error: unknown) => error);
+    await endpoint.waitFor('decodeFontFace');
+    const disposal = session.dispose();
+    expect(session.dispose()).toBe(disposal);
+    await disposal;
+    expect(await rejected).toMatchObject({ name: 'SessionFailure', code: 'disposed' });
+    await expect(session.ready).rejects.toMatchObject({ name: 'PptxWorkerEditorDisposedError' });
+    await expect(decoder(new Uint8Array([0]), { codec: 'zstd' })).rejects.toMatchObject({ code: 'disposed' });
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    expect(endpoint.calls.map(call => call.method)).toEqual(['decodeFontFace']);
+    expect(endpoint.listenerCount()).toBe(0);
+    expect(endpoint.terminate).toHaveBeenCalledTimes(1);
+    expect(session.failure).toBeUndefined();
+    expect(onError).not.toHaveBeenCalled();
+    expect(unhandled).not.toHaveBeenCalled();
   } finally {
     await session.dispose();
     process.off('unhandledRejection', unhandled);

@@ -1739,9 +1739,6 @@ export function write_docx_s13_wasm_with_warnings(request_json: string, original
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly FONTPACK_calloc: (a: number, b: number) => number;
-    readonly FONTPACK_free: (a: number) => void;
-    readonly FONTPACK_malloc: (a: number) => number;
     readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;

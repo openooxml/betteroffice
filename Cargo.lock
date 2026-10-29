@@ -89,6 +89,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
+ "betteroffice-fonts",
  "betteroffice-ooxml-fidelity",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
@@ -103,6 +104,7 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-fonts",
  "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
@@ -182,6 +184,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "cc",
+ "lol_alloc",
+ "ruzstd",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wuff",
+ "zstd",
+]
+
+[[package]]
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
@@ -233,6 +251,7 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -352,6 +371,7 @@ dependencies = [
 name = "betteroffice-vsdx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
@@ -490,6 +510,7 @@ name = "betteroffice-xlsx"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -974,22 +995,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fontpack"
-version = "0.5.1"
-dependencies = [
- "cc",
- "lol_alloc",
- "ruzstd",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "wuff",
- "zstd",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1400,8 +1405,10 @@ dependencies = [
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-engine",
+ "js-sys",
  "wasm-bindgen",
 ]
 
@@ -2181,11 +2188,13 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vsdx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-validate",
+ "js-sys",
  "serde_json",
  "wasm-bindgen",
  "yrs",
@@ -2472,6 +2481,7 @@ dependencies = [
 name = "xlsx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-xlsx",
  "betteroffice-xlsx-engine",

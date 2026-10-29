@@ -1,4 +1,5 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 import { resolveDefaultFontProvider } from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
@@ -68,6 +69,7 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
+  runtime?: { decoder?: FontDecoder };
 }): RustMeasureSource {
   const engine = options.engine;
   const registry = new TextMeasureFontRegistry(
@@ -78,7 +80,7 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
     },
-    { bundled: options.bundled ?? resolveDefaultFontProvider },
+    { bundled: options.bundled ?? (() => resolveDefaultFontProvider(options.runtime)) },
   );
   let compat: CompatibilityFlags | undefined;
 

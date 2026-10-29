@@ -1,8 +1,9 @@
-import { createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
+import { bindPresentationFontPreparation, createPptxWorkerEditorSession, PptxWorkerEditorDisposedError } from '@betteroffice/pptx';
 import type { DeckSnapshot, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxWorkerEditorAccess, PptxWorkerEditorFrame, PptxWorkerEditorSession } from '@betteroffice/pptx/worker';
 import { useCallback, useMemo, useRef } from 'react';
 import { useFontWarning } from '../fontFaces';
+import { prepareDefaultFonts } from '../defaultFonts';
 import type { PptxWorkerEditorProps } from './PptxWorkerEditor';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import { frameImages, installFonts, useStableFonts } from '../viewer/sessionPaint';
@@ -32,10 +33,15 @@ export class EditablePresentation {
   constructor(props: PptxWorkerEditorProps, private readonly changed: () => void,
     private readonly isCurrent: () => boolean = () => true, warnFonts?: () => void) {
     this.active = Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0;
-    this.owner = workerEditorSessionOpener.open(props.file!, {
+    this.owner = workerEditorSessionOpener.open(props.file!, bindPresentationFontPreparation({
       fonts: props.fonts, clientId: props.clientId, collaboration: props.collaboration,
-      onError: (error) => { if (this.current) props.onError?.(error); },
-    });
+      onError: (error: Error) => { if (this.current) props.onError?.(error); },
+    }, async (runtime, families) => {
+      if (props.fonts.length) return undefined;
+      const fonts = await prepareDefaultFonts(runtime, families, warnFonts ?? (() => {}));
+      await installFonts(fonts, this.fonts, () => this.current, warnFonts);
+      return fonts;
+    }));
     this.off = this.owner.subscribe(() => {
       if (!this.current) return;
       if (this.owner.failure) this.finish(this.owner.failure);

@@ -5,6 +5,9 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { rpcFontDecoder } from '../../../../shared/office-session/fontDecoder';
+import type { PresentationFontPreparation } from './fontPreparation';
+import type { PresentationCommandMethods } from './commandProtocol';
 import type { OpenPresentationOptions } from '../wasm/loader';
 import { frameAssetIds } from './frame';
 import { PptxWorkerEditorDisposedError } from './peerHydrationError';
@@ -121,20 +124,35 @@ export interface PresentationEditorConnection {
 export function createPresentationEditorClient(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenPresentationSessionOptions,
-  transport: SessionTransport
+  transport: SessionTransport,
+  prepareFonts?: PresentationFontPreparation,
 ): PresentationEditorConnection {
   try {
     const { document, input, transfer } = prepareOpen(bytes, options);
     if (options.wasm === undefined) delete input.wasm;
-    const client = createSessionClient<PresentationEditorMethods, {}>(transport, {
-      methods: PRESENTATION_EDITOR_METHODS,
+    const wasm = input.wasm instanceof ArrayBuffer ? input.wasm.slice(0) : input.wasm;
+    const client = createSessionClient<PresentationEditorMethods & Pick<PresentationCommandMethods, 'decodeFontFace' | 'fontFamilies'>, {}>(transport, {
+      methods: { ...PRESENTATION_EDITOR_METHODS, decodeFontFace: true, fontFamilies: true },
     });
     const media = new Map<string, Uint8Array>();
     let disposed = false;
     const connection: PresentationEditorConnection = {
       get failure() { return client.failure; },
       onFailure: (listener) => client.onFailure(listener),
-      begin: () => client.callWithTransfer('beginEditor', [document, input], transfer),
+      begin: async () => {
+        if (prepareFonts) {
+          const decoder = rpcFontDecoder((encoded, input, transfer) => client.callWithTransfer('decodeFontFace',
+            [encoded, input, wasm instanceof ArrayBuffer ? wasm.slice(0) : wasm], transfer));
+          const fonts = await prepareFonts({ decoder }, () => {
+            const source = document.slice(0);
+            return client.callWithTransfer('fontFamilies', [source,
+              wasm instanceof ArrayBuffer ? wasm.slice(0) : wasm], [source]);
+          });
+          if (fonts !== undefined) input.fonts = copyFonts(fonts, transfer);
+        }
+        if (disposed) throw new PptxWorkerEditorDisposedError();
+        return client.callWithTransfer('beginEditor', [document, input], transfer);
+      },
       frame: async (slideId: string) => {
         if (disposed) throw new PptxWorkerEditorDisposedError();
         const wire = await client.call.editorFrame(slideId);

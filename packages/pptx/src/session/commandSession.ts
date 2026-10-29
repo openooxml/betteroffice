@@ -4,6 +4,8 @@ import { isHostMessage } from '../../../../shared/office-session/protocol';
 import { SessionFailure } from '../../../../shared/office-session/types';
 import { requestWasmCompile } from '../../../../shared/office-session/client';
 import { wasmAssetUrl } from '../wasm/asset';
+import { presentationFontPreparations } from './fontPreparation';
+import { takePresentationFontWorker } from './fontWorker';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
@@ -52,8 +54,9 @@ export function createPptxWorkerSession(
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
   const cacheUrl = !options.worker && options.wasm === undefined ? wasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
+  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
   const transport = createWorkerTransport(options.worker ? options.worker() :
-    new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
+    preparedWorker ?? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' }));
   if (cacheUrl && !wasm) requestWasmCompile(transport);
   const input = {
     session: crypto.randomUUID(), incarnation: crypto.randomUUID(),
@@ -141,7 +144,8 @@ export function createPptxWorkerSession(
       transport.close();
     },
   };
-  const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
+  const opening = createSharedPresentationCommandClient(bytes, input, monitored,
+    preparedWorker ? undefined : presentationFontPreparations.get(options), ended).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
     if (disposed) offClientFailure();

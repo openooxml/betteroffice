@@ -11,7 +11,7 @@ const SHIPPED_ROOT_VALUES = [
 ];
 
 const STATIC_EDITOR_INTERNALS = ['PptxPeerNotReadyError', 'PptxWorkerEditorDisposedError', 'openPresentationSession',
-  'createPptxWorkerEditorSession'];
+  'createPptxWorkerEditorSession', 'bindPresentationFontPreparation', 'presentationFontFamilies'];
 
 test('root keeps every shipped handle export', () => {
   for (const name of SHIPPED_ROOT_VALUES) expect(pptx).toHaveProperty(name);

@@ -52,7 +52,8 @@ import {
   type ResidentEngineSession,
 } from './residentEngineSession';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
-import { preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wasm/index';
+import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -1459,6 +1460,7 @@ function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
     case 'destroy':
       return { lane: 'input', mutates: true, run };
     case 'warm':
+    case 'decodeFontFace':
       return { lane: 'input', run };
     case 'documentRead':
       return {
@@ -1518,7 +1520,8 @@ async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
     }
     if (commandHost && request.type !== 'edit' && request.type !== 'checkpoint' &&
       request.type !== 'commandInit' && request.type !== 'requestFullFrame' &&
-      request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport') {
+      request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport' &&
+      request.type !== 'decodeFontFace') {
       await commandHost.withFrameWork(() => handle(request));
     } else await handle(request);
   } catch (error) {
@@ -1586,6 +1589,20 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
 }
 
 async function handle(request: DocxEngineWorkerRequest): Promise<void> {
+  if (request.type === 'decodeFontFace') {
+    try {
+      await preloadEditWasm();
+      const face = copyDecodedFace(decodePackedFontFace(fontBytes(request.bytes), request.codec,
+        request.dict === undefined ? undefined : fontBytes(request.dict), request.maxOutput));
+      reply({ id: request.id, ok: true, decodedFontFace: face },
+        face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      reply({ id: request.id, ok: false, error: message, commandError: { name: 'Error', message } });
+    }
+    return;
+  }
   if (!['edit', 'checkpoint', 'documentRead', 'fontRequirements', 'encodeState', 'revisionCount', 'layoutJson'].includes(request.type) &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')) commandFrameChanges?.causes?.add('other');
   if (session && request.type === 'sync') validateFontsBaseRevision(request.snapshot);

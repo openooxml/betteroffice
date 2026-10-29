@@ -9,6 +9,8 @@ export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatti
 export { browserFrameImages } from './render/browserFrameImages';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { bindPresentationFontPreparation } from './session/fontPreparation';
+export { preparePresentationFontDecoder } from './session/fontWorker';
 /** @experimental */
 export type {
   PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
@@ -74,3 +76,4 @@ export type {
 
 /** @internal */
 export { presentationCollaborationPipes } from './session/commandCollaboration';
+export { presentationFontFamilies } from './fontFamilies';

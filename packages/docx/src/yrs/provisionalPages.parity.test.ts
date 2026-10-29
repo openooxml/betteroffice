@@ -11,7 +11,7 @@ import {
   loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
 } from '../layout/render/rustDisplayList';
-import { preloadEditWasm } from '../wasm/edit';
+import { decodePackedFontFace, preloadEditWasm } from '../wasm/edit';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import { echoBackgroundPage } from './residentCommandPresentation';
@@ -38,8 +38,11 @@ beforeAll(async () => {
     './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unused source opening"); };',
     './residentEngineSession':
       'export const createResidentEngineSession = async () => testHarness.session;',
-    './wasm/index':
-      'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
+    './wasm/index': `
+      export const preloadEditWasm = async () => {};
+      export const preloadEditWasmFrom = async () => {};
+      export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
+    `,
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
     '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
@@ -145,7 +148,7 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   let now = 0;
   let timerId = 0;
   const timers = new Map<number, { at: number; callback: () => void }>();
-  const harness = { session, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
+  const harness = { session, decodePackedFontFace, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
     loadedRustDisplayListQueryEngine,
     preloadOpcWasm: () => import('../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
     preloadParseWasm: () => import('../wasm/parse').then((wasm) => wasm.preloadParseWasm()),

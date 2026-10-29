@@ -406,6 +406,7 @@
         "@betteroffice/pptx-i18n": "workspace:*",
       },
       "devDependencies": {
+        "@betteroffice/fonts": "workspace:*",
         "@happy-dom/global-registrator": "^21.0.4",
         "@testing-library/react": "^16.0.0",
         "@types/bun": "^1.4.2",
@@ -417,9 +418,13 @@
         "typescript": "^6.0.3",
       },
       "peerDependencies": {
+        "@betteroffice/fonts": "workspace:^0",
         "react": "^18.0.0 || ^19.0.0",
         "react-dom": "^18.0.0 || ^19.0.0",
       },
+      "optionalPeers": [
+        "@betteroffice/fonts",
+      ],
     },
     "packages/vsdx": {
       "name": "@betteroffice/vsdx",

@@ -1,4 +1,5 @@
 import initWasmModule, {
+  decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
@@ -11,6 +12,13 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';

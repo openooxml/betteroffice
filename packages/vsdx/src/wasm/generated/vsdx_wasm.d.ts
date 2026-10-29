@@ -89,9 +89,6 @@ export function rendererVersion(): string;
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly FONTPACK_calloc: (a: number, b: number) => number;
-    readonly FONTPACK_free: (a: number) => void;
-    readonly FONTPACK_malloc: (a: number) => number;
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_vsdxdocument_free: (a: number, b: number) => void;

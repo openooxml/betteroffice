@@ -167,7 +167,7 @@ test('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async
     default: initialize, initSync: initialize,
     PptxDocument: class { static openCollaborative = load; static open = load; },
     PptxRenderer: class { static open = load; },
-    decodeTiffPng: load, exportPptxMarkdownJson: load, exportPptxStructuredJson: load,
+    decodeFontFace: load, decodeTiffPng: load, exportPptxMarkdownJson: load, exportPptxStructuredJson: load,
     parsePptxJson: load, parsePptxJsonWithoutMedia: load, renderPptxMarkdownJson: load, rendererVersion: load,
   }));
   const pair = createInProcessPair();

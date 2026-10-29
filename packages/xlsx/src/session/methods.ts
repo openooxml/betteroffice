@@ -1,3 +1,4 @@
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -158,7 +159,7 @@ export interface WorkbookSessionEvents {
  * Workbook RPC methods; engine version tokens remain strings.
  * @experimental
  */
-export type WorkbookSessionMethods = {
+export type WorkbookSessionMethods = FontDecoderMethods & {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
   openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
   version(): string;
@@ -191,6 +192,7 @@ export type WorkbookSessionMethods = {
 };
 
 export const WORKBOOK_SESSION_METHODS = {
+  decodeFontFace: true,
   open: true,
   openRecovery: true,
   version: true,
@@ -223,6 +225,7 @@ export const WORKBOOK_SESSION_METHODS = {
 } satisfies { readonly [K in keyof WorkbookSessionMethods]-?: true };
 
 export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> = {
+  decodeFontFace: { lane: 'interactive' },
   open: { lane: 'interactive' },
   openRecovery: { lane: 'input', reorderable: false },
   version: { lane: 'interactive' },

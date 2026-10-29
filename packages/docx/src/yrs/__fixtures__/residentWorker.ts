@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine, loadedRustDisplayListQueryEngine } from '../../layout/render/rustDisplayList';
 import { createResidentEngineSession, type ResidentEngineSession } from '../residentEngineSession';
-import { preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
+import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from '../wasm/index';
 import { decodeDocxHostJson } from '../yrsSessionFacade';
 import { wasmModuleMemories } from '../../wasm/loadWasmAsset';
 import type { ResidentEngineWorkerPort } from '../residentEngineWorkerClient';
@@ -31,6 +31,7 @@ const STUBS: Record<string, string> = {
   './wasm/index': `
     export const preloadEditWasm = () => testHarness.preload();
     export const preloadEditWasmFrom = (source) => testHarness.preloadFrom(source);
+    export const decodePackedFontFace = (...args) => testHarness.decodePackedFontFace(...args);
   `,
   '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
   '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
@@ -226,6 +227,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
         },
         preload: preloadEditWasm,
         preloadFrom: preloadEditWasmFrom,
+        decodePackedFontFace,
         preloadOpcWasm: () => import('../../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
         preloadParseWasm: () => import('../../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
         decodeDocxHostJson,

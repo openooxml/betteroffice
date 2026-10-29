@@ -225,6 +225,7 @@ export type DocxEngineWorkerHostModule = {
 
 export type DocxEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
+  | { id: number; type: 'decodeFontFace'; bytes: ArrayBuffer; codec: string; dict?: ArrayBuffer; maxOutput?: number }
   | { id: number; type: 'openSource'; source: DocxSourceOpenRequest }
   | { id: number; type: 'previewSource'; preview: DocxSourcePreviewOptions & { layoutInput: string } }
   | { id: number; type: 'commandInit'; request: DocxCommandInitRequest }
@@ -411,6 +412,7 @@ export type DocxEngineWorkerResponse = (
   | {
       id: number;
       ok: true;
+      decodedFontFace?: { font: ArrayBuffer; payload?: ArrayBuffer };
       commandInitial?: DocxCommandInitReply;
       commandAck?: DocxCommandAck;
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };

@@ -3,6 +3,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as pptx from '@betteroffice/pptx';
+import * as defaultFonts from '../defaultFonts';
 import type { SlideDisplayList } from '@betteroffice/pptx';
 import type { PresentationFrame, PresentationSession } from '@betteroffice/pptx/worker';
 import { createPresentationSession } from '../../../pptx/src/session/client';
@@ -624,9 +625,10 @@ describe('session viewer', () => {
   it('keeps local opening when worker mode is inactive', async () => {
     const opener = open(session().viewer);
     const init = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
+    const fonts = spyOn(defaultFonts, 'prepareDefaultFonts').mockResolvedValue([]);
     const failure = new Error('Local open reached');
     const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw failure; });
-    restorers.push(() => init.mockRestore(), () => local.mockRestore());
+    restorers.push(() => init.mockRestore(), () => fonts.mockRestore(), () => local.mockRestore());
     const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={file} fonts={[]} />);
     await waitFor(() => expect(view.getByText(failure.message)).toBeDefined());
     expect(local).toHaveBeenCalledTimes(1);

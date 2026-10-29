@@ -1,6 +1,7 @@
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
+import { prepareDefaultFonts } from './defaultFonts';
 import {
-  initWasm, openPresentation, paintSlide, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
+  decodeFontFace, initWasm, inspectPresentation, openPresentation, paintSlide, presentationFontFamilies, presentationImageBlob, PRESENCE_LABEL_DURATION_MS, sizeCanvasForSlide,
   slideToPng, StaleProposalError, PptxPeerNotReadyError,
 } from '@betteroffice/pptx';
 import type {
@@ -1361,9 +1362,19 @@ export function PptxEditorContent({
         return;
       }
     }
+    let preparedFonts = stableFonts;
+    const prepare = async () => {
+      const initialization = initWasm();
+      if (!stableFonts.length) preparedFonts = await prepareDefaultFonts({ decoder: decodeFontFace }, async () => {
+        await initialization;
+        return presentationFontFamilies(inspectPresentation(file, { includeMedia: false }));
+      }, warnFonts);
+      return Promise.all([initialization, installBrowserFonts(preparedFonts,
+        () => !disposed && currentFontSession.current === fontSession, warnFonts)]);
+    };
     void (worker
       ? worker.open(coordinator as WorkerInputCoordinator).then(() => [undefined, [] as FontFace[]] as const)
-      : Promise.all([initWasm(), installBrowserFonts(stableFonts, () => !disposed && currentFontSession.current === fontSession, warnFonts)])).then(
+      : prepare()).then(
       ([, installed]) => {
         browserFaces = installed;
         if (disposed || currentFontSession.current !== fontSession) {
@@ -1373,7 +1384,7 @@ export function PptxEditorContent({
         try {
           handle = worker ? worker.access as unknown as PresentationHandle : openPresentation(file, {
             clientId: collaborationClientId,
-            fonts: stableFonts,
+            fonts: preparedFonts,
             initialUpdate: collaborationInitialUpdate,
           });
           if (!worker && collaboration) handle.setCollaborative();
