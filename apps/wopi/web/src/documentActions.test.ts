@@ -88,6 +88,45 @@ test("save flushes pending input before capturing the socket sequence", async ()
   expect(h.calls).toEqual(["flush", "sequence", "save"]);
 });
 
+test("read-only saves fail before flushing input or waiting for resync", async () => {
+  const h = setup();
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, h.api, {
+      ...h.saveOptions, canWrite: () => false,
+      hasActiveComposition: () => { throw new Error("must not wait for composition"); },
+      hasPendingResync: () => { throw new Error("must not wait for resync"); },
+    })).rejects.toThrow("notAllowed");
+    expect(h.calls).toEqual([]);
+  } finally { warning.mockRestore(); }
+});
+
+test("becoming read-only while flushing rejects Save before the resync wait", async () => {
+  const h = setup();
+  let canWrite = true;
+  h.editor.flushPendingInput = async () => { h.calls.push("flush"); canWrite = false; };
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(saveDocument(h.editor, h.api, {
+      ...h.saveOptions, canWrite: () => canWrite,
+      hasPendingResync: () => { throw new Error("must not wait for resync"); },
+    })).rejects.toThrow("notAllowed");
+    expect(h.calls).toEqual(["flush"]);
+  } finally { warning.mockRestore(); }
+});
+
+test("read-only Close closes the handle and notifies the host without a final save", async () => {
+  const h = setup();
+  const blocked: boolean[] = [];
+  await closeDocument(null, h.api, {
+    ...h.closeOptions, canWrite: () => false,
+    hasPendingResync: () => { throw new Error("must not wait for resync"); },
+    setInputBlocked: (value) => { blocked.push(value); },
+  }, () => { h.calls.push("host-close"); });
+  expect(h.calls).toEqual(["close", "host-close"]);
+  expect(blocked).toEqual([true]);
+});
+
 test("composition waiting uses the same deadline as the subsequent input flush", async () => {
   const h = setup();
   let composing = true;

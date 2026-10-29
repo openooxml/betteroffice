@@ -45,6 +45,7 @@ export type SessionEvent =
   | { type: "saveFailed"; kind: string }
   | { type: "conflict"; copyName: string }
   | { type: "viewOnly"; reason: string }
+  | { type: "writable"; canWrite: boolean }
   | { type: "rejoinRequired"; reason: string }
   | { type: "tokenExpiring"; expiresAt: number | null }
   | { type: "closed" };
@@ -66,6 +67,8 @@ export function toSessionEvent(raw: SseEvent): SessionEvent | null {
       return { type: "conflict", copyName: typeof data.copyName === "string" ? data.copyName : typeof data.name === "string" ? data.name : "" };
     case "viewOnly":
       return { type: "viewOnly", reason: typeof data.reason === "string" ? data.reason : "" };
+    case "writable":
+      return typeof data.canWrite === "boolean" ? { type: "writable", canWrite: data.canWrite } : null;
     case "rejoinRequired":
       return { type: "rejoinRequired", reason: typeof data.reason === "string" ? data.reason : "" };
     case "tokenExpiring":

@@ -394,18 +394,12 @@ export default function Editor({
         const current = providerRef.current;
         return !current || current.pendingBytes > 0;
       },
-      async flushPendingInput(options) {
+      async flushPendingInput() {
         if (file.format === "docx") {
           if (!active || !docx.current) throw new Error(text.current.documentDisposed);
           await docx.current.flushPendingInput();
         } else if (file.format === "xlsx") {
-          const api = await whenReady(xlsx);
-          if (options?.terminateEdit === false) {
-            const current = replicas.current.replica;
-            if (!current) throw new Error("The collaboration replica is not ready.");
-            await ("async" in current ? current.async : current).encodeStateVector();
-            if (!active || current !== replicas.current.replica) throw disposed;
-          } else await api.version();
+          await (await whenReady(xlsx)).version();
         } else {
           await (await whenReady(pptx)).flushPendingInput();
         }

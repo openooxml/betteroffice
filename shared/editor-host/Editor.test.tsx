@@ -8,6 +8,12 @@ import type { DocxErrorInfo } from "@betteroffice/docx-react";
 import type { AsyncReplicaAdapter } from "@betteroffice/docx/collaboration";
 import type { CollaborationReplica } from "./collaboration/types";
 import type { EditorApi } from "./Editor";
+import { Doc } from "yjs";
+import { SessionApi } from "../../apps/wopi/web/src/api";
+import { parseWopiConfig } from "../../apps/wopi/web/src/config";
+import type { Loaded } from "../../apps/wopi/web/src/page";
+import { PostMessageBridge } from "../../apps/wopi/web/src/postMessage";
+import * as wopiTransport from "../../apps/wopi/web/src/transport";
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -52,6 +58,13 @@ let workbookSave: (props: XlsxAsyncEditorProps) => Promise<XlsxCommandResult>;
 let deferWorkbookReady = false;
 let readyWorkbook: (() => void) | undefined;
 let disposeWorkbookApi: (() => void) | undefined;
+const workbookReplica = {
+  clientId: 7,
+  encodeStateVector: () => Uint8Array.of(0),
+  encodeStateAsUpdate: () => Uint8Array.of(0, 0),
+  applyUpdate() {},
+  onUpdate: () => () => {},
+};
 mock.module("@betteroffice/xlsx-react", () => ({
   XlsxEditor: (props: XlsxAsyncEditorProps) => {
     workbookProps = props;
@@ -70,7 +83,11 @@ mock.module("@betteroffice/xlsx-react", () => ({
       if (!deferWorkbookReady) readyWorkbook();
       return () => { if (typeof dispose === "function") dispose(); };
     }, []);
-    return null;
+    useEffect(() => {
+      props.collaboration?.onReplica?.(workbookReplica);
+      return () => props.collaboration?.onReplica?.(null);
+    }, [props.collaboration?.onReplica]);
+    return <input data-testid="xlsx-input" />;
   },
 }));
 const disposeWorkbook = mock(async () => {});
@@ -183,6 +200,7 @@ for (const [specifier, exports] of Object.entries({
 
 const { act, cleanup, render } = await import("@testing-library/react");
 const { default: Editor, prepareFile } = await import("./Editor");
+const { default: WopiApp } = await import("../../apps/wopi/web/src/page");
 
 afterEach(() => {
   cleanup();
@@ -277,6 +295,90 @@ test.each(["xlsx", "pptx"] as const)("%s commits pending input through its publi
   const { api } = await mount(format);
   await api.flushPendingInput();
   expect(flush).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])("xlsx Action_Save commits deferred text through version with DontTerminateEdit=%s", async (DontTerminateEdit) => {
+  const document = new Doc();
+  let deferredText = "";
+  let release!: () => void;
+  const deferred = new Promise<void>((resolve) => { release = resolve; });
+  flushWorkbookInput.mockClear();
+  flushWorkbookInput.mockImplementationOnce(async () => {
+    await deferred;
+    document.getText("body").insert(0, deferredText);
+    workbookProps.onChange?.();
+    return "committed";
+  });
+  const saved: string[] = [];
+  const replies: Array<{ MessageId: string; Values: Record<string, unknown> }> = [];
+  const barrier = { connectionId: crypto.randomUUID(), seq: 1 };
+  const captureSaveBarrier = mock(() => barrier);
+  const connection = spyOn(wopiTransport, "createWopiTransport").mockReturnValue({
+    connect() {}, disconnect() {}, send: () => true, onEvent: () => () => {},
+    hasPendingResync: () => false, hasUnacknowledgedUpdates: () => false, noteLocalUpdate() {},
+    captureSaveBarrier,
+  });
+  const api = new SessionApi("xlsx-handle", async (input, init) => {
+    if (String(input).endsWith("/save")) {
+      expect(JSON.parse(String(init?.body))).toEqual(barrier);
+      saved.push(document.getText("body").toString());
+      return Response.json({ itemVersion: "2" });
+    }
+    if (String(input).endsWith("/events")) {
+      return new Response(new ReadableStream({
+        start(controller) { init?.signal?.addEventListener("abort", () => controller.close(), { once: true }); },
+      }));
+    }
+    throw new Error(`Unexpected request: ${input}`);
+  });
+  let saving: Promise<void> | undefined;
+  const bridge = new PostMessageBridge({
+    parent: { postMessage(message) { replies.push(JSON.parse(message)); } },
+    addEventListener() {}, removeEventListener() {},
+  }, "https://host.example", {
+    onSave(options) {
+      saving = loaded.actions.save!(options);
+      return saving;
+    },
+    onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
+  });
+  const loaded: Loaded = {
+    config: parseWopiConfig({ sessionHandle: "xlsx-handle", format: "xlsx", fileName: "book.xlsx", canWrite: true }),
+    api, bridge, file: { bytes: Uint8Array.of(0), format: "xlsx" },
+    join: { format: "xlsx", initialUpdate: Uint8Array.of(0, 0), baselineGeneration: 1, canWrite: true },
+    clientId: 7, actions: { views: [] },
+  };
+  let view: ReturnType<typeof render> | undefined;
+  try {
+    await act(async () => { view = render(<WopiApp loaded={loaded} />); });
+    const input = view!.getByTestId("xlsx-input");
+    input.addEventListener("compositionend", () => { deferredText = "変"; });
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+    });
+    expect(document.getText("body").toString()).toBe("");
+    await act(async () => bridge.handleMessage({ origin: "https://host.example", data: {
+      MessageId: "Action_Save", Values: { Notify: true, DontTerminateEdit },
+    } }));
+    expect(flushWorkbookInput).toHaveBeenCalledTimes(1);
+    expect(captureSaveBarrier).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+    expect(replies.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([]);
+    await act(async () => { release(); await saving; });
+    expect(saved).toEqual(["変"]);
+    expect(replies.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+      { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: true } },
+    ]);
+  } finally {
+    release();
+    await saving?.catch(() => {});
+    await act(async () => view?.unmount());
+    connection.mockRestore();
+    flushWorkbookInput.mockReset();
+    flushWorkbookInput.mockImplementation(async () => "version");
+    document.destroy();
+  }
 });
 
 test.each(["xlsx", "pptx"] as const)("%s readiness waits for opening and hydration", async (format) => {

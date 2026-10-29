@@ -8,11 +8,16 @@ function sseResponse(text: string): Response {
 }
 
 describe("decodeJoinResponse", () => {
-  test("decodes the base64 initial update", () => {
-    const decoded = decodeJoinResponse({ format: "xlsx", baselineGeneration: 1, initialUpdate: Buffer.from([1, 2, 3]).toString("base64") });
+  test.each([false, true])("decodes the base64 initial update and effective canWrite=%s", (canWrite) => {
+    const decoded = decodeJoinResponse({ format: "xlsx", baselineGeneration: 1, initialUpdate: Buffer.from([1, 2, 3]).toString("base64"), canWrite });
     expect(decoded.format).toBe("xlsx");
     expect(decoded.initialUpdate).toEqual(Uint8Array.of(1, 2, 3));
     expect(decoded.baselineGeneration).toBe(1);
+    expect(decoded.canWrite).toBe(canWrite);
+  });
+
+  test.each([undefined, null, "true", 1])("rejects invalid effective writability %s", (canWrite) => {
+    expect(() => decodeJoinResponse({ format: "xlsx", baselineGeneration: 1, initialUpdate: "AA==", canWrite })).toThrow("Invalid join response writability.");
   });
 });
 

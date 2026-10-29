@@ -22,6 +22,9 @@ describe("toSessionEvent", () => {
     expect(toSessionEvent({ event: "saved", data: '{"itemVersion":"3"}' })).toEqual({ type: "saved", itemVersion: "3" });
     expect(toSessionEvent({ event: "conflict", data: '{"copyName":"book (conflict).xlsx","name":"book.xlsx"}' })).toEqual({ type: "conflict", copyName: "book (conflict).xlsx" });
     expect(toSessionEvent({ event: "viewOnly", data: '{"reason":"lockedElsewhere"}' })).toEqual({ type: "viewOnly", reason: "lockedElsewhere" });
+    expect(toSessionEvent({ event: "writable", data: '{"canWrite":true}' })).toEqual({ type: "writable", canWrite: true });
+    expect(toSessionEvent({ event: "writable", data: '{"canWrite":false}' })).toEqual({ type: "writable", canWrite: false });
+    expect(toSessionEvent({ event: "writable", data: '{}' })).toBeNull();
     expect(toSessionEvent({ event: "tokenExpiring", data: '{"expiresAt":123}' })).toEqual({ type: "tokenExpiring", expiresAt: 123 });
     expect(toSessionEvent({ event: "leaderChanged", data: "{}" })).toBeNull();
     expect(toSessionEvent({ event: "saved", data: "nope" })).toBeNull();

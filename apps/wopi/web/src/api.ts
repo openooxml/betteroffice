@@ -7,6 +7,7 @@ export interface JoinResponse {
   format: "docx" | "xlsx" | "pptx";
   initialUpdate: Uint8Array;
   baselineGeneration: number;
+  canWrite: boolean;
 }
 
 function fromBase64(value: string): Uint8Array {
@@ -27,7 +28,8 @@ export function decodeJoinResponse(raw: unknown): JoinResponse {
   if (typeof record.baselineGeneration !== "number" || !Number.isSafeInteger(record.baselineGeneration) || record.baselineGeneration < 0) {
     throw new Error("Invalid baseline generation.");
   }
-  return { format: record.format, initialUpdate: fromBase64(record.initialUpdate), baselineGeneration: record.baselineGeneration };
+  if (typeof record.canWrite !== "boolean") throw new Error("Invalid join response writability.");
+  return { format: record.format, initialUpdate: fromBase64(record.initialUpdate), baselineGeneration: record.baselineGeneration, canWrite: record.canWrite };
 }
 
 function defaultFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

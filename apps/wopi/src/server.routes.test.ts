@@ -323,6 +323,61 @@ describe("session API", () => {
     return pageConfig(await tracked(s, response));
   }
 
+  test("join and writable events expose effective per-user writability across lock recovery", async () => {
+    const h = makeHarness();
+    addToken(h, TOKEN, "writer");
+    addToken(h, TOKEN_B, "viewer", { canWrite: false });
+    const writer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN, accessTokenTtl: 0, mode: "edit" });
+    const viewer = await h.registry.join({ wopiSrc: SRC, accessToken: TOKEN_B, accessTokenTtl: 0, mode: "view" });
+    const session = writer.session;
+    const handler = createHandler({ config: h.config, currentKey: generateKeyPair(), registry: h.registry });
+    const request = (path: string, userId: string) => handler(new Request(`https://office.example/api/session/${path}`, {
+      headers: { Authorization: `Bearer ${userId}`, [BASELINE_GENERATION_HEADER]: String(session.baselineGeneration) },
+    }));
+    const readers = await Promise.all([writer, viewer].map(async ({ user }) => (await request("events", user.id)).body!.getReader()));
+    const nextEvent = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const chunk = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("session event timed out")), 100); }),
+        ]);
+        return new TextDecoder().decode(chunk.value);
+      } finally { clearTimeout(timeout); }
+    };
+    try {
+      for (const reader of readers) expect(await nextEvent(reader)).toBe(": connected\n\n");
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+      expect(await (await request("join", viewer.user.id)).json()).toMatchObject({ canWrite: false });
+      const file = h.host.files.get("file1")!;
+      file.lock = "other-app-lock";
+      file.lockExpiresAt = h.clock.t + 30 * 60000;
+      for (let i = 0; i < 60 && !session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnlyReason).toBe("lockLost");
+      expect(writer.user.canWrite).toBe(true);
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: false });
+      for (const reader of readers) expect(await nextEvent(reader)).toBe('event: viewOnly\ndata: {"reason":"lockLost"}\n\n');
+      file.lock = null;
+      file.lockExpiresAt = null;
+      for (let i = 0; i < 4 && session.viewOnly; i += 1) {
+        session.heartbeat(writer.user.id);
+        session.heartbeat(viewer.user.id);
+        await h.clock.advance(30000);
+      }
+      expect(session.viewOnly).toBe(false);
+      expect(await nextEvent(readers[0]!)).toBe('event: writable\ndata: {"canWrite":true}\n\n');
+      expect(await nextEvent(readers[1]!)).toBe('event: writable\ndata: {"canWrite":false}\n\n');
+      expect(await (await request("join", writer.user.id)).json()).toMatchObject({ canWrite: true });
+    } finally {
+      await Promise.all(readers.map((reader) => reader.cancel()));
+      session.abandon();
+    }
+  });
+
   test("auth is required and the right handle gets source and join", async () => {
     const s = setup();
     const config = await joined(s);

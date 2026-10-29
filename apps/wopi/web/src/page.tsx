@@ -95,7 +95,8 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     recoveryName ? `Your edits were saved as ${recoveryName}.` : config.viewOnlyReason === "lockedElsewhere" ? "This file is being edited elsewhere. You are viewing a live read-only copy." : null,
   );
   const [closed, setClosed] = useState(false);
-  const [readOnly, setReadOnly] = useState(!config.canWrite);
+  const [readOnly, setReadOnly] = useState(!loaded.join.canWrite);
+  const writable = useRef(loaded.join.canWrite);
   const [localRecovery, setLocalRecovery] = useState<{ bytes: Uint8Array; name: string } | null>(null);
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const editorApi = useRef<EditorApi | null>(null);
@@ -121,6 +122,11 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const userName = displayUserName(config.userFriendlyName);
   const room = useMemo(() => ({ id: "wopi", name: userName }), [userName]);
   const views = useRef<WopiView[]>([{ ViewId: loaded.clientId, UserName: userName }]);
+  const setWritable = useCallback((canWrite: boolean) => {
+    const next = canWrite && (config.tokenExpiresAt === null || config.tokenExpiresAt > Date.now());
+    writable.current = next;
+    setReadOnly(!next);
+  }, [config.tokenExpiresAt]);
 
   useEffect(() => {
     const container = editorContainer.current;
@@ -235,8 +241,9 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       await saveDocument(editorApi.current, api, {
         ...options,
         signal: lifetime.signal,
+        canWrite: () => writable.current,
         hasActiveComposition: () => compositionActive.current,
-        hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
+        hasPendingResync: () => writable.current && (transportRef.current?.hasPendingResync() ?? true),
         captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
         onFlushed: () => { version = changeVersion.current; },
         onProgress: wopiDebug,
@@ -256,7 +263,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       }
       throw error;
     }
-  }, [api, bridge, config.canWrite, lifetime, endSession]);
+  }, [api, bridge, lifetime, endSession]);
 
   const onSaveRequest = useCallback(async (): Promise<boolean> => {
     await requestSave();
@@ -275,8 +282,9 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       whenClosed: handleClosed.promise,
       finalSaved: finalSaved.current,
       onFinalSaved: () => { finalSaved.current = true; },
+      canWrite: () => writable.current,
       hasActiveComposition: () => compositionActive.current,
-      hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
+      hasPendingResync: () => writable.current && (transportRef.current?.hasPendingResync() ?? true),
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
       onProgress: wopiDebug,
       setInputBlocked: (blocked) => {
@@ -296,7 +304,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     }, completeClose).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
     return pending;
-  }, [api, completeClose, config.canWrite, handleClosed, lifetime, endSession]);
+  }, [api, completeClose, handleClosed, lifetime, endSession]);
 
   useEffect(() => {
     mounted.current = true;
@@ -343,28 +351,30 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       } else if (event.type === "tokenExpiring") {
         setBanner("Your access is about to expire. Save your work and reopen the document from the host.");
       } else if (event.type === "viewOnly") {
-        setReadOnly(true);
+        setWritable(false);
         if (event.reason === "lockedElsewhere") {
           setBanner("This file is being edited elsewhere. You are viewing a live read-only copy.");
         }
+      } else if (event.type === "writable") {
+        setWritable(event.canWrite);
       }
     }, { baselineGeneration: loaded.join.baselineGeneration }).catch(() => undefined);
     return () => {
       lifetime.signal.removeEventListener("abort", abort);
       controller.abort();
     };
-  }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin, endSession]);
+  }, [api, closed, lifetime, loaded.join.baselineGeneration, rejoin, endSession, setWritable]);
 
   useEffect(() => {
     if (config.tokenExpiresAt === null) return;
     const delay = config.tokenExpiresAt - Date.now();
     if (delay <= 0) {
-      setReadOnly(true);
+      setWritable(false);
       return;
     }
-    const timer = setTimeout(() => setReadOnly(true), delay);
+    const timer = setTimeout(() => setWritable(false), delay);
     return () => clearTimeout(timer);
-  }, [config.tokenExpiresAt]);
+  }, [config.tokenExpiresAt, setWritable]);
 
   const createTransport = useCallback(
     (_roomId: string) => {

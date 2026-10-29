@@ -350,7 +350,7 @@ export function createHandler(deps: WopiServerDeps): WopiHandler {
       if (request.method !== "GET") return typedError("methodNotAllowed", 405);
       const replica = session.replica;
       if (!replica) return typedError("closed", 409);
-      return json({ ...encodeJoinPayload(replica.joinPayload()), baselineGeneration: session.baselineGeneration }, 200, { "Cache-Control": "no-store" });
+      return json({ ...encodeJoinPayload(replica.joinPayload()), baselineGeneration: session.baselineGeneration, canWrite: user.canWrite && !session.viewOnly }, 200, { "Cache-Control": "no-store" });
     }
     if (path === "/api/session/save") {
       if (request.method !== "POST") return typedError("methodNotAllowed", 405);
@@ -534,6 +534,7 @@ function eventsResponse(session: import("./session/fileSession").FileSession, us
         session.on("saveFailed", (p) => send("saveFailed", { kind: p.kind })),
         session.on("conflict", (p) => send("conflict", { name: p.name, copyName: p.copyName })),
         session.on("viewOnly", (p) => send("viewOnly", { reason: p.reason })),
+        session.on("writable", () => send("writable", { canWrite: session.getUser(userId)?.canWrite === true && !session.viewOnly })),
         session.on("rejoinRequired", (p) => {
           send("rejoinRequired", { reason: p.reason });
           end();

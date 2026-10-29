@@ -18,6 +18,7 @@ interface RecoveryOptions {
 interface SaveDocumentOptions extends SaveOptions {
   signal?: AbortSignal;
   captureBarrier?(): SocketSaveBarrier | null;
+  canWrite?(): boolean;
   hasActiveComposition?(): boolean;
   hasPendingResync?(): boolean;
   onFlushed?(): void;
@@ -112,6 +113,9 @@ export async function saveDocument(
   let step = "started";
   const controller = new AbortController();
   const progress = (patch: Record<string, unknown>) => options.onProgress?.({ saveStep: step, ...patch });
+  const checkWritable = () => {
+    if (options.canWrite?.() === false) throw new Error("notAllowed");
+  };
   progress({
     saveStartedAt: Date.now(), saveFlushedAt: null, saveInputFlushed: null, saveStateVectorBytes: null,
     savePostedAt: null, saveResult: null, saveError: null, saveFailedStep: null,
@@ -119,11 +123,14 @@ export async function saveDocument(
   });
   try {
     options.signal?.throwIfAborted();
+    checkWritable();
     if (!editor) throw new Error("editorNotReady");
     const flushDeadline = Date.now() + (options.inputTimeoutMs ?? 3000);
     do {
       step = "composition";
+      checkWritable();
       await waitForComposition(options.hasActiveComposition, flushDeadline, "compositionActive", options.signal);
+      checkWritable();
       step = "flush";
       await bounded(() => editor.flushPendingInput({ terminateEdit: !options.DontTerminateEdit }), Math.max(0, flushDeadline - Date.now()), "flushPendingInputTimeout", options.signal);
       options.signal?.throwIfAborted();
@@ -131,13 +138,16 @@ export async function saveDocument(
       step = "flushed";
       progress({ saveFlushedAt: Date.now(), saveInputFlushed: true });
       step = "drain";
-      while (options.hasPendingResync?.() || editor.hasPendingUpdates()) {
+      for (;;) {
+        checkWritable();
+        if (!options.hasPendingResync?.() && !editor.hasPendingUpdates()) break;
         const remaining = flushDeadline - Date.now();
         if (remaining <= 0) throw new Error("notSynced");
         await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "notSynced", options.signal);
       }
     } while (options.hasActiveComposition?.());
     options.signal?.throwIfAborted();
+    checkWritable();
     if (Date.now() >= flushDeadline) throw new Error("notSynced");
     step = "sequence";
     const barrier = options.captureBarrier?.();
@@ -146,6 +156,7 @@ export async function saveDocument(
     progress({ saveConnectionId: barrier.connectionId, saveSequence: barrier.seq });
     step = "posted";
     await bounded(() => {
+      checkWritable();
       const saving = api.save(capturedBarrier, controller.signal);
       progress({ savePostedAt: Date.now() });
       return saving;
@@ -174,7 +185,9 @@ export async function closeDocument(
   let saved = options.finalSaved ?? false;
   try {
     if (!saved) {
-      await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+      if (options.canWrite?.() !== false) {
+        await saveDocument(editor, api, { ...options, DontTerminateEdit: false, DontSaveIfUnmodified: false });
+      }
       saved = true;
       options.onFinalSaved?.();
     }

@@ -25,6 +25,7 @@ let publish = (_update: Uint8Array) => false;
 let serverDoc: Doc;
 let attachGeneration: number | null = null;
 let acknowledge = true;
+let readOnlyRelay = false;
 const prepareFile = mock(async (bytes: Uint8Array, format: PreparedFile["format"]) => ({ bytes, format }));
 mock.module("../../../../shared/editor-host/Editor", () => ({
   prepareFile,
@@ -92,7 +93,7 @@ class TestSocket implements WebSocketLike {
     }
     this.readyState = 1;
     this.onopen?.();
-    this.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
+    if (!readOnlyRelay) this.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
   }
   drop(code: number) { this.readyState = 3; this.onclose?.({ code, reason: "rejoin from source" }); }
 }
@@ -111,6 +112,7 @@ afterEach(() => {
   serverDoc.destroy();
   attachGeneration = null;
   acknowledge = true;
+  readOnlyRelay = false;
   (window as unknown as GlobalWindow).happyDOM.setURL(previousUrl);
   sockets.length = 0;
   mounts.length = 0;
@@ -126,7 +128,9 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(replaceBeforeAttach = false, format: PreparedFile["format"] = "docx") {
+async function mount(replaceBeforeAttach = false, format: PreparedFile["format"] = "docx", options: { canWrite?: boolean; credentialCanWrite?: boolean; readOnlyRelay?: boolean } = {}) {
+  let canWrite = options.canWrite ?? true;
+  readOnlyRelay = options.readOnlyRelay ?? false;
   const calls: string[] = [];
   const messages: Array<{ MessageId: string; SendTime: number; Values: Record<string, unknown> }> = [];
   const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
@@ -150,7 +154,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
       await sourceGate;
       return failSource ? new Response(null, { status: 503 }) : new Response(Uint8Array.of(2), { headers: { "X-WOPI-Baseline-Generation": String(generation) } });
     }
-    if (path.endsWith("/join")) return Response.json({ format, initialUpdate: "Aw==", baselineGeneration: generation });
+    if (path.endsWith("/join")) return Response.json({ format, initialUpdate: "Aw==", baselineGeneration: generation, canWrite });
     if (path.endsWith("/events")) {
       return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
@@ -168,7 +172,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
     throw new Error(`Unexpected request: ${path}`);
   });
   const config = parseWopiConfig({
-    sessionHandle: "same-handle", format, fileName: `file.${format}`, canWrite: true,
+    sessionHandle: "same-handle", format, fileName: `file.${format}`, canWrite: options.credentialCanWrite ?? true,
     postMessageOrigin: "https://host.example", userFriendlyName: "Peer", closePostMessage: true,
   });
   const bridge = new PostMessageBridge({
@@ -179,7 +183,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
   });
   const loaded: Loaded = {
     config, api, bridge, file: { bytes: Uint8Array.of(0), format },
-    join: { format, initialUpdate: Uint8Array.of(1), baselineGeneration: 1 }, clientId: 7, actions: { views: [] },
+    join: { format, initialUpdate: Uint8Array.of(1), baselineGeneration: 1, canWrite }, clientId: 7, actions: { views: [] },
   };
   let view!: ReturnType<typeof render>;
   bridge.frameReady();
@@ -196,6 +200,17 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
     blockSource() { let release!: () => void; sourceGate = new Promise((resolve) => { release = resolve; }); return release; },
     failSource() { failSource = true; },
     closedEvent() { streams.at(-1)!.enqueue(new TextEncoder().encode("event: closed\ndata: {}\n\n")); },
+    viewOnlyEvent() {
+      canWrite = false;
+      readOnlyRelay = true;
+      streams.at(-1)!.enqueue(new TextEncoder().encode('event: viewOnly\ndata: {"reason":"lockLost"}\n\n'));
+    },
+    writableEvent(writable = true) {
+      canWrite = writable;
+      readOnlyRelay = !writable;
+      streams.at(-1)!.enqueue(new TextEncoder().encode(`event: writable\ndata: ${JSON.stringify({ canWrite })}\n\n`));
+      if (writable) sockets.at(-1)!.onmessage?.({ data: encodeSyncStep1(Uint8Array.of(0)) });
+    },
     event() { streams.at(-1)!.enqueue(new TextEncoder().encode('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n')); },
   };
 }
@@ -203,7 +218,62 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
 const compositionSaves = (["docx", "xlsx", "pptx"] as const).flatMap((format) =>
   (["Action_Save", "Save button", "Close"] as const).map((action) => [format, action] as const));
 
-test.each(["docx", "xlsx", "pptx"] as const)("%s DontTerminateEdit waits for the worker commit after compositionend", async (format) => {
+test.each(["docx", "xlsx", "pptx"] as const)("%s initially view-only joins reject Save and complete Close without outbound resync", async (format) => {
+  const h = await mount(false, format, { canWrite: false, readOnlyRelay: true });
+  const flushing = mock(async () => {});
+  flush = flushing;
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(h.loaded.config.canWrite).toBe(true);
+    expect(h.view.getByTestId("editor").getAttribute("data-readonly")).toBe("true");
+    await act(async () => {
+      await expect(Promise.resolve(mounts[0]!.onSaveRequest!())).rejects.toThrow("notAllowed");
+      h.loaded.bridge.handleMessage({ origin: "https://host.example", data: {
+        MessageId: "Action_Save", Values: { Notify: true },
+      } });
+    });
+    expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+      { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: false, result: "notAllowed" } },
+    ]);
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    await act(async () => { await h.loaded.actions.close!(); });
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    expect(h.calls.filter((path) => path.endsWith("/close"))).toHaveLength(1);
+    expect(h.view.queryByTestId("editor")).toBeNull();
+    expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+  } finally { warning.mockRestore(); }
+});
+
+test("session permission events update editing and subsequent Save and Close decisions", async () => {
+  const h = await mount(false, "xlsx", { canWrite: false, readOnlyRelay: true });
+  expect(h.view.getByTestId("editor").getAttribute("data-readonly")).toBe("true");
+  await act(async () => h.writableEvent());
+  expect(h.view.getByTestId("editor").getAttribute("data-readonly")).toBe("false");
+  await act(async () => { await h.loaded.actions.save!(); });
+  expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+  await act(async () => h.viewOnlyEvent());
+  expect(h.view.getByTestId("editor").getAttribute("data-readonly")).toBe("true");
+  const flushing = mock(async () => {});
+  flush = flushing;
+  await act(async () => { await h.loaded.actions.close!(); });
+  expect(flushing).not.toHaveBeenCalled();
+  expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+  expect(h.calls.filter((path) => path.endsWith("/close"))).toHaveLength(1);
+  expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+});
+
+test("a writable session event keeps credential viewers read-only", async () => {
+  const h = await mount(false, "docx", { canWrite: false, credentialCanWrite: false, readOnlyRelay: true });
+  await act(async () => h.writableEvent(false));
+  expect(h.view.getByTestId("editor").getAttribute("data-readonly")).toBe("true");
+  await act(async () => { await h.loaded.actions.close!(); });
+  expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+  expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+});
+
+test.each(["docx", "pptx"] as const)("%s DontTerminateEdit waits for the worker commit after compositionend", async (format) => {
   const h = await mount(false, format);
   const local = new Doc();
   const input = h.view.getByTestId("editor");
@@ -601,7 +671,7 @@ test("source and join from different generations retry before preparing an edito
       sources += 1;
       return new Response(Uint8Array.of(sources), { headers: { "X-WOPI-Baseline-Generation": String(sources) } });
     }
-    return Response.json({ format: "docx", initialUpdate: "Aw==", baselineGeneration: 2 });
+    return Response.json({ format: "docx", initialUpdate: "Aw==", baselineGeneration: 2, canWrite: true });
   });
   const { loadBaseline } = await import("./page");
   const baseline = await loadBaseline(api);
@@ -964,7 +1034,7 @@ test("host messages during deferred boot receive normal replies through the wind
   document.body.appendChild(element);
   let release!: (value: { bytes: Uint8Array; baselineGeneration: number }) => void;
   const source = spyOn(SessionApi.prototype, "source").mockImplementation(() => new Promise((resolve) => { release = resolve; }));
-  const join = spyOn(SessionApi.prototype, "join").mockResolvedValue({ format: "docx", initialUpdate: Uint8Array.of(0), baselineGeneration: 1 });
+  const join = spyOn(SessionApi.prototype, "join").mockResolvedValue({ format: "docx", initialUpdate: Uint8Array.of(0), baselineGeneration: 1, canWrite: true });
   const root = { render: mock(() => {}), unmount() {} };
   const createRoot = spyOn(ReactDOMClient, "createRoot").mockReturnValue(root);
   const send = (MessageId: string, Values = {}) => window.dispatchEvent(new MessageEvent("message", {
