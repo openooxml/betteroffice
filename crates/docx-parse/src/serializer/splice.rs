@@ -708,7 +708,7 @@ fn comment_removal_spans(
     let mut parents = vec![None; parsed.len()];
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut ends = HashMap::new();
-    let mut stack = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
     for (index, tag) in parsed.iter().enumerate() {
         if tag.end {
             let open = stack.pop()?;
@@ -1412,6 +1412,10 @@ fn splice_story_part_inner(
             return None;
         }
     }
+    let changed_ranges = ranged
+        .iter()
+        .map(|ordinal| changed_comment_ranges(&source[spans[ordinal].clone()], &written[ordinal]))
+        .collect::<Option<Vec<_>>>()?;
     let mut prefixes = BTreeSet::new();
     for ordinal in &replaced {
         let mut required = required_prefixes(&written[ordinal])?;
@@ -1427,11 +1431,8 @@ fn splice_story_part_inner(
     for (_, _, xml) in &rows.edits {
         prefixes.extend(required_prefixes(xml)?);
     }
-    for ordinal in &ranged {
-        prefixes.extend(required_prefixes(&changed_comment_ranges(
-            &source[spans[ordinal].clone()],
-            &written[ordinal],
-        )?)?);
+    for xml in &changed_ranges {
+        prefixes.extend(required_prefixes(xml)?);
     }
     let root = root_tag(source)?;
     let bound = bindings(source, &root);
