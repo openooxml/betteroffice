@@ -225,6 +225,7 @@ export type DocxEngineWorkerHostModule = {
 
 export type DocxEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
+  | { id: number; type: 'prepare-save' }
   | { id: number; type: 'openSource'; source: DocxSourceOpenRequest }
   | { id: number; type: 'previewSource'; preview: DocxSourcePreviewOptions & { layoutInput: string } }
   | { id: number; type: 'commandInit'; request: DocxCommandInitRequest }
