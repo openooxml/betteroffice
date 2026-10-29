@@ -21,11 +21,13 @@ import type {
   SlideDisplayList,
 } from '@betteroffice/pptx';
 import type { PptxEditorApi, PptxEditorProps, PptxInThreadEditorProps, PptxWorkerViewerApi } from './PptxEditor';
-import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
+import { PptxEditor, pptxLegacyEditorLoader } from './PptxEditor';
+import { paintSelection, SelectionOverlay } from './PptxEditorContent';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
 import * as presenceRendering from './presence-rendering';
 import { workerEditorSessionOpener } from './worker/useEditableSessionPresentation';
+import { LEGACY_SYNC_API } from './runtimeOptions';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -90,6 +92,26 @@ function isDisabled(element: HTMLElement): boolean {
 it('pins the editor root to ltr', () => {
   const view = render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} fonts={[]} />);
   expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
+it('opens the legacy sync API through its lazy session and calls onReady once', async () => {
+  const ready: PptxEditorApi[] = [];
+  const errors: Error[] = [];
+  const load = spyOn(pptxLegacyEditorLoader, 'load');
+  const legacy = { [LEGACY_SYNC_API]: true as const };
+  const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+  try {
+    const view = render(<PptxEditor {...legacy} file={fixture} fonts={fonts} onReady={(api) => { ready.push(api); }}
+      onError={(error) => { errors.push(error); }} />);
+    await waitFor(() => expect(ready).toHaveLength(1));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(ready[0]!.handle.snapshot().slides.length).toBeGreaterThan(0);
+    expect(ready[0]!.save()).toBeInstanceOf(Uint8Array);
+    expect(errors).toEqual([]);
+    await act(async () => { view.rerender(<PptxEditor {...legacy} file={fixture} fonts={fonts}
+      onReady={(api) => { ready.push(api); }} />); });
+    expect(ready).toHaveLength(1);
+  } finally { load.mockRestore(); }
 });
 
 describe('shortcut matching', () => {

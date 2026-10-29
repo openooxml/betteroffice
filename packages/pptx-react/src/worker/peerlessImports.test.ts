@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
+const STATIC_GZIP_BUDGET = 104_500;
 
 function source(path: string): ts.SourceFile {
   const name = relative(root, path).replace(/\\/g, '/');
@@ -84,9 +85,28 @@ test('default editor static chunks exclude the peerless core', async () => {
     .flatMap((path) => Object.entries(outputs[path].inputs)
       .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
+  for (const module of [
+    /packages\/pptx-react\/src\/viewer\//,
+    /packages\/pptx-react\/src\/worker\/PptxWorkerEditor\.tsx$/,
+    /packages\/pptx-react\/src\/worker\/createWorkerEditorApi\.ts$/,
+    /packages\/pptx-react\/src\/worker\/useEditableSessionPresentation\.ts$/,
+    /packages\/pptx-react\/src\/commands\/workerInputCoordinator\.ts$/,
+    /packages\/pptx-react\/src\/PptxEditorContent\.tsx$/,
+    /packages\/pptx-react\/src\/PptxLegacyEditorSession\.tsx$/,
+    /packages\/pptx\/src\/session\/editorSession\.ts$/,
+    /packages\/pptx\/src\/session\/editPeer\.ts$/,
+    /packages\/pptx\/src\/session\/client\.ts$/,
+    /packages\/pptx\/src\/render\/browserImage\.ts$/,
+    /packages\/pptx\/src\/render\/imageSize\.ts$/,
+    /packages\/pptx\/src\/wasm\/loader\.ts$/,
+    /shared\/react-toolbar\/symbols\.ts$/,
+  ]) {
+    expect(inputs.filter((path) => module.test(path))).toEqual([]);
+    expect(deferredInputs.some((path) => module.test(path))).toBe(true);
+  }
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
-  expect(bytes).toBeLessThan(104_500);
+  expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);
 });
 
 test('p2_peerless_import_graph_has_no_wasm_modules', () => {
