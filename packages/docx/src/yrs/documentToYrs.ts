@@ -843,7 +843,7 @@ function runContentToUnits(
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
-      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, drawingMarks(marks))];
+      return [embedUnit('shape', { ...shapePayload(content.shape), ...(content.drawing ? { docPr: content.drawing } : {}) }, content.shape.drawingRunXml ? drawingMarks(marks) : trackedMarks(marks))];
     case 'chart':
       return [embedUnit('chart', { ...chartPayload(content.chart), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];
     case 'opaqueDrawing':

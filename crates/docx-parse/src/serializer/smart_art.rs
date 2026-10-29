@@ -472,7 +472,7 @@ pub(super) fn replay(
 #[cfg(test)]
 mod tests {
     use crate::image::ImagePadding;
-    use crate::serializer::{SerializerDeterminism, canonical_xml_events};
+    use crate::serializer::{CanonicalXmlEvent, SerializerDeterminism, canonical_xml_events};
     use crate::smart_art::{frame_model, other_model_sha256};
     use serde_json::json;
 
@@ -616,6 +616,30 @@ mod tests {
 
     #[test]
     fn smart_art_frame_edits_patch_source_without_changing_diagram_content() {
+        let graphic_events = |xml: &str| {
+            let events = canonical_xml_events(xml, false).unwrap();
+            let start = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        CanonicalXmlEvent::Start { namespace_uri, local_name, .. }
+                            if namespace_uri == crate::xml::namespaces::A && local_name == "graphic"
+                    )
+                })
+                .unwrap();
+            let end = events
+                .iter()
+                .rposition(|event| {
+                    matches!(
+                        event,
+                        CanonicalXmlEvent::End { namespace_uri, local_name }
+                            if namespace_uri == crate::xml::namespaces::A && local_name == "graphic"
+                    )
+                })
+                .unwrap();
+            events[start..=end].to_vec()
+        };
         for anchored in [false, true] {
             let (mut shape, original) = source(anchored);
             shape.size.width = 2_743_200.0;
@@ -659,32 +683,7 @@ mod tests {
                 );
                 assert_eq!(reopened.relative_height, Some(29.0));
             }
-            let original = parse_xml(
-                original.as_bytes(),
-                "original",
-                &mut ParseBudget::new(&limits),
-            )
-            .unwrap();
-            let original = original
-                .root()
-                .unwrap()
-                .child_by_local_name("drawing")
-                .unwrap()
-                .child_elements()
-                .next()
-                .unwrap()
-                .child_by_local_name("graphic")
-                .unwrap();
-            let graphic = drawing
-                .child_elements()
-                .next()
-                .unwrap()
-                .child_by_local_name("graphic")
-                .unwrap();
-            assert_eq!(
-                canonical_xml_events(&graphic.to_raw_inline_xml(), true).unwrap(),
-                canonical_xml_events(&original.to_raw_inline_xml(), true).unwrap()
-            );
+            assert_eq!(graphic_events(&saved), graphic_events(&original));
             assert!(saved.contains("<w:noProof/>"));
             assert!(!saved.contains("wps:wsp"));
             assert!(context.take_warnings().is_empty());
