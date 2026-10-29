@@ -4575,6 +4575,16 @@ impl<'a> ShapeFonts<'a> {
     }
 
     fn resolve(&self, chain: &[ooxml_text::FontId], ch: char) -> Option<ooxml_text::FontId> {
+        if !ooxml_text::measure::needs_glyph(ch)
+            && chain
+                .last()
+                .is_some_and(|id| self.coverage_only.contains(id))
+        {
+            return chain
+                .iter()
+                .copied()
+                .find(|&id| self.store.metrics(id).is_ok());
+        }
         self.store.resolve(chain, ch).or_else(|| {
             chain
                 .last()
@@ -4591,6 +4601,7 @@ fn painted_text_width(
     fmt: &RunFormattingIn,
     bidi_level: u8,
     authoritative: bool,
+    coverage_only: bool,
 ) -> Option<f64> {
     let size = effective_font_px_of(fmt);
     let features = kern_features_of(fmt, size);
@@ -4603,10 +4614,11 @@ fn painted_text_width(
         }
     });
     let width = |text: &str, small_caps: bool| {
-        if text
-            .chars()
-            .any(|ch| !ch.is_whitespace() && !fonts.store.covers(font, ch).unwrap_or(false))
-        {
+        if text.chars().any(|ch| {
+            !ch.is_whitespace()
+                && (!coverage_only || ooxml_text::measure::needs_glyph(ch))
+                && !fonts.store.covers(font, ch).unwrap_or(false)
+        }) {
             return None;
         }
         let mut features = features.clone();
@@ -4710,8 +4722,27 @@ fn text_substitute_scale(
             return None;
         }
         let owner = fonts.store.byte_owner(font).ok()?;
-        let wanted = painted_text_width(fonts, font, text, fmt, bidi_level, authoritative)?;
-        let own = painted_text_width(fonts, owner, text, fmt, bidi_level, authoritative)?;
+        let coverage_only = chain
+            .last()
+            .is_some_and(|id| fonts.coverage_only.contains(id));
+        let wanted = painted_text_width(
+            fonts,
+            font,
+            text,
+            fmt,
+            bidi_level,
+            authoritative,
+            coverage_only,
+        )?;
+        let own = painted_text_width(
+            fonts,
+            owner,
+            text,
+            fmt,
+            bidi_level,
+            authoritative,
+            coverage_only,
+        )?;
         let ratio = wanted / own;
         (ratio.is_finite() && ratio > 0.0 && (ratio - 1.0).abs() > 1e-3).then_some(ratio)
     });
@@ -13706,6 +13737,35 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_visible_font_resolution_is_scoped_to_implicit_defaults() {
+        let mut store = ooxml_text::FontStore::new();
+        let bytes = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let first = store.register(bytes.to_vec()).unwrap();
+        let last = store.register(bytes.to_vec()).unwrap();
+        let chain = [first, last];
+        let mut fonts = ShapeFonts {
+            store: &store,
+            chains: HashMap::new(),
+            coverage_only: HashSet::new(),
+        };
+        for ch in ['\t', '\u{2060}', '\u{fe0f}', '\u{feff}'] {
+            assert_eq!(store.resolve(&chain, ch), None);
+            assert_eq!(fonts.resolve(&chain, ch), Some(last));
+            fonts.coverage_only.insert(first);
+            assert_eq!(fonts.resolve(&chain, ch), Some(last));
+            fonts.coverage_only.insert(last);
+            assert_eq!(fonts.resolve(&chain, ch), Some(first));
+            let unknown = ooxml_text::FontId::from_u32(u32::MAX);
+            assert_eq!(fonts.resolve(&[unknown, first, last], ch), Some(first));
+            assert_eq!(fonts.resolve(&chain, '\u{0939}'), None);
+            fonts.coverage_only.clear();
+        }
+        let fmt = RunFormattingIn::default();
+        assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, false).is_none());
+        assert!(painted_text_width(&fonts, first, "\u{2060}", &fmt, 0, false, true).is_some());
+    }
 
     #[test]
     fn unequal_column_bounds_and_separators_match_placement() {

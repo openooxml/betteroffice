@@ -43,7 +43,7 @@ use crate::word_metrics::{kern_enabled, kern_features};
 
 use super::font_slots::{FontSlot, char_slot};
 use super::input::{FontChains, MeasureRequest, RunIn, validate_pt_size};
-use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
+use super::{MAX_RUN_TEXT_BYTES, MeasureError, needs_glyph, pt_to_px};
 
 /// Longest fallback chain a run keeps resolved per slot. Chains past it are
 /// rebuilt per character instead, so keeping them can never cost more memory
@@ -569,6 +569,9 @@ fn resolve_with_fallback(
     ch: char,
     font_chains: FontChains<'_>,
 ) -> Option<FontId> {
+    if !needs_glyph(ch) && font_chains.coverage_only(chain) {
+        return chain.iter().copied().find(|&id| store.metrics(id).is_ok());
+    }
     store.resolve(chain, ch).or_else(|| {
         chain
             .last()
@@ -1065,6 +1068,62 @@ mod tests {
             "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn implicit_non_visible_characters_do_not_require_cmap_entries() {
+        let mut bytes = FIXTURE.to_vec();
+        let count = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        let entry = bytes[12..]
+            .chunks_exact(16)
+            .take(count)
+            .find(|entry| &entry[..4] == b"cmap")
+            .unwrap();
+        let cmap = u32::from_be_bytes(entry[8..12].try_into().unwrap()) as usize;
+        bytes[cmap + 2..cmap + 4].copy_from_slice(&0u16.to_be_bytes());
+
+        let mut store = FontStore::new();
+        let font = store.register(bytes).unwrap();
+        let fallback = store.register(FIXTURE.to_vec()).unwrap();
+        let chain = [font, fallback];
+        let configured = std::collections::HashMap::new();
+        let implicit = std::collections::HashMap::from([(
+            "@betteroffice/fonts/coverage".to_owned(),
+            vec![fallback.to_u32()],
+        )]);
+        let unrelated = std::collections::HashMap::from([(
+            "@betteroffice/fonts/coverage".to_owned(),
+            vec![font.to_u32()],
+        )]);
+        for ch in [
+            '\t', '\u{0013}', '\u{0014}', '\u{0015}', '\u{00a0}', '\u{00ad}', '\u{200b}',
+            '\u{200d}', '\u{202f}', '\u{2060}', '\u{fe0f}', '\u{feff}',
+        ] {
+            assert!(!needs_glyph(ch), "U+{:04X}", ch as u32);
+            assert_eq!(store.glyph_id(font, ch).unwrap(), None);
+            assert!(!store.covers(font, ch).unwrap(), "U+{:04X}", ch as u32);
+            assert_eq!(store.resolve(&[font], ch), None);
+            assert_eq!(store.resolve(&chain, ch), store.resolve(&[fallback], ch));
+            for chains in [&configured, &unrelated] {
+                assert_eq!(
+                    resolve_with_fallback(&store, &chain, ch, FontChains::Hash(chains)),
+                    Some(fallback)
+                );
+            }
+            assert_eq!(
+                resolve_with_fallback(&store, &chain, ch, FontChains::Hash(&implicit)),
+                Some(font)
+            );
+        }
+        assert!(needs_glyph('€'));
+        assert!(store.covers(fallback, '€').unwrap());
+        assert!(needs_glyph('\u{0939}'));
+        assert_eq!(
+            resolve_with_fallback(&store, &chain, '\u{0939}', FontChains::Hash(&implicit)),
+            None
+        );
+        let unknown = FontId::from_u32(u32::MAX);
+        assert!(store.covers(unknown, '\t').is_err());
     }
 
     /// Offsets are UTF-16 code units, not UTF-8 bytes: 'é' is 2 bytes but

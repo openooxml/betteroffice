@@ -9,7 +9,7 @@ use skrifa::raw::tables::os2::SelectionFlags;
 use skrifa::{FontRef, MetadataProvider};
 
 use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics, runs_at_own_widths};
-use crate::shape::{ShapedGlyph, is_default_ignorable};
+use crate::shape::ShapedGlyph;
 
 const MAX_SHAPE_CACHE_ENTRIES: usize = 4_096;
 pub(crate) const MAX_CACHED_SHAPE_TEXT_BYTES: usize = 64 * 1024;
@@ -586,13 +586,9 @@ impl FontStore {
         Ok(entry.advance.map(|advance| advance * font.advance_scale))
     }
 
-    /// Whether `ch` needs no glyph or the font's cmap covers it.
+    /// Whether the font's cmap covers `ch`.
     pub fn covers(&self, id: FontId, ch: char) -> Result<bool, FontError> {
-        self.entry(id)?;
-        Ok(ch.is_whitespace()
-            || ch.is_control()
-            || is_default_ignorable(ch)
-            || self.glyph_id(id, ch)?.is_some())
+        Ok(self.glyph_id(id, ch)?.is_some())
     }
 
     /// Resolves the first covering font, skipping unknown IDs.
@@ -688,33 +684,6 @@ mod tests {
             "repeat lookups reuse the memo"
         );
         assert!(!store.covers(font, '\u{10FFFF}').unwrap());
-    }
-
-    #[test]
-    fn non_visible_characters_do_not_require_cmap_entries() {
-        let mut store = FontStore::new();
-        let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
-        for ch in [
-            '\t',
-            '\u{0013}',
-            '\u{0014}',
-            '\u{0015}',
-            '\u{00a0}',
-            '\u{00ad}',
-            '\u{200b}',
-            '\u{200d}',
-            '\u{202f}',
-            '\u{2060}',
-            '\u{fe0f}',
-            '\u{feff}',
-        ] {
-            assert!(store.covers(font, ch).unwrap(), "U+{:04X}", ch as u32);
-            assert_eq!(store.resolve(&[font], ch), Some(font));
-        }
-        assert!(store.covers(font, '€').unwrap());
-        assert_eq!(store.resolve(&[font], '\u{0939}'), None);
-        let unknown = FontId::from_u32(u32::MAX);
-        assert!(store.covers(unknown, '\t').is_err());
     }
 
     #[test]
