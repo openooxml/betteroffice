@@ -126,7 +126,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(replaceBeforeAttach = false) {
+async function mount(replaceBeforeAttach = false, format: PreparedFile["format"] = "docx") {
   const calls: string[] = [];
   const messages: Array<{ MessageId: string; SendTime: number; Values: Record<string, unknown> }> = [];
   const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
@@ -150,7 +150,7 @@ async function mount(replaceBeforeAttach = false) {
       await sourceGate;
       return failSource ? new Response(null, { status: 503 }) : new Response(Uint8Array.of(2), { headers: { "X-WOPI-Baseline-Generation": String(generation) } });
     }
-    if (path.endsWith("/join")) return Response.json({ format: "docx", initialUpdate: "Aw==", baselineGeneration: generation });
+    if (path.endsWith("/join")) return Response.json({ format, initialUpdate: "Aw==", baselineGeneration: generation });
     if (path.endsWith("/events")) {
       return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
@@ -168,7 +168,7 @@ async function mount(replaceBeforeAttach = false) {
     throw new Error(`Unexpected request: ${path}`);
   });
   const config = parseWopiConfig({
-    sessionHandle: "same-handle", format: "docx", fileName: "file.docx", canWrite: true,
+    sessionHandle: "same-handle", format, fileName: `file.${format}`, canWrite: true,
     postMessageOrigin: "https://host.example", userFriendlyName: "Peer", closePostMessage: true,
   });
   const bridge = new PostMessageBridge({
@@ -178,8 +178,8 @@ async function mount(replaceBeforeAttach = false) {
     onSave: (options) => loaded.actions.save!(options), onClose() {}, onBlurFocus() {}, onGrabFocus() {}, onGetViews: () => [],
   });
   const loaded: Loaded = {
-    config, api, bridge, file: { bytes: Uint8Array.of(0), format: "docx" },
-    join: { format: "docx", initialUpdate: Uint8Array.of(1), baselineGeneration: 1 }, clientId: 7, actions: { views: [] },
+    config, api, bridge, file: { bytes: Uint8Array.of(0), format },
+    join: { format, initialUpdate: Uint8Array.of(1), baselineGeneration: 1 }, clientId: 7, actions: { views: [] },
   };
   let view!: ReturnType<typeof render>;
   bridge.frameReady();
@@ -199,6 +199,150 @@ async function mount(replaceBeforeAttach = false) {
     event() { streams.at(-1)!.enqueue(new TextEncoder().encode('event: rejoinRequired\ndata: {"reason":"sourceChanged"}\n\n')); },
   };
 }
+
+const compositionSaves = (["docx", "xlsx", "pptx"] as const).flatMap((format) =>
+  (["Action_Save", "Save button", "Close"] as const).map((action) => [format, action] as const));
+
+test.each(compositionSaves)("%s %s waits for compositionend and saves the composed edit", async (format, action) => {
+  const h = await mount(false, format);
+  const local = new Doc();
+  const input = h.view.getByTestId("editor");
+  const flushing = mock(async () => {});
+  flush = flushing;
+  input.addEventListener("compositionstart", (event) => event.stopPropagation());
+  input.addEventListener("compositionend", (event) => {
+    event.stopPropagation();
+    local.getText("body").insert(0, "漢字");
+    expect(publish(encodeStateAsUpdate(local))).toBe(true);
+    mounts[0]!.onChange();
+  });
+  try {
+    let saving: Promise<unknown> | undefined;
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      if (action === "Action_Save") {
+        h.loaded.bridge.handleMessage({ origin: "https://host.example", data: { MessageId: action, Values: { Notify: true } } });
+      } else {
+        saving = action === "Close" ? h.loaded.actions.close!() : Promise.resolve(mounts[0]!.onSaveRequest!());
+      }
+    });
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.calls.filter((path) => path.endsWith("/save") || path.endsWith("/close"))).toEqual([]);
+    expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp" || message.MessageId === "UI_Close")).toEqual([]);
+    expect(local.getText("body").toString()).toBe("");
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await saving;
+    });
+    expect(flushing).toHaveBeenCalledTimes(1);
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+    expect(h.hostText).toBe("漢字");
+    if (action === "Action_Save") {
+      expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+        { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: true } },
+      ]);
+    } else if (action === "Close") {
+      expect(h.calls.filter((path) => path.endsWith("/close"))).toHaveLength(1);
+      expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+    }
+  } finally { local.destroy(); }
+});
+
+test.each(compositionSaves)("%s %s fails with compositionActive at the deadline and can be retried", async (format, action) => {
+  const h = await mount(false, format);
+  const input = h.view.getByTestId("editor");
+  const flushing = mock(async () => {});
+  flush = flushing;
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay < 100 || delay > 3000) return schedule(callback, delay);
+    const timer = schedule(() => {}, delay);
+    deadlines.set(timer, callback);
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer);
+    cancel(timer);
+  }) as typeof clearTimeout);
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    let outcome: Promise<unknown> | undefined;
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      if (action === "Action_Save") {
+        h.loaded.bridge.handleMessage({ origin: "https://host.example", data: {
+          MessageId: action, Values: { Notify: true, DontTerminateEdit: true },
+        } });
+      } else {
+        const saving = action === "Close" ? h.loaded.actions.close!() : Promise.resolve(mounts[0]!.onSaveRequest!());
+        outcome = saving.then(() => "saved", (error: Error) => error.message);
+      }
+    });
+    if (action === "Close") expect(h.view.container.querySelector("main")!.inert).toBe(true);
+    expect(deadlines.size).toBe(1);
+    await act(async () => {
+      for (const deadline of [...deadlines.values()]) deadline();
+      await outcome;
+    });
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.calls.filter((path) => path.endsWith("/save") || path.endsWith("/close"))).toEqual([]);
+    expect(h.view.getByRole("alert").textContent).toMatch(/finish typing/i);
+    expect(h.view.getByTestId("editor")).toBe(input);
+    if (action === "Close") expect(h.view.container.querySelector("main")!.inert).toBe(false);
+    else expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toEqual([]);
+    if (action === "Action_Save") {
+      expect(h.messages.filter((message) => message.MessageId === "Action_Save_Resp")).toEqual([
+        { MessageId: "Action_Save_Resp", SendTime: expect.any(Number), Values: { success: false, result: "compositionActive" } },
+      ]);
+    } else if (action === "Save button") {
+      expect(await outcome).toBe("compositionActive");
+    }
+    await act(async () => input.dispatchEvent(new Event("compositionend", { bubbles: true })));
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    await act(async () => {
+      if (action === "Close") await h.loaded.actions.close!();
+      else await h.loaded.actions.save!();
+    });
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+    expect(h.view.queryByRole("alert")).toBeNull();
+    if (action === "Close") expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+  } finally {
+    for (const timer of deadlines.keys()) cancel(timer);
+    timers.mockRestore(); cancellations.mockRestore(); warning.mockRestore();
+  }
+});
+
+test.each(["remount", "teardown"])("%s cancels composition waiting and clears the old editor's composition", async (action) => {
+  const h = await mount();
+  const oldInput = h.view.getByTestId("editor");
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    let outcome!: Promise<string>;
+    await act(async () => {
+      oldInput.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      outcome = h.loaded.actions.save!().then(() => "saved", (error: Error) => error.message);
+    });
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    await act(async () => {
+      if (action === "remount") sockets[0]!.drop(4409);
+      else h.view.unmount();
+      await outcome;
+    });
+    expect(await outcome).toBe(action === "remount" ? "rejoinRequired" : "editorDisposed");
+    oldInput.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+    if (action === "remount") {
+      expect(mounts).toHaveLength(2);
+      await act(async () => { sockets[1]!.open(); await h.loaded.actions.save!(); });
+      expect(h.calls.filter((path) => path.endsWith("/save"))).toHaveLength(1);
+    } else {
+      expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    }
+  } finally { warning.mockRestore(); }
+});
 
 test.each(["socket", "event", "socket and event", "event and socket"])("%s replaces the baseline exactly once", async (signal) => {
   const h = await mount();

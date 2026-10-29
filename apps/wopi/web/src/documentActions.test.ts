@@ -20,7 +20,7 @@ test.each(["resync", "drain"])("provider %s shares the input flush deadline and 
   } finally { warning.mockRestore(); clock.mockRestore(); }
 });
 
-test.each(["flush", "resync", "drain", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
+test.each(["composition", "flush", "resync", "drain", "save"])("rejoining rejects a pending %s without waiting for its deadline", async (stage) => {
   const h = setup();
   const controller = new AbortController();
   let entered!: () => void;
@@ -40,6 +40,7 @@ test.each(["flush", "resync", "drain", "save"])("rejoining rejects a pending %s 
   const warning = spyOn(console, "error").mockImplementation(() => {});
   const pending = saveDocument(h.editor, api, {
     ...h.saveOptions, signal: controller.signal,
+    hasActiveComposition: () => { if (stage !== "composition") return false; entered(); return true; },
     hasPendingResync: () => { if (stage !== "resync") return false; entered(); return true; },
   });
   const outcome = pending.then(() => "saved", (error: Error) => error.message);
@@ -85,6 +86,48 @@ test("save flushes pending input before capturing the socket sequence", async ()
   const h = setup();
   await saveDocument(h.editor, h.api, { ...h.saveOptions });
   expect(h.calls).toEqual(["flush", "sequence", "save"]);
+});
+
+test("composition waiting uses the same deadline as the subsequent input flush", async () => {
+  const h = setup();
+  let composing = true;
+  let now = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const callbacks = new Map<number, () => void>();
+  const handles: ReturnType<typeof setTimeout>[] = [];
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    callbacks.set(delay, callback);
+    const timer = schedule(() => {}, 1000);
+    handles.push(timer);
+    return timer;
+  }) as typeof setTimeout);
+  let enterFlush!: () => void;
+  const flushing = new Promise<void>((resolve) => { enterFlush = resolve; });
+  h.editor.flushPendingInput = () => { h.calls.push("flush"); enterFlush(); return new Promise<void>(() => {}); };
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  const pending = saveDocument(h.editor, h.api, {
+    ...h.saveOptions, inputTimeoutMs: 100, hasActiveComposition: () => composing,
+  });
+  const outcome = pending.then(() => "saved", (error: Error) => error.message);
+  try {
+    await Promise.resolve();
+    expect(h.calls).toEqual([]);
+    expect(callbacks.has(50)).toBe(true);
+    now = 90;
+    composing = false;
+    callbacks.get(50)!();
+    await flushing;
+    expect(h.calls).toEqual(["flush"]);
+    expect(callbacks.has(10)).toBe(true);
+    callbacks.get(10)!();
+    expect(await outcome).toBe("flushPendingInputTimeout");
+    expect(h.calls).toEqual(["flush"]);
+  } finally {
+    for (const timer of handles) cancel(timer);
+    timers.mockRestore(); clock.mockRestore(); warning.mockRestore();
+  }
 });
 
 test("a stalled input flush fails without posting a save", async () => {

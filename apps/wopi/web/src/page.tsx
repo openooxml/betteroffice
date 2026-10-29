@@ -8,6 +8,7 @@ import { closeDocument, finishClose, recoverDocument, saveDocument } from "./doc
 import { createWopiTransport, type WopiTransport } from "./transport";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
+const COMPOSITION_ACTIVE_MESSAGE = "Finish typing before saving or closing the document.";
 
 /** Records page progress for diagnostics. */
 export function wopiDebug(patch: Record<string, unknown>): void {
@@ -100,6 +101,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const editorApi = useRef<EditorApi | null>(null);
   const transportRef = useRef<WopiTransport | null>(null);
   const editorContainer = useRef<HTMLElement | null>(null);
+  const compositionActive = useRef(false);
   const loadedSent = useRef(false);
   const modified = useRef(false);
   const changeVersion = useRef(0);
@@ -119,6 +121,21 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const userName = displayUserName(config.userFriendlyName);
   const room = useMemo(() => ({ id: "wopi", name: userName }), [userName]);
   const views = useRef<WopiView[]>([{ ViewId: loaded.clientId, UserName: userName }]);
+
+  useEffect(() => {
+    const container = editorContainer.current;
+    compositionActive.current = false;
+    if (!container) return;
+    const start = () => { compositionActive.current = true; };
+    const end = () => { compositionActive.current = false; };
+    container.addEventListener("compositionstart", start, true);
+    container.addEventListener("compositionend", end, true);
+    return () => {
+      container.removeEventListener("compositionstart", start, true);
+      container.removeEventListener("compositionend", end, true);
+      compositionActive.current = false;
+    };
+  }, [closed]);
 
   const completeClose = useCallback(() => {
     if (closeCompleted.current) return;
@@ -218,6 +235,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       await saveDocument(editorApi.current, api, {
         ...options,
         signal: lifetime.signal,
+        hasActiveComposition: () => compositionActive.current,
         hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
         captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
         onFlushed: () => { version = changeVersion.current; },
@@ -225,13 +243,17 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       });
       lifetime.signal.throwIfAborted();
       setSaveState("saved");
+      setBanner((message) => message === COMPOSITION_ACTIVE_MESSAGE ? null : message);
       if (modified.current && changeVersion.current === version) {
         modified.current = false;
         bridge.modified(false);
       }
     } catch (error) {
       if (error instanceof SessionEndedError) endSession();
-      if (!lifetime.signal.aborted) setSaveState("failed");
+      if (!lifetime.signal.aborted) {
+        setSaveState("failed");
+        if (error instanceof Error && error.message === "compositionActive") setBanner(COMPOSITION_ACTIVE_MESSAGE);
+      }
       throw error;
     }
   }, [api, bridge, config.canWrite, lifetime, endSession]);
@@ -253,6 +275,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       whenClosed: handleClosed.promise,
       finalSaved: finalSaved.current,
       onFinalSaved: () => { finalSaved.current = true; },
+      hasActiveComposition: () => compositionActive.current,
       hasPendingResync: () => config.canWrite && (transportRef.current?.hasPendingResync() ?? true),
       captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
       onProgress: wopiDebug,
@@ -267,7 +290,8 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
           return;
         }
         setSaveState("failed");
-        setBanner(error instanceof Error ? error.message : "Could not close the document.");
+        const message = error instanceof Error ? error.message : "Could not close the document.";
+        setBanner(message === "compositionActive" ? COMPOSITION_ACTIVE_MESSAGE : message);
       },
     }, completeClose).catch(() => {}).finally(() => { closing.current = null; });
     closing.current = pending;
@@ -431,6 +455,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
             setBanner(error.message);
           }}
           onReady={(ready) => {
+            if (!ready) compositionActive.current = false;
             if (lifetime.signal.aborted) return;
             wopiDebug({ onReadyCalled: true, onReadyHasApi: ready !== null });
             editorApi.current = ready;

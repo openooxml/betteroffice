@@ -15,6 +15,7 @@ interface RecoveryOptions {
 interface SaveDocumentOptions extends SaveOptions {
   signal?: AbortSignal;
   captureBarrier?(): SocketSaveBarrier | null;
+  hasActiveComposition?(): boolean;
   hasPendingResync?(): boolean;
   onFlushed?(): void;
   onProgress?(patch: Record<string, unknown>): void;
@@ -96,21 +97,29 @@ export async function saveDocument(
   try {
     options.signal?.throwIfAborted();
     if (!editor) throw new Error("editorNotReady");
-    step = "flush";
     const flushDeadline = Date.now() + (options.inputTimeoutMs ?? 3000);
-    if (!options.DontTerminateEdit) {
-      await bounded(() => editor.flushPendingInput(), options.inputTimeoutMs ?? 3000, "flushPendingInputTimeout", options.signal);
-    }
-    options.signal?.throwIfAborted();
-    options.onFlushed?.();
-    step = "flushed";
-    progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
-    step = "drain";
-    while (options.hasPendingResync?.() || editor.hasPendingUpdates()) {
-      const remaining = flushDeadline - Date.now();
-      if (remaining <= 0) throw new Error("notSynced");
-      await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "notSynced", options.signal);
-    }
+    do {
+      step = "composition";
+      while (options.hasActiveComposition?.()) {
+        const remaining = flushDeadline - Date.now();
+        if (remaining <= 0) throw new Error("compositionActive");
+        await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "compositionActive", options.signal);
+      }
+      step = "flush";
+      if (!options.DontTerminateEdit) {
+        await bounded(() => editor.flushPendingInput(), Math.max(0, flushDeadline - Date.now()), "flushPendingInputTimeout", options.signal);
+      }
+      options.signal?.throwIfAborted();
+      options.onFlushed?.();
+      step = "flushed";
+      progress({ saveFlushedAt: Date.now(), saveInputFlushed: !options.DontTerminateEdit });
+      step = "drain";
+      while (options.hasPendingResync?.() || editor.hasPendingUpdates()) {
+        const remaining = flushDeadline - Date.now();
+        if (remaining <= 0) throw new Error("notSynced");
+        await bounded(() => new Promise<void>((resolve) => setTimeout(resolve, Math.min(50, remaining))), remaining, "notSynced", options.signal);
+      }
+    } while (options.hasActiveComposition?.());
     options.signal?.throwIfAborted();
     if (Date.now() >= flushDeadline) throw new Error("notSynced");
     step = "sequence";
