@@ -479,9 +479,10 @@ fn pixel_round(value: f32) -> f32 {
     (value + 0.5).floor()
 }
 
-/// past this many pixels the tiler's f32 rect translations stop being exact, so
-/// a cropped composite could shift; such targets composite the whole surface.
-const F32_EXACT_PIXELS: u32 = 1 << 24;
+/// past this many pixels f32 pixel centers and the tiler's rect translations
+/// stop being exact, so a cropped composite could shift; such targets
+/// composite the whole surface.
+const F32_EXACT_PIXELS: u32 = 1 << 23;
 
 /// target-space edges (left, top, right, bottom) of a segment or rectangle,
 /// grown by `pad` on every side; `None`, meaning the whole clip, when any input
