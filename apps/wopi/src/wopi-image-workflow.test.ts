@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
@@ -36,15 +38,19 @@ function loadWorkflow(path: string): Workflow {
   return { ...(parsed as unknown as Workflow), on: triggers };
 }
 
-function stepsWithUses(job: Job): Step[] {
-  return (job.steps ?? []).filter((step) => typeof step.uses === "string");
-}
-
 function buildPushSteps(job: Job): Step[] {
   return (job.steps ?? []).filter((step) => step.uses?.startsWith("docker/build-push-action@"));
 }
 
-const PINNED = /^[^@\s]+@(?:v\d+(?:\.\d+){0,2}(?:[-.][0-9A-Za-z.-]+)?|[0-9a-f]{40})$/;
+const PINNED = /^[^@\s]+@[0-9a-f]{40}$/;
+const ACTION_PINS: Record<string, string> = {
+  "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+  "docker/build-push-action": "10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2",
+  "docker/login-action": "c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0",
+  "docker/setup-buildx-action": "8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0",
+  "docker/setup-qemu-action": "c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0",
+  "actions/attest-build-provenance": "e8998f949152b193b063cb0ec769d69d929409be # v2.4.0",
+};
 const EXPECTED_PATHS = [
   "apps/wopi/**",
   "packages/**",
@@ -58,10 +64,56 @@ const EXPECTED_PATHS = [
   ".dockerignore",
   ".github/workflows/wopi-image.yml",
 ];
+const RELEASE_CONTEXT_IF =
+  "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository))";
 const PUBLISH_IF =
-  "${{ inputs.publish && github.event_name == 'workflow_call' && github.ref == 'refs/heads/main' && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
+  "${{ inputs.publish && " + RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
 const RELEASE_WOPI_IF =
-  "needs.release.result == 'success' && needs.release.outputs.published == 'true' && vars.WOPI_IMAGE_PUBLISH == 'true'";
+  "needs.release.result == 'success' && needs.release.outputs.published == 'true' && " +
+  RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true'";
+const VERSION_IMAGE = "ghcr.io/openooxml/betteroffice-wopi:0.1.0";
+
+function inspectVersionTag({ status = 0, stdout = "", stderr = "" } = {}) {
+  const workflow = loadWorkflow(wopiWorkflowPath);
+  const check = workflow.jobs.publish!.steps!.find((step) => step.id === "exists")!;
+  const directory = mkdtempSync(join(tmpdir(), "wopi-image-inspect-"));
+  try {
+    const output = join(directory, "output");
+    const call = join(directory, "docker-call");
+    writeFileSync(output, "");
+    writeFileSync(
+      join(directory, "docker"),
+      [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" > "$DOCKER_CALL"',
+        'printf "%s" "$INSPECT_STDOUT"',
+        'printf "%s" "$INSPECT_STDERR" >&2',
+        'exit "$INSPECT_STATUS"',
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const run = check.run!
+      .replaceAll("${{ github.repository_owner }}", "openooxml")
+      .replaceAll("${{ steps.version.outputs.version }}", "0.1.0");
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", run], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GITHUB_OUTPUT: output,
+        DOCKER_CALL: call,
+        INSPECT_STDOUT: stdout,
+        INSPECT_STDERR: stderr,
+        INSPECT_STATUS: String(status),
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(readFileSync(call, "utf8").trim()).toBe(`buildx imagetools inspect ${VERSION_IMAGE}`);
+    return { ...result, output: readFileSync(output, "utf8") };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 describe("wopi-image workflow", () => {
   test("triggers on pull requests and main pushes with the image paths", () => {
@@ -136,11 +188,63 @@ describe("wopi-image workflow", () => {
     expect(check!.run).toContain('echo "exists=false" >> "$GITHUB_OUTPUT"');
     const build = steps.find((step) => step.id === "build");
     expect(build).toBeDefined();
-    expect(build!.if).toBe("steps.exists.outputs.exists != 'true'");
+    expect(build!.if).toBe("steps.exists.outputs.exists == 'false'");
     const attest = steps.find((step) => step.uses?.startsWith("actions/attest-build-provenance@"));
     expect(attest).toBeDefined();
-    expect(attest!.if).toBe("steps.exists.outputs.exists != 'true'");
+    expect(attest!.if).toBe("steps.exists.outputs.exists == 'false'");
     expect(steps.indexOf(check!)).toBeLessThan(steps.indexOf(build!));
+  });
+
+  test("marks a successful inspection as an existing version", () => {
+    const result = inspectVersionTag({ stdout: `Name: ${VERSION_IMAGE}\n` });
+    expect(result.status).toBe(0);
+    expect(result.output).toBe("exists=true\n");
+  });
+
+  test("permits a push only after the version manifest is confirmed missing", () => {
+    const result = inspectVersionTag({ status: 1, stderr: `ERROR: ${VERSION_IMAGE}: not found\n` });
+    expect(result.status).toBe(0);
+    expect(result.output).toBe("exists=false\n");
+  });
+
+  test.each([
+    ["authentication", "ERROR: failed to authorize: 401 Unauthorized"],
+    ["authorization", "ERROR: unexpected status from HEAD request: 403 Forbidden"],
+    ["registry server", "ERROR: unexpected status from HEAD request: 500 Internal Server Error"],
+    ["registry outage", "ERROR: unexpected status from HEAD request: 503 Service Unavailable"],
+    ["network", "ERROR: failed to do request: dial tcp: i/o timeout"],
+    ["DNS", "ERROR: lookup ghcr.io: no such host"],
+    ["unrelated not found", "ERROR: credential helper not found"],
+    ["generic 404", "ERROR: 404 Not Found"],
+    ["wrong version", "ERROR: ghcr.io/openooxml/betteroffice-wopi:0.0.1: not found"],
+    ["mixed errors", `ERROR: ${VERSION_IMAGE}: not found\nERROR: 503 Service Unavailable`],
+    ["unexpected output", "unexpected registry response"],
+    ["empty output", ""],
+  ])("fails closed on %s inspection failures", (_name, stderr) => {
+    const result = inspectVersionTag({ status: 1, stderr });
+    expect(result.status).toBe(1);
+    expect(result.output).toBe("");
+    expect(result.stdout).toContain("::error::Could not confirm whether version tag");
+  });
+
+  test("rejects unexpected output alongside a manifest-not-found error", () => {
+    const result = inspectVersionTag({
+      status: 1,
+      stdout: "unexpected output\n",
+      stderr: `ERROR: ${VERSION_IMAGE}: not found\n`,
+    });
+    expect(result.status).toBe(1);
+    expect(result.output).toBe("");
+  });
+
+  test("gates WOPI write permissions on main pushes from this repository's release workflow", () => {
+    const publish = loadWorkflow(wopiWorkflowPath).jobs.publish!;
+    const caller = loadWorkflow(releaseWorkflowPath).jobs["wopi-image"]!;
+    for (const job of [publish, caller]) {
+      expect(job.permissions?.packages).toBe("write");
+      expect(job.if).toContain(RELEASE_CONTEXT_IF);
+      expect(job.if).not.toContain("||");
+    }
   });
 
   test("keeps permissions minimal per job", () => {
@@ -161,13 +265,16 @@ describe("wopi-image workflow", () => {
     }
   });
 
-  test("pins every action to a version tag or SHA", () => {
-    const workflow = loadWorkflow(wopiWorkflowPath);
-    for (const job of Object.values(workflow.jobs)) {
-      for (const step of stepsWithUses(job)) {
-        if (step.uses!.startsWith("./")) continue;
-        expect(step.uses).toMatch(PINNED);
-      }
+  test("pins every uses line to the required full SHA with a version comment", () => {
+    const source = readFileSync(wopiWorkflowPath, "utf8");
+    const uses = source.split("\n").filter((line) => /^\s*(?:-\s*)?uses:/.test(line));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) {
+      const action = line.trim().replace(/^(?:-\s*)?uses:\s*/, "");
+      expect(action.split(/\s/)[0]).toMatch(PINNED);
+      const name = action.split("@")[0]!;
+      expect(ACTION_PINS[name]).toBeDefined();
+      expect(action).toBe(`${name}@${ACTION_PINS[name]}`);
     }
   });
 

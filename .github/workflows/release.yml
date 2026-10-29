@@ -283,7 +283,7 @@ jobs:
   wopi-image:
     name: Publish WOPI image
     needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && vars.WOPI_IMAGE_PUBLISH == 'true'
+    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true'
     uses: ./.github/workflows/wopi-image.yml
     with:
       publish: true
