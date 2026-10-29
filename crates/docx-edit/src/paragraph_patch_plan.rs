@@ -1152,7 +1152,7 @@ pub(crate) fn diff_paragraph_v1(
             && (slot_value(&delta.before) == inherited_value(&seeded_properties, &delta.path)
                 || list_indent)
     });
-    let plain_restyle = before.properties.get("numPr").is_none()
+    let plain_restyle = !before.properties.contains_key("numPr")
         && before_direct.is_empty()
         && (before.units.is_empty()
             || before
