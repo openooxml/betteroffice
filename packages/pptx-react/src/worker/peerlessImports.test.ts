@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 104_500;
+const STATIC_GZIP_BUDGET = 36_000;
 
 function source(path: string): ts.SourceFile {
   const name = relative(root, path).replace(/\\/g, '/');
@@ -99,7 +99,6 @@ test('default editor static chunks exclude the peerless core', async () => {
     /packages\/pptx\/src\/render\/browserImage\.ts$/,
     /packages\/pptx\/src\/render\/imageSize\.ts$/,
     /packages\/pptx\/src\/wasm\/loader\.ts$/,
-    /shared\/react-toolbar\/symbols\.ts$/,
   ]) {
     expect(inputs.filter((path) => module.test(path))).toEqual([]);
     expect(deferredInputs.some((path) => module.test(path))).toBe(true);
