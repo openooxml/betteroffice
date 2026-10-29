@@ -3123,6 +3123,7 @@ impl EditingDoc {
                             story,
                             metadata: metadata.as_deref(),
                             source_paragraph: Some(&source_paragraph),
+                            source: Some(&source),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };

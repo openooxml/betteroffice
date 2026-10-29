@@ -2,9 +2,86 @@
 /* eslint-disable */
 
 /**
+ * wasm compatibility wrapper. Resident engine users call
+ * [`build_display_list_value`] and keep the typed result.
+ */
+export function build_display_list_json(input: string): string;
+
+/**
+ * Drop every registered measurement font (ids restart at 0). Callers must
+ * re-register before the next `measure_paragraph_json`.
+ */
+export function clear_measure_fonts(): void;
+
+/**
+ * wasm wrapper over [`session::close_display_list`]: drop a handle so its
+ * parsed display list is freed. Idempotent.
+ */
+export function close_display_list(handle: number): void;
+
+/**
  * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
  */
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
+/**
+ * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
+ * point in, document position (or `null`) as JSON out.
+ */
+export function hit_test_json(display_list: string, page_index: number, x: number, y: number): string;
+
+/**
+ * wasm wrapper over [`session::hit_test_regions_by_handle`]: region-aware hit
+ * test against a stored display list. `Err` on an unknown/closed handle so the
+ * caller can fall back to [`hit_test_regions_json`].
+ */
+export function hit_test_regions_by_handle(handle: number, page_index: number, x: number, y: number): string;
+
+/**
+ * wasm wrapper over [`hit::hit_test_regions_json`]: region-aware hit test —
+ * `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,"noteId"?,`
+ * `"pos":n|null,"target":"text"|"image"|"none"}` (or `"null"` for an
+ * out-of-range page). The plain `hit_test_json` export stays body-only.
+ */
+export function hit_test_regions_json(display_list: string, page_index: number, x: number, y: number): string;
+
+/**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+ * module init for every wasm core that links this crate (layout and edit).
+ */
+export function install_panic_hook(): void;
+
+/**
+ * wasm wrapper over [`layout_to_json`].
+ */
+export function layout_document_json(input: string): string;
+
+/**
+ * Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
+ * out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
+ * must fall back to browser measurement for that block.
+ */
+export function measure_paragraph_json(input: string): string;
+
+/**
+ * wasm wrapper over [`session::open_display_list`]: parse a display list once
+ * and return a handle the by-handle query exports reuse (no per-query
+ * re-parse). The caller frees it with [`close_display_list`]. `Err` on
+ * malformed JSON — the caller then stays on the JSON-arg path.
+ */
+export function open_display_list(display_list: string): number;
+
+/**
+ * wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
+ * of a registered font's glyph, in font design units, as JSON:
+ * `{"upem":2048,"cmds":[{"t":"M","x":..,"y":..},{"t":"L","x":..,"y":..},
+ * {"t":"Q","cx":..,"cy":..,"x":..,"y":..},
+ * {"t":"C","c1x":..,"c1y":..,"c2x":..,"c2y":..,"x":..,"y":..},{"t":"Z"}]}`.
+ * The canvas caches this per `(fontId, glyphId)` and scales by `size/upem`,
+ * flipping y at draw time. `cmds` is empty for a blank glyph (space).
+ */
+export function outline_glyph_json(font_id: number, glyph_id: number): string;
 
 export function paragraphPatchWriterVersion(): number;
 
@@ -59,6 +136,66 @@ export function parse_docx_s9(data: Uint8Array, options_json: string): string;
 export function parse_relationships_xml(xml: Uint8Array, part_path: string): string;
 
 /**
+ * wasm wrapper over [`session::range_rects_by_handle`]: range rects against a
+ * stored display list. `Err` on an unknown/closed handle so the caller can
+ * fall back to [`range_rects_json`].
+ */
+export function range_rects_by_handle(handle: number, from: number, to: number): string;
+
+/**
+ * wasm wrapper over [`hit::range_rects_json`]: display-list JSON + document range
+ * in, JSON array of page-local rects out.
+ */
+export function range_rects_json(display_list: string, from: number, to: number): string;
+
+/**
+ * @internal
+ */
+export function range_rects_on_pages_by_handle(handle: number, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
+ * @internal
+ */
+export function range_rects_on_pages_json(display_list: string, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
+ * wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
+ * range rects against a stored display list. `region` is
+ * `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
+ * header/footer to one HF part and names the note id for a note region.
+ * `Err` on an unknown/closed handle so the caller can fall back to
+ * [`range_rects_region_json`].
+ */
+export function range_rects_region_by_handle(handle: number, region: string, part_id: string, from: number, to: number): string;
+
+/**
+ * wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
+ * `region` is `"body" | "header" | "footer" | "footnote" | "endnote"`;
+ * `part_id` scopes a header/footer to one HF part (empty for body / match-any)
+ * and names the note id for a note region. The `from`/`to` refer to that
+ * region's doc. The plain `range_rects_json` export stays body-only.
+ */
+export function range_rects_region_json(display_list: string, region: string, part_id: string, from: number, to: number): string;
+
+/**
+ * Register a font for measurement from raw sfnt bytes; returns the font id
+ * that `measure_paragraph_json` inputs reference in their `fontChains`.
+ * Malformed bytes (attacker-controlled embedded fonts) are rejected as an
+ * error at this boundary, mirroring `FontStore::register`.
+ */
+export function register_measure_font(bytes: Uint8Array): number;
+
+/**
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `requested_family` with, and return its id;
+ * returns `base` unchanged for a family with no known metrics. Hosts call
+ * this for a face they substituted, and put the result at the head of that
+ * family's chain. Pagination, the display list and glyph outlines all read
+ * this one store, so a widened view measures and paints at one pitch.
+ */
+export function register_substitute_measure_font(base: number, requested_family: string): number;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -72,6 +209,18 @@ export function serialize_docx_s11(request_json: string): string;
  * Serializes an S12 request.
  */
 export function serialize_docx_s12(request_json: string): string;
+
+/**
+ * wasm wrapper over [`session::update_display_list`]: apply a page-delta
+ * update to a stored display list so an incremental rebuild re-parses only
+ * its changed pages. `Err` closes the handle first, so the caller's fallback
+ * (a fresh [`open_display_list`]) can never race a half-updated list.
+ */
+export function update_display_list(handle: number, update: string): void;
+
+export function vertical_move_by_handle(handle: number, position: number, direction: string, goal_x: number): string;
+
+export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
 
 /**
  * Writes a DOCX from a typed model and original package.
@@ -95,8 +244,19 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
+    readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => [number, number];
+    readonly close_display_list: (a: number) => void;
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
+    readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
+    readonly layout_document_json: (a: number, b: number) => [number, number, number, number];
+    readonly measure_paragraph_json: (a: number, b: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
+    readonly open_display_list: (a: number, b: number) => [number, number, number];
+    readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
     readonly paragraphPatchWriterVersion: () => number;
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
@@ -108,9 +268,20 @@ export interface InitOutput {
     readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly range_rects_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_on_pages_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly update_display_list: (a: number, b: number, c: number) => [number, number];
+    readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 }

@@ -1284,21 +1284,16 @@ fn paragraph_patch_text_donor_changed_inheritance_requests_restyle_replace() {
 }
 
 #[test]
-fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
-    for (key, before, after) in [
-        ("pStyle", json!("A"), json!("B")),
-        (
-            "numPr",
-            json!({"numId": 1, "ilvl": 0}),
-            json!({"numId": 2, "ilvl": 0}),
-        ),
-    ] {
-        let units = vec![text("x", json!({}))];
-        let mut plan = patch(units.clone(), units);
-        plan.seed.properties.insert(key.to_owned(), before.clone());
-        plan.para_deltas = vec![delta(key, Some(before), Some(after))];
-        assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
-    }
+fn paragraph_patch_numbering_and_run_style_deltas_request_restyle_replace() {
+    let units = vec![text("x", json!({}))];
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({"numPr": {"numId": 1, "ilvl": 0}}));
+    plan.para_deltas = vec![delta(
+        "numPr",
+        Some(json!({"numId": 1, "ilvl": 0})),
+        Some(json!({"numId": 2, "ilvl": 0})),
+    )];
+    assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
     let mut plan = patch(vec![text("x", json!({}))], vec![text("x", json!({}))]);
     plan.run_edits.push(RunEditV1 {
         from: 0,
@@ -1308,6 +1303,35 @@ fn paragraph_patch_style_and_numbering_deltas_request_restyle_replace() {
         inherit: Attrs::new(),
     });
     assert_restyle_failure("<w:p><w:r><w:t>x</w:t></w:r></w:p>", &plan);
+}
+
+#[test]
+fn paragraph_patch_plain_restyle_inserts_the_style_element() {
+    for properties in ["", "<w:pPr/>"] {
+        let source = format!("<w:p>{properties}<w:r><w:t>x</w:t></w:r></w:p>");
+        let units = vec![text("x", json!({}))];
+        let mut plan = patch(units.clone(), units);
+        plan.para_deltas = vec![delta("pStyle", None, Some(json!("B")))];
+        plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"pStyle": "B"})));
+        assert_eq!(
+            write(&source, &plan).unwrap(),
+            "<w:p><w:pPr><w:pStyle w:val=\"B\"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"
+        );
+    }
+}
+
+#[test]
+fn paragraph_patch_plain_restyle_with_unchanged_inheritance_changes_only_style() {
+    let source = "<w:p><w:pPr><w:pStyle w:val='A'/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>";
+    let units = vec![text("x", json!({}))];
+    let mut plan = patch(units.clone(), units);
+    plan.seed.properties = attrs(json!({"pStyle": "A"}));
+    plan.para_deltas = vec![delta("pStyle", Some(json!("A")), Some(json!("B")))];
+    plan.result_sha256 = result_sha256(&plan.seed.units, &attrs(json!({"pStyle": "B"})));
+    assert_eq!(
+        write(source, &plan).unwrap(),
+        source.replace("w:val='A'", "w:val='B'")
+    );
 }
 
 #[test]

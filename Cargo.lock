@@ -138,6 +138,7 @@ name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
+ "betteroffice-docx-layout",
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-opc",

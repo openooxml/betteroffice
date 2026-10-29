@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path';
 const ENTRY = resolve(import.meta.dir, '../headless.ts');
 
 // import specifiers that must never appear anywhere in the seam's closure.
-const FORBIDDEN = [/react/i, /vue/i, /canvas2d/, /wasm\/loader/, /\bdom\b/i];
+const FORBIDDEN = [/react/i, /vue/i, /canvas2d/, /wasm\/loader/, /wasm\/engine/, /\/generated\//, /\bdom\b/i];
 
 // pull the module specifier out of every static import/export-from line.
 function importSpecifiers(source: string): string[] {
@@ -51,7 +51,7 @@ function collectClosure(entry: string): Map<string, string[]> {
 }
 
 describe('headless seam purity', () => {
-  it('imports no react, vue, canvas, wasm loader, or DOM code transitively', () => {
+  it('imports no react, vue, canvas, wasm loader or engine, or DOM code transitively', () => {
     const closure = collectClosure(ENTRY);
     const violations: string[] = [];
     for (const [file, specs] of closure) {
