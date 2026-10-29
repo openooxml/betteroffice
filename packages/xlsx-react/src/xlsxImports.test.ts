@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import ts from 'typescript';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 136_900;
+const STATIC_GZIP_BUDGET = 116_000;
 const deferredModules = ['XlsxEditorContent.tsx', 'LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx',
   'viewer/XlsxSessionViewer.tsx', 'viewer/useSessionWorkbook.ts', 'createInThreadAsyncEditorApi.ts',
   'commands/useXlsxCommands.ts', 'commands/inputCoordinator.ts', 'clipboard.ts', 'presence/Presence.tsx']
