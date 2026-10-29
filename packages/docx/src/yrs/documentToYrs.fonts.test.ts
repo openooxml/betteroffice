@@ -6,7 +6,7 @@ import { parseDocx } from '../docx';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../docx/wasm';
-import type { LayoutBlock } from '../layout/pagination/types';
+import type { LayoutBlock, Run as LayoutRun, ShapeBlock } from '../layout/pagination/types';
 import type { DisplayList, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
@@ -175,6 +175,16 @@ beforeAll(() => preloadEditWasm(new Uint8Array(
   readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))
 )));
 
+function layoutRuns(blocks: readonly LayoutBlock[]): LayoutRun[] {
+  return blocks.flatMap(block => {
+    const runs = block.kind === 'paragraph' ? block.runs
+      : block.kind === 'shape' ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
+        : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : [];
+    return runs.flatMap(run => run.kind === 'image' && run.inlineShape
+      ? layoutRuns([run.inlineShape as ShapeBlock]) : [run]);
+  });
+}
+
 function assertThemeFontPaint(session: YrsSession, document: Document, texts: string[]): void {
   const themeFont = session.registerFont(new Uint8Array(readFileSync(
     resolve(import.meta.dir, '../../../fonts/assets/Carlito-Regular.ttf')
@@ -226,9 +236,7 @@ for (const path of ['native', 'typescript'] as const) {
         const original = session.encodeState();
         const request = buildResidentRegionLayoutRequest(document, 24, {});
         const blocks = session.yrsBlocksForStory('body', request.renderEnv) as LayoutBlock[];
-        const runs = blocks.flatMap(block => block.kind === 'paragraph' ? block.runs
-          : block.kind === 'shape' ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
-            : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : []);
+        const runs = layoutRuns(blocks);
         const text = runs.filter(run => run.kind === 'text' && ['Title', 'Box'].includes(run.text));
         expect(text).toHaveLength(3);
         for (const run of text) expect(run).toMatchObject({
@@ -268,11 +276,11 @@ for (const path of ['native', 'typescript'] as const) {
           for (const candidate of path === 'typescript' ? [source, session] : [session]) {
             const original = candidate.encodeState();
             const blocks = candidate.yrsBlocksForStory('body', env) as LayoutBlock[];
-            const runs = blocks.flatMap(block => block.kind === 'paragraph' ? block.runs
-              : block.kind === 'shape' ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
-                : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : []);
+            const runs = layoutRuns(blocks);
             const text = runs.filter(run => run.kind === 'text' && ['Title', 'Box'].includes(run.text));
             expect(text).toHaveLength(3);
+            expect(text.filter(run => run.kind === 'text' && run.text === 'Title')).toHaveLength(1);
+            expect(text.filter(run => run.kind === 'text' && run.text === 'Box')).toHaveLength(2);
             const effective = context === 'document theme' ? 'Times New Roman' : seeded;
             for (const run of text) expect(run).toMatchObject({
               fontFamily: effective, fontSlots: { ascii: effective, hAnsi: effective },
@@ -342,9 +350,7 @@ for (const path of ['native', 'typescript'] as const) {
           const original = session.encodeState();
           const request = buildResidentRegionLayoutRequest(document, 24, {});
           const blocks = session.yrsBlocksForStory('body', request.renderEnv) as LayoutBlock[];
-          const runs = blocks.flatMap(block => block.kind === 'shape'
-            ? (block.innerText ?? []).flatMap(paragraph => paragraph.runs)
-            : block.kind === 'textBox' ? block.content.flatMap(paragraph => paragraph.runs) : []);
+          const runs = layoutRuns(blocks);
           const labels = runs.filter(run => run.kind === 'text' && run.text === 'Box');
           expect(labels).toHaveLength(1);
           expect(labels[0]).toMatchObject({
