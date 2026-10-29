@@ -432,7 +432,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
     }));
-    let mut list_state = ListState::new(source.map(|source| source.numbering()));
+    let numbering = source.as_ref().map(|source| source.numbering());
+    let mut list_state = ListState::new(numbering);
+    local.block(story_id == "body" && list_state.first_picture_bullet().is_some());
     let txn = doc.yrs_doc().transact();
     local.block(
         txn.get_map(COMMENTS)
@@ -4139,6 +4141,7 @@ fn inline_shared_drawings(
     carried: &[(u32, Vec<RawRun>)],
     drawings: &mut Vec<DrawingMarker>,
     show_hidden_text: bool,
+    leading_box: bool,
 ) {
     let convertible = |drawing: &DrawingMarker| {
         !drawing.anchored
@@ -4155,7 +4158,8 @@ fn inline_shared_drawings(
     if count == 0 {
         return;
     }
-    let shares = count > 1
+    let shares = leading_box
+        || count > 1
         || raw_runs
             .iter()
             .chain(carried.iter().flat_map(|(_, runs)| runs.iter()))
@@ -4163,7 +4167,8 @@ fn inline_shared_drawings(
     if !shares {
         return;
     }
-    if count == 1
+    if !leading_box
+        && count == 1
         && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
         && matches!(drawing.block, LayoutBlock::Shape(_))
     {
@@ -4262,7 +4267,16 @@ fn flush_paragraph_parts<T: ReadTxn>(
         }
     }
     let has_source_content = !drawings.is_empty();
-    inline_shared_drawings(&mut raw_runs, &carried, &mut drawings, env.show_hidden_text);
+    let leading_box = source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && list_state.first_picture_bullet().is_some();
+    inline_shared_drawings(
+        &mut raw_runs,
+        &carried,
+        &mut drawings,
+        env.show_hidden_text,
+        leading_box,
+    );
     for drawing in &drawings {
         let pm_start = paragraph_pm_start + 1 + u64::from(drawing.pm_offset);
         map.spans.push(SourceSpan {
@@ -4299,6 +4313,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 .has_source_content = Some(true);
         }
         if paragraph.runs.is_empty()
+            && !leading_box
             && (hides_mark
                 || (!env.show_hidden_text
                     && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
@@ -4474,6 +4489,14 @@ fn flush_paragraph<T: ReadTxn>(
         clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
     }
     let raw_runs = coalesce_runs(raw_runs);
+    let leading_box = (source == 0
+        && map.stories.first().is_some_and(|story| story == "body")
+        && !map
+            .paragraph_blocks
+            .iter()
+            .any(|(_, previous)| *previous == source))
+    .then(|| list_state.first_picture_bullet().cloned())
+    .flatten();
     map.paragraph_blocks.push((paragraph_pm_start, source));
     let carried: Vec<_> = carried
         .into_iter()
@@ -4502,6 +4525,10 @@ fn flush_paragraph<T: ReadTxn>(
     let can_start_page = story_id == "body" || story_id.starts_with("body:");
     let mut attrs =
         lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state, can_start_page);
+    attrs.leading_inline_box = leading_box.map(|size| docx_layout::types::LeadingInlineBox {
+        width: size.width * 96.0 / 72.0,
+        height: size.height * 96.0 / 72.0,
+    });
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();

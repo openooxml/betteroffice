@@ -4,13 +4,14 @@ use pptx_edit::structured::{
     PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxStructuredContent,
 };
 use pptx_edit::{
-    CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
-    DocumentVersion, EditCtx, EditError, EditOutcome, EditRequest, FindOutcome, FindRequest,
-    PresetShapeDraft, ReadOutcome, ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
-    ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt,
-    SlideBackgroundReceipt, SlideReceipt, SlideScope, StorySnapshot, TextReceipt, TextSearchMatch,
-    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
-    ValidationOutcome,
+    CaretAnchor, CommandReadResponse, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession,
+    DeckSnapshot, DocumentVersion, EditCtx, EditError, EditOutcome, EditRefusal, EditRequest,
+    FindOutcome, FindRequest, HistoryReceipt, PictureDraft, PresetShapeDraft, ReadOutcome,
+    ReadRequest, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeReceipt,
+    ShapeRect, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt,
+    SlideReceipt, SlideScope, StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition,
+    TableReceipt, TextParagraphDraft, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch,
+    TransformReceipt, UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -165,6 +166,14 @@ impl Presentation {
         Ok(self.session.read_content(request)?)
     }
 
+    /// Reads content with source text fields. Policy refusals are the inner `Err`.
+    pub fn read_command_content(
+        &self,
+        request: &ReadRequest,
+    ) -> Result<std::result::Result<CommandReadResponse, EditRefusal>> {
+        Ok(self.session.read_command_content(request)?)
+    }
+
     /// Exact, case-sensitive, paragraph-local search with the version it ran at.
     pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
         Ok(self.session.find_text(request)?)
@@ -229,6 +238,16 @@ impl Presentation {
         Ok(self.session.delete_slide(context, slide_id)?)
     }
 
+    /// Duplicates a slide at the requested deck index.
+    pub fn duplicate_slide(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        to_index: u32,
+    ) -> Result<SlideReceipt> {
+        Ok(self.session.duplicate_slide(context, slide_id, to_index)?)
+    }
+
     pub fn move_slide(
         &self,
         context: &EditCtx,
@@ -287,6 +306,16 @@ impl Presentation {
         Ok(self.session.add_shape(context, slide_id, draft)?)
     }
 
+    /// Adds a picture from image bytes.
+    pub fn add_picture(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        draft: &PictureDraft,
+    ) -> Result<ShapeReceipt> {
+        Ok(self.session.add_picture(context, slide_id, draft)?)
+    }
+
     pub fn set_shape_fill(
         &self,
         context: &EditCtx,
@@ -343,6 +372,46 @@ impl Presentation {
         Ok(self.session.move_shape(context, slide_id, shape_id, x, y)?)
     }
 
+    /// Moves a shape to the end of its slide's paint order.
+    pub fn bring_shape_to_front(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> Result<ShapeZOrderReceipt> {
+        Ok(self.session.bring_to_front(context, slide_id, shape_id)?)
+    }
+
+    /// Moves a shape to the start of its slide's paint order.
+    pub fn send_shape_to_back(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> Result<ShapeZOrderReceipt> {
+        Ok(self.session.send_to_back(context, slide_id, shape_id)?)
+    }
+
+    /// Moves a shape one step later in its slide's paint order.
+    pub fn bring_shape_forward(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> Result<ShapeZOrderReceipt> {
+        Ok(self.session.bring_forward(context, slide_id, shape_id)?)
+    }
+
+    /// Moves a shape one step earlier in its slide's paint order.
+    pub fn send_shape_backward(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> Result<ShapeZOrderReceipt> {
+        Ok(self.session.send_backward(context, slide_id, shape_id)?)
+    }
+
     pub fn resize_shape(
         &self,
         context: &EditCtx,
@@ -381,6 +450,18 @@ impl Presentation {
             .insert_text(context, story_id, index, text, style)?)
     }
 
+    /// Replaces a story's paragraphs and runs.
+    pub fn set_story_paragraphs(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        paragraphs: &[TextParagraphDraft],
+    ) -> Result<StorySnapshot> {
+        Ok(self
+            .session
+            .set_story_paragraphs(context, story_id, paragraphs)?)
+    }
+
     pub fn delete_text(
         &self,
         context: &EditCtx,
@@ -415,6 +496,113 @@ impl Presentation {
         Ok(self
             .session
             .set_paragraph_alignment(context, story_id, start, end, alignment)?)
+    }
+
+    /// Inserts a row before or after an existing table row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_table_row(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+    ) -> Result<TableReceipt> {
+        Ok(self
+            .session
+            .insert_table_row(context, slide_id, shape_id, index, position, cells)?)
+    }
+
+    /// Deletes a table row.
+    pub fn delete_table_row(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+    ) -> Result<TableReceipt> {
+        Ok(self
+            .session
+            .delete_table_row(context, slide_id, shape_id, index)?)
+    }
+
+    /// Inserts a table column by splitting the selected column's width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_table_column(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+    ) -> Result<TableReceipt> {
+        Ok(self
+            .session
+            .insert_table_column(context, slide_id, shape_id, index, position, cells)?)
+    }
+
+    /// Inserts a table column with the requested width policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_table_column_with_width(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+        width: TableColumnWidth,
+    ) -> Result<TableReceipt> {
+        Ok(self.session.insert_table_column_with_width(
+            context, slide_id, shape_id, index, position, cells, width,
+        )?)
+    }
+
+    /// Deletes a table column.
+    pub fn delete_table_column(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+    ) -> Result<TableReceipt> {
+        Ok(self
+            .session
+            .delete_table_column(context, slide_id, shape_id, index)?)
+    }
+
+    /// Checks a table structure edit without changing the deck.
+    pub fn check_table_edit(
+        &self,
+        edit: TableEdit,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+    ) -> Result<()> {
+        Ok(self
+            .session
+            .check_table_edit(edit, slide_id, shape_id, index, position, cells)?)
+    }
+
+    /// Checks a table structure edit with the requested width policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_table_edit_with_width(
+        &self,
+        edit: TableEdit,
+        slide_id: &str,
+        shape_id: &str,
+        index: u32,
+        position: TableInsertPosition,
+        cells: &[String],
+        width: TableColumnWidth,
+    ) -> Result<()> {
+        Ok(self
+            .session
+            .check_table_edit_with_width(edit, slide_id, shape_id, index, position, cells, width)?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -457,6 +645,19 @@ impl Presentation {
         Ok(self
             .session
             .set_comment_status(context, comment_id, resolved)?)
+    }
+
+    /// Sets a root comment's position in EMU.
+    pub fn set_comment_position(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .set_comment_position(context, comment_id, x_emu, y_emu)?)
     }
 
     pub fn remove_comment(&self, context: &EditCtx, comment_id: &str) -> Result<CommentReceipt> {
@@ -571,6 +772,11 @@ impl Presentation {
 
     pub fn undo(&self) -> bool {
         self.session.undo()
+    }
+
+    /// Steps through history, returning changed slides; `redo` selects the direction.
+    pub fn history_step(&self, redo: bool) -> Result<HistoryReceipt> {
+        Ok(self.session.history_step(redo)?)
     }
 
     pub fn redo(&self) -> bool {
