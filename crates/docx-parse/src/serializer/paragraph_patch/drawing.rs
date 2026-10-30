@@ -240,21 +240,11 @@ pub(super) fn validate_edits(
         }
     }
     let properties = |run: usize| {
-        lowered.runs[run].properties.filter(|&at| {
-            let node = &lowered.xml.nodes[at];
-            !node.children.is_empty() || !node.attributes.is_empty()
-        })
-    };
-    let same_properties = |left: usize, right: usize| match (properties(left), properties(right)) {
-        (None, None) => true,
-        (Some(left), Some(right)) => equivalent(
-            source,
-            lowered,
-            left,
-            &source[lowered.xml.nodes[left].span.clone()],
-            &source[lowered.xml.nodes[right].span.clone()],
-        ),
-        _ => false,
+        lowered.runs[run]
+            .properties
+            .map(|at| &lowered.xml.nodes[at])
+            .filter(|node| !node.children.is_empty() || !node.attributes.is_empty())
+            .map(|node| &source[node.span.clone()])
     };
     for edit in &patch.text_edits {
         let mut runs = lowered
@@ -263,7 +253,7 @@ pub(super) fn validate_edits(
             .filter(|cell| edit.from <= cell.from && cell.to <= edit.to)
             .map(|cell| cell.run);
         if let Some(first) = runs.next()
-            && runs.any(|run| !same_properties(first, run))
+            && runs.any(|run| properties(run) != properties(first))
         {
             return Err(Failure::structure("drawing: text edit crosses source runs"));
         }
