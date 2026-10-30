@@ -26,7 +26,10 @@ for (const [name, override] of [
 // Fonts this checkout has not published yet cannot come from the pinned CDN,
 // so an explicit assets directory is served from the viewer's own origin.
 const fontAssets = process.env.QUALITY_FONT_ASSETS?.trim() ||
-  (process.env.QUALITY_LOCAL_ONLY === '1' ? 'packages/fonts/assets' : undefined);
+  (process.env.QUALITY_LOCAL_ONLY === '1' ? 'packages/fonts-latin/assets' : undefined);
+const latinFiles = Object.fromEntries(JSON.parse(readFileSync(
+  resolve('packages/fonts-latin/assets/manifest.json'), 'utf8',
+)).faces.map((face) => [face.file, true]));
 const intlAssets = resolve(process.env.QUALITY_FONT_ASSETS_INTL ?? 'packages/fonts-intl/assets');
 const server = await createServer({
   configFile: false,
@@ -47,7 +50,8 @@ const server = await createServer({
         const prefix = `/@fs${resolve(fontAssets)}/`;
         server.middlewares.use((request, _response, next) => {
           const file = request.url?.startsWith(prefix) ? request.url.slice(prefix.length) : '';
-          if (/^[A-Za-z0-9-]+\.ttf\.zst$/.test(file)) {
+          if (/^[A-Za-z0-9-]+\.ttf\.zst$/.test(file) &&
+              !Object.hasOwn(latinFiles, file)) {
             request.url = `/@fs${intlAssets}/${file}`;
           } else if (file === 'decoder/fontpack.wasm') {
             request.url = `/@fs${resolve('packages/fonts/dist/decoder/fontpack.wasm')}`;

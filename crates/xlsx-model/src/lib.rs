@@ -11,6 +11,8 @@ pub mod numfmt;
 pub mod open_timing;
 pub mod progress;
 pub mod rich_text;
+#[doc(hidden)]
+pub mod sort;
 pub mod styles;
 pub mod value;
 pub mod workbook;
