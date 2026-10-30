@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/fonts",
   "version": "0.4.2",
-  "description": "Bundled open fonts for the BetterOffice engine: metric-compatible Latin faces (Carlito, Caladea, Liberation, Gelasio, Comic Relief), common presentation families (Inter, Roboto, Montserrat and more) plus Noto RTL script-coverage faces, with a lazy same-origin loader. CJK faces ship separately in @betteroffice/fonts-cjk.",
+  "description": "Bundled open fonts for the BetterOffice engine: metric-compatible Latin faces (Carlito, Caladea, Liberation, Gelasio, Comic Relief), common presentation families (Inter, Roboto, Montserrat and more) plus Noto RTL script-coverage faces, with a lazy same-origin loader. Optional coverage faces ship separately in @betteroffice/fonts-cjk and @betteroffice/fonts-intl.",
   "sideEffects": false,
   "type": "module",
   "main": "./dist/index.js",
@@ -20,30 +20,35 @@
   },
   "files": [
     "dist",
-    "assets",
     "LICENSE",
     "LICENSES",
     "README.md"
   ],
   "scripts": {
-    "prebuild": "bun run --filter '@betteroffice/fonts-cjk' build",
-    "build": "tsup",
+    "prebuild": "bun run --filter '@betteroffice/fonts-cjk' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-latin' build",
+    "build": "tsup && bun ../../scripts/build-fonts-decoder.ts",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:^0"
+    "@betteroffice/fonts-cjk": "workspace:^0",
+    "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {
     "@betteroffice/fonts-cjk": {
+      "optional": true
+    },
+    "@betteroffice/fonts-intl": {
       "optional": true
     }
   },
   "devDependencies": {
     "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-intl": "workspace:*",
     "@types/bun": "^1.0.0",
     "@types/node": "^26.0.0",
     "tsup": "^8.0.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "esbuild": "^0.28.1"
   },
   "keywords": [
     "docx",
@@ -70,5 +75,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@betteroffice/fonts-latin": "workspace:*"
   }
 }

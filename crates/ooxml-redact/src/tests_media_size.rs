@@ -277,15 +277,6 @@ fn preserve_media_size_keeps_dimensions_format_color_type_and_approximate_bytes(
             .windows(b"SECRET_PNG_TEXT_METADATA".len())
             .any(|w| w == b"SECRET_PNG_TEXT_METADATA")
     );
-    let png_decoded = image::load_from_memory(&png_out).unwrap().to_rgb8();
-    let sentinel_matches = (0..100)
-        .flat_map(|y| (0..100).map(move |x| (x, y)))
-        .filter(|&(x, y)| png_decoded.get_pixel(x, y).0 == [251, 13, 249])
-        .count();
-    assert!(
-        sentinel_matches < 5,
-        "source sentinel pattern survived in PNG ({sentinel_matches} matches)"
-    );
 
     let jpeg_out = get_part(&parts, "word/media/camera.jpg");
     let jpeg_out_2 = get_part(&parts_2, "word/media/camera.jpg");
@@ -300,18 +291,6 @@ fn preserve_media_size_keeps_dimensions_format_color_type_and_approximate_bytes(
         !jpeg_out
             .windows(b"SECRET_JPEG_EXIF_METADATA".len())
             .any(|w| w == b"SECRET_JPEG_EXIF_METADATA")
-    );
-    let jpeg_decoded = image::load_from_memory(&jpeg_out).unwrap().to_rgb8();
-    let magenta_matches = (0..128)
-        .flat_map(|y| (0..128).map(move |x| (x, y)))
-        .filter(|&(x, y)| {
-            let [r, g, b] = jpeg_decoded.get_pixel(x, y).0;
-            r > 230 && g < 25 && b > 230
-        })
-        .count();
-    assert!(
-        magenta_matches < 200,
-        "source magenta patch survived in JPEG ({magenta_matches} / 16384 pixels)"
     );
 
     let gif_out = get_part(&parts, "word/media/anim.gif");
@@ -329,14 +308,83 @@ fn preserve_media_size_keeps_dimensions_format_color_type_and_approximate_bytes(
     );
     assert_size_within_25_percent(bmp_out.len(), bmp_orig.len(), "400x300 BMP");
     assert_ne!(bmp_out, bmp_orig);
-    let bmp_decoded = image::load_from_memory(&bmp_out).unwrap().to_rgb8();
-    let bmp_sentinel = (0..64)
-        .flat_map(|y| (0..64).map(move |x| (x, y)))
-        .filter(|&(x, y)| bmp_decoded.get_pixel(x, y).0 == [252, 11, 248])
-        .count();
-    assert!(bmp_sentinel < 5);
 
     docx_parse::parse_docx_s9_wire(&preserved_out, docx_parse::S9ParseOptions::default()).unwrap();
+}
+
+fn same_header_sources(format: ImageFormat, width: u32, height: u32) -> Vec<Vec<u8>> {
+    let encode = |pixel: &dyn Fn(u32, u32) -> [u8; 3]| {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| Rgb(pixel(x, y))))
+            .write_to(&mut out, format)
+            .unwrap();
+        out.into_inner()
+    };
+    let mut sources = vec![
+        encode(&|_, _| [255, 0, 255]),
+        encode(&|_, _| [0, 0, 0]),
+        encode(&|x, y| {
+            let [r, g, b, _] = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503))
+                .rotate_left(7)
+                .to_le_bytes();
+            [r, g, b]
+        }),
+    ];
+    let len = sources.iter().map(Vec::len).max().unwrap();
+    for source in &mut sources {
+        source.resize(len, 0);
+    }
+    sources
+}
+
+#[test]
+fn preserve_media_size_output_depends_on_no_source_pixel() {
+    let options = RedactionOptions {
+        random_characters: false,
+        preserve_media_size: true,
+    };
+    for (path, format) in [
+        ("word/media/image.png", ImageFormat::Png),
+        ("word/media/image.jpg", ImageFormat::Jpeg),
+        ("word/media/image.gif", ImageFormat::Gif),
+        ("word/media/image.bmp", ImageFormat::Bmp),
+        ("word/media/image.tiff", ImageFormat::Tiff),
+    ] {
+        let sources = same_header_sources(format, 320, 240);
+        let redact = |bytes: &[u8], seed: u64| {
+            media::with_seed(seed, || {
+                media::replace_media_with_options(
+                    path,
+                    bytes,
+                    &options,
+                    &mut RedactionReport::default(),
+                )
+                .unwrap()
+            })
+        };
+        let header = inspect(&sources[0]);
+        assert_eq!(header.0, format, "{path}");
+        let outputs: Vec<Vec<u8>> = sources
+            .iter()
+            .map(|source| {
+                assert_eq!(inspect(source), header, "{path}");
+                redact(source, 7)
+            })
+            .collect();
+        for (index, output) in outputs.iter().enumerate() {
+            assert!(
+                *output == outputs[0],
+                "{path}: source {index} changed the redacted bytes"
+            );
+            assert_ne!(*output, sources[index], "{path}");
+        }
+        assert_eq!(inspect(&outputs[0]).1, header.1, "{path}");
+        assert_ne!(
+            redact(&sources[0], 8),
+            outputs[0],
+            "{path}: the seed does not reach the output"
+        );
+    }
 }
 
 #[test]
