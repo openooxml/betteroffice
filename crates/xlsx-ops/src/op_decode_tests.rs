@@ -270,10 +270,7 @@ fn goldens() -> Vec<Golden> {
             canonical_minimal: r##"{"type":"setHyperlinks","sheet":2,"hyperlinks":[]}"##,
         },
         Golden {
-            op: Op::SetHyperlink {
-                sheet,
-                hyperlink,
-            },
+            op: Op::SetHyperlink { sheet, hyperlink },
             json: concat!(
                 r##"{"type":"setHyperlink","sheet":2,"##,
                 r##""hyperlink":{"range":{"start":{"row":0,"col":0},"end":{"row":1,"##,
@@ -293,10 +290,7 @@ fn goldens() -> Vec<Golden> {
             ),
         },
         Golden {
-            op: Op::RemoveHyperlink {
-                sheet,
-                range,
-            },
+            op: Op::RemoveHyperlink { sheet, range },
             json: concat!(
                 r##"{"type":"removeHyperlink","sheet":2,"range":{"start":{"row":0,"##,
                 r##""col":0},"end":{"row":1,"col":1}}}"##,
@@ -453,10 +447,7 @@ fn goldens() -> Vec<Golden> {
             ),
         },
         Golden {
-            op: Op::MergeCells {
-                sheet,
-                range,
-            },
+            op: Op::MergeCells { sheet, range },
             json: concat!(
                 r##"{"type":"mergeCells","sheet":2,"range":{"start":{"row":0,"##,
                 r##""col":0},"end":{"row":1,"col":1}}}"##,
@@ -471,10 +462,7 @@ fn goldens() -> Vec<Golden> {
             ),
         },
         Golden {
-            op: Op::UnmergeCells {
-                sheet,
-                range,
-            },
+            op: Op::UnmergeCells { sheet, range },
             json: concat!(
                 r##"{"type":"unmergeCells","sheet":2,"range":{"start":{"row":0,"##,
                 r##""col":0},"end":{"row":1,"col":1}}}"##,
@@ -581,10 +569,7 @@ fn goldens() -> Vec<Golden> {
             canonical_minimal: r##"{"type":"removeSheet","index":1}"##,
         },
         Golden {
-            op: Op::MoveSheet {
-                from: 1,
-                to: 2,
-            },
+            op: Op::MoveSheet { from: 1, to: 2 },
             json: r##"{"type":"moveSheet","from":1,"to":2}"##,
             minimal: r##"{"type":"moveSheet","from":1,"to":2}"##,
             canonical_minimal: r##"{"type":"moveSheet","from":1,"to":2}"##,
@@ -748,7 +733,11 @@ where
         assert_eq!(&decoded.unwrap(), op, "new/{entry}: {canonical}");
     }
     for (entry, decoded) in entry_points::<O>(&canonical) {
-        assert_eq!(&convert(decoded.unwrap()), op, "oracle/{entry}: {canonical}");
+        assert_eq!(
+            &convert(decoded.unwrap()),
+            op,
+            "oracle/{entry}: {canonical}"
+        );
     }
 }
 
@@ -802,8 +791,14 @@ where
     T: Debug + PartialEq + Serialize + DeserializeOwned,
     O: Serialize + DeserializeOwned,
 {
-    assert!(serde_json::from_str::<T>(input).is_err(), "new/from_str: {input}");
-    assert!(serde_json::from_str::<O>(input).is_err(), "oracle/from_str: {input}");
+    assert!(
+        serde_json::from_str::<T>(input).is_err(),
+        "new/from_str: {input}"
+    );
+    assert!(
+        serde_json::from_str::<O>(input).is_err(),
+        "oracle/from_str: {input}"
+    );
     assert!(
         serde_json::from_slice::<T>(input.as_bytes()).is_err(),
         "new/from_slice: {input}"
@@ -899,7 +894,11 @@ fn tag_orders(input: &str) -> Vec<String> {
         .collect();
     let mut inputs = Vec::new();
     for position in [0, fields.len() / 2, fields.len()] {
-        for key in [r##""type""##, r##""t\u0079pe""##, r##""\u0074\u0079\u0070\u0065""##] {
+        for key in [
+            r##""type""##,
+            r##""t\u0079pe""##,
+            r##""\u0074\u0079\u0070\u0065""##,
+        ] {
             let mut ordered = fields.clone();
             ordered.insert(position, format!("{key}:{tag}"));
             inputs.push(format!("{{{}}}", ordered.join(",")));
@@ -958,7 +957,10 @@ mod well_formed {
             assert_eq!(serde_json::to_string(&oracle).unwrap(), json);
             assert_eq!(op, Op::from(oracle));
             let minimal_op = serde_json::from_str::<OracleOp>(minimal).unwrap();
-            assert_eq!(serde_json::to_string(&minimal_op).unwrap(), canonical_minimal);
+            assert_eq!(
+                serde_json::to_string(&minimal_op).unwrap(),
+                canonical_minimal
+            );
             assert_eq!(
                 serde_json::to_string(&Op::from(minimal_op)).unwrap(),
                 canonical_minimal
@@ -1156,7 +1158,11 @@ where
         .zip(entry_points::<O>(input))
     {
         assert!(direct.is_err(), "new/{entry}: {input}");
-        assert_eq!(&convert(oracle.unwrap()), expected, "oracle/{entry}: {input}");
+        assert_eq!(
+            &convert(oracle.unwrap()),
+            expected,
+            "oracle/{entry}: {input}"
+        );
     }
     assert_canonical::<T, O>(expected, &convert);
 }
@@ -1201,7 +1207,10 @@ where
     for (entry, result) in entry_points::<T>(input) {
         assert_eq!(&result.unwrap(), expected, "new/{entry}: {input}");
     }
-    assert!(serde_json::from_str::<O>(input).is_err(), "oracle/from_str: {input}");
+    assert!(
+        serde_json::from_str::<O>(input).is_err(),
+        "oracle/from_str: {input}"
+    );
     assert!(
         serde_json::from_slice::<O>(input.as_bytes()).is_err(),
         "oracle/from_slice: {input}"
@@ -1227,7 +1236,10 @@ mod pinned {
     fn numeric_nested_cell_value_tags_are_rejected() {
         for (value, expected) in [
             (r##"{"kind":0}"##, CellValue::Empty),
-            (r##"{"kind":1,"value":3.5}"##, CellValue::Number { value: 3.5 }),
+            (
+                r##"{"kind":1,"value":3.5}"##,
+                CellValue::Number { value: 3.5 },
+            ),
         ] {
             let input = format!(
                 "{{\"type\":\"setCell\",\"sheet\":0,\"at\":{{\"row\":0,\"col\":0}},\
@@ -1479,8 +1491,14 @@ mod malformed {
             b"{\"type\":\"\xff\",\"index\":0}".as_slice(),
             b"{\"type\":\"removeSheet\",\"index\":0}\xff".as_slice(),
         ] {
-            assert!(serde_json::from_slice::<Op>(input).is_err(), "new: {input:?}");
-            assert!(serde_json::from_slice::<OracleOp>(input).is_err(), "oracle: {input:?}");
+            assert!(
+                serde_json::from_slice::<Op>(input).is_err(),
+                "new: {input:?}"
+            );
+            assert!(
+                serde_json::from_slice::<OracleOp>(input).is_err(),
+                "oracle: {input:?}"
+            );
         }
     }
 
@@ -1510,7 +1528,12 @@ mod malformed {
         assert_boundary::<Vec<OracleOp>>(|depth| format!("[{}]", ignored(depth)), 125);
         assert_boundary::<OracleOps>(|depth| format!("{{\"ops\":[{}]}}", ignored(depth)), 124);
         assert_boundary::<OracleTransaction>(
-            |depth| format!("{{\"ops\":[{}],\"author\":{{\"kind\":\"user\"}}}}", ignored(depth)),
+            |depth| {
+                format!(
+                    "{{\"ops\":[{}],\"author\":{{\"kind\":\"user\"}}}}",
+                    ignored(depth)
+                )
+            },
             124,
         );
         assert_boundary::<Outer<OracleOp>>(
