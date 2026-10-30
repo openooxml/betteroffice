@@ -433,22 +433,6 @@ impl SlideRenderer {
                 .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
                 .or_else(|| covering().next())
                 .map(|(_, _, candidate)| candidate)
-                .or_else(|| {
-                    self.faces
-                        .iter()
-                        .filter(|(_, candidate)| covers(candidate))
-                        .min_by_key(|((_, face_bold, face_italic), candidate)| {
-                            let preference = if (*face_bold, *face_italic) == (bold, italic) {
-                                0
-                            } else if *face_bold == bold {
-                                1
-                            } else {
-                                2
-                            };
-                            (preference, candidate.id.to_u32())
-                        })
-                        .map(|(_, candidate)| candidate)
-                })
         };
         (!emoji_presentation_cluster(cluster))
             .then(registered)

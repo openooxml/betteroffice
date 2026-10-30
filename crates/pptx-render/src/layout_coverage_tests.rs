@@ -23,112 +23,17 @@ mod coverage_regressions {
     }
 
     #[test]
-    fn browser_coverage_uses_primary_faces_for_cyrillic() {
-        let mut renderer = latin_renderer();
-        let own = renderer.fallback_font().unwrap();
-        let fallback = renderer
-            .register_font("Trebuchet MS", false, false, FONT)
-            .unwrap();
-        assert!(
-            renderer
-                .resolve_face(
-                    "Trebuchet MS",
-                    false,
-                    false,
-                    &mut SubstitutionLog::default()
-                )
-                .unwrap()
-                .widths
-                .is_some()
-        );
-        let cyrillic = "България";
-        for character in cyrillic.chars() {
-            assert_eq!(renderer.fonts.covers(own, character), Ok(false));
-            assert_eq!(
-                renderer.fonts.covers(FontId::from_u32(fallback), character),
-                Ok(true)
-            );
-        }
-        let text = format!("A{cyrillic}B");
-        for enabled in [false, true, false] {
-            renderer.set_browser_coverage_fallback(enabled);
-            let pieces = split(&renderer, &text);
-            let actual: Vec<_> = pieces
-                .iter()
-                .map(|piece| (piece.text.as_str(), piece.style.face.id.to_u32()))
-                .collect();
-            if enabled {
-                assert_eq!(
-                    actual,
-                    [
-                        ("A", own.to_u32()),
-                        (cyrillic, fallback),
-                        ("B", own.to_u32())
-                    ]
-                );
-            } else {
-                assert_eq!(actual, [(text.as_str(), own.to_u32())]);
-            }
-        }
-
-        renderer.set_browser_coverage_fallback(true);
-        let mut paragraph = paragraph(&renderer, "l", &text);
-        let original_line = style_line_box(&renderer.fonts, &paragraph.runs[0].style, 1.0).unwrap();
-        paragraph.runs = split(&renderer, &text);
-        let selected = &paragraph.runs[1].style;
-        assert_eq!(selected.face.line_id, own);
-        assert!(selected.face.widths.is_none());
-        let selected_line = style_line_box(&renderer.fonts, selected, 1.0).unwrap();
-        assert_eq!(selected_line.ascent, original_line.ascent);
-        assert_eq!(selected_line.descent, original_line.descent);
-        assert_eq!(selected_line.leading, original_line.leading);
-
-        let expected = shape(
-            &renderer.fonts,
-            FontId::from_u32(fallback),
-            cyrillic,
-            points_to_px(selected.font_size_pt),
-            &[],
-        )
-        .unwrap();
-        let expected_width: f32 = expected.iter().map(|glyph| glyph.x_advance).sum();
-        let lines = layout_paragraph(
-            &renderer.fonts,
-            &paragraph,
-            0.0,
-            0.0,
-            1_000.0,
-            1.0,
-            false,
-            false,
-        )
-        .unwrap();
-        let drawn = lines[0]
-            .runs
-            .iter()
-            .find(|run| run.text == cyrillic)
-            .unwrap();
-        assert_eq!(drawn.font_id, fallback);
-        assert_eq!(drawn.font_family, "Trebuchet MS");
-        assert!((drawn.width - expected_width).abs() < 0.01);
-        let drawn_advance: f32 = drawn.glyphs.iter().map(|glyph| glyph.advance).sum();
-        assert!((drawn_advance - expected_width).abs() < 0.01);
-        assert!(drawn.glyphs.iter().all(|glyph| glyph.glyph_id != 0));
-    }
-
-    #[test]
-    fn browser_coverage_still_uses_browser_when_no_primary_face_covers() {
+    fn browser_coverage_skips_registered_faces_of_other_families() {
         for registered_primary in [false, true] {
             let mut renderer = latin_renderer();
             if registered_primary {
-                renderer
-                    .register_font(
-                        "Other Latin",
-                        false,
-                        false,
-                        include_bytes!("../../fontpack/tests/fixtures/Synthetic-Regular.ttf"),
-                    )
+                let other = renderer
+                    .register_font("Trebuchet MS", false, false, FONT)
                     .unwrap();
+                assert_eq!(
+                    renderer.fonts.covers(FontId::from_u32(other), 'Б'),
+                    Ok(true)
+                );
             }
             renderer.set_browser_coverage_fallback(true);
             let own = renderer.fallback_font().unwrap().to_u32();
@@ -138,57 +43,6 @@ mod coverage_regressions {
                 .map(|piece| (piece.text.as_str(), piece.style.face.id.to_u32()))
                 .collect();
             assert_eq!(actual, [("A", own), ("Б", BROWSER_FONT_ID), ("B", own)]);
-        }
-    }
-
-    #[test]
-    fn primary_coverage_keeps_emoji_presentation_on_the_browser() {
-        let mut renderer = SlideRenderer::new();
-        let own = renderer
-            .register_font(
-                "Segoe UI",
-                false,
-                false,
-                include_bytes!("../../../packages/fonts/assets/Selawik-Regular.ttf"),
-            )
-            .unwrap();
-        let covering = renderer
-            .register_font(
-                "Calibri",
-                false,
-                false,
-                include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf"),
-            )
-            .unwrap();
-        renderer.set_browser_coverage_fallback(true);
-        let face = renderer
-            .resolve_face("Segoe UI", false, false, &mut SubstitutionLog::default())
-            .unwrap();
-        for character in ['☀', 'Ӂ'] {
-            assert_eq!(
-                renderer.fonts.covers(FontId::from_u32(own), character),
-                Ok(false)
-            );
-            assert_eq!(
-                renderer.fonts.covers(FontId::from_u32(covering), character),
-                Ok(true)
-            );
-        }
-        for (cluster, expected) in [
-            ("☀️", BROWSER_FONT_ID),
-            ("👨‍👩‍👧‍👦", BROWSER_FONT_ID),
-            ("1️⃣", BROWSER_FONT_ID),
-            ("☀", covering),
-            ("☀\u{FE0E}", covering),
-            ("Ӂ", covering),
-        ] {
-            let pieces = renderer.browser_coverage_pieces(&face, cluster, false, false);
-            assert_eq!(pieces.len(), 1, "{cluster:?}");
-            assert_eq!(
-                pieces[0].1.as_ref().unwrap().id.to_u32(),
-                expected,
-                "{cluster:?}"
-            );
         }
     }
 
@@ -236,7 +90,7 @@ mod coverage_regressions {
     }
 
     #[test]
-    fn text_presentation_selector_lets_registered_faces_cover_default_emoji() {
+    fn text_presentation_selector_lets_coverage_faces_cover_default_emoji() {
         let mut renderer = SlideRenderer::new();
         let own = renderer
             .register_font(
@@ -247,7 +101,7 @@ mod coverage_regressions {
             )
             .unwrap();
         let covering = renderer
-            .register_font(
+            .register_fallback_font(
                 "Inter",
                 false,
                 false,
@@ -299,13 +153,10 @@ mod coverage_regressions {
     }
 
     #[test]
-    fn primary_coverage_requires_the_whole_grapheme() {
+    fn coverage_requires_the_whole_grapheme() {
         let mut renderer = latin_renderer();
         renderer.set_browser_coverage_fallback(true);
         let partial = renderer
-            .register_font("Partial primary", false, false, FONT)
-            .unwrap();
-        renderer
             .register_fallback_font("Partial coverage", false, false, FONT)
             .unwrap();
         assert_eq!(
@@ -322,7 +173,7 @@ mod coverage_regressions {
         assert_eq!(pieces[1].style.face.id.to_u32(), BROWSER_FONT_ID);
 
         let covering = renderer
-            .register_font(
+            .register_fallback_font(
                 "Carlito",
                 false,
                 false,
@@ -342,7 +193,7 @@ mod coverage_regressions {
     }
 
     #[test]
-    fn primary_coverage_prefers_style_then_registration_order() {
+    fn coverage_prefers_style_then_registration_order() {
         for (bold, italic) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut renderer = latin_renderer();
             let face = renderer
@@ -356,33 +207,33 @@ mod coverage_regressions {
                     .to_u32()
             };
             let first_any = renderer
-                .register_font("First any", !bold, !italic, FONT)
+                .register_fallback_font("First any", !bold, !italic, FONT)
                 .unwrap();
             renderer
-                .register_font("Second any", !bold, italic, FONT)
+                .register_fallback_font("Second any", !bold, italic, FONT)
                 .unwrap();
             assert_eq!(selected(&renderer), first_any);
 
             let first_bold = renderer
-                .register_font("First bold", bold, !italic, FONT)
+                .register_fallback_font("First bold", bold, !italic, FONT)
                 .unwrap();
             renderer
-                .register_font("Second bold", bold, !italic, FONT)
+                .register_fallback_font("Second bold", bold, !italic, FONT)
                 .unwrap();
             assert_eq!(selected(&renderer), first_bold);
 
             let first_exact = renderer
-                .register_font("First exact", bold, italic, FONT)
+                .register_fallback_font("First exact", bold, italic, FONT)
                 .unwrap();
             renderer
-                .register_font("Second exact", bold, italic, FONT)
+                .register_fallback_font("Second exact", bold, italic, FONT)
                 .unwrap();
             assert_eq!(selected(&renderer), first_exact);
 
-            let coverage = renderer
-                .register_fallback_font("Coverage", !bold, !italic, FONT)
+            renderer
+                .register_font("Registered exact", bold, italic, FONT)
                 .unwrap();
-            assert_eq!(selected(&renderer), coverage);
+            assert_eq!(selected(&renderer), first_exact);
         }
     }
 
