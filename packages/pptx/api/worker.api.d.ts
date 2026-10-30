@@ -609,6 +609,7 @@ export declare function navigateGeometry(index: NavigationIndex & {
 export {};
 
 // ---- session/commandProtocol.d.ts ----
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
 import type { SessionFailure } from '../../../../shared/office-session/types';
@@ -862,7 +863,11 @@ export declare class CommandOutcomeUnknown extends Error {
     };
     constructor(seq: number, message: string);
 }
-export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure;
+/** Opening needed more than an engine budget allows (today: more than 256 distinct font faces). */
+export declare class PptxResourceLimitError extends Error {
+    constructor(message: string);
+}
+export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure | PptxResourceLimitError;
 export interface PresentationCommandOutcome {
     seq: number;
     status: 'applied' | 'noop' | 'refused' | 'cancelled';
@@ -995,7 +1000,7 @@ export interface PresentationCommandSaveResult extends PresentationCommandIdenti
 export interface PresentationCommandReadResult extends PresentationCommandAck {
     result: PptxReadResult;
 }
-export type PresentationCommandMethods = {
+export type PresentationCommandMethods = FontDecoderMethods & {
     openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
     command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
     thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
@@ -1033,6 +1038,7 @@ export interface PresentationCommandClient {
     dispose(): Promise<void>;
 }
 export declare const PRESENTATION_COMMAND_METHODS: {
+    decodeFontFace: true;
     openCommandEditor: true;
     command: true;
     thumbnailFrame: true;
@@ -1176,6 +1182,17 @@ export interface PptxWorkerEditorSession {
 }
 export declare function createPptxWorkerEditorSession(bytes: Uint8Array | ArrayBuffer, options?: PptxWorkerEditorOptions): PptxWorkerEditorSession;
 export declare function createPresentationEditorSession(bytes: Uint8Array | ArrayBuffer, options: PptxWorkerEditorOptions, transport: SessionTransport): PptxWorkerEditorSession;
+
+// ---- session/fontWorker.d.ts ----
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+interface PreparedFontWorker {
+    decoder: FontDecoder;
+    release(): void;
+    take(): Worker;
+}
+export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer): PreparedFontWorker;
+export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined;
+export {};
 
 // ---- session/frame.d.ts ----
 import type { SlideDisplayList } from '../types';
@@ -2304,6 +2321,26 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontDecoder.d.ts ----
+export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
+    codec: string;
+    dict?: ArrayBuffer | Uint8Array;
+    maxOutput?: number;
+}) => Promise<{
+    font: ArrayBuffer;
+    payload?: ArrayBuffer;
+}>;
+export type FontDecodeResult = Awaited<ReturnType<FontDecoder>>;
+export type FontDecoderMethods = {
+    decodeFontFace(bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], wasm?: ArrayBuffer | WebAssembly.Module): FontDecodeResult;
+};
+export declare function rpcFontDecoder(call: (bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], transfer: Transferable[]) => Promise<FontDecodeResult>): FontDecoder;
+export declare function fontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer>;
+export declare function copyDecodedFace(face: {
+    font: Uint8Array;
+    payload?: Uint8Array;
+}): FontDecodeResult;
+
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
@@ -2352,6 +2389,7 @@ export type ClientMessage = {
 export interface ReplyError {
     name: string;
     message: string;
+    code?: string;
     refusal?: unknown;
 }
 export type HostMessage = {
@@ -3517,6 +3555,8 @@ export {};
 // ---- wasm/generated/pptx_wasm.d.ts ----
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 export class PptxDocument {
     private constructor();
@@ -3699,6 +3739,13 @@ export class PptxRenderer {
 
 export function compileSlideJson(slide_json: string): string;
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
 /**
@@ -3738,6 +3785,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3880,6 +3928,8 @@ export default function __wbg_init (module_or_path?: { module_or_path: InitInput
 
 // ---- wasm/loader.d.ts ----
 import type { InitInput } from './generated/pptx_wasm.js';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+export declare const decodeFontFace: FontDecoder;
 import type { PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions, PptxStructuredContent } from '../structuredExport';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxTextField, PptxValidationResult } from '../edits';
@@ -4207,6 +4257,7 @@ export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatti
 export { browserFrameImages } from './render/browserFrameImages';
 /** @experimental */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { preparePresentationFontDecoder } from './session/fontWorker';
 /** @experimental */
 export type { PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession, PptxWorkerEditorStage, PptxWorkerEditorState, } from './session/editorSession';
 /** @experimental */
@@ -4230,7 +4281,7 @@ export type { PptxWorkerSession, PptxWorkerSessionOptions } from './session/comm
 /** @internal */
 export { presentationSharedInputs } from './session/commandSharedInput';
 /** @internal */
-export { CommandOutcomeUnknown, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
+export { CommandOutcomeUnknown, PptxResourceLimitError, PRESENTATION_COMMAND_ADMISSION, PRESENTATION_COMMAND_METHODS, PRESENTATION_COMMAND_MUTATIONS } from './session/commandProtocol';
 /** @internal */
 export { frameAssetIds } from './session/frame';
 /** @internal */

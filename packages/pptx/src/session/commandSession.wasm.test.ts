@@ -115,6 +115,30 @@ describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
     finally { await cached.dispose(); }
   });
 
+  for (const name of ['PptxResourceLimitError', 'PptxEditDecodeError']) test(`types a host open ${name} without a closed connection`, async () => {
+    const h = factory();
+    const original = Object.assign(new Error(name === 'PptxResourceLimitError'
+      ? 'render resource limit exceeded: more than 256 font faces' : 'invalid presentation'), { name });
+    h.rejectInitialize(original);
+    const session = h.client.createPptxWorkerSession(new Uint8Array());
+    const failures: Error[] = [];
+    session.subscribeFailure((error) => failures.push(error));
+    try {
+      const error = await session.ready.then(() => undefined, (error: unknown) => error);
+      if (!(error instanceof Error)) throw new Error('Expected an open error');
+      if (name === 'PptxResourceLimitError') expect(error.constructor.name).toBe('PptxResourceLimitError');
+      expect(error).toMatchObject(name === 'PptxResourceLimitError' ? { name } : { name: 'SessionFailure', code: 'crash' });
+      expect(error.message).toBe(original.message);
+      expect(error.message).not.toContain('connection closed');
+      expect(session.failure).toBe(error);
+      expect(failures).toEqual([error]);
+      const late: Error[] = [];
+      session.subscribeFailure((failure) => late.push(failure));
+      expect(late).toEqual([error]);
+    } finally { await session.dispose(); }
+    expect(h.workers[0]!.terminated).toBe(true);
+  });
+
   test('keys cached modules by asset URL', async () => {
     const h = factory();
     for (const url of ['https://example.test/first.wasm', 'https://example.test/second.wasm', 'https://example.test/first.wasm']) {

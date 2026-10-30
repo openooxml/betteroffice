@@ -8,6 +8,7 @@ type Engine = Pick<
   | 'XlsxDocument'
   | 'XlsxSnapshotBuilder'
   | 'allocationFailure'
+  | 'decodeFontFace'
   | 'displayListCellLimit'
   | 'exportXlsxMarkdownJson'
   | 'exportXlsxStructuredJson'
@@ -21,6 +22,7 @@ export type XlsxDocument = Wasm.XlsxDocument;
 export const XlsxSnapshotBuilder = binding.XlsxSnapshotBuilder;
 export type XlsxSnapshotBuilder = Wasm.XlsxSnapshotBuilder;
 export const allocationFailure = binding.allocationFailure;
+export const decodeFontFace = binding.decodeFontFace;
 export const displayListCellLimit = binding.displayListCellLimit;
 export const exportXlsxMarkdownJson = binding.exportXlsxMarkdownJson;
 export const exportXlsxStructuredJson = binding.exportXlsxStructuredJson;

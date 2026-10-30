@@ -165,10 +165,11 @@ export class FileSession {
   #sweepTimer: ReturnType<typeof setInterval> | null = null;
   #userTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
   #format: Format | null = null;
+  #sourceBytes: Uint8Array | null = null;
+  #baselineGeneration = 0;
   #journalActive = false;
   #journalBroken = false;
   #pendingJoins = 0;
-  #sourceBytes: Uint8Array | null = null;
   #offLocalUpdate: (() => void) | null = null;
   #openedClientId: number | null = null;
   #openedInitialState: Uint8Array | null = null;
@@ -211,6 +212,18 @@ export class FileSession {
     return this.#format;
   }
 
+  get fileName(): string {
+    return this.#fileName;
+  }
+
+  get sourceBytes(): Uint8Array | null {
+    return this.#sourceBytes;
+  }
+
+  get baselineGeneration(): number {
+    return this.#baselineGeneration;
+  }
+
   get lockHeld(): boolean {
     this.#checkLockLease();
     return this.#lockHeld;
@@ -218,6 +231,11 @@ export class FileSession {
 
   get journalBroken(): boolean {
     return this.#journalBroken;
+  }
+
+  /** Most users that may be connected to this file at once. */
+  get maxEditorsPerFile(): number {
+    return this.#deps.maxEditorsPerFile ?? 50;
   }
 
   get viewOnly(): boolean {
@@ -331,7 +349,7 @@ export class FileSession {
     if (this.#state === "closed" || this.#state === "closing") {
       throw new SessionError("closed", "file session is closed");
     }
-    const max = this.#deps.maxEditorsPerFile ?? 50;
+    const max = this.maxEditorsPerFile;
     const connectedCount = [...this.#users.values()].filter((user) => user.connected).length;
     if (connectedCount >= max) {
       throw new SessionError("tooManyEditors", "max editors per file reached");
@@ -351,6 +369,7 @@ export class FileSession {
         this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
+        this.#baselineGeneration += 1;
         this.#openedClientId = this.#replica!.clientId;
         try {
           this.#openedInitialState = this.#replica!.encodeStateAsUpdate();
@@ -413,6 +432,8 @@ export class FileSession {
       friendlyName: info.UserFriendlyName ?? info.UserId,
       canWrite: wantsWrite && this.#canUseSaveCredentials(),
       joinedAt: now,
+      postMessageOrigin: info.PostMessageOrigin ?? "",
+      closeUrl: info.CloseUrl ?? "",
     });
     this.#users.set(user.id, user);
     this.#history.push(user);
@@ -479,6 +500,7 @@ export class FileSession {
     this.#lockNeedsRecovery = false;
     this.#viewOnlyReason = null;
     this.#leader = null;
+    this.#sourceBytes = null;
     this.#journalActive = false;
     this.#deps.journal?.close();
   }
@@ -504,6 +526,7 @@ export class FileSession {
     this.#destroyReplica();
     this.#attachReplica(replica);
     this.#sourceBytes = bytes;
+    this.#baselineGeneration += 1;
     this.#openedClientId = replica.clientId;
     this.#openedInitialState = replica.encodeStateAsUpdate();
     this.#savedVersion = 0;
@@ -601,6 +624,7 @@ export class FileSession {
       this.#destroyReplica();
       this.#attachReplica(recovered);
       this.#sourceBytes = existing.source;
+      this.#baselineGeneration += 1;
       this.#savedVersion = 0;
       if (existing.updates.length > 0) {
         this.#firstDirtyAt = this.#now();
@@ -719,6 +743,8 @@ export class FileSession {
       });
     }, handles);
     this.#setTimerAt(user.expiresAt, () => {
+      if (!this.#users.has(user.id) || this.#state !== "open") return;
+      this.#emit("userInvalidated", { userId: user.id });
       this.#enqueueTask(async () => {
         if (!this.#users.has(user.id) || this.#state !== "open") return;
         user.canWrite = false;
@@ -905,6 +931,12 @@ export class FileSession {
     this.#enqueueTask(() => this.#maybeCloseAfterDeparture(affected));
   }
 
+  /** Whether one user's token is still valid on the session clock. */
+  isUserTokenValid(userId: string): boolean {
+    const user = this.#users.get(userId);
+    return user ? user.isTokenValidAt(this.#now()) : false;
+  }
+
   /** Applies one update from a connected writer. Follow-ups are replica authored updates, in order. */
   applyUpdate(userId: string, update: Uint8Array): { accepted: true; followUps: Uint8Array[] } | { accepted: false; reason: string; followUps?: Uint8Array[] } {
     const user = this.#users.get(userId);
@@ -976,15 +1008,25 @@ export class FileSession {
     }
   }
 
-  /** Marks a user as alive and reconnects them when needed. */
-  heartbeat(userId: string): void {
+  /** Starts a new socket connection. */
+  connect(userId: string): number {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
+    const generation = ++user.connectionGeneration;
+    this.heartbeat(userId, generation);
+    return generation;
+  }
+
+  /** Marks the current connection as alive. */
+  heartbeat(userId: string, generation = this.#users.get(userId)?.connectionGeneration): void {
+    const user = this.#users.get(userId);
+    if (!user) throw new SessionError("unknownUser", "unknown user");
+    if (user.connectionGeneration !== generation) return;
     user.lastSeen = this.#now();
     if (user.connected) return;
     user.connected = true;
     this.#enqueueTask(async () => {
-      if (this.#state !== "open" || !this.#users.has(user.id) || !user.connected) return;
+      if (this.#state !== "open" || !this.#users.has(user.id) || !user.connected || user.connectionGeneration !== generation) return;
       if (this.#holdPending && this.#isConnectedEditor(user)) {
         this.#holdPending = false;
         this.#clearTimer("hold");
@@ -995,13 +1037,13 @@ export class FileSession {
   }
 
   /** Marks a user disconnected and runs the departure policy. */
-  disconnect(userId: string): Promise<void> {
-    return this.#enqueue(() => this.#disconnectInternal(userId));
+  disconnect(userId: string, generation = this.#users.get(userId)?.connectionGeneration): Promise<void> {
+    return this.#enqueue(() => this.#disconnectInternal(userId, generation));
   }
 
-  async #disconnectInternal(userId: string): Promise<void> {
+  async #disconnectInternal(userId: string, generation: number | undefined): Promise<void> {
     const user = this.#users.get(userId);
-    if (!user) throw new SessionError("unknownUser", "unknown user");
+    if (!user || user.connectionGeneration !== generation) return;
     if (!user.connected) return;
     user.connected = false;
     await this.#refreshLeader();
@@ -1020,6 +1062,7 @@ export class FileSession {
     this.#users.delete(userId);
     this.#clearUserTimers(userId);
     user.connected = false;
+    this.#emit("userInvalidated", { userId });
     await this.#refreshLeader();
     const departing = leaderBefore && leaderBefore.id !== userId ? [leaderBefore, user] : [user];
     await this.#maybeCloseAfterDeparture(departing);
@@ -1344,6 +1387,7 @@ export class FileSession {
     this.#users.clear();
     this.#history = [];
     this.#leader = null;
+    this.#sourceBytes = null;
     this.#lockHeld = false;
     this.#lockNeedsRecovery = false;
     this.#state = "closed";
@@ -1359,6 +1403,7 @@ export class FileSession {
     this.#destroyReplica();
     for (const user of this.#history) user.accessToken = "";
     this.#users.clear();
+    this.#sourceBytes = null;
     this.#state = "closed";
     this.#deps.onClosed?.(this);
   }

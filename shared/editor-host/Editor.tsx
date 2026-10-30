@@ -12,6 +12,7 @@ import {
   loadBundledFontBytes,
   resolveLastResortFace,
   resolveMetricCompatFace,
+  type FontDecoder,
 } from "@betteroffice/fonts";
 import { createRoomTransport } from "./collaboration/createRoomTransport";
 import type { CollaborationReplica } from "./collaboration/types";
@@ -92,7 +93,7 @@ export async function prepareFile(
       return { bytes, format };
     }
     const { parseDocx } = await import("@betteroffice/docx/docx");
-    await parseDocx(bytes);
+    await parseDocx(bytes, { preloadFonts: false });
     return { bytes, format };
   }
   if (format === "xlsx") {
@@ -107,32 +108,37 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const results = await Promise.allSettled(
-    [false, true].flatMap((bold) =>
-      [false, true].map(async (italic) => {
-        const face =
-          resolveMetricCompatFace("Arial", bold, italic) ??
-          resolveLastResortFace("Arial", bold, italic);
-        return {
-          family: "Arial",
-          bold,
-          italic,
-          bytes: new Uint8Array(await loadBundledFontBytes(face)),
-        };
-      })
-    )
-  );
-  const fonts = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+  const workerFonts = typeof Worker === "function" && typeof OffscreenCanvas === "function";
+  const decoder = workerFonts
+    ? import("@betteroffice/pptx/worker").then(module => module.preparePresentationFontDecoder(bytes))
+    : import("@betteroffice/pptx").then(async module => {
+      await module.initWasm();
+      return { decoder: module.decodeFontFace, release() {} };
+    });
+  void decoder.catch(() => {});
+  const runtime: { decoder: FontDecoder } = {
+    decoder: async (encoded, options) => (await decoder).decoder(encoded, options),
+  };
+  const results = await Promise.allSettled([false, true].flatMap(bold => [false, true].map(async italic => {
+    const face = resolveMetricCompatFace("Arial", bold, italic) ?? resolveLastResortFace("Arial", bold, italic);
+    return { family: "Arial", bold, italic, bytes: new Uint8Array(await loadBundledFontBytes(face, undefined, runtime)) };
+  })));
+  const fonts = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
   const failed = results.length - fonts.length;
   if (failed) console.warn(`${failed} font faces failed to load; text uses fallback fonts.`);
-  if (typeof Worker === "function" && typeof OffscreenCanvas === "function") {
-    const { openPresentationSession } = await import("@betteroffice/pptx/worker");
-    const session = await openPresentationSession(bytes, { fonts });
-    await session.dispose();
-  } else {
-    const { initWasm, openPresentation } = await import("@betteroffice/pptx");
-    await initWasm();
-    openPresentation(bytes, { fonts }).dispose();
+  try {
+    if (workerFonts) {
+      const { openPresentationSession } = await import("@betteroffice/pptx/worker");
+      const session = await openPresentationSession(bytes, { fonts });
+      await session.dispose();
+    } else {
+      const { initWasm, openPresentation } = await import("@betteroffice/pptx");
+      await initWasm();
+      openPresentation(bytes, { fonts }).dispose();
+    }
+  } catch (error) {
+    void decoder.then(prepared => prepared.release(), () => {});
+    throw error;
   }
   return { bytes, format, fonts };
 }

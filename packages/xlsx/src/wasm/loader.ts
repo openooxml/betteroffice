@@ -12,6 +12,7 @@ import initWasmModule, {
   XlsxDocument,
   XlsxSnapshotBuilder,
   allocationFailure,
+  decodeFontFace as decodePackedFontFace,
   displayListCellLimit,
   engineKind,
   exportXlsxMarkdownJson,
@@ -20,6 +21,13 @@ import initWasmModule, {
 } from './engine';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+
+export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
+  await initWasm();
+  return copyDecodedFace(decodePackedFontFace(fontBytes(bytes), codec,
+    dict === undefined ? undefined : fontBytes(dict), maxOutput));
+};
 import { wasmAssetUrl } from './asset';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';

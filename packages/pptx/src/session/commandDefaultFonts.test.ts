@@ -1,6 +1,8 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import * as fonts from '@betteroffice/fonts';
 import { commandFontProvider, createCommandDefaultFonts } from './commandDefaultFonts';
+import { decodeFontFace } from '../wasm/loader';
 
 const restorers: (() => void)[] = [];
 const regular = { family: 'Calibri', bold: false, italic: false };
@@ -17,6 +19,13 @@ function provider(load: (family: string, bold: boolean, italic: boolean) => (() 
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+test('the manager decodes packed faces with the worker engine', async () => {
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  await commandFontProvider.load();
+  expect(create).toHaveBeenCalledWith(undefined, { decoder: decodeFontFace });
+});
 
 test('app families exclude all styles without importing the manager', async () => {
   const source = provider(() => async () => bytes);

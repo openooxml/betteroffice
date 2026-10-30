@@ -5,6 +5,7 @@ export type { InitInput } from '../../../packages/pptx/src/wasm/generated/pptx_w
 
 type Engine = Pick<
   typeof Wasm,
+  | 'decodeFontFace'
   | 'decodeTiffPng'
   | 'exportPptxMarkdownJson'
   | 'exportPptxStructuredJson'
@@ -18,6 +19,7 @@ type Engine = Pick<
 
 const binding = createRequire(import.meta.url)('../index.js') as Engine;
 
+export const decodeFontFace = binding.decodeFontFace;
 export const decodeTiffPng = binding.decodeTiffPng;
 export const exportPptxMarkdownJson = binding.exportPptxMarkdownJson;
 export const exportPptxStructuredJson = binding.exportPptxStructuredJson;

@@ -3,6 +3,7 @@ export {
   XlsxDocument,
   XlsxSnapshotBuilder,
   allocationFailure,
+  decodeFontFace,
   displayListCellLimit,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
