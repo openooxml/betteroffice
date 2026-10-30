@@ -58,7 +58,7 @@
 More packages:
 
 - **Agent tools:** [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents), the TypeScript SDK and `betteroffice-mcp` server.
-- **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
+- **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk), [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl).
 - **i18n:** [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n), [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n).
 
 What to install for which language, with a first example each:
