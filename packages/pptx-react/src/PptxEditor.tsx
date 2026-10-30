@@ -219,6 +219,12 @@ export interface PptxAsyncPresentationProps {
   loadingIndicator?: ReactNode;
   /** Inline styles for the editor root. */
   style?: CSSProperties;
+  /**
+   * Loads bundled faces before the first paint for document families that
+   * `fonts` does not supply; supplied families keep the app's faces. Pass
+   * false to fetch no default fonts. Defaults to true.
+   */
+  defaultFonts?: boolean;
 }
 
 export type PptxAsyncEditorProps = Omit<PptxInThreadEditorProps,

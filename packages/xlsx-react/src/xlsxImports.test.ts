@@ -61,36 +61,56 @@ function modulePath(from: string, specifier: string): string {
   throw new Error(`Unresolved source: ${relative(root, from)} -> ${specifier}`);
 }
 
+function runtimeImports(path: string, dynamic: boolean): string[] {
+  const imports: string[] = [];
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
+  const walk = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
+      !node.importClause?.isTypeOnly && node.moduleSpecifier.text.startsWith('.')) {
+      const bindings = node.importClause?.namedBindings;
+      if (!node.importClause?.name && bindings && ts.isNamedImports(bindings) &&
+        bindings.elements.every((entry) => entry.isTypeOnly)) return;
+      imports.push(modulePath(path, node.moduleSpecifier.text));
+    } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
+      if (node.exportClause && ts.isNamedExports(node.exportClause) &&
+        node.exportClause.elements.every((entry) => entry.isTypeOnly)) return;
+      imports.push(modulePath(path, node.moduleSpecifier.text));
+    } else if (dynamic && ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text.startsWith('.')) {
+      imports.push(modulePath(path, node.arguments[0].text));
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(source);
+  return imports;
+}
+
 test('deferred editors have no runtime imports back into the editor shell', () => {
   const seen = new Set<string>();
   const visit = (path: string): void => {
     expect(relative(root, path)).not.toMatch(/^packages\/xlsx-react\/src\/(?:XlsxEditor|worker\/XlsxWorkerEditor)\.tsx$/);
     if (seen.has(path)) return;
     seen.add(path);
-    const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
-    const walk = (node: ts.Node): void => {
-      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
-        !node.importClause?.isTypeOnly && node.moduleSpecifier.text.startsWith('.')) {
-        const bindings = node.importClause?.namedBindings;
-        if (!node.importClause?.name && bindings && ts.isNamedImports(bindings) &&
-          bindings.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
-      } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier &&
-        ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
-        if (node.exportClause && ts.isNamedExports(node.exportClause) &&
-          node.exportClause.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
-      } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text.startsWith('.')) {
-        visit(modulePath(path, node.arguments[0].text));
-      }
-      ts.forEachChild(node, walk);
-    };
-    walk(source);
+    for (const imported of runtimeImports(path, true)) visit(imported);
   };
   for (const path of ['LegacyXlsxEditor.tsx', 'XlsxAsyncInThreadSession.tsx', 'worker/LegacyXlsxWorkerEditor.tsx']) {
     seen.clear();
     visit(resolve(root, `packages/xlsx-react/src/${path}`));
     expect(seen.has(resolve(root, 'packages/xlsx-react/src/viewer/XlsxSessionViewer.tsx'))).toBe(path === 'LegacyXlsxEditor.tsx');
   }
+});
+
+test('the peerless editor has no static runtime imports of the legacy worker session', () => {
+  const legacy = ['worker/LegacyXlsxWorkerEditor.tsx', 'worker/useEditableSessionWorkbook.ts',
+    'worker/createWorkerEditorApi.ts', 'commands/workerInputCoordinator.ts']
+    .map((path) => resolve(root, `packages/xlsx-react/src/${path}`));
+  const seen = new Set<string>();
+  const visit = (path: string): void => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    for (const imported of runtimeImports(path, false)) visit(imported);
+  };
+  visit(resolve(root, 'packages/xlsx-react/src/worker/XlsxPeerlessWorkerEditor.tsx'));
+  expect(legacy.filter((path) => seen.has(path)).map((path) => relative(root, path))).toEqual([]);
 });
