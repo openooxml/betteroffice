@@ -21,6 +21,7 @@
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/vsdx": "workspace:*",
@@ -59,6 +60,7 @@
         "@betteroffice/fonts": "workspace:*",
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/fonts-intl": "workspace:*",
+        "@betteroffice/fonts-latin": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-i18n": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
@@ -333,11 +335,15 @@
     "packages/fonts": {
       "name": "@betteroffice/fonts",
       "version": "0.4.2",
+      "dependencies": {
+        "@betteroffice/fonts-latin": "workspace:*",
+      },
       "devDependencies": {
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/fonts-intl": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
+        "esbuild": "^0.28.1",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
@@ -360,6 +366,14 @@
     },
     "packages/fonts-intl": {
       "name": "@betteroffice/fonts-intl",
+      "version": "0.4.2",
+      "devDependencies": {
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+    },
+    "packages/fonts-latin": {
+      "name": "@betteroffice/fonts-latin",
       "version": "0.4.2",
       "devDependencies": {
         "tsup": "^8.0.1",
@@ -721,6 +735,8 @@
     "@betteroffice/fonts-cjk": ["@betteroffice/fonts-cjk@workspace:packages/fonts-cjk"],
 
     "@betteroffice/fonts-intl": ["@betteroffice/fonts-intl@workspace:packages/fonts-intl"],
+
+    "@betteroffice/fonts-latin": ["@betteroffice/fonts-latin@workspace:packages/fonts-latin"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],
 

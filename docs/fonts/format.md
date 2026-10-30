@@ -23,7 +23,10 @@ source TTF. For `woff2t`, each `<face>.source.sha256` sidecar lists the SHA-256
 of the `.ttf`, `.uw2` and `.woff2` in `sha256sum` format, one line each in that
 order; the builder rejects a face whose sidecar is missing or does not match all
 three current files. Regenerate companions with `scripts/fonts/woff2-transform.py`.
-The default `--codec zstd` preserves source bytes. File names stay
+`--codec auto` compares the encoded totals for each family and selects
+`woff2t+zstd` only when it is smaller, keeping dictionary codecs consistent.
+It requires the same companions for TTF faces. The default `--codec zstd`
+preserves source bytes. File names stay
 `<face>.ttf.zst` for both codecs.
 
 WOFF2 reconstruction produces a valid sfnt but does not preserve the source TTF
@@ -119,6 +122,11 @@ their plain zstd behavior.
 
 ## Manifest schema
 
+`schema: 1` versions the manifest structure independently of the binary `format`.
+Consumers ignore unknown top-level and per-face fields. Optional additions do
+not require a schema bump. The per-face name `slices` is reserved for optional
+future data; format 1 loaders do not interpret it.
+
 `manifest.json` is UTF-8 JSON. `faces` is sorted by `file`. File names are
 relative to the pack directory. `family` is the source filename stem before its
 last `-`, or the entire stem when there is no `-`.
@@ -126,6 +134,7 @@ last `-`, or the entire stem when there is no `-`.
 ```json
 {
   "format": 1,
+  "schema": 1,
   "pack": "synthetic",
   "version": "1.2.3",
   "faces": [

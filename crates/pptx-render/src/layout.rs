@@ -10326,13 +10326,32 @@ mod tests {
             .unwrap()
     }
 
+    /// CPU time this thread has used.
+    #[cfg(unix)]
+    fn thread_cpu_time() -> std::time::Duration {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a valid timespec for the call to write into.
+        let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+        assert_eq!(status, 0, "clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed");
+        std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+    }
+
+    #[cfg(not(unix))]
+    fn thread_cpu_time() -> std::time::Duration {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+
     fn best_of_three<T>(mut workload: impl FnMut() -> T) -> (std::time::Duration, T) {
         let mut best: Option<std::time::Duration> = None;
         let mut output = None;
         for _ in 0..3 {
-            let start = std::time::Instant::now();
+            let start = thread_cpu_time();
             let result = workload();
-            let elapsed = start.elapsed();
+            let elapsed = thread_cpu_time() - start;
             if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
                 best = Some(elapsed);
             }
@@ -11357,13 +11376,19 @@ mod tests {
             (current, baseline)
         };
         let (small_current, small_baseline) = make_shapes(7_500);
-        let (small_elapsed, _) = best_of_three(|| {
-            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default())
-        });
         let (large_current, large_baseline) = make_shapes(30_000);
-        let (large_elapsed, edited) = best_of_three(|| {
-            autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default())
-        });
+        let mut small_elapsed = std::time::Duration::MAX;
+        let mut large_elapsed = std::time::Duration::MAX;
+        let mut edited = HashSet::new();
+        for _ in 0..5 {
+            let start = thread_cpu_time();
+            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default());
+            small_elapsed = small_elapsed.min(thread_cpu_time() - start);
+            let start = thread_cpu_time();
+            edited =
+                autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default());
+            large_elapsed = large_elapsed.min(thread_cpu_time() - start);
+        }
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
             ratio < 8.0,

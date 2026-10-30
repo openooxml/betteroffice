@@ -32,5 +32,8 @@ unicode-segmentation = "1.12"
 libm.workspace = true
 ooxml-opc.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm.workspace = true

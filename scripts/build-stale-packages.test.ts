@@ -38,6 +38,9 @@ describe('workspace build order', () => {
     expect(position.get('@betteroffice/fonts-intl')!).toBeLessThan(
       position.get('@betteroffice/fonts')!
     );
+    expect(position.get('@betteroffice/fonts-latin')!).toBeLessThan(
+      position.get('@betteroffice/fonts')!
+    );
   });
 
   test('every package that builds is ordered exactly once', () => {
