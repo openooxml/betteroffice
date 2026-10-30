@@ -65,6 +65,31 @@ impl Presentation {
         )
     }
 
+    pub fn layout_proposal_diff_slide(
+        &self,
+        id: &str,
+        slide_index: usize,
+    ) -> Result<crate::ProposalDiffSlide> {
+        let preview = self
+            .session
+            .preview_proposal_diff_slide(id, slide_index)
+            .map_err(|error| match error {
+                crate::ProposalError::Edit(EditError::OutOfBounds { .. }) => {
+                    crate::Error::from(RenderError::SlideNotFound(slide_index))
+                }
+                error => error.into(),
+            })?;
+        let rendered = self
+            .renderer
+            .layout_scoped_slide(self.session.package(), &preview.scope)?;
+        Ok(crate::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
+    }
+
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
         Ok(self.session.accept_proposal(id, force)?)
     }
@@ -736,6 +761,32 @@ impl Presentation {
         bytes: &[u8],
     ) -> Result<u32> {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
+    }
+
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32> {
+        Ok(self
+            .renderer
+            .register_fallback_font(family, bold, italic, bytes)?)
+    }
+
+    /// Tests a slide point in display-list pixels, measured from the top left.
+    pub fn hit_test(
+        &self,
+        slide_index: usize,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<crate::HitTestResult>> {
+        let scope = slide_scope(&self.session, slide_index)?;
+        Ok(self
+            .renderer
+            .layout_scoped_slide(self.session.package(), &scope)?
+            .hit_test(x, y))
     }
 
     #[cfg(feature = "raster")]
