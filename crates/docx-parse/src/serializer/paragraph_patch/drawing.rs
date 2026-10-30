@@ -239,17 +239,5 @@ pub(super) fn validate_edits(
             return Err(Failure::structure("drawing: formatting touches SmartArt"));
         }
     }
-    for edit in &patch.text_edits {
-        let mut runs = lowered
-            .cells
-            .iter()
-            .filter(|cell| edit.from <= cell.from && cell.to <= edit.to)
-            .map(|cell| cell.run);
-        if let Some(first) = runs.next()
-            && runs.any(|run| run != first)
-        {
-            return Err(Failure::structure("drawing: text edit crosses source runs"));
-        }
-    }
     Ok(())
 }

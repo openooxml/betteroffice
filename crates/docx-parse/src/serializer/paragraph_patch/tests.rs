@@ -1997,7 +1997,7 @@ fn smart_art_text_patch_keeps_the_drawing_run_and_checks_its_source() {
 }
 
 #[test]
-fn smart_art_patch_refuses_text_replacement_across_source_runs() {
+fn smart_art_text_replacement_across_source_runs_keeps_the_drawing_run() {
     let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds/></a:graphicData></a:graphic></w:drawing>"#;
     let atom = UnitV1::Atom {
         atom_kind: "shape".to_owned(),
@@ -2012,10 +2012,11 @@ fn smart_art_patch_refuses_text_replacement_across_source_runs() {
     let source = format!(
         "<w:p><w:r><w:t>be</w:t></w:r><w:r><w:t>fore</w:t></w:r><w:r>{drawing}</w:r></w:p>"
     );
-    assert_eq!(
-        write(&source, &plan).unwrap_err().detail,
-        "drawing: text edit crosses source runs"
-    );
+    let output = write(&source, &plan).unwrap();
+    assert!(output.ends_with(&format!("<w:r>{drawing}</w:r></w:p>")));
+    assert_eq!(output.matches("<dgm:relIds/>").count(), 1);
+    assert!(output.contains("ahead of"));
+    assert!(!output.contains(">be<") && !output.contains(">fore<"));
 }
 
 #[test]
