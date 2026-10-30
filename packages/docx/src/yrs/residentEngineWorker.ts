@@ -21,6 +21,7 @@ import { echoBackgroundPage, stageCommandPresentation } from './residentCommandP
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces, type EmbeddedFontFace } from '../utils/embeddedFonts';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
 import { commandMayNeedNewFonts, ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
@@ -1761,6 +1762,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
+      const embeddedFontFaces = opened.embeddedFontFaces ?? await extractEmbeddedFontFaces(document);
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
       const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
@@ -1769,10 +1771,11 @@ async function handle(request: ScheduledRequest): Promise<void> {
       const listed = svgMedia?.length ? { svgMedia } : {};
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity, ...listed });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, embeddedFontFaces, hostJson, ...identity, ...listed });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity, ...listed }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, embeddedFontFaces, hostJson, stateVector, ...identity, ...listed },
+          [stateVector, ...embeddedFontFaces.map(face => face.data)]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -3533,8 +3536,9 @@ function parsedToolbar(document: import('../types/document').Document): () => Do
 function adoptResidentSource(
   opening: ResidentEngineSession,
   source: DocxSourceOpenRequest
-): { document: import('../types/document').Document; hostJson?: string } | null {
+): { document: import('../types/document').Document; hostJson?: string; embeddedFontFaces?: EmbeddedFontFace[] } | null {
   let hostJson: string | undefined;
+  let embeddedFontFaces: EmbeddedFontFace[] | undefined;
   let document: import('../types/document').Document;
   let partial = false;
   const options = { ...source, initialUpdate: source.collaboration?.initialUpdate };
@@ -3547,11 +3551,14 @@ function adoptResidentSource(
     hostJson = cut;
     const host = decodeDocxHostJson(hostJson, source.bytes!);
     document = host.document;
+    embeddedFontFaces = getEmbeddedFontFaces(document.package.fontTable, host.embeddedFonts, host.fontTableRelationshipsXml);
     partial = host.wholeBody !== true;
   } else {
     hostJson = opening.openSourceDocx(source.bytes!, options);
     reportProgress();
-    document = decodeDocxHostJson(hostJson, source.bytes!).document;
+    const host = decodeDocxHostJson(hostJson, source.bytes!);
+    document = host.document;
+    embeddedFontFaces = getEmbeddedFontFaces(document.package.fontTable, host.embeddedFonts, host.fontTableRelationshipsXml);
     reportProgress();
   }
   if (!source.cut) opening.setDirectBatches(true);
@@ -3565,7 +3572,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
-  return { document, hostJson };
+  return { document, hostJson, embeddedFontFaces };
 }
 
 /** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
@@ -3588,7 +3595,7 @@ async function replySourcePreview(
   preview: DocxSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; embeddedFontFaces?: EmbeddedFontFace[]; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3629,7 +3636,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; embeddedFontFaces?: EmbeddedFontFace[]; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
@@ -3717,6 +3724,7 @@ async function replyFrame(
       ...(layoutProvisional ? { layoutProvisional } : {}),
     },
     [...packed.transfer, ...updateBuffers, ...(stateVector ? [stateVector] : []),
+      ...(sourceOpened?.embeddedFontFaces?.map(face => face.data) ?? []),
       ...(layoutMeta ? [layoutMeta.pageSizes.buffer as ArrayBuffer] : [])]
   );
 }

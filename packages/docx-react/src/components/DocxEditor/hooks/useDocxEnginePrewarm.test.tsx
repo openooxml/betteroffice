@@ -117,8 +117,7 @@ test('an opted-in editor warms on mount once in StrictMode and releases an unuse
     worker.reply({ id: worker.requestAt(0).id, ok: true });
   });
   expect(worker.posted).toEqual([
-    { id: 1, type: 'warm', hostModule: true },
-    { type: 'editModule', module: editModule },
+    { id: 1, type: 'warm' },
   ]);
   expect(worker.terminated).toBe(false);
   editor.unmount();
@@ -166,13 +165,11 @@ test('byte arrival retries warm in parallel with the main-thread open', async ()
     });
     expect(preparedWorkers).toEqual([1]);
     expect(worker.posted).toEqual([
-      { id: 1, type: 'warm', hostModule: true },
-      { type: 'editModule', module: editModule },
-      { id: 2, type: 'warm', hostModule: true },
-      { type: 'editModule', module: editModule },
+      { id: 1, type: 'warm' },
+      { id: 2, type: 'warm' },
     ]);
     await act(async () => {
-      worker.reply({ id: worker.requestAt(2).id, ok: true });
+      worker.reply({ id: worker.requestAt(1).id, ok: true });
     });
     expect(worker.terminated).toBe(false);
   } finally {

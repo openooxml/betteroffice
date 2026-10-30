@@ -491,8 +491,8 @@ describe('loading', () => {
     }
   });
 
-  test('loads every manifest face from the package without a base URL', async () => {
-    for (const face of BUNDLED_FONTS) {
+  test('loads every raw manifest face from the package without a base URL', async () => {
+    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
       expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
     }
   });
@@ -530,6 +530,14 @@ describe('published shape', () => {
     }
   });
 
+  test('carries no intl binary from the optional add-on', () => {
+    const intl = BUNDLED_FONTS.filter((face) => face.file.endsWith('.ttf.zst'));
+    expect(intl.length).toBeGreaterThan(0);
+    for (const face of intl) {
+      expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
+    }
+  });
+
   test('gives every shipped asset a literal URL a bundler can emit', async () => {
     const source = await Bun.file(new URL('./index.ts', import.meta.url)).text();
     const rows = [
@@ -541,14 +549,14 @@ describe('published shape', () => {
     expect(rows.map(([, file]) => file).sort()).toEqual(assets);
     expect(rows.filter(([, file, target]) => file !== target).map(([row]) => row)).toEqual([]);
     expect(
-      BUNDLED_FONTS.filter((face) => !face.script?.startsWith('cjk-'))
+      BUNDLED_FONTS.filter((face) => !face.script?.startsWith('cjk-') && !face.file.endsWith('.zst'))
         .map((face) => face.file)
         .sort()
     ).toEqual(assets);
   });
 
-  test('records the exact byte length of every vendored face', () => {
-    for (const face of BUNDLED_FONTS) {
+  test('records the exact byte length of every raw vendored face', () => {
+    for (const face of BUNDLED_FONTS.filter((candidate) => !candidate.file.endsWith('.zst'))) {
       const directory = face.script?.startsWith('cjk-') ? '../../fonts-cjk/assets/' : '../assets/';
       expect(Bun.file(new URL(`${directory}${face.file}`, import.meta.url)).size).toBe(
         face.byteLength

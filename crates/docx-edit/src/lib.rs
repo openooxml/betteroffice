@@ -83,6 +83,7 @@ mod ctx;
 mod deterministic;
 mod document_properties;
 mod fingerprint;
+mod fmath;
 mod format;
 mod geometry;
 mod header_footer;

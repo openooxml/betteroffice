@@ -35,6 +35,7 @@ pub mod comments;
 pub mod content_control;
 pub mod document;
 pub mod drawingml;
+mod fmath;
 pub mod fonts;
 pub mod formatting;
 pub mod header_footer;
