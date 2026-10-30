@@ -1046,7 +1046,7 @@ export function PptxEditorContent({
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
           const requestedSlide = initialSlideRef.current;
-          refreshAt(
+          const initial = refreshAt(
             worker ? worker.active : typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
               ? requestedSlide - 1
               : 0,
@@ -1110,6 +1110,7 @@ export function PptxEditorContent({
                 setOpenedHandle(opened);
               },
             };
+            if (!initial) releaseReady(opened);
           }
         } catch (value) {
           setLoading(false);
@@ -1159,6 +1160,7 @@ export function PptxEditorContent({
     refresh,
     readOnlyRefusal,
     refreshAt,
+    releaseReady,
     reportError,
     selectText,
     setActiveTool,

@@ -143,6 +143,30 @@ it('calls the legacy onReady only after the first slide painted', async () => {
   }
 });
 
+it('calls the legacy onReady once when the first slide cannot be laid out', async () => {
+  const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+  const failure = new Error('layout failed');
+  const originalOpen = pptx.openPresentation;
+  const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+    const handle = originalOpen(bytes, options);
+    handle.layoutSlide = () => { throw failure; };
+    return handle;
+  });
+  const ready: PptxEditorApi[] = [];
+  const errors: Error[] = [];
+  try {
+    render(<PptxEditor legacySyncApi experimentalWorkerOpen={false} file={fixture} fonts={fonts}
+      onReady={(api) => { ready.push(api); }} onError={(error) => { errors.push(error); }} />);
+    await waitFor(() => expect(ready).toHaveLength(1));
+    expect(errors).toContain(failure);
+    expect(ready[0]!.save()).toBeInstanceOf(Uint8Array);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(ready).toHaveLength(1);
+  } finally {
+    open.mockRestore();
+  }
+});
+
 describe('shortcut matching', () => {
   it('needs exactly the chord\'s modifiers', () => {
     const press = (init: KeyboardEventInit) => new KeyboardEvent('keydown', { key: 'b', ...init });
@@ -238,7 +262,7 @@ describe('PptxEditor slide layout cache', () => {
         expect(activate).not.toHaveBeenCalled();
         await act(async () => { finishPaint(); await firstPaint; });
         await waitFor(() => expect(api).toBeDefined());
-        expect(api!.handle).toBe(opened);
+        expect(api!.handle).toBe(opened!);
         const completed = scenario.failAt ?? 50;
         const attempted = scenario.failAt === undefined ? 50 : completed + 1;
         await waitFor(() => {
