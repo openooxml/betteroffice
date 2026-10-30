@@ -295,8 +295,10 @@ export interface DocxSessionSave {
 }
 
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
-export function captureSessionSave(session: YrsSession): DocxSessionSave {
-  const identities = session.paragraphIdentities();
+export function captureSessionSave(
+  session: YrsSession,
+  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities()
+): DocxSessionSave {
   engineProgress();
   const plan = session.paragraphSavePlan();
   engineProgress();
@@ -460,8 +462,10 @@ export async function writeSessionSave(
   options: RepackOptions = {},
   patches: (part: string) => boolean = () => true,
   skipMutations = false,
-  splices: (part: string) => boolean = patches
+  splices: (part: string) => boolean = patches,
+  yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
+  if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
   engineProgress();
@@ -491,6 +495,7 @@ export async function writeSessionSave(
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   const sectionPlan = await sectionSavePlan(session, output, capture, sourceBuffer);
+  if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
@@ -521,7 +526,7 @@ export async function writeSessionSave(
           }),
     };
     const { buffer, warnings } = await writeDocumentWithRust(
-      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations
+      withSourceOrdinals(output, spliced), sectionEdits ? sourceBuffer : originalBuffer, options, undefined, undefined, plan, skipMutations, yieldSave
     );
     for (const warning of warnings) {
       if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
@@ -545,6 +550,7 @@ export async function writeSessionSave(
     result = await write(undefined);
   }
   const { buffer, plan } = result;
+  if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   const bytes = new Uint8Array(buffer);
   engineProgress();

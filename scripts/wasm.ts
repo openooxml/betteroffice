@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 export interface WasmModule {
   /** Directory under crates/. */
   crate: string;
-  /** wasm-bindgen artifact base name: the crate name with dashes underscored. */
+  /** wasm-bindgen artifact base name. */
   name: string;
   /** Destination for the vendored output, relative to the repo root. */
   generated: string;

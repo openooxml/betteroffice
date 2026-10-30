@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 /** Configuration of the default chrome, supplied by the editor that renders it. */
 export interface EditorChrome {
   showZoomControl: boolean;
+  prepareSave?(): void;
   /** Host controls appended to the default toolbar row. */
   toolbarExtra: ReactNode;
 }

@@ -17,6 +17,8 @@ export interface ToolbarButtonProps {
   /** Keyboard shortcut shown in the tooltip and overflow menu, such as `Ctrl+B`. */
   shortcut?: string;
   onClick?: () => void;
+  onPointerEnter?: () => void;
+  onFocus?: () => void;
   children: ReactNode;
   className?: string;
   ariaLabel?: string;
@@ -56,6 +58,8 @@ export function ToolbarButton({
   title,
   shortcut,
   onClick,
+  onPointerEnter,
+  onFocus,
   children,
   className,
   ariaLabel,
@@ -98,6 +102,8 @@ export function ToolbarButton({
       data-active={active === true ? 'true' : undefined}
       onMouseDown={(event) => event.preventDefault()}
       onClick={disabled ? undefined : onClick}
+      onPointerEnter={onPointerEnter}
+      onFocus={onFocus}
       disabled={disabled && !described}
       aria-disabled={described ? true : undefined}
       aria-pressed={active === undefined ? undefined : active}

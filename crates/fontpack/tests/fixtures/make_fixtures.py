@@ -64,6 +64,22 @@ def make_face(style, inset):
     builder.save(DIRECTORY / f"Synthetic-{style}.ttf")
 
 
+def block_bomb(sequences=100, match_code=52, match_bits=16, content_size=1000):
+    """One compressed block of `sequences` repeat matches of up to 131074 bytes each,
+    in a frame that declares `content_size` bytes and a zero checksum."""
+    literals = bytes([0x04 | (sequences & 0xF) << 4, sequences >> 4]) + b"A" * sequences
+    stream, width = 0, 0
+    for _ in range(sequences):
+        stream |= ((1 << match_bits) - 1) << width
+        width += match_bits + 2
+    stream |= 1 << width
+    block = literals + bytes([sequences, 0x54, 1, 2, match_code])
+    block += stream.to_bytes((width + 8) // 8, "little")
+    header = (len(block) << 3 | 2 << 1 | 1).to_bytes(3, "little")
+    frame_size = (content_size - 256).to_bytes(2, "little")
+    return b"\x28\xb5\x2f\xfd\x64" + frame_size + header + block + bytes(4)
+
+
 def main():
     tooling = runpy.run_path(str(ROOT / "scripts/fonts/woff2-transform.py"))
     make_face("Regular", 0)
@@ -87,6 +103,8 @@ def main():
         compressor = zstd.ZstdCompressor(compression_params=params, dict_data=raw_dict)
         frame = compressor.compress(payload)
         (DIRECTORY / f"Synthetic-{style}.{suffix}").write_bytes(frame)
+
+    (DIRECTORY / "Synthetic-block-bomb.zst").write_bytes(block_bomb())
 
 
 if __name__ == "__main__":

@@ -122,6 +122,7 @@ try {
     QUALITY_REACT_ROOT: values['react-root'],
     QUALITY_FONT_ASSETS: resolve(repo, 'packages/fonts/assets'),
     QUALITY_FONT_ASSETS_CJK: resolve(repo, 'packages/fonts-cjk/assets'),
+    QUALITY_FONT_ASSETS_INTL: resolve(repo, 'packages/fonts-intl/assets'),
     QUALITY_PORT: String(port),
     QUALITY_LOCAL_ONLY: '1',
     QUALITY_TIMEOUT_SECONDS: String(seconds),

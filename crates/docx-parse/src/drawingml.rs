@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::fmath;
 use crate::scalars::ColorValue;
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
 
@@ -389,7 +390,10 @@ fn arc_to_cubics(
     }
     let start = angle_radians(start_angle);
     let sweep = angle_radians(sweep_angle);
-    let center = (current.0 - rx * start.cos(), current.1 - ry * start.sin());
+    let center = (
+        current.0 - rx * fmath::cos(start),
+        current.1 - ry * fmath::sin(start),
+    );
     let count = ((sweep.abs() / (std::f64::consts::PI / 2.0)).ceil() as usize).max(1);
     let segment_sweep = sweep / count as f64;
     let mut output = Vec::with_capacity(count);
@@ -397,10 +401,13 @@ fn arc_to_cubics(
     for index in 0..count {
         let t0 = start + segment_sweep * index as f64;
         let t1 = t0 + segment_sweep;
-        let alpha = 4.0 / 3.0 * (segment_sweep / 4.0).tan();
-        let p1 = (center.0 + rx * t1.cos(), center.1 + ry * t1.sin());
-        let d0 = (-rx * t0.sin(), ry * t0.cos());
-        let d1 = (-rx * t1.sin(), ry * t1.cos());
+        let alpha = 4.0 / 3.0 * fmath::tan(segment_sweep / 4.0);
+        let p1 = (
+            center.0 + rx * fmath::cos(t1),
+            center.1 + ry * fmath::sin(t1),
+        );
+        let d0 = (-rx * fmath::sin(t0), ry * fmath::cos(t0));
+        let d1 = (-rx * fmath::sin(t1), ry * fmath::cos(t1));
         output.push(GeometryPathCommand::Cubic {
             cp1x: p0.0 + alpha * d0.0,
             cp1y: p0.1 + alpha * d0.1,
@@ -606,17 +613,17 @@ fn evaluate_guide(formula: Option<&str>, values: &HashMap<String, f64>) -> Optio
             }
         }
         "abs" => x.abs(),
-        "at2" => y.atan2(x) * 180.0 * ANGLE_UNITS_PER_DEGREE / std::f64::consts::PI,
-        "cat2" => x * z.atan2(y).cos(),
-        "cos" => x * angle_radians(y).cos(),
+        "at2" => fmath::atan2(y, x) * 180.0 * ANGLE_UNITS_PER_DEGREE / std::f64::consts::PI,
+        "cat2" => x * fmath::cos(fmath::atan2(z, y)),
+        "cos" => x * fmath::cos(angle_radians(y)),
         "max" => x.max(y),
         "min" => x.min(y),
         "mod" => (x * x + y * y + z * z).sqrt(),
         "pin" => y.max(x).min(z),
-        "sat2" => x * z.atan2(y).sin(),
-        "sin" => x * angle_radians(y).sin(),
+        "sat2" => x * fmath::sin(fmath::atan2(z, y)),
+        "sin" => x * fmath::sin(angle_radians(y)),
         "sqrt" if x >= 0.0 => x.sqrt(),
-        "tan" => x * angle_radians(y).tan(),
+        "tan" => x * fmath::tan(angle_radians(y)),
         _ => return None,
     };
     (result.is_finite() && result.abs() <= MAX_ABS_CUSTOM_PATH_NUMBER).then_some(result)

@@ -149,7 +149,7 @@ type PendingRequest = {
 
 type AwaitedRequest = Exclude<
   ResidentEngineWorkerRequestWithoutId,
-  { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
+  { type: 'applyUpdate' | 'eraseCaret' | 'prepare-save' | 'destroy' }
 >;
 
 /**
@@ -774,6 +774,12 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     };
   }
 
+  prepareSave(): void {
+    if (this.terminalError) return;
+    const id = this.nextId++;
+    try { this.worker.postMessage({ id, type: 'prepare-save' }); } catch {}
+  }
+
   async revisionCount(): Promise<number> {
     const response = await this.request({ type: 'revisionCount' });
     if (
@@ -786,7 +792,11 @@ export class ResidentEngineWorkerClient implements DocxCommandClient {
     return response.revisionCount;
   }
 
-  async warm(): Promise<void> {
+  async warm(hostModule = false): Promise<void> {
+    if (!hostModule) {
+      await this.request({ type: 'warm' });
+      return;
+    }
     const response = this.request({ type: 'warm', hostModule: true });
     const postModule = (module: WebAssembly.Module | null): void => {
       if (this.terminalError) return;

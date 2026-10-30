@@ -83,6 +83,7 @@ mod ctx;
 mod deterministic;
 mod document_properties;
 mod fingerprint;
+mod fmath;
 mod format;
 mod geometry;
 mod header_footer;
@@ -1599,7 +1600,6 @@ impl EditingDoc {
         self.write_comment_metadata(comment_id, patch, false)
     }
 
-    #[cfg(feature = "wasm")]
     pub(crate) fn seed_comment_metadata(
         &self,
         comment_id: &str,

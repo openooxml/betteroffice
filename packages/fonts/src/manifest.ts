@@ -1,4 +1,4 @@
-/** Deterministic bundled-font resolution with lazy loading and optional CJK assets. */
+import intlSizes from './intl-sizes.json';
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript =
@@ -7,7 +7,30 @@ export type BundledFontScript =
   | 'cjk-jp'
   | 'cjk-kr'
   | 'arabic'
-  | 'hebrew';
+  | 'hebrew'
+  | 'thai'
+  | 'lao'
+  | 'khmer'
+  | 'myanmar'
+  | 'devanagari'
+  | 'bengali'
+  | 'gurmukhi'
+  | 'gujarati'
+  | 'oriya'
+  | 'tamil'
+  | 'telugu'
+  | 'kannada'
+  | 'malayalam'
+  | 'sinhala'
+  | 'armenian'
+  | 'georgian'
+  | 'ethiopic'
+  | 'tibetan'
+  | 'mongolian'
+  | 'syriac'
+  | 'thaana'
+  | 'cherokee'
+  | 'tifinagh';
 
 /** One bundled font binary and the Word font(s) it stands in for. */
 export interface BundledFontFace {
@@ -70,14 +93,26 @@ function familyFaces(
   ];
 }
 
-/**
- * The complete manifest of bundled faces. Single source of truth: the
- * metric-compat and script-fallback resolution below is derived from this
- * list, never duplicated.
- *
- * Order matters within a script bucket: `resolveScriptFallbackFace` prefers
- * earlier entries on ties, so the sans face of each script comes first.
- */
+function intlFamilyFaces(
+  family: string,
+  script: BundledFontScript,
+  fileBase: string,
+): BundledFontFace[] {
+  return (['Regular', 'Bold'] as const).flatMap<BundledFontFace>((style) => {
+    const file = `${fileBase}-${style}.ttf.zst`;
+    const byteLength = (intlSizes as Record<string, number>)[file];
+    return byteLength === undefined ? [] : [{
+      family,
+      weight: style === 'Bold' ? 700 : 400,
+      style: 'normal',
+      file,
+      byteLength,
+      script,
+    }];
+  });
+}
+
+/** Complete face manifest, ordered by script fallback preference. */
 export const BUNDLED_FONTS: BundledFontFace[] = [
   ...familyFaces(
     'Carlito',
@@ -279,6 +314,31 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     byteLength: 247336,
     script: 'arabic',
   },
+
+  ...intlFamilyFaces('Noto Sans Thai', 'thai', 'NotoSansThai'),
+  ...intlFamilyFaces('Noto Sans Lao', 'lao', 'NotoSansLao'),
+  ...intlFamilyFaces('Noto Sans Khmer', 'khmer', 'NotoSansKhmer'),
+  ...intlFamilyFaces('Noto Sans Myanmar', 'myanmar', 'NotoSansMyanmar'),
+  ...intlFamilyFaces('Noto Sans Devanagari', 'devanagari', 'NotoSansDevanagari'),
+  ...intlFamilyFaces('Noto Sans Bengali', 'bengali', 'NotoSansBengali'),
+  ...intlFamilyFaces('Noto Sans Gurmukhi', 'gurmukhi', 'NotoSansGurmukhi'),
+  ...intlFamilyFaces('Noto Sans Gujarati', 'gujarati', 'NotoSansGujarati'),
+  ...intlFamilyFaces('Noto Sans Oriya', 'oriya', 'NotoSansOriya'),
+  ...intlFamilyFaces('Noto Sans Tamil', 'tamil', 'NotoSansTamil'),
+  ...intlFamilyFaces('Noto Sans Telugu', 'telugu', 'NotoSansTelugu'),
+  ...intlFamilyFaces('Noto Sans Kannada', 'kannada', 'NotoSansKannada'),
+  ...intlFamilyFaces('Noto Sans Malayalam', 'malayalam', 'NotoSansMalayalam'),
+  ...intlFamilyFaces('Noto Sans Sinhala', 'sinhala', 'NotoSansSinhala'),
+  ...intlFamilyFaces('Noto Sans Armenian', 'armenian', 'NotoSansArmenian'),
+  ...intlFamilyFaces('Noto Sans Georgian', 'georgian', 'NotoSansGeorgian'),
+  ...intlFamilyFaces('Noto Sans Ethiopic', 'ethiopic', 'NotoSansEthiopic'),
+  ...intlFamilyFaces('Noto Serif Tibetan', 'tibetan', 'NotoSerifTibetan'),
+  ...intlFamilyFaces('Noto Sans Mongolian', 'mongolian', 'NotoSansMongolian'),
+  ...intlFamilyFaces('Noto Sans Syriac', 'syriac', 'NotoSansSyriac'),
+  ...intlFamilyFaces('Noto Sans Thaana', 'thaana', 'NotoSansThaana'),
+  ...intlFamilyFaces('Noto Sans Cherokee', 'cherokee', 'NotoSansCherokee'),
+  ...intlFamilyFaces('Noto Sans Lao Looped', 'lao', 'NotoSansLaoLooped'),
+  ...intlFamilyFaces('Noto Sans Tifinagh', 'tifinagh', 'NotoSansTifinagh'),
 
   // CJK coverage faces (Regular-only statics; see the module doc). The sans
   // face precedes the serif face of the same script bucket on purpose.
