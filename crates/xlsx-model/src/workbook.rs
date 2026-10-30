@@ -290,6 +290,10 @@ pub struct ColumnRuns {
 
 impl ColumnRuns {
     pub fn push(&mut self, run: ColStyle) {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_column_runs");
+            crate::open_timing::count("style_column_runs_input", 1);
+        }
         if run.first > run.last {
             return;
         }
@@ -321,6 +325,9 @@ impl ColumnRuns {
             .map(|(&first, _)| first)
             .collect::<Vec<_>>();
         for first in inside {
+            crate::open_timing! {
+                crate::open_timing::count("style_column_runs_visited", 1);
+            }
             let Some(old) = runs.remove(&first) else {
                 continue;
             };
@@ -437,7 +444,12 @@ impl Sheet {
         self.col_styles
             .iter()
             .rev()
-            .find(|run| (run.first..=run.last).contains(&col))
+            .find(|run| {
+                crate::open_timing! {
+                    crate::open_timing::count("style_column_scan_runs", 1);
+                }
+                (run.first..=run.last).contains(&col)
+            })
             .map(|run| run.xf)
     }
 
@@ -470,9 +482,18 @@ impl Sheet {
         at: CellRef,
         col_style: impl FnOnce(ColId) -> Option<u32>,
     ) -> Option<u32> {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_inherited");
+            crate::open_timing::count("style_inherited_rows", 1);
+        }
         match self.row_styles.get(&at.row) {
             Some(&style) => Some(style),
-            None => col_style(at.col),
+            None => {
+                crate::open_timing! {
+                    crate::open_timing::count("style_inherited_cols", 1);
+                }
+                col_style(at.col)
+            }
         }
     }
 
@@ -481,6 +502,10 @@ impl Sheet {
         at: CellRef,
         col_style: impl FnOnce(ColId) -> Option<u32>,
     ) -> Option<u32> {
+        crate::open_timing! {
+            let _timing = crate::open_timing::span("style_effective");
+            crate::open_timing::count("style_effective_cells", 1);
+        }
         match self.cell(at) {
             Some(cell) => cell.style,
             None => self.inherited_style_with(at, col_style),
@@ -895,8 +920,9 @@ impl<'a> Iterator for SparseCells<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Workbook {
+    pub full_precision: bool,
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
     pub defined_names: Vec<DefinedName>,
@@ -906,6 +932,20 @@ pub struct Workbook {
     pub styles: Stylesheet,
     /// table parts, in package order; structured references resolve through them.
     pub tables: Vec<Table>,
+}
+
+impl Default for Workbook {
+    fn default() -> Self {
+        Self {
+            full_precision: true,
+            sheets: Vec::new(),
+            date_system: DateSystem::default(),
+            defined_names: Vec::new(),
+            shared_strings: Vec::new(),
+            styles: Stylesheet::default(),
+            tables: Vec::new(),
+        }
+    }
 }
 
 impl Workbook {

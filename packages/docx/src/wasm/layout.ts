@@ -1,6 +1,6 @@
 /**
- * Loader for the docx-layout wasm (the Rust display-list builder and the
- * ooxml-text measure surface). External-asset pattern — see ./loadWasmAsset.ts
+ * DOCX layout and measurement bindings.
+ * External-asset pattern: see ./loadWasmAsset.ts
  * for the init contract and URL-geometry invariant.
  *
  * IMPORTANT: reach this module only via dynamic `import()` — its consumers are
@@ -10,35 +10,57 @@
  * Requires a CSP that permits wasm compilation (`wasm-unsafe-eval`).
  */
 
-// vendored wasm-bindgen glue (typed by ./docx_layout.d.ts)
-import wasmInit, {
-  initSync,
-  build_display_list_json,
-  clear_measure_fonts,
-  hit_test_regions_json,
-  layout_document_json,
-  measure_paragraph_json,
-  range_rects_json,
-  register_measure_font,
-  register_substitute_measure_font,
-} from './generated/layout/docx_layout.js';
-// Namespace view of the same glue. Exports the generated .d.ts does not
-// declare are resolved by name through this, since a named import of an
-// undeclared export would not typecheck.
-import * as layoutGlue from './generated/layout/docx_layout.js';
-import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
+import * as editGlue from './generated/edit/docx_edit.js';
+import * as parseGlue from './generated/parse/docx_parse.js';
+import * as queryGlue from './generated/query/docx_query.js';
+import { editWasmState } from './edit';
+import type { WasmAsyncInput, WasmModuleState } from './loadWasmAsset';
+import { parseWasmState } from './parse';
+import { queryWasmState } from './query';
+import { residentEngine } from './residentEngine';
 
-const state = createWasmModuleState({
-  label: 'docx-layout',
-  preloadName: 'preloadLayoutWasm',
-  assetUrl: () => new URL('./generated/layout/docx_layout_bg.wasm', import.meta.url),
-  initAsync: wasmInit,
-  initSync,
-});
+let source: { state: WasmModuleState; glue: object } | undefined;
+let querySource: { state: WasmModuleState; glue: object } | undefined;
 
-/** Load + instantiate the layout wasm (browser path). Idempotent. */
+function queryEngine() {
+  if (!querySource) {
+    const engine = residentEngine();
+    querySource = engine?.state.status() === 'ready' ? engine : { state: queryWasmState, glue: queryGlue };
+  }
+  return querySource;
+}
+
+function displayListQueryGlue(): typeof queryGlue {
+  const engine = queryEngine();
+  engine.state.ensure();
+  return engine.glue as typeof queryGlue;
+}
+
+/** Load the display-list query engine. */
+export function preloadDisplayListQueryWasm(): Promise<void> {
+  return queryEngine().state.preload();
+}
+
+function layoutEngine() {
+  if (!source) {
+    const engine = residentEngine();
+    source = engine?.state.status() === 'ready' ? engine : { state: parseWasmState, glue: parseGlue };
+  }
+  return source;
+}
+
+function layoutGlue(): typeof parseGlue {
+  const engine = layoutEngine();
+  engine.state.ensure();
+  return engine.glue as typeof parseGlue;
+}
+
+/** Load + instantiate the engine wasm (browser path). Idempotent. */
 export function preloadLayoutWasm(input?: WasmAsyncInput): Promise<void> {
-  return state.preload(input);
+  if (input !== undefined && !source) source = { state: editWasmState, glue: editGlue };
+  const engine = layoutEngine();
+  if (input !== undefined) querySource ??= engine;
+  return engine.state.preload(input);
 }
 
 /**
@@ -54,8 +76,7 @@ export function hitTestRegionsJson(
   x: number,
   y: number
 ): string {
-  state.ensure();
-  return hit_test_regions_json(displayList, pageIndex, x, y);
+  return displayListQueryGlue().hit_test_regions_json(displayList, pageIndex, x, y);
 }
 
 /**
@@ -64,8 +85,7 @@ export function hitTestRegionsJson(
  * positions live in different docs and are never consulted.
  */
 export function rangeRectsJson(displayList: string, from: number, to: number): string {
-  state.ensure();
-  return range_rects_json(displayList, from, to);
+  return displayListQueryGlue().range_rects_json(displayList, from, to);
 }
 
 /** @internal */
@@ -76,7 +96,6 @@ export function rangeRectsOnPagesJson(
   firstPage: number,
   lastPage: number
 ): string {
-  state.ensure();
   const query = glueExport<RangeRectsOnPagesExport<string>>('range_rects_on_pages_json');
   if (!query)
     throw new Error('range_rects_on_pages_json is not available in the embedded layout wasm');
@@ -143,7 +162,7 @@ type RangeRectsRegionByHandleExport = (
 ) => string;
 
 function glueExport<T>(name: string): T | undefined {
-  const fn = (layoutGlue as unknown as Record<string, unknown>)[name];
+  const fn = (displayListQueryGlue() as unknown as Record<string, unknown>)[name];
   return typeof fn === 'function' ? (fn as T) : undefined;
 }
 
@@ -152,13 +171,11 @@ function glueExport<T>(name: string): T | undefined {
  * Callers gate the handle path on this and otherwise use the JSON-arg exports.
  */
 export function hasDisplayListSession(): boolean {
-  state.ensure();
   return glueExport<OpenDisplayListExport>('open_display_list') !== undefined;
 }
 
 /** @internal */
 export function hasRangeRectsOnPages(): boolean {
-  state.ensure();
   return (
     glueExport<RangeRectsOnPagesExport<string>>('range_rects_on_pages_json') !== undefined &&
     glueExport<RangeRectsOnPagesExport<number>>('range_rects_on_pages_by_handle') !== undefined
@@ -173,7 +190,6 @@ export function hasRangeRectsOnPages(): boolean {
  * absent export.
  */
 export function hasRangeRectsRegion(): boolean {
-  state.ensure();
   return glueExport<RangeRectsRegionJsonExport>('range_rects_region_json') !== undefined;
 }
 
@@ -184,7 +200,6 @@ export function hasRangeRectsRegion(): boolean {
  * the JSON-arg path.
  */
 export function openDisplayList(displayList: string): number {
-  state.ensure();
   const open = glueExport<OpenDisplayListExport>('open_display_list');
   if (!open) throw new Error('open_display_list is not available in the embedded layout wasm yet');
   return open(displayList);
@@ -192,7 +207,6 @@ export function openDisplayList(displayList: string): number {
 
 /** Drop a display-list handle so its parsed list is freed. No-op when the export is absent. */
 export function closeDisplayList(handle: number): void {
-  state.ensure();
   glueExport<CloseDisplayListExport>('close_display_list')?.(handle);
 }
 
@@ -203,7 +217,6 @@ export function closeDisplayList(handle: number): void {
  * fallback (a fresh `openDisplayList`) is always safe.
  */
 export function updateDisplayList(handle: number, update: string): void {
-  state.ensure();
   const apply = glueExport<UpdateDisplayListExport>('update_display_list');
   if (!apply) {
     throw new Error('update_display_list is not available in the embedded layout wasm yet');
@@ -213,7 +226,6 @@ export function updateDisplayList(handle: number, update: string): void {
 
 /** True when the embedded layout wasm carries the page-delta update export. */
 export function hasDisplayListUpdate(): boolean {
-  state.ensure();
   return glueExport<UpdateDisplayListExport>('update_display_list') !== undefined;
 }
 
@@ -228,7 +240,6 @@ export function hitTestRegionsByHandle(
   x: number,
   y: number
 ): string {
-  state.ensure();
   const query = glueExport<HitTestRegionsByHandleExport>('hit_test_regions_by_handle');
   if (!query)
     throw new Error('hit_test_regions_by_handle is not available in the embedded layout wasm yet');
@@ -246,7 +257,6 @@ export function verticalMoveJson(
   direction: 'up' | 'down',
   goalX: number
 ): string {
-  state.ensure();
   const query = glueExport<VerticalMoveJsonExport>('vertical_move_json');
   if (!query) throw new Error('vertical_move_json is not available in the embedded layout wasm');
   return query(displayList, position, direction, goalX);
@@ -259,7 +269,6 @@ export function verticalMoveByHandle(
   direction: 'up' | 'down',
   goalX: number
 ): string {
-  state.ensure();
   const query = glueExport<VerticalMoveByHandleExport>('vertical_move_by_handle');
   if (!query)
     throw new Error('vertical_move_by_handle is not available in the embedded layout wasm');
@@ -271,7 +280,6 @@ export function verticalMoveByHandle(
  * Throws when the export is absent or the handle is unknown/closed.
  */
 export function rangeRectsByHandle(handle: number, from: number, to: number): string {
-  state.ensure();
   const query = glueExport<RangeRectsByHandleExport>('range_rects_by_handle');
   if (!query)
     throw new Error('range_rects_by_handle is not available in the embedded layout wasm yet');
@@ -286,7 +294,6 @@ export function rangeRectsOnPagesByHandle(
   firstPage: number,
   lastPage: number
 ): string {
-  state.ensure();
   const query = glueExport<RangeRectsOnPagesExport<number>>('range_rects_on_pages_by_handle');
   if (!query)
     throw new Error('range_rects_on_pages_by_handle is not available in the embedded layout wasm');
@@ -306,7 +313,6 @@ export function rangeRectsRegionJson(
   from: number,
   to: number
 ): string {
-  state.ensure();
   const query = glueExport<RangeRectsRegionJsonExport>('range_rects_region_json');
   if (!query)
     throw new Error('range_rects_region_json is not available in the embedded layout wasm yet');
@@ -324,7 +330,6 @@ export function rangeRectsRegionByHandle(
   from: number,
   to: number
 ): string {
-  state.ensure();
   const query = glueExport<RangeRectsRegionByHandleExport>('range_rects_region_by_handle');
   if (!query)
     throw new Error(
@@ -335,8 +340,7 @@ export function rangeRectsRegionByHandle(
 
 /** `{ measured, options, layout }` JSON in, `DisplayList` JSON out. Throws on inputs the Rust builder rejects. */
 export function buildDisplayListJson(input: string): string {
-  state.ensure();
-  return build_display_list_json(input);
+  return layoutGlue().build_display_list_json(input);
 }
 
 /**
@@ -346,8 +350,7 @@ export function buildDisplayListJson(input: string): string {
  * layout; there is no fallback engine.
  */
 export function layoutDocumentJson(input: string): string {
-  state.ensure();
-  return layout_document_json(input);
+  return layoutGlue().layout_document_json(input);
 }
 
 /**
@@ -357,8 +360,7 @@ export function layoutDocumentJson(input: string): string {
  * rejects unparseable input at this boundary).
  */
 export function registerMeasureFont(bytes: Uint8Array): number {
-  state.ensure();
-  return register_measure_font(bytes);
+  return layoutGlue().register_measure_font(bytes);
 }
 
 /**
@@ -368,14 +370,12 @@ export function registerMeasureFont(bytes: Uint8Array): number {
  * does not know.
  */
 export function registerSubstituteMeasureFont(base: number, family: string): number {
-  state.ensure();
-  return register_substitute_measure_font(base, family);
+  return layoutGlue().register_substitute_measure_font(base, family);
 }
 
 /** Drop every registered measurement font (ids restart at 0). Callers must re-register before the next `measureParagraphJson`. */
 export function clearMeasureFonts(): void {
-  state.ensure();
-  clear_measure_fonts();
+  layoutGlue().clear_measure_fonts();
 }
 
 /**
@@ -384,8 +384,7 @@ export function clearMeasureFonts(): void {
  * yet — the caller must fall back to browser measurement for that block.
  */
 export function measureParagraphJson(input: string): string {
-  state.ensure();
-  return measure_paragraph_json(input);
+  return layoutGlue().measure_paragraph_json(input);
 }
 
 type OutlineGlyphExport = (fontId: number, glyphId: number) => string;
@@ -394,7 +393,7 @@ type OutlineGlyphExport = (fontId: number, glyphId: number) => string;
 // `outline_glyph_json` this resolves to undefined, `outlineGlyphJson` throws,
 // and the canvas backend paints the run with `fillText` instead.
 function resolveOutlineGlyphExport(): OutlineGlyphExport | undefined {
-  const fn = (layoutGlue as unknown as Record<string, unknown>).outline_glyph_json;
+  const fn = (layoutGlue() as unknown as Record<string, unknown>).outline_glyph_json;
   return typeof fn === 'function' ? (fn as OutlineGlyphExport) : undefined;
 }
 
@@ -408,7 +407,6 @@ function resolveOutlineGlyphExport(): OutlineGlyphExport | undefined {
  * `fillText`, so text is never invisible.
  */
 export function outlineGlyphJson(fontId: number, glyphId: number): string {
-  state.ensure();
   const outlineExport = resolveOutlineGlyphExport();
   if (!outlineExport) {
     throw new Error('outline_glyph_json is not available in the embedded layout wasm yet');

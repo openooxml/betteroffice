@@ -142,6 +142,7 @@ pub(crate) fn parse_workbook_indexed(
         workbook: Workbook {
             sheets,
             date_system: meta.date_system,
+            full_precision: meta.full_precision,
             defined_names: meta.defined_names,
             shared_strings,
             styles,
@@ -271,6 +272,7 @@ fn check_workbook_root(e: &quick_xml::events::BytesStart) -> Result<(), ParseErr
 }
 
 struct WorkbookMeta {
+    full_precision: bool,
     date_system: DateSystem,
     active_sheet: SheetId,
     sheets: Vec<SheetEntry>,
@@ -279,11 +281,17 @@ struct WorkbookMeta {
 
 /// read sheet order/names, the r:id linking each to a worksheet part, and the
 /// 1900/1904 date epoch flag.
+/// whether a workbook part calculates at full precision (calcPr fullPrecision)
+pub fn workbook_full_precision(data: &[u8]) -> Result<bool, ParseError> {
+    parse_workbook_xml(data).map(|meta| meta.full_precision)
+}
+
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
+    let mut full_precision = true;
     let mut active_sheet = None;
     let mut sheets_depth = None;
     let mut sheets = Vec::new();
@@ -296,6 +304,10 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
             Event::Start(e) => match local_name(&e).as_slice() {
                 // the save rewrites the root's `sheets` child, so only it lists sheets
                 b"sheets" if depth == 2 => sheets_depth = Some(depth),
+                b"calcPr" if depth == 2 => {
+                    full_precision = attr(&e, b"fullPrecision")?
+                        .is_none_or(|value| !matches!(value.as_str(), "0" | "false"));
+                }
                 b"workbookPr" => {
                     if let Some(v) = attr(&e, b"date1904")?
                         && is_truthy(&v)
@@ -349,6 +361,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
         }
     }
     Ok(WorkbookMeta {
+        full_precision,
         date_system,
         active_sheet: active_sheet.unwrap_or(SheetId(0)),
         sheets,
@@ -1078,6 +1091,9 @@ fn parse_col(
     columns: &mut ColumnRuns,
     legacy: &mut LegacySheetDimensions,
 ) -> Result<(), ParseError> {
+    xlsx_model::open_timing! {
+        let _timing = xlsx_model::open_timing::span("parse_columns");
+    }
     let hidden = attr(e, b"hidden")?.is_some_and(|value| is_truthy(&value));
     let authored = attr(e, b"width")?.and_then(|v| v.parse::<f64>().ok());
     let style = attr(e, b"style")?.and_then(|v| v.parse::<u32>().ok());
@@ -1109,6 +1125,9 @@ fn parse_col(
         Some(w) => w.clamp(0.0, MAX_COL_WIDTH_CHARS),
         None => return Ok(()),
     };
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("parse_dimension_cols", u64::from(max - min + 1));
+    }
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
         if hidden && let Some(authored) = authored.filter(|authored| *authored > 0.0) {
@@ -1201,6 +1220,9 @@ fn finalize_cell(
             .inherited_style_in(addr, columns)
             .is_some_and(|style| style != 0)
     {
+        xlsx_model::open_timing! {
+            xlsx_model::open_timing::count("parse_preserved_empty_cells", 1);
+        }
         cell.style = Some(0);
     }
     if cell != Cell::default() {

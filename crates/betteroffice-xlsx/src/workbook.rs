@@ -610,6 +610,9 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        xlsx_model::open_timing! {
+            let timing_parse = xlsx_model::open_timing::span("package_parse");
+        }
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -618,6 +621,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        xlsx_model::open_timing! { drop(timing_parse); }
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -633,6 +637,9 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("recalculate");
+        }
         workbook.recalculate(options);
         Ok(workbook)
     }
@@ -738,12 +745,13 @@ impl Workbook {
         }
         let model = projected;
         validate_model(&model)?;
-        let opened_anchors = model
-            .sheets
-            .iter()
-            .flat_map(|sheet| &sheet.charts)
-            .map(|chart| (chart.frame_id(), chart.anchor))
-            .collect();
+        let opened_anchors = model.sheets.iter().flat_map(|sheet| &sheet.charts).fold(
+            BTreeMap::new(),
+            |mut anchors, chart| {
+                anchors.insert(chart.frame_id(), chart.anchor);
+                anchors
+            },
+        );
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
@@ -5081,8 +5089,9 @@ enum CalculationScope {
 impl CalculationScope {
     /// What `ops` require of the engine, judged against `model` before they
     /// apply. The engine reads values, formulas, sheet names, defined names,
-    /// tables, array extents and used extents; styles, merges, panes and
-    /// charts never reach it.
+    /// tables, array extents and used extents; merges, panes and charts never
+    /// reach it, and styles reach it only through the number formats a
+    /// workbook that calculates with precision as displayed rounds to.
     fn of(model: &WorkbookModel, ops: &[Op]) -> Self {
         ops.iter()
             .map(|op| Self::of_op(model, op))
@@ -5092,6 +5101,15 @@ impl CalculationScope {
 
     fn of_op(model: &WorkbookModel, op: &Op) -> Self {
         match op {
+            Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
+            | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
+                if !model.full_precision =>
+            {
+                Self::Full
+            }
             Op::PatchRangeStyle { .. }
             | Op::SetRangeNumberFormat { .. }
             | Op::ApplyRangeFormat { .. }
@@ -5111,7 +5129,13 @@ impl CalculationScope {
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
             Op::SetCell { sheet, at, cell } => {
-                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref()) {
+                let style = model
+                    .sheet(*sheet)
+                    .and_then(|sheet| sheet.cell(*at))
+                    .and_then(|cell| cell.style);
+                if cell_content(model, *sheet, *at) == (&cell.value, cell.formula.as_deref())
+                    && (model.full_precision || style == cell.style)
+                {
                     Self::Kept
                 } else {
                     Self::Full

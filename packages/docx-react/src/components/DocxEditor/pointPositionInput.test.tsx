@@ -44,7 +44,7 @@ beforeAll(async () => {
   }
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(GENERATED, 'edit/docx_edit_bg.wasm'))));
   await preloadLayoutWasm(
-    new Uint8Array(readFileSync(resolve(GENERATED, 'layout/docx_layout_bg.wasm')))
+    new Uint8Array(readFileSync(resolve(GENERATED, 'edit/docx_edit_bg.wasm')))
   );
   fontBytes = readFileSync(FONT).buffer as ArrayBuffer;
 });

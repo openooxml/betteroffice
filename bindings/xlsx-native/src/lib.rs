@@ -369,6 +369,7 @@ impl Task for OpenTask {
     }
 }
 
+/// @deprecated Use `openWorkbook` from `@betteroffice/xlsx`, which runs on this native engine when it is installed; this asynchronous facade is removed in 0.7.
 #[napi(js_name = "Workbook")]
 pub struct XlsxWorkbook {
     worker: Worker,
@@ -825,6 +826,7 @@ impl XlsxWorkbook {
     }
 }
 
+/// @deprecated Use `openWorkbook` from `@betteroffice/xlsx`, which runs on this native engine when it is installed; this asynchronous facade is removed in 0.7.
 #[napi(ts_return_type = "Promise<Workbook>")]
 pub fn open_workbook(data: Buffer, options: Option<OpenWorkbookOptions>) -> AsyncTask<OpenTask> {
     let options = options.unwrap_or(OpenWorkbookOptions {

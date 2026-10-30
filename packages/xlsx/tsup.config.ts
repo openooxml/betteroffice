@@ -11,6 +11,7 @@ export default defineConfig((options) => ({
     xlsxSessionWorker: 'src/session/worker.ts',
   },
   format: ['esm'],
+  external: ['@betteroffice/xlsx-native'],
   dts: true,
   splitting: true,
   sourcemap: false,
@@ -27,6 +28,10 @@ export default defineConfig((options) => ({
     await copyFile(
       'src/wasm/generated/xlsx_wasm_bg.wasm',
       'dist/generated/xlsx_wasm_bg.wasm'
+    );
+    await copyFile(
+      'src/wasm/generated/xlsx_wasm_lean_bg.wasm',
+      'dist/generated/xlsx_wasm_lean_bg.wasm'
     );
   },
 }));

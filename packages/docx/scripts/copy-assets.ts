@@ -20,11 +20,8 @@ const root = resolve(here, '..');
 // src/wasm/generated so the root-level loader chunks' relative URLs hold)
 const assets: Asset[] = [
   { from: 'src/wasm/generated/opc/ooxml_opc_bg.wasm', to: 'dist/generated/opc/ooxml_opc_bg.wasm' },
-  {
-    from: 'src/wasm/generated/layout/docx_layout_bg.wasm',
-    to: 'dist/generated/layout/docx_layout_bg.wasm',
-  },
   { from: 'src/wasm/generated/edit/docx_edit_bg.wasm', to: 'dist/generated/edit/docx_edit_bg.wasm' },
+  { from: 'src/wasm/generated/query/docx_query_bg.wasm', to: 'dist/generated/query/docx_query_bg.wasm' },
   {
     from: 'src/wasm/generated/parse/docx_parse_bg.wasm',
     to: 'dist/generated/parse/docx_parse_bg.wasm',

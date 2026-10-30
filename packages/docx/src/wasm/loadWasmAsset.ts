@@ -1,6 +1,6 @@
 /**
- * Shared init-state machinery for the four generated wasm modules (opc /
- * layout / edit / parse). The binaries are external assets (gitignored,
+ * Shared init-state machinery for the generated wasm modules (opc / edit / parse).
+ * The binaries are external assets (gitignored,
  * rebuilt by scripts/build-docx-wasm.ts, shipped in dist/generated/) —
  * never embedded base64.
  *
@@ -101,6 +101,8 @@ function defaultAsyncInput(url: URL): WasmAsyncInput {
 }
 
 export interface WasmModuleState {
+  /** Ready after init; loading during init or a shared compile, including before instantiation. */
+  status(): 'idle' | 'loading' | 'ready';
   /** Async init from the packaged asset URL (or an explicit override). */
   preload(input?: WasmAsyncInput): Promise<void>;
   /** @internal */
@@ -131,6 +133,7 @@ export interface WasmModuleMemory extends Partial<WasmHeapStats> {
    * high-water mark.
    */
   bufferBytes: number;
+  maximumBytes?: number;
 }
 
 /** The address space of a wasm32 memory: 4 GiB. */
@@ -150,9 +153,24 @@ export function wasmModuleMemories(): WasmModuleMemory[] {
   for (const module of registered) {
     const memory = module.memory();
     if (!memory) continue;
-    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength, ...module.heap?.() });
+    const maximumBytes = memoryMaximumBytes(memory);
+    out.push({ label: module.label, bufferBytes: memory.buffer.byteLength,
+      ...(maximumBytes === undefined ? {} : { maximumBytes }), ...module.heap?.() });
   }
   return out;
+}
+
+function memoryMaximumBytes(memory: WebAssembly.Memory): number | undefined {
+  try {
+    const reflected = memory as WebAssembly.Memory & { type?(): { maximum?: number | bigint } };
+    const maximum = reflected.type?.().maximum;
+    if (maximum === undefined) return undefined;
+    const bytes = Number(maximum) * 65536;
+    return Number.isSafeInteger(bytes) && bytes > 0 && bytes < WASM32_MEMORY_LIMIT_BYTES ? bytes : undefined;
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
+    return undefined;
+  }
 }
 
 function exportedMemory(output: unknown): WebAssembly.Memory | null {
@@ -207,6 +225,9 @@ export function createWasmModuleState(options: {
   }
 
   return {
+    status() {
+      return initialized ? 'ready' : pending || compiled ? 'loading' : 'idle';
+    },
     module,
     sharedModule(): Promise<WebAssembly.Module | null> {
       if (compiled) return compiled;

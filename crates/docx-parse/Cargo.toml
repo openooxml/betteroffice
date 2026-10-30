@@ -18,13 +18,16 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["wasm"]
 wasm = ["dep:wasm-bindgen"]
+wasm-layout = ["wasm", "dep:docx-layout"]
 tiff = ["ooxml-drawingml/tiff"]
 metafile = ["dep:ooxml-metafile"]
 
 [dependencies]
 base64 = "0.22"
+docx-layout = { workspace = true, optional = true }
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
+libm.workspace = true
 memchr = "2"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-metafile = { workspace = true, features = ["svg"], optional = true }

@@ -12,6 +12,7 @@ use std::ops::Range;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{ColId, RowId};
+use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
@@ -1153,7 +1154,7 @@ fn displaced_source_sheets(
 ) -> Vec<String> {
     let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
     let mut ranked = retained.clone();
-    ranked.sort_unstable();
+    sort_by_shared(&mut ranked, Ord::cmp);
     let mut displaced = Vec::new();
     for (index, original) in package.original_workbook.sheets.iter().enumerate() {
         let rank = retained.iter().position(|origin| *origin == index);
@@ -2327,6 +2328,11 @@ fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseEr
                     Ok(())
                 })?;
                 write_defined_names(w, wb)?;
+                if !wb.full_precision {
+                    w.create_element("calcPr")
+                        .with_attribute(("fullPrecision", "0"))
+                        .write_empty()?;
+                }
                 Ok(())
             })?;
         Ok(())
@@ -2419,14 +2425,30 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    let calc_pr = if edited && holds_formulas(wb, package, sheets) {
+    let full_calc = edited && holds_formulas(wb, package, sheets);
+    let precision_changed = wb.full_precision != package.original_workbook.full_precision;
+    let calc_pr = if full_calc || precision_changed {
         let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
-        set_attribute(
-            &mut attributes,
-            "fullCalcOnLoad",
-            "fullCalcOnLoad",
-            "1".to_owned(),
-        );
+        if full_calc {
+            set_attribute(
+                &mut attributes,
+                "fullCalcOnLoad",
+                "fullCalcOnLoad",
+                "1".to_owned(),
+            );
+        }
+        if precision_changed {
+            if wb.full_precision {
+                remove_attribute(&mut attributes, "fullPrecision");
+            } else {
+                set_attribute(
+                    &mut attributes,
+                    "fullPrecision",
+                    "fullPrecision",
+                    "0".to_owned(),
+                );
+            }
+        }
         Some(fragment(|writer| {
             write_empty_element(writer, "calcPr", &attributes)
         })?)
@@ -3584,7 +3606,7 @@ pub(crate) struct ColRun {
 /// `covered`. Widths stay one column per run.
 pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
     let mut sorted = covered.to_vec();
-    sorted.sort_unstable_by_key(|range| range.start);
+    sort_by_shared(&mut sorted, |left, right| left.start.cmp(&right.start));
     let mut covered: Vec<Range<ColId>> = Vec::with_capacity(sorted.len());
     for range in sorted {
         match covered.last_mut() {
@@ -3604,7 +3626,7 @@ pub(crate) fn col_runs(sheet: &Sheet, covered: &[Range<ColId>]) -> Vec<ColRun> {
     for range in &covered {
         bounds.extend([range.start, range.end]);
     }
-    bounds.sort_unstable();
+    sort_by_shared(&mut bounds, Ord::cmp);
     bounds.dedup();
     let mut runs: Vec<ColRun> = Vec::new();
     for pair in bounds.windows(2) {
