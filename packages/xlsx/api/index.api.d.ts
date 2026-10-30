@@ -1104,7 +1104,7 @@ export { toTsv, fromTsv } from './clipboard/index';
 export type { A11yStrings, A11yCell, A11yChart, A11yColumnHeader, A11yRow, A11yGrid, } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 export { paintDisplayList } from './render/canvas2d';
-export { initWasm, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, engineBackend, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
+export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, engineBackend, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
 export type { WasmInitInput, WasmInitOptions, EngineBackend, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
@@ -1301,6 +1301,7 @@ import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/p
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1343,7 +1344,7 @@ export interface WorkbookSession {
     onAck(listener: (ack: WorkbookAck) => void): () => void;
     markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
     whenPresented(seq: number): Promise<void>;
-    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
+    readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' | 'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
         renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
         renderRangePng(options?: {
             range?: string;
@@ -1363,6 +1364,9 @@ export interface WorkbookSession {
     readonly failure: SessionFailure | undefined;
     dispose(): Promise<void>;
 }
+export declare const workbookFontRuntimes: WeakMap<WorkbookSession, {
+    decoder: FontDecoder;
+}>;
 /** @internal */
 export declare function hydratePeer(session: WorkbookSession): Promise<WorkbookHandle>;
 /**
@@ -1648,6 +1652,7 @@ export declare function createWorkbookEditSession<X = unknown>(options: Omit<Ses
 export {};
 
 // ---- session/methods.d.ts ----
+import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -1786,7 +1791,7 @@ export interface WorkbookSessionEvents {
  * Workbook RPC methods; engine version tokens remain strings.
  * @experimental
  */
-export type WorkbookSessionMethods = {
+export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
     openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
     version(): string;
@@ -1821,6 +1826,7 @@ export type WorkbookSessionMethods = {
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
+    decodeFontFace: true;
     open: true;
     openRecovery: true;
     version: true;
@@ -2837,6 +2843,26 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontDecoder.d.ts ----
+export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
+    codec: string;
+    dict?: ArrayBuffer | Uint8Array;
+    maxOutput?: number;
+}) => Promise<{
+    font: ArrayBuffer;
+    payload?: ArrayBuffer;
+}>;
+export type FontDecodeResult = Awaited<ReturnType<FontDecoder>>;
+export type FontDecoderMethods = {
+    decodeFontFace(bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], wasm?: ArrayBuffer | WebAssembly.Module): FontDecodeResult;
+};
+export declare function rpcFontDecoder(call: (bytes: ArrayBuffer, options: Parameters<FontDecoder>[1], transfer: Transferable[]) => Promise<FontDecodeResult>): FontDecoder;
+export declare function fontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer>;
+export declare function copyDecodedFace(face: {
+    font: Uint8Array;
+    payload?: Uint8Array;
+}): FontDecodeResult;
+
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
@@ -3168,6 +3194,8 @@ export interface VisibleCells {
 // ---- wasm/generated/xlsx_wasm.d.ts ----
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 /**
  * a workbook handle exposed to js; wraps the pure `Session`.
@@ -3352,6 +3380,13 @@ export class XlsxSnapshotBuilder {
  */
 export function allocationFailure(): number;
 
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
+
 export function displayListCellLimit(): number;
 
 export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
@@ -3383,6 +3418,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly allocationFailure: () => number;
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly displayListCellLimit: () => number;
     readonly exportXlsxMarkdownJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly exportXlsxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -3501,6 +3537,8 @@ import type { ChartInfo, ChartMutation } from '../charts';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+export declare const decodeFontFace: FontDecoder;
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type { XlsxCellAddress, XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxReadRequest, XlsxReadResult, XlsxValidationResult } from '../edits';
