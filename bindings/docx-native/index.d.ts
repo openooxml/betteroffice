@@ -28,6 +28,14 @@ export declare class Document {
   paragraphs(): Promise<any>
   tables(): Promise<any>
   paragraph(paragraphId: string): Promise<any | null>
+  /** Same shape as DocxStructuredContent from @betteroffice/docx. */
+  exportStructured(options: DocxExportOptions): Promise<unknown>
+  /** Same shape as DocxMarkdownContent from @betteroffice/docx. */
+  exportMarkdown(options: DocxExportOptions): Promise<unknown>
+  /** Same shape as DocxContentControlsSnapshot from @betteroffice/docx. */
+  listContentControls(options?: DocxContentControlsOptions | undefined | null): Promise<unknown>
+  /** Same shape as DocxContentControlsSnapshot from @betteroffice/docx. */
+  findContentControls(query: DocxContentControlQuery, options?: DocxContentControlsOptions | undefined | null): Promise<unknown>
   replaceParagraphText(paragraphId: string, text: string): Promise<EditReceipt>
   layout(input: any): Promise<LayoutResult>
   registerFont(face: FontFace): Promise<number>
@@ -45,6 +53,30 @@ export interface DocumentStructure {
   footers: number
   footnotes: number
   endnotes: number
+}
+
+export type DocxContentControlQuery =
+  | { kind: 'id'; controlId: string }
+  | { kind: 'tag'; tag: string }
+  | { kind: 'ooxmlId'; ooxmlId: string }
+  | { kind: 'alias'; alias: string }
+
+export interface DocxContentControlsOptions {
+  stories?: ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>
+  maxControls?: number
+  maxBytes?: number
+}
+
+export interface DocxExportOptions {
+  revisionView: 'accepted' | 'original' | 'markup'
+  stories?: ReadonlyArray<'body' | 'headers' | 'footers' | 'footnotes' | 'endnotes' | 'comments'>
+  includeFormatting?: boolean
+  maxBlocks?: number
+  maxBytes?: number
+}
+
+export interface DocxMarkdownOptions {
+  maxBytes?: number
 }
 
 export interface EditReceipt {
@@ -77,11 +109,34 @@ export interface LayoutResult {
 
 export declare function openDocument(data: Buffer, options?: OpenDocumentOptions | undefined | null): Promise<Document>
 
+export interface OpenDocumentLimits {
+  maxXmlBytes?: number
+  maxXmlEvents?: number
+  maxXmlTextBytes?: number
+  maxXmlDepth?: number
+  maxAttributesPerElement?: number
+  maxAttributeBytes?: number
+  maxRelationships?: number
+  maxLeafValues?: number
+  maxBlocks?: number
+  maxParagraphs?: number
+  maxTables?: number
+  maxTableRows?: number
+  maxTableCells?: number
+  maxNotes?: number
+  maxComments?: number
+  maxNestingDepth?: number
+}
+
 export interface OpenDocumentOptions {
   author?: string
   origin?: string
   timestamp?: string
+  limits?: OpenDocumentLimits
 }
+
+/** Input has the same shape as DocxStructuredContent from @betteroffice/docx. */
+export declare function renderDocxMarkdown(content: unknown, options?: DocxMarkdownOptions | undefined | null): Promise<string>
 
 export interface RenderedPage {
   data: Buffer
@@ -90,6 +145,7 @@ export interface RenderedPage {
 
 export interface SaveDocumentOptions {
   timestamp?: string
+  now?: string
   updateModifiedDate?: boolean
   modifiedBy?: string
 }
