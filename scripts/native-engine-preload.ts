@@ -1,14 +1,13 @@
 import { plugin } from 'bun';
-import { NATIVE_ENGINE_FILTER, nativeEngineFor } from './native-engine';
+import { NATIVE_ENGINE_FILTER, nativeEngineSource } from './native-engine';
 
 // Links the -native engine modules in place of the wasm ones, as the -native package builds do.
 plugin({
   name: 'betteroffice-native-engine',
   setup(build) {
-    build.onResolve({ filter: NATIVE_ENGINE_FILTER }, (args) => {
-      if (!args.path.startsWith('.') && !args.path.startsWith('/')) return undefined;
-      const path = nativeEngineFor(args.path, args.importer);
-      return path === undefined ? undefined : { path };
+    build.onLoad({ filter: NATIVE_ENGINE_FILTER }, ({ path }) => {
+      const contents = nativeEngineSource(path);
+      return contents === undefined ? undefined : { contents, loader: 'ts' };
     });
   },
 });

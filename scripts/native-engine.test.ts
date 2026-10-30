@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 import { engineKind as pptxEngine } from '../packages/pptx/src/wasm/engine';
 import { engineKind as xlsxEngine } from '../packages/xlsx/src/wasm/engine';
-import { NATIVE_ENGINES, nativeEngineFor } from './native-engine';
+import { NATIVE_ENGINE_FILTER, NATIVE_ENGINES, nativeEngineSource } from './native-engine';
 
 const expected =
   (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testEngine')] ?? 'wasm';
@@ -16,19 +16,21 @@ test('the engine modules match the engine this run links', () => {
 });
 
 test('the native preload relinks only the wasm engine modules', () => {
-  const xlsxLoader = resolve(root, 'packages/xlsx/src/wasm/loader.ts');
-  expect(nativeEngineFor('./engine', xlsxLoader)).toBe(resolve(root, NATIVE_ENGINES.xlsx.native));
-  expect(nativeEngineFor('./engine.ts', xlsxLoader)).toBe(resolve(root, NATIVE_ENGINES.xlsx.native));
-  const commandHost = resolve(root, 'packages/pptx/src/session/commandHost.ts');
-  expect(nativeEngineFor('../wasm/engine', commandHost)).toBe(resolve(root, NATIVE_ENGINES.pptx.native));
-  expect(nativeEngineFor('./engine', commandHost)).toBeUndefined();
-  expect(nativeEngineFor('./engine', resolve(root, 'packages/docx/src/wasm/loader.ts'))).toBeUndefined();
+  for (const { engine, native } of Object.values(NATIVE_ENGINES)) {
+    expect(NATIVE_ENGINE_FILTER.test(resolve(root, engine))).toBe(true);
+    expect(nativeEngineSource(resolve(root, engine))).toBe(
+      `export * from ${JSON.stringify(resolve(root, native))};\nexport { default } from ${JSON.stringify(resolve(root, native))};\n`
+    );
+  }
+  expect(nativeEngineSource(resolve(root, 'packages/docx/src/wasm/engine.ts'))).toBeUndefined();
+  expect(nativeEngineSource(resolve(root, 'packages/xlsx/src/session/engine.ts'))).toBeUndefined();
 });
 
 test('the wasm packages never reference their native packages', () => {
   for (const [format, { engine, native }] of Object.entries(NATIVE_ENGINES)) {
     const source = readFileSync(resolve(root, engine), 'utf8');
     expect(source).not.toContain(`${format}-native`);
+    expect(source).not.toContain('bindings/');
     expect(source).not.toContain('createRequire');
     const manifest = JSON.parse(readFileSync(resolve(root, `packages/${format}/package.json`), 'utf8'));
     expect(JSON.stringify(manifest)).not.toContain(`@betteroffice/${format}-native`);

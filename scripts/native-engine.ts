@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -15,19 +15,21 @@ export const NATIVE_ENGINES = {
   },
 } as const;
 
-export const NATIVE_ENGINE_FILTER = /(^|[\\/])engine(\.[jt]s)?$/;
-
-const withoutExtension = (path: string) => path.replace(/\.[jt]s$/, '');
+export const NATIVE_ENGINE_FILTER = /[\\/]src[\\/]wasm[\\/]engine\.ts$/;
 
 const aliases = new Map(
-  Object.values(NATIVE_ENGINES).map(({ engine, native }) => [
-    withoutExtension(resolve(root, engine)),
-    resolve(root, native),
-  ])
+  Object.values(NATIVE_ENGINES).map(({ engine, native }) => [resolve(root, engine), resolve(root, native)])
 );
 
-/** The native engine module for an import of a wasm package's engine module, else undefined. */
-export function nativeEngineFor(specifier: string, importer: string): string | undefined {
-  const target = isAbsolute(specifier) ? specifier : resolve(dirname(importer), specifier);
-  return aliases.get(withoutExtension(target));
+/** The native engine module that replaces a wasm package's engine module, else undefined. */
+export function nativeEngineFor(path: string): string | undefined {
+  return aliases.get(resolve(path));
+}
+
+/** Module source that re-exports the native engine in place of the wasm engine module at `path`. */
+export function nativeEngineSource(path: string): string | undefined {
+  const native = nativeEngineFor(path);
+  if (native === undefined) return undefined;
+  const specifier = JSON.stringify(native);
+  return `export * from ${specifier};\nexport { default } from ${specifier};\n`;
 }
