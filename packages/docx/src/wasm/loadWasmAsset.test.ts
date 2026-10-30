@@ -435,6 +435,33 @@ describe('readWasmSync', () => {
 });
 
 describe('wasmModuleMemories', () => {
+  it.each([4096, 4096n])('reports a reflected lower memory maximum of %s pages', async (maximum) => {
+    const memory = new WebAssembly.Memory({ initial: 1, maximum: 4096 });
+    Object.defineProperty(memory, 'type', { value: () => ({ maximum }) });
+    const label = `memory-maximum-${typeof maximum}`;
+    const state = createWasmModuleState({
+      label, preloadName: 'preloadMemoryMaximumWasm', assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }), initSync: () => ({ memory }),
+    });
+    await state.preload(new Uint8Array());
+    expect(wasmModuleMemories().find((module) => module.label === label)).toEqual({
+      label, bufferBytes: 65536, maximumBytes: 4096 * 65536,
+    });
+  });
+
+  it('keeps memory stats available when maximum reflection is unavailable', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    Object.defineProperty(memory, 'type', { value: () => { throw new Error('reflection unavailable'); } });
+    const state = createWasmModuleState({
+      label: 'memory-maximum-unavailable', preloadName: 'preloadMemoryMaximumUnavailableWasm', assetUrl: () => ASSET,
+      initAsync: async () => ({ memory }), initSync: () => ({ memory }),
+    });
+    await state.preload(new Uint8Array());
+    expect(wasmModuleMemories().find((module) => module.label === 'memory-maximum-unavailable')).toEqual({
+      label: 'memory-maximum-unavailable', bufferBytes: 65536,
+    });
+  });
+
   it('lists a module once it is initialized, with its allocator counters', async () => {
     const memory = new WebAssembly.Memory({ initial: 2 });
     const heap = { liveBytes: 10, peakBytes: 20, failedAllocationBytes: 0 };

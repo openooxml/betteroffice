@@ -11,22 +11,8 @@ import {
   WorkerInputNotReadyError, WorkerInputRefusal, inputRefusal, type WorkerInputCoordinator, type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
 
-/** @experimental */
-export class XlsxPeerNotReadyError extends WorkerInputNotReadyError {
-  constructor() {
-    super();
-    this.name = 'XlsxPeerNotReadyError';
-  }
-}
-
-/** @experimental */
-export class XlsxWorkerEditorCollaborationError extends Error {
-  readonly code = 'collaboration-unavailable';
-  constructor() {
-    super('Collaboration is unavailable in the worker editor');
-    this.name = 'XlsxWorkerEditorCollaborationError';
-  }
-}
+import { XlsxPeerNotReadyError } from './workerEditorErrors';
+export { XlsxPeerNotReadyError, XlsxWorkerEditorCollaborationError } from './workerEditorErrors';
 
 export interface WorkerEditorSessionAccess {
   readonly current: boolean;

@@ -14,6 +14,8 @@ export interface MenuItem {
   label: string;
   shortcut?: string;
   onClick?: () => void;
+  onPointerEnter?: () => void;
+  onFocus?: () => void;
   disabled?: boolean;
   /** Why the item is disabled. */
   description?: string;
@@ -405,8 +407,10 @@ export function MenuDropdown({
                   aria-controls={hasSubmenu ? submenuId : undefined}
                   tabIndex={-1}
                   onFocus={() => {
+                    item.onFocus?.();
                     if (!isSubmenuOpen) setOpenSubmenuLabel(null);
                   }}
+                  onPointerEnter={item.onPointerEnter}
                   style={item.disabled ? menuItemDisabledStyle : menuItemStyle}
                   onKeyDown={(event) => {
                     if (

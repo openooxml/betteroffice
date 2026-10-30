@@ -3,8 +3,15 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    let target = env::var("TARGET").expect("TARGET");
+    // wasm32 decodes with ruzstd, so a wasm build needs no C compiler with a wasm target.
+    if target.starts_with("wasm32") {
+        if target == "wasm32-unknown-unknown" {
+            println!("cargo:rustc-link-arg-cdylib=--max-memory=1073741824");
+        }
+        return;
+    }
     println!("cargo:rerun-if-changed=../../vendor/zstd/zstddeclib.c");
-    println!("cargo:rerun-if-changed=wasm-include");
 
     let source = fs::read_to_string("../../vendor/zstd/zstddeclib.c")
         .expect("vendor zstd first with bash scripts/fonts/vendor-zstd.sh");
@@ -12,21 +19,12 @@ fn main() {
     let source_path = output.join("fontpack_zstd.c");
     fs::write(&source_path, namespace(&source)).expect("write namespaced zstd decoder");
 
-    let target = env::var("TARGET").expect("TARGET");
-    let mut build = cc::Build::new();
-    build
+    cc::Build::new()
         .file(source_path)
         .define("ZSTD_LEGACY_SUPPORT", "0")
         .define("ZSTD_MULTITHREAD", "0")
-        .warnings(false);
-    if target.starts_with("wasm32") {
-        build.define("ZSTD_NO_INLINE", "1").flag("-Oz");
-    }
-    if target == "wasm32-unknown-unknown" {
-        build.include("wasm-include").flag("-ffreestanding");
-        println!("cargo:rustc-link-arg-cdylib=--max-memory=1073741824");
-    }
-    build.compile("fontpack_zstd");
+        .warnings(false)
+        .compile("fontpack_zstd");
 }
 
 // Isolate decoder symbols from the full zstd compressor linked by the build tool.
