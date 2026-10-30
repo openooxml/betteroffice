@@ -16,9 +16,17 @@ pub(crate) mod args;
 mod controls;
 mod crdt;
 mod error;
+mod exports;
+mod history;
 mod host;
+mod identity;
+mod json;
+mod metadata;
 mod open;
 mod raw;
+mod reads;
+mod review;
+mod selection;
 mod tables;
 mod text;
 
@@ -123,18 +131,5 @@ impl EditSessionCore {
 
     pub fn client_id(&self) -> f64 {
         self.engine.doc().client_id() as f64
-    }
-
-    pub(crate) fn story_ids(&self) -> Vec<String> {
-        use yrs::{ReadTxn, Transact};
-        let txn = self.engine.doc().yrs_doc().transact();
-        let Some(stories) = txn.get_map(crate::STORIES) else {
-            return Vec::new();
-        };
-        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
-            .map(|(id, _)| id.to_string())
-            .collect();
-        ids.sort();
-        ids
     }
 }
