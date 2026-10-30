@@ -514,6 +514,46 @@ describe("locks, conflicts and permissions", () => {
     }
   });
 
+  test("a lock of an instance whose id extends ours is not reclaimed", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    h.host.files.get("file1")!.lock = "bo1:inst-test:2:live-session";
+    h.host.files.get("file1")!.lockExpiresAt = h.clock.t + 30 * 60000;
+    const a = await joinEditor(h, "tok-a");
+    try {
+      expect(a.user.canWrite).toBe(false);
+      expect(a.viewOnlyReason).toBe("lockedElsewhere");
+      expect(h.calls.some((call) => call.headers.has("X-WOPI-OldLock"))).toBe(false);
+      expect(h.host.files.get("file1")!.lock).toBe("bo1:inst-test:2:live-session");
+    } finally {
+      await a.session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a second session of this instance for an alias of the file does not reclaim the live lock", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const client = await clientFor(a.session, a.joinPayload);
+    try {
+      const b = await h.registry.join({ hostId: "testhost", wopiSrc: `${SRC}?alias=1`, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(b.session).not.toBe(a.session);
+      expect(b.user.canWrite).toBe(false);
+      expect(b.viewOnlyReason).toBe("lockedElsewhere");
+      expect(h.calls.some((call) => call.headers.has("X-WOPI-OldLock"))).toBe(false);
+      expect(h.host.files.get("file1")!.lock).toBe(a.session.lockId);
+      edit(a.session, a.user.id, client, "alias-safe-edit ");
+      expect((await a.session.requestSave(a.user.id)).saved).toBe(true);
+      expect(await savedContains(h, "alias-safe-edit")).toBe(true);
+      await b.session.leave(b.user.id);
+    } finally {
+      client.destroy();
+      await a.session.leave(a.user.id).catch(() => {});
+      await h.registry.closeAll();
+    }
+  });
+
   test("timestamp conflict saves a conflict copy and leaves the original untouched", async () => {
     const h = makeHarness({ quirks: { timestampConflict: true } });
     addToken(h, "tok-a", "user-a");

@@ -17,6 +17,7 @@ describe("SessionRegistry", () => {
     expect(SessionRegistry.fileKey("testhost", `${src}&access_token=tok-a&access_token_ttl=123#frag`)).toBe(key);
     expect(SessionRegistry.fileKey("testhost", `${SRC}?access_token=tok-a#frag`)).toBe(SessionRegistry.fileKey("testhost", SRC));
     expect(SessionRegistry.fileKey("testhost", `${SRC}?tenant=B`)).not.toBe(key);
+    expect(SessionRegistry.fileKey("testhost", `${SRC}?route=1&tenant=A`)).toBe(SessionRegistry.fileKey("testhost", `${SRC}?tenant=A&route=1`));
     expect(key).not.toContain("tok-a");
     const session = h.registry.create("testhost", `${src}&access_token=tok-a&access_token_ttl=123#frag`);
     expect(h.registry.create("testhost", `${src}#other`)).toBe(session);

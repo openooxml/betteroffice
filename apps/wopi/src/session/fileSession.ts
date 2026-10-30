@@ -100,6 +100,7 @@ export interface FileSessionDeps {
   maxEditorsPerFile?: number;
   openReplica?: typeof openServerReplica;
   onClosed?: (session: FileSession) => void;
+  isLiveLock?: (lock: string) => boolean;
 }
 
 interface SaveOptions {
@@ -641,7 +642,7 @@ export class FileSession {
           if (lockErr instanceof WopiHostError && lockErr.kind === "unauthorized") throw lockErr;
         }
       }
-      if (current && current.startsWith(`${OUR_LOCK_PREFIX}${this.#deps.instanceId}:`)) {
+      if (current && this.#isStaleOwnLock(current)) {
         try {
           const relockRequestedAt = this.#now();
           await this.#host.unlockAndRelock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId, oldLock: current });
@@ -779,6 +780,13 @@ export class FileSession {
   #requireLock(): void {
     this.#checkLockLease();
     if (!this.#lockHeld) throw new SessionError("lockLost", "file session lock is lost");
+  }
+
+  #isStaleOwnLock(lock: string): boolean {
+    if (lock === this.lockId) return true;
+    if (!lock.startsWith(OUR_LOCK_PREFIX)) return false;
+    const owner = lock.slice(OUR_LOCK_PREFIX.length, lock.lastIndexOf(":"));
+    return owner === this.#deps.instanceId && !(this.#deps.isLiveLock?.(lock) ?? false);
   }
 
   #loseLock(): void {

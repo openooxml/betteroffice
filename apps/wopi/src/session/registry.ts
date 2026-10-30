@@ -43,7 +43,9 @@ export class SessionRegistry {
 
   /** File key for a host and WOPISrc. */
   static fileKey(hostId: string, wopiSrc: string): string {
-    return `${hostId}:${cleanWopiSrc(wopiSrc)}`;
+    const url = new URL(cleanWopiSrc(wopiSrc));
+    url.searchParams.sort();
+    return `${hostId}:${url.toString()}`;
   }
 
   /** File key for a WOPISrc under this registry. */
@@ -89,6 +91,7 @@ export class SessionRegistry {
       journal: journalDir ? new FileJournal(journalDir, key) : null,
       maxEditorsPerFile: this.#deps.maxEditorsPerFile ?? this.#config.maxEditorsPerFile ?? 50,
       openReplica: this.#deps.openReplica,
+      isLiveLock: (lock) => this.list().some((live) => live.lockId === lock),
       onClosed: (closed) => {
         if (this.#sessions.get(closed.fileKey) === closed) this.#sessions.delete(closed.fileKey);
       },
