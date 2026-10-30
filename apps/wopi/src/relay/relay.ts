@@ -37,6 +37,8 @@ export interface ResolvedHandle {
 
 const AWARENESS_RATE_CAPACITY = 30;
 const AWARENESS_REFILL_PER_SECOND = 30;
+/** Client ids one socket may keep in awareness; a page announces only its own. */
+export const MAX_AWARENESS_CLIENTS_PER_SOCKET = 8;
 
 interface SocketState {
   ws: RelaySocket;
@@ -357,6 +359,11 @@ export class CollabRelay {
             state.awareness.delete(entry.clientId);
             state.awarenessFrames.delete(entry.clientId);
           } else {
+            if (!state.awareness.has(entry.clientId) && state.awareness.size >= MAX_AWARENESS_CLIENTS_PER_SOCKET) {
+              this.#close(state, 1008, "too many awareness clients");
+              this.detach(state.ws);
+              return;
+            }
             state.awareness.set(entry.clientId, entry.clock);
             state.awarenessFrames.set(entry.clientId, encodeAwarenessUpdateRaw([entry]));
           }

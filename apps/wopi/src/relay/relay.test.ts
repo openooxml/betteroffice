@@ -21,7 +21,7 @@ import {
   encodeSyncStep2,
   encodeUpdateFrame,
 } from "./frames";
-import { CollabRelay, type RelaySocket } from "./relay";
+import { CollabRelay, MAX_AWARENESS_CLIENTS_PER_SOCKET, type RelaySocket } from "./relay";
 import { CollaborationProvider as DocxProvider } from "../../../../packages/docx/src/collaboration/index";
 import { CollaborationProvider as XlsxProvider } from "../../../../packages/xlsx/src/collaboration/index";
 import { CollaborationProvider as PptxProvider } from "../../../../packages/pptx/src/collaboration/index";
@@ -325,6 +325,54 @@ describe("collab relay", () => {
       });
     }
   }
+
+  test("a socket cannot grow awareness past its client id cap", async () => {
+    const h = makeHarness();
+    addToken(h, TOKENS[0]!, "user-a");
+    addToken(h, TOKENS[1]!, "viewer-b", { canWrite: false });
+    addToken(h, TOKENS[2]!, "user-c");
+    const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
+    const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[1]!, accessTokenTtl: 0, mode: "view" });
+    const c = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[2]!, accessTokenTtl: 0, mode: "edit" });
+    const relay = new CollabRelay(h.registry);
+    const awarenessAt = (frames: Uint8Array[]) => frames.flatMap((frame) => decodeMessages(frame).flatMap((message) => message.type === "awareness" ? message.entries : []));
+    const framesA: Uint8Array[] = [];
+    const closedA: number[] = [];
+    const framesB: Uint8Array[] = [];
+    const closedB: number[] = [];
+    const healthy: RelaySocket = { send: (frame) => { framesA.push(frame); return frame.length; }, close: (code) => { closedA.push(code!); } };
+    const viewer: RelaySocket = { send: (frame) => { framesB.push(frame); return frame.length; }, close: (code) => { closedB.push(code!); } };
+    relay.attach(healthy, relay.resolve(a.user.id)!, a.session.baselineGeneration);
+    relay.attach(viewer, relay.resolve(b.user.id)!, b.session.baselineGeneration);
+    const ids = Array.from({ length: MAX_AWARENESS_CLIENTS_PER_SOCKET }, (_, i) => 953001 + i);
+    const announce = (clientId: number, clock: number) => ({ clientId, clock, state: { user: { name: `Viewer ${clientId}`, color: "#000000" }, cursor: null } });
+    try {
+      relay.handleMessage(viewer, encodeAwarenessFrame(ids.map((id) => announce(id, 1))));
+      relay.handleMessage(viewer, encodeAwarenessFrame([{ clientId: ids[0]!, clock: 2, state: null }]));
+      relay.handleMessage(viewer, encodeAwarenessFrame([announce(953100, 1), ...ids.slice(1).map((id) => announce(id, 2))]));
+      expect(closedB).toEqual([]);
+      expect(awarenessAt(framesA).filter((entry) => !entry.isNull).map((entry) => entry.clientId)).toContain(953100);
+
+      relay.handleMessage(viewer, encodeAwarenessFrame([announce(953101, 1)]));
+      expect(closedB).toEqual([1008]);
+      await h.clock.drain();
+      expect(b.user.connected).toBe(false);
+      const removed = awarenessAt(framesA).filter((entry) => entry.isNull).map((entry) => entry.clientId);
+      for (const id of [953100, ...ids.slice(1)]) expect(removed).toContain(id);
+      expect(awarenessAt(framesA).map((entry) => entry.clientId)).not.toContain(953101);
+      relay.handleMessage(viewer, encodeAwarenessFrame([announce(953102, 1)]));
+      expect(awarenessAt(framesA).map((entry) => entry.clientId)).not.toContain(953102);
+
+      const framesC: Uint8Array[] = [];
+      const late: RelaySocket = { send: (frame) => { framesC.push(frame); return frame.length; }, close: () => {} };
+      relay.attach(late, relay.resolve(c.user.id)!, c.session.baselineGeneration);
+      relay.handleMessage(late, encodeQueryAwarenessFrame());
+      expect(awarenessAt(framesC)).toEqual([]);
+      expect(closedA).toEqual([]);
+    } finally {
+      a.session.abandon();
+    }
+  });
 
   test("two clients converge, one autosave has every edit, late joiner catches up", async () => {
     const s = setup("xlsx");
