@@ -1174,6 +1174,10 @@ impl PyDocument {
         Ok(PyEdit::from_core(receipt))
     }
 
+    fn replace_paragraph_text(&mut self, para_id: &str, text: &str) -> PyResult<PyEdit> {
+        self.replace_text(para_id, text)
+    }
+
     /// Export the document as read-only structured content: a dict with the
     /// camelCase `schemaVersion: 1` schema, anchors scoped to this snapshot.
     ///
