@@ -46,6 +46,17 @@ from .exports import (
     PptxStructuredResult,
 )
 from .proposals import Proposal, ProposalChange, ProposalPreview
+from .render import (
+    HitTestResult,
+    MediaContent,
+    MediaSummary,
+    PresentationInspection,
+    ProposalDiffSlide,
+    ProposalTextChange,
+    ShapeHit,
+    SlideDisplayList,
+    TextHit,
+)
 
 from ._betteroffice_pptx import (
     decode_font_face,
@@ -82,6 +93,7 @@ from ._betteroffice_pptx import (
     UpdateSubscription,
     export_pptx_markdown_json as _export_pptx_markdown_json,
     export_pptx_structured_json as _export_pptx_structured_json,
+    inspect_presentation as _inspect_presentation,
     render_pptx_markdown_json as _render_pptx_markdown_json,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
@@ -103,15 +115,19 @@ __all__ = [
     "EMU_PER_POINT",
     "ExportError",
     "FillEdit",
+    "HitTestResult",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
     "Media",
+    "MediaContent",
+    "MediaSummary",
     "NotCollaborativeError",
     "Paragraph",
     "ParseError",
     "Png",
     "PptxError",
     "Presentation",
+    "PresentationInspection",
     "PptxAnchor",
     "PptxAnchorScope",
     "PptxEditFailure",
@@ -148,13 +164,18 @@ __all__ = [
     "PptxValidationResult",
     "Proposal",
     "ProposalChange",
+    "ProposalDiffSlide",
     "ProposalPreview",
+    "ProposalTextChange",
     "StaleProposalError",
     "RangeError",
     "Rect",
     "RenderError",
     "Shape",
     "ShapeEdit",
+    "ShapeHit",
+    "SlideDisplayList",
+    "TextHit",
     "Slide",
     "SlideEdit",
     "SlideKey",
@@ -168,6 +189,7 @@ __all__ = [
     "__version__",
     "export_pptx_markdown",
     "export_pptx_structured",
+    "inspect_presentation",
     "render_pptx_markdown",
 ]
 
@@ -176,6 +198,13 @@ EMU_PER_CENTIMETER = 360000
 EMU_PER_POINT = 12700
 
 SlideKey = Union[int, str]
+
+
+def inspect_presentation(
+    data: "bytes | bytearray | memoryview", *, include_media: bool = True,
+) -> PresentationInspection:
+    """Parse package JSON; ``include_media=False`` omits media bytes."""
+    return _inspect_presentation(_as_bytes(data), include_media=include_media)
 
 
 class Presentation:
@@ -696,6 +725,23 @@ class Presentation:
         """Lay a slide out into the renderer's display list."""
         return self._inner.render_slide(slide)
 
+    def register_fallback_font(
+        self,
+        family: str,
+        data: "bytes | bytearray | memoryview",
+        *,
+        bold: bool = False,
+        italic: bool = False,
+    ) -> int:
+        """Register a fallback face for missing glyphs."""
+        return self._inner.register_fallback_font(
+            family, _as_bytes(data), bold=bold, italic=italic
+        )
+
+    def hit_test(self, slide: SlideKey, x: float, y: float) -> HitTestResult | None:
+        """Test display-list pixels from the slide's top-left corner."""
+        return self._inner.hit_test(slide, x, y)
+
     def propose(
         self, agent_id: str, edits: Sequence[Mapping[str, object]], *,
         note: str | None = None,
@@ -714,6 +760,10 @@ class Presentation:
             for value in json.loads(self._inner.proposals_json())
         ]
 
+    def list_proposals(self) -> list[Proposal]:
+        """Alias of proposals, named as in the TypeScript API."""
+        return self.proposals()
+
     def preview_proposal(self, proposal_id: str) -> ProposalPreview:
         """Preview edits against the current document without applying them."""
         return ProposalPreview._from_dict(
@@ -723,6 +773,12 @@ class Presentation:
     def render_proposal(self, proposal_id: str, slide: SlideKey) -> DisplayList:
         """Render one proposed slide without changing the presentation."""
         return self._inner.render_proposal(proposal_id, slide)
+
+    def layout_proposal_diff_slide(
+        self, proposal_id: str, slide: SlideKey,
+    ) -> ProposalDiffSlide:
+        """Lay out proposal changes against the current slide."""
+        return self._inner.layout_proposal_diff_slide(proposal_id, slide)
 
     @overload
     def accept_proposal(
@@ -862,15 +918,31 @@ class Presentation:
         """
         return self._inner.state_vector()
 
+    def encode_state_vector(self) -> bytes:
+        """Alias of state_vector, named as in the TypeScript API."""
+        return self.state_vector()
+
     def state_as_update(self) -> bytes:
         """The whole document as one update, for a peer joining from nothing."""
         return self._inner.state_as_update()
+
+    def encode_state_as_update(
+        self, remote_state_vector: "bytes | bytearray | memoryview | None" = None,
+    ) -> bytes:
+        """Encode the full state, or a diff for the given remote state vector."""
+        if remote_state_vector is None:
+            return self.state_as_update()
+        return self.diff(remote_state_vector)
 
     def diff(self, state_vector: "bytes | bytearray | memoryview") -> bytes:
         """The update carrying everything the peer's state vector is missing."""
         return self._inner.diff(
             _as_bytes(state_vector, max_length=MAX_COLLABORATION_BYTES)
         )
+
+    def encode_diff(self, remote_state_vector: "bytes | bytearray | memoryview") -> bytes:
+        """Alias of diff, named as in the TypeScript API."""
+        return self.diff(remote_state_vector)
 
     def apply_update(self, update: "bytes | bytearray | memoryview") -> Deck:
         """Merge a peer's update and return the deck it produced."""
@@ -898,6 +970,10 @@ class Presentation:
     def add_undo_barrier(self) -> None:
         """Close the current undo step so the next edit starts a new one."""
         self._inner.add_undo_barrier()
+
+    def add_undo_boundary(self) -> None:
+        """Alias of add_undo_barrier, named as in the TypeScript API."""
+        self.add_undo_barrier()
 
     @property
     def undo_capture_mode(self) -> Literal["auto", "manual"]:

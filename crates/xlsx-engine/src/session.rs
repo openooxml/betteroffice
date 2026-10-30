@@ -60,10 +60,9 @@ struct SheetInfo {
     auto_filter: Option<String>,
 }
 
-impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
-    fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
+impl SheetInfo {
+    fn new(info: betteroffice_xlsx::SheetInfo, auto_filter: Option<String>) -> Self {
         Self {
-            auto_filter: None,
             sheet_ids: info.sheet_ids,
             sheet_names: info.sheet_names,
             active_sheet: info.active_sheet.0,
@@ -73,6 +72,7 @@ impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
             frozen_cols: info.frozen_cols,
             initial_scroll_x: info.initial_scroll_x,
             initial_scroll_y: info.initial_scroll_y,
+            auto_filter,
         }
     }
 }
@@ -223,14 +223,6 @@ struct ProfiledEditResult {
 struct DisplayListProfile {
     build_ms: f64,
     encode_ms: f64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CalculationStatus {
-    limited_cells: Vec<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    budget_exhausted: bool,
 }
 
 #[derive(Serialize)]
@@ -666,12 +658,7 @@ impl Session {
             .workbook
             .sheet_info_for(SheetId(sheet))
             .map_err(|error| error.to_string())?;
-        let mut info = SheetInfo::from(info);
-        info.auto_filter = self.workbook.model().sheets[sheet as usize]
-            .auto_filter
-            .as_ref()
-            .map(|filter| filter.range.to_a1());
-        serde_json::to_string(&info).map_err(|error| error.to_string())
+        serde_json::to_string(&self.sheet_info_payload(info)?).map_err(|error| error.to_string())
     }
 
     pub fn charts_json(&self, sheet: u32) -> Result<String, String> {
@@ -697,54 +684,14 @@ impl Session {
     }
 
     pub fn conditional_formats_json(&self, sheet: u32) -> Result<String, String> {
-        let model = self.workbook.model();
-        let sheet = model
-            .sheet(SheetId(sheet))
-            .ok_or_else(|| format!("sheet {sheet} not found"))?;
-        let mut items = Vec::new();
-        for group in &sheet.conditional_formats {
-            for rule in &group.rules {
-                let mut format = serde_json::Map::new();
-                if let Some(color) = &rule.format.font_color {
-                    format.insert("fontColor".into(), color.clone().into());
-                }
-                if let Some(bold) = rule.format.bold {
-                    format.insert("bold".into(), bold.into());
-                }
-                if let Some(italic) = rule.format.italic {
-                    format.insert("italic".into(), italic.into());
-                }
-                if let Some(fill) = &rule.format.fill {
-                    format.insert("fill".into(), fill.clone().into());
-                }
-                let mut item = serde_json::json!({
-                    "id": rule.id,
-                    "range": group.sqref,
-                    "type": rule.rule_type,
-                    "formulas": rule.formulas,
-                    "priority": rule.priority,
-                    "format": format,
-                    "editable": rule.editable(),
-                });
-                if let Some(operator) = &rule.operator {
-                    item["operator"] = operator.clone().into();
-                }
-                if let Some(dxf_id) = rule.dxf_id {
-                    item["dxfId"] = dxf_id.into();
-                }
-                items.push(item);
-            }
-        }
-        serde_json::to_string(&items).map_err(|error| error.to_string())
+        self.workbook
+            .conditional_formats_json(SheetId(sheet))
+            .map_err(|error| error.to_string())
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
-        let calculation = self.workbook.last_calculation();
-        serde_json::to_string(&CalculationStatus {
-            limited_cells: self.changed_list(&calculation.limited_cells),
-            budget_exhausted: calculation.budget_exhausted,
-        })
-        .map_err(|error| error.to_string())
+        serde_json::to_string(&self.workbook.calculation_status())
+            .map_err(|error| error.to_string())
     }
 
     pub fn set_active_sheet(&mut self, index: u32) -> Result<(), String> {
@@ -908,19 +855,8 @@ impl Session {
             .workbook
             .cell(SheetId(args.sheet), CellRef::new(args.row, args.col))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&CellEdit {
-            a1: cell.cell.to_a1(),
-            input: cell.input,
-            is_formula: cell.is_formula,
-            is_array_formula: self
-                .workbook
-                .sheet(SheetId(args.sheet))
-                .map_err(|error| error.to_string())?
-                .array_formulas()
-                .any(|(_, range)| range.contains(cell.cell))
-                .then_some(true),
-        })
-        .map_err(|error| error.to_string())
+        serde_json::to_string(&self.cell_payload(SheetId(args.sheet), cell)?)
+            .map_err(|error| error.to_string())
     }
 
     pub fn search_text_json(&self, args: &str) -> Result<String, String> {
@@ -993,13 +929,6 @@ impl Session {
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
         let range =
             CellRange::parse_a1(&args.range).map_err(|error| format!("bad range: {error}"))?;
-        let arrays: Vec<_> = self
-            .workbook
-            .sheet(SheetId(args.sheet))
-            .map_err(|error| error.to_string())?
-            .array_formulas()
-            .filter_map(|(_, array)| array.overlaps(&range).then_some(array))
-            .collect();
         let cells = self
             .workbook
             .range_cells(SheetId(args.sheet), range)
@@ -1007,18 +936,10 @@ impl Session {
             .into_iter()
             .map(|row| {
                 row.into_iter()
-                    .map(|cell| CellEdit {
-                        a1: cell.cell.to_a1(),
-                        input: cell.input,
-                        is_formula: cell.is_formula,
-                        is_array_formula: arrays
-                            .iter()
-                            .any(|range| range.contains(cell.cell))
-                            .then_some(true),
-                    })
-                    .collect()
+                    .map(|cell| self.cell_payload(SheetId(args.sheet), cell))
+                    .collect::<Result<Vec<_>, String>>()
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         serde_json::to_string(&RangeCells { cells }).map_err(|error| error.to_string())
     }
 
@@ -1210,56 +1131,9 @@ impl Session {
     }
 
     pub fn list_defined_names_json(&self, request: &str) -> Result<String, String> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Request {
-            #[serde(default, deserialize_with = "scope_filter")]
-            scope: Option<Option<u32>>,
-            offset: Option<usize>,
-            limit: Option<usize>,
-        }
-        fn scope_filter<'de, D: serde::Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Option<Option<u32>>, D::Error> {
-            Option::<u32>::deserialize(deserializer).map(Some)
-        }
-        let request: Request = serde_json::from_str(request).map_err(|error| error.to_string())?;
-        let offset = request.offset.unwrap_or(0);
-        let limit = request.limit.unwrap_or(100);
-        if !(1..=100).contains(&limit) {
-            return Err("limit must be between 1 and 100".into());
-        }
-        if let Some(Some(scope)) = request.scope
-            && self.workbook.model().sheet(SheetId(scope)).is_none()
-        {
-            return Err("scope sheet is out of range".into());
-        }
-        let names = self.workbook.model().defined_names.iter().filter(|name| {
-            request
-                .scope
-                .is_none_or(|scope| scope == name.local_sheet.map(|sheet| sheet.0))
-        });
-        let total = names.clone().count();
-        let items = names
-            .skip(offset)
-            .take(limit)
-            .map(|name| {
-                serde_json::json!({
-                    "name": name.name,
-                    "refersTo": name.formula,
-                    "scope": name.local_sheet.map(|sheet| sheet.0),
-                    "hidden": name.hidden,
-                })
-            })
-            .collect::<Vec<_>>();
-        let next = offset.saturating_add(items.len());
-        serde_json::to_string(&serde_json::json!({
-            "version": self.document_version(),
-            "items": items,
-            "total": total,
-            "nextOffset": (next < total).then_some(next),
-        }))
-        .map_err(|error| error.to_string())
+        self.workbook
+            .list_defined_names_json(request)
+            .map_err(|error| error.to_string())
     }
 
     pub fn find_text_json(&self, request: &str) -> Result<String, String> {
@@ -1336,17 +1210,37 @@ impl Session {
     }
 
     fn sheet_info(&self) -> Result<SheetInfo, String> {
-        self.workbook
+        let info = self
+            .workbook
             .sheet_info()
-            .map(|info| {
-                let mut info = SheetInfo::from(info);
-                info.auto_filter = self.workbook.model().sheets[info.active_sheet as usize]
-                    .auto_filter
-                    .as_ref()
-                    .map(|filter| filter.range.to_a1());
-                info
-            })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.sheet_info_payload(info)
+    }
+
+    fn sheet_info_payload(&self, info: betteroffice_xlsx::SheetInfo) -> Result<SheetInfo, String> {
+        let auto_filter = self
+            .workbook
+            .auto_filter(info.active_sheet)
+            .map_err(|error| error.to_string())?;
+        Ok(SheetInfo::new(info, auto_filter))
+    }
+
+    fn cell_payload(
+        &self,
+        sheet: SheetId,
+        cell: betteroffice_xlsx::CellEdit,
+    ) -> Result<CellEdit, String> {
+        let is_array_formula = self
+            .workbook
+            .is_array_formula(sheet, cell.cell)
+            .map_err(|error| error.to_string())?
+            .then_some(true);
+        Ok(CellEdit {
+            a1: cell.cell.to_a1(),
+            input: cell.input,
+            is_formula: cell.is_formula,
+            is_array_formula,
+        })
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {

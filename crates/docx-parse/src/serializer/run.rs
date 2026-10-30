@@ -7,7 +7,7 @@ use crate::image::{Image, ImagePosition, ImageWrap};
 use crate::inline::{Run, RunContent, RunPropertyChange};
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::shape::Shape;
-use crate::xml::ParseError;
+use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
 
 use super::context::SerializerContext;
 use super::raw::{validate_raw_subtree, validate_replayed_fragment};
@@ -163,8 +163,39 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
 
 /// Serialize one run, consuming any active rendered-page-break markers.
 pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
+    let rendered_page_breaks = context.take_rendered_page_breaks();
+    let raw_run = match run.content.as_slice() {
+        [RunContent::Shape { shape, .. }] => super::smart_art::replay(shape, context, true)?,
+        [RunContent::OpaqueDrawing { kind, xml, .. }] if kind == "drawingRun" => Some(xml.clone()),
+        _ => None,
+    };
+    if let Some(xml) = raw_run {
+        validate_replayed_fragment(&xml)?;
+        let mut output = replay_run_properties(&xml, run, context)?;
+        if rendered_page_breaks > 0 {
+            let root = super::splice::root_tag(&output)
+                .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
+            let (end, empty, name) = (root.range.end, root.empty, root.name.to_owned());
+            if empty {
+                output.replace_range(
+                    end - 2..end,
+                    &format!(
+                        ">{}</{}>",
+                        "<w:lastRenderedPageBreak/>".repeat(rendered_page_breaks),
+                        name
+                    ),
+                );
+            } else {
+                output.insert_str(
+                    end,
+                    &"<w:lastRenderedPageBreak/>".repeat(rendered_page_breaks),
+                );
+            }
+        }
+        return Ok(output);
+    }
     let mut output = String::from("<w:r>");
-    for _ in 0..context.take_rendered_page_breaks() {
+    for _ in 0..rendered_page_breaks {
         output.push_str("<w:lastRenderedPageBreak/>");
     }
     output.push_str(&serialize_run_properties(
@@ -175,6 +206,185 @@ pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<Strin
         output.push_str(&serialize_run_content(content, context)?);
     }
     output.push_str("</w:r>");
+    Ok(output)
+}
+
+fn replay_run_properties(
+    source: &str,
+    run: &Run,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
+    let limits = ParseLimits::default();
+    let parsed = parse_xml(
+        source.as_bytes(),
+        "drawing run",
+        &mut ParseBudget::new(&limits),
+    )?;
+    let root = parsed
+        .root()
+        .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
+    let baseline = crate::inline::parse_run(root, None, None, None).run;
+    let formatting = run.formatting.as_ref().or(baseline.formatting.as_ref());
+    if baseline.formatting.as_ref() == formatting
+        && baseline.property_changes == run.property_changes
+    {
+        return Ok(source.to_owned());
+    }
+    let properties = |formatting: Option<&TextFormatting>,
+                      changes: Option<&[RunPropertyChange]>|
+     -> Result<XmlElement, ParseError> {
+        let xml = format!(
+            "<w:r>{}</w:r>",
+            serialize_run_properties(formatting, changes)
+        );
+        let parsed = parse_xml(
+            xml.as_bytes(),
+            "drawing run properties",
+            &mut ParseBudget::new(&limits),
+        )?;
+        Ok(parsed.root().expect("generated run").clone())
+    };
+    let before = properties(
+        baseline.formatting.as_ref(),
+        baseline.property_changes.as_deref(),
+    )?;
+    let after = properties(formatting, run.property_changes.as_deref())?;
+    let before = before.child_by_local_name("rPr");
+    let after = after.child_by_local_name("rPr");
+    let children = |properties: Option<&XmlElement>| {
+        properties
+            .into_iter()
+            .flat_map(XmlElement::child_elements)
+            .map(|child| (child.local_name().to_owned(), child.to_raw_inline_xml()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before_children = children(before);
+    let after_children = children(after);
+    let changed: std::collections::BTreeSet<_> = before_children
+        .keys()
+        .chain(after_children.keys())
+        .filter(|name| before_children.get(*name) != after_children.get(*name))
+        .cloned()
+        .collect();
+    let mut output = source.to_owned();
+    if !changed.is_empty() {
+        if let Some(at) = root
+            .child_elements()
+            .position(|child| child.local_name() == "rPr")
+        {
+            let span = super::s13::element_span(source, &[at as u32]).ok_or_else(|| {
+                ParseError::Canonical("drawing run properties have no source span".to_owned())
+            })?;
+            let replacement = patch_run_properties(
+                &source[span.clone()],
+                root.child_by_local_name("rPr").expect("source properties"),
+                after,
+                &changed,
+            )?;
+            output.replace_range(span, &replacement);
+        } else if let Some(after) = after {
+            let root = super::splice::root_tag(source)
+                .ok_or_else(|| ParseError::Canonical("drawing run has no root".to_owned()))?;
+            output.insert_str(root.range.end, &after.to_raw_inline_xml());
+        }
+    }
+    let saved = parse_xml(
+        output.as_bytes(),
+        "drawing run",
+        &mut ParseBudget::new(&limits),
+    )?;
+    let saved = crate::inline::parse_run(saved.root().expect("replayed run"), None, None, None).run;
+    for (field, before, current, saved) in [
+        (
+            "formatting",
+            serde_json::to_value(&baseline.formatting),
+            serde_json::to_value(formatting.filter(|value| **value != TextFormatting::default())),
+            serde_json::to_value(&saved.formatting),
+        ),
+        (
+            "propertyChanges",
+            serde_json::to_value(&baseline.property_changes),
+            serde_json::to_value(&run.property_changes),
+            serde_json::to_value(&saved.property_changes),
+        ),
+    ] {
+        if super::smart_art::unapplied_change(
+            &before.expect("run property model"),
+            &current.expect("run property model"),
+            &saved.expect("run property model"),
+        ) {
+            context.warn(format!("Drawing run {field} changes cannot be represented exactly; preserving unsupported source properties and saving supported run changes."));
+        }
+    }
+    Ok(output)
+}
+
+fn patch_run_properties(
+    source: &str,
+    properties: &XmlElement,
+    after: Option<&XmlElement>,
+    changed: &std::collections::BTreeSet<String>,
+) -> Result<String, ParseError> {
+    let root = super::splice::root_tag(source)
+        .ok_or_else(|| ParseError::Canonical("drawing run properties have no root".to_owned()))?;
+    let children = properties
+        .child_elements()
+        .enumerate()
+        .map(|(at, child)| {
+            super::s13::element_span(source, &[at as u32])
+                .map(|span| (child, span))
+                .ok_or_else(|| {
+                    ParseError::Canonical("drawing run property has no source span".to_owned())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let additions: Vec<_> = after
+        .into_iter()
+        .flat_map(XmlElement::child_elements)
+        .filter(|child| changed.contains(child.local_name()))
+        .collect();
+    if root.empty {
+        if additions.is_empty() {
+            return Ok(source.to_owned());
+        }
+        let mut output = source[..root.range.end - 2].to_owned();
+        output.push('>');
+        for child in additions {
+            output.push_str(&child.to_raw_inline_xml());
+        }
+        output.push_str(&format!("</{}>", root.name));
+        output.push_str(&source[root.range.end..]);
+        return Ok(output);
+    }
+    let end = source.rfind("</").ok_or_else(|| {
+        ParseError::Canonical("drawing run properties have no closing tag".to_owned())
+    })?;
+    let rank = |local: &str| {
+        "rStyle rFonts b bCs i iCs caps smallCaps strike dstrike outline shadow emboss imprint noProof snapToGrid vanish webHidden color spacing w kern position sz szCs highlight u effect bdr shd fitText vertAlign rtl cs em lang eastAsianLayout specVanish oMath rPrChange"
+            .split_whitespace().position(|name| name == local).unwrap_or(usize::MAX)
+    };
+    let mut edits: Vec<_> = children
+        .iter()
+        .filter(|(child, _)| changed.contains(child.local_name()))
+        .map(|(_, span)| (span.clone(), String::new()))
+        .collect();
+    let mut insertions = std::collections::BTreeMap::<usize, String>::new();
+    for child in additions {
+        let at = children
+            .iter()
+            .find(|(source, _)| rank(source.local_name()) > rank(child.local_name()))
+            .map_or(end, |(_, span)| span.start);
+        insertions
+            .entry(at)
+            .or_default()
+            .push_str(&child.to_raw_inline_xml());
+    }
+    edits.extend(insertions.into_iter().map(|(at, xml)| (at..at, xml)));
+    edits.sort_by_key(|(span, _)| (span.start, span.end));
+    let mut output = source.to_owned();
+    for (span, replacement) in edits.into_iter().rev() {
+        output.replace_range(span, &replacement);
+    }
     Ok(output)
 }
 
@@ -383,8 +593,21 @@ fn serialize_run_content(
             ));
             return Ok(String::new());
         }
-        RunContent::OpaqueDrawing { xml, .. } => {
+        RunContent::OpaqueDrawing { kind, xml, .. } => {
             validate_replayed_fragment(xml)?;
+            if kind == "drawingRun" {
+                let limits = crate::xml::ParseLimits::default();
+                let parsed = crate::xml::parse_xml(
+                    xml.as_bytes(),
+                    "drawing run",
+                    &mut crate::xml::ParseBudget::new(&limits),
+                )?;
+                return Ok(parsed
+                    .root()
+                    .and_then(|run| run.child_by_local_name("drawing"))
+                    .map(|drawing| drawing.to_raw_inline_xml())
+                    .unwrap_or_default());
+            }
             return Ok(xml.clone());
         }
     }
@@ -500,6 +723,9 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    if let Some(xml) = super::smart_art::replay(shape, context, false)? {
+        return Ok(xml);
+    }
     let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
@@ -1295,6 +1521,253 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    fn smart_art_run(source: &str, opaque: bool) -> Run {
+        let root = drawing_root(source);
+        let mut run = crate::inline::parse_run(&root, None, None, None).run;
+        run.content = vec![if opaque {
+            RunContent::OpaqueDrawing {
+                kind: "drawingRun".to_owned(),
+                xml: source.to_owned(),
+                preview: None,
+                previews: Vec::new(),
+                text_box: None,
+                drawing_properties: None,
+            }
+        } else {
+            let mut shape = Shape::empty(
+                "rect".to_owned(),
+                crate::image::ImageSize {
+                    width: 1000.0,
+                    height: 500.0,
+                },
+            );
+            crate::smart_art::apply_frame_metadata(
+                &mut shape,
+                root.child_by_local_name("drawing").unwrap(),
+            );
+            shape.drawing_run_xml = Some(source.to_owned());
+            shape.drawing_model = Some(serde_json::json!({
+                "frame": crate::smart_art::frame_model(&shape),
+                "otherSha256": crate::smart_art::other_model_sha256(&shape),
+            }));
+            RunContent::Shape {
+                shape: Box::new(shape),
+                drawing_properties: None,
+            }
+        }];
+        run
+    }
+
+    #[test]
+    fn smart_art_run_edits_keep_drawing_bytes_and_unknown_properties() {
+        let drawing = r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><wp:inline><wp:extent cx="1000" cy="500"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="dm" r:lo="lo" r:qs="qs" r:cs="cs"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+        for opaque in [false, true] {
+            for properties in [
+                "",
+                "<w:rPr><w:vanish/></w:rPr>",
+                r#"<w:rPr keep:attribute="source"><w:noProof/><w:vanish/><keep:metadata/></w:rPr>"#,
+            ] {
+                let source = format!(
+                    r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:keep="urn:keep">{properties}{drawing}</w:r>"#
+                );
+                let mut run = smart_art_run(&source, opaque);
+                run.formatting = None;
+                let mut omitted_context = context();
+                assert_eq!(serialize_run(&run, &mut omitted_context).unwrap(), source);
+                assert!(omitted_context.take_warnings().is_empty());
+                for hidden in [Some(true), Some(false), None] {
+                    let mut run = smart_art_run(&source, opaque);
+                    run.formatting = Some(TextFormatting {
+                        hidden,
+                        ..TextFormatting::default()
+                    });
+                    let mut context = context();
+                    let saved = serialize_run(&run, &mut context).unwrap();
+                    assert!(saved.contains(drawing));
+                    let reopened =
+                        crate::inline::parse_run(&drawing_root(&saved), None, None, None).run;
+                    assert_eq!(
+                        reopened
+                            .formatting
+                            .as_ref()
+                            .and_then(|formatting| formatting.hidden),
+                        hidden
+                    );
+                    if properties.contains("keep:attribute") {
+                        assert!(saved.contains("<w:noProof/>"));
+                        assert!(saved.contains("<keep:metadata/>"));
+                        assert!(saved.contains("keep:attribute=\"source\""));
+                    }
+                    assert!(context.take_warnings().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smart_art_unsupported_run_edits_warn_and_save_supported_properties() {
+        let source = r#"<w:r xmlns:keep="urn:keep"><w:rPr><w:noProof/><keep:metadata/></w:rPr><w:drawing/></w:r>"#;
+        let mut run = smart_art_run(source, true);
+        run.formatting = Some(TextFormatting {
+            hidden: Some(true),
+            modern_effects: Some(crate::formatting::TextModernEffects {
+                glow: Some(crate::formatting::TextGlow {
+                    radius: Some(2.0),
+                    color: Some("FF0000".to_owned()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut context = context();
+        let saved = serialize_run(&run, &mut context).unwrap();
+        assert!(saved.contains("<w:vanish/>"));
+        assert!(saved.contains("<w:drawing/>"));
+        assert!(saved.contains("<keep:metadata/>"));
+        assert_eq!(
+            context.take_warnings(),
+            [
+                "Drawing run formatting changes cannot be represented exactly; preserving unsupported source properties and saving supported run changes."
+            ]
+        );
+    }
+
+    #[test]
+    fn smart_art_run_edits_splice_only_changed_properties() {
+        let properties = "<w:rPr keep:attribute = 'source'>\n<w:noProof /> <w:position w:val = '20'></w:position><!--keep--><keep:metadata value = 'raw' />\n</w:rPr>";
+        let source = format!(r#"<w:r xmlns:keep="urn:keep">{properties}<w:drawing/></w:r>"#);
+        for opaque in [false, true] {
+            let run = smart_art_run(&source, opaque);
+            assert_eq!(serialize_run(&run, &mut context()).unwrap(), source);
+            let mut hidden = run.clone();
+            hidden.formatting.as_mut().unwrap().hidden = Some(true);
+            let saved = serialize_run(&hidden, &mut context()).unwrap();
+            assert_eq!(
+                saved,
+                source.replace("<w:position", "<w:vanish/><w:position")
+            );
+            let mut visible = smart_art_run(&saved, opaque);
+            visible.formatting.as_mut().unwrap().hidden = None;
+            assert_eq!(serialize_run(&visible, &mut context()).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn smart_art_model_serializer_replays_the_graphic_frame_and_run() {
+        use crate::paragraph::{DrawingContext, parse_run_composed};
+        use crate::relationships::{Relationship, RelationshipMap};
+        use crate::serializer::canonical_xml_events;
+        use crate::smart_art::SmartArtContext;
+
+        for anchored in [false, true] {
+            for preview in ["cached", "basic", "unsupported"] {
+                let container = if anchored { "anchor" } else { "inline" };
+                let drawing = format!(
+                    r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:{container} distL="114300"><wp:extent cx="5486400" cy="3200400"/><wp:effectExtent l="19050" t="0" r="0" b="38100"/><wp:docPr id="71" name="Diagram &amp; process"><a:extLst><a:ext uri="urn:test"><keep:metadata xmlns:keep="urn:keep"/></a:ext></a:extLst></wp:docPr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rId10" r:lo="rId11" r:qs="rId12" r:cs="rId13"/><a:extLst><a:ext uri="urn:keep"/></a:extLst></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+                );
+                let drawing = if anchored {
+                    drawing
+                        .replace("w:drawing", "x:drawing")
+                        .replace("xmlns:w=", "xmlns:x=")
+                } else {
+                    drawing
+                };
+                let run_name = if anchored {
+                    "x:r xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""
+                } else {
+                    "w:r"
+                };
+                let closing_name = if anchored { "x:r" } else { "w:r" };
+                let source = format!(
+                    r#"<{run_name} w:rsidR="0099AABB"><w:rPr><w:noProof/><w:lang w:val="en-US"/></w:rPr>{drawing}</{closing_name}>"#
+                );
+                let relationships = RelationshipMap::from_iter(
+                    [
+                        ("rId10", "diagramData", "diagrams/data1.xml"),
+                        ("rId11", "diagramLayout", "diagrams/layout1.xml"),
+                    ]
+                    .map(|(id, kind, target)| {
+                        (
+                            id.to_owned(),
+                            Relationship {
+                                id: id.to_owned(),
+                                relationship_type: kind.to_owned(),
+                                target: target.to_owned(),
+                                target_mode: None,
+                            },
+                        )
+                    }),
+                );
+                let mut smart_art = SmartArtContext::default();
+                if preview != "unsupported" {
+                    smart_art.parts.insert("word/diagrams/data1.xml".to_owned(),
+                        br#"<dgm:dataModel><dgm:ptLst><dgm:pt modelId="0" type="doc"/><dgm:pt modelId="1"><a:t>Plan</a:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#.to_vec());
+                    smart_art.parts.insert(
+                        "word/diagrams/layout1.xml".to_owned(),
+                        b"<layout name=\"Basic Process\"/>".to_vec(),
+                    );
+                }
+                if preview == "cached" {
+                    smart_art.parts.insert("word/diagrams/drawing1.xml".to_owned(),
+                        br#"<dsp:drawing><dsp:spTree><dsp:sp><dsp:nvSpPr><dsp:cNvPr id="2" name="Plan"/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1600000" cy="960000"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom></dsp:spPr><dsp:txBody><a:p><a:r><a:t>Plan</a:t></a:r></a:p></dsp:txBody></dsp:sp></dsp:spTree></dsp:drawing>"#.to_vec());
+                }
+                let media = Default::default();
+                let charts = Default::default();
+                let mut drawing_context = DrawingContext {
+                    media: &media,
+                    charts: &charts,
+                    smart_art: &mut smart_art,
+                };
+                let limits = ParseLimits::default();
+                let mut budget = ParseBudget::new(&limits);
+                let run = parse_run_composed(
+                    &drawing_root(&source),
+                    Some(&relationships),
+                    None,
+                    None,
+                    None,
+                    &mut budget,
+                    Some(&mut drawing_context),
+                    false,
+                )
+                .unwrap();
+                if preview != "unsupported" {
+                    let [RunContent::Shape { shape, .. }] = run.content.as_slice() else {
+                        panic!("SmartArt preview missing")
+                    };
+                    assert!(!shape.children.as_ref().unwrap().is_empty());
+                    assert!(shape.drawing_xml.is_none());
+                    assert!(shape.drawing_run_xml.is_some());
+                    assert_eq!(
+                        canonical_xml_events(
+                            &serialize_shape_content(shape, &mut context()).unwrap(),
+                            true
+                        )
+                        .unwrap(),
+                        canonical_xml_events(&drawing, true).unwrap()
+                    );
+                }
+                let written = serialize_run(&run, &mut context()).unwrap();
+                assert_eq!(
+                    canonical_xml_events(&written, true).unwrap(),
+                    canonical_xml_events(&source, true).unwrap(),
+                    "{preview}: {written}"
+                );
+                assert!(!written.contains("wps:wsp"));
+                let mut with_break = context();
+                with_break.enter_paragraph(true);
+                let written = serialize_run(&run, &mut with_break).unwrap();
+                let mut expected = source.clone();
+                let root = super::super::splice::root_tag(&source).unwrap();
+                expected.insert_str(root.range.end, "<w:lastRenderedPageBreak/>");
+                assert_eq!(
+                    canonical_xml_events(&written, true).unwrap(),
+                    canonical_xml_events(&expected, true).unwrap()
+                );
+            }
+        }
     }
 
     #[test]
