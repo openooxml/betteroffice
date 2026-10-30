@@ -246,6 +246,23 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('prime_save_seed_states caches within the same budgets as wasm', () => {
+    const expected = new wasm.EditSession(62);
+    const actual = new native.EditSession(62);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      for (const [paragraphs, inflated] of [[0, 0], [1, 0], [1_000, 64 * 1024 * 1024]]) {
+        expect(actual.prime_save_seed_states(paragraphs, inflated))
+          .toBe(expected.prime_save_seed_states(paragraphs, inflated));
+      }
+      expect(read(actual)).toEqual(read(expected));
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test('RunInheritance resolves the same attributes and formatting', () => {
     const expectedSession = new wasm.EditSession(71);
     const actualSession = new native.EditSession(71);
