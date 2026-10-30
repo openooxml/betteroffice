@@ -319,7 +319,7 @@ describe("last leave, disconnect and hold", () => {
 
   for (const save of ["autosave", "explicit save"] as const) {
     test(`${save} after a failed exit save unlocks and closes the held session`, async () => {
-      const h = makeHarness();
+      const h = makeHarness({ reconnectGraceMs: 0 });
       addToken(h, "tok-a", "user-a");
       const fetch = h.host.fetch.bind(h.host);
       let failed = false;
