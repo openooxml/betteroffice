@@ -1,6 +1,6 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { StrictMode } from 'react';
@@ -49,6 +49,7 @@ const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-libr
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1]);
 let paints: PeerlessConfirmedFrame[];
+let frozenCanvases: HTMLCanvasElement[];
 let paintedViews: PeerlessViewSnapshot[];
 let suppliedMedia: PresentationCommandFrame['media'][];
 let duringPaint: (() => void) | undefined;
@@ -348,6 +349,7 @@ beforeEach(() => {
     });
   }
   paints = [];
+  frozenCanvases = [];
   paintedViews = [];
   suppliedMedia = [];
   duringPaint = undefined;
@@ -365,6 +367,7 @@ beforeEach(() => {
   const frame = spyOn(peerlessPainterFactories, 'frame').mockImplementation((canvas, options) => {
     const painter = createCommandFramePainter(canvas, options);
     return { ...painter,
+      freeze() { frozenCanvases.push(canvas); painter.freeze(); },
       paintFrame(value: PeerlessConfirmedFrame, view: PeerlessViewSnapshot, media?: PresentationCommandFrame['media']) {
         duringPaint?.();
         painter.paintFrame(value, view, media);
@@ -2656,6 +2659,8 @@ describe('peerless caret blink', () => {
 });
 
 describe('peerless stage fit', () => {
+  beforeAll(async () => { await pptxPeerlessEditorLoader.load(); });
+
   let stageSize: { width: number; height: number };
   let beforeChromeWidth: number | undefined;
   const observers = new Map<ResizeObserver, { callback: ResizeObserverCallback; target: Element }>();
@@ -2954,6 +2959,120 @@ describe('peerless stage fit', () => {
       expect(images.requests.map(({ close }) => close.mock.calls.length)).toEqual(Array<number>(27).fill(1));
     } finally {
       value.view.unmount();
+      await flushStage(images.releaseAll);
+    }
+  });
+
+  test('strip_releases_evicted_images_and_retains_pixels_after_paint_and_update', async () => {
+    const images = heldBitmaps();
+    const value = session(true);
+    const base = value.client.state.frame;
+    const frames = Array.from({ length: 31 }, (_, index) => ({ ...pictureFrame(base, `image-${index}`),
+      slideId: index ? `slide-${index}` : base.slideId, slideIndex: index,
+      media: [{ assetId: `image-${index}`, bytes: new Uint8Array([index + 1]).buffer }] }));
+    value.client.state.frame = frames[0];
+    value.client.state.slides = frames.map((frame) => ({ id: frame.slideId, index: frame.slideIndex,
+      name: null, layoutPartPath: null }));
+    value.client.thumbnail.mockImplementation((slideId) => {
+      const frame = frames.find((frame) => frame.slideId === slideId)!;
+      return Promise.resolve({ session: value.client.state.session, incarnation: value.client.state.incarnation,
+        epoch: value.client.state.epoch, slideId, slideRevision: frame.slideRevision, status: 'frame', frame });
+    });
+    const view = render(<PptxEditor fonts={[]} file={file} />);
+    try {
+      await flushStage(value.admit);
+      expect(images.decode).toHaveBeenCalledTimes(1);
+      for (let index = 0; index < frames.length; index += 1) await flushStage(images.releaseAll);
+      expect(images.decode).toHaveBeenCalledTimes(31);
+      const stage = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
+      const previews = [...view.container.querySelectorAll<HTMLCanvasElement>('aside canvas')];
+      expect(previews).toHaveLength(31);
+      const rasters = previews.map(drawnRaster);
+      for (const [index, canvas] of previews.entries()) {
+        expect(frozenCanvases.filter((entry) => entry === canvas)).toHaveLength(1);
+        expectIntact(canvas, rasters[index], calls(canvas).length);
+        expect(rasters[index].width).toBeGreaterThan(0);
+        expect(rasterTiles(rasters[index]).some((tile) => tile.width > 0 && calls(tile).some((entry) =>
+          entry.kind === 'drawImage' && entry.args[0] === images.requests[index].source))).toBe(true);
+      }
+      expect(images.requests[0].close).not.toHaveBeenCalled();
+      expect(images.requests.slice(1, 6).map(({ close }) => close.mock.calls.length)).toEqual([1, 1, 1, 1, 1]);
+      expect(images.requests.filter(({ close }) => close.mock.calls.length === 0)).toHaveLength(26);
+      await resize(280, 175);
+      expect(images.decode).toHaveBeenCalledTimes(31);
+      expect(images.requests[0].close).not.toHaveBeenCalled();
+      expect(rasterTiles(drawnRaster(stage)).some((tile) => calls(tile).some((entry) =>
+        entry.kind === 'drawImage' && entry.args[0] === images.requests[0].source))).toBe(true);
+      frames[1] = { ...pictureFrame(base, 'updated-image'), slideId: frames[1].slideId, slideIndex: 1, slideRevision: 1 };
+      await flushStage(() => {
+        for (const listener of value.client.listeners) listener({ ...value.client.state,
+          frame: undefined, dirtySlideIds: [frames[1].slideId] });
+      });
+      expect(images.decode).toHaveBeenCalledTimes(32);
+      expect(frozenCanvases.filter((entry) => entry === previews[1])).toHaveLength(1);
+      await flushStage(images.releaseAll);
+      expect(view.container.querySelectorAll('aside canvas')[1]).toBe(previews[1]);
+      expect(frozenCanvases.filter((entry) => entry === previews[1])).toHaveLength(2);
+      const updated = drawnRaster(previews[1]);
+      expect(updated.width).toBeGreaterThan(0);
+      expect(rasterTiles(updated).some((tile) => calls(tile).some((entry) =>
+        entry.kind === 'drawImage' && entry.args[0] === images.requests[31].source))).toBe(true);
+      expect(images.requests.filter(({ close }) => close.mock.calls.length === 0)).toHaveLength(26);
+      await flushStage(() => { view.unmount(); });
+      expect(images.requests.map(({ close }) => close.mock.calls.length)).toEqual(Array<number>(32).fill(1));
+    } finally {
+      view.unmount();
+      await flushStage(images.releaseAll);
+    }
+  });
+
+  test('strip_freezes_refits_and_resumed_paints_only_after_success', async () => {
+    const images = heldBitmaps();
+    const client = new FakeCommandClient();
+    const base = client.state.frame;
+    client.state.frame = pictureFrame(base, 'preview-image');
+    const store = createPeerlessViewStore(client, { paintFrame() {}, paintEcho() {}, restoreLine() {} });
+    const media = createCommandFrameImages();
+    const run = { client, store, images: media, current: true, failure: undefined } as unknown as PeerlessPresentation;
+    let fit = { scale: 0.25, dpr: 2, generation: 1 };
+    let valid = true;
+    const strip = () => <PeerlessSlideStrip run={run} previewFit={() => fit}
+      current={(token) => valid && token.generation === fit.generation} onNavigate={() => {}} />;
+    const view = render(strip());
+    try {
+      await flushStage();
+      const canvas = view.container.querySelector('canvas')!;
+      expect(frozenCanvases).toEqual([]);
+      await flushStage(images.releaseAll);
+      expect(frozenCanvases).toEqual([canvas]);
+      let raster = drawnRaster(canvas);
+      for (const next of [{ scale: 0.125, dpr: 2 }, { scale: 0.125, dpr: 3 }]) {
+        const count = frozenCanvases.length;
+        await flushStage(() => { fit = { ...next, generation: fit.generation + 1 }; view.rerender(strip()); });
+        expect(frozenCanvases).toHaveLength(count + 1);
+        raster = drawnRaster(canvas);
+        expect([canvas.width, canvas.height]).toEqual([Math.ceil(960 * fit.scale * fit.dpr), Math.ceil(540 * fit.scale * fit.dpr)]);
+        expect(rasterTiles(raster).some((tile) => calls(tile).some((entry) =>
+          entry.kind === 'drawImage' && entry.args[0] === images.requests[0].source))).toBe(true);
+      }
+      expect(images.decode).toHaveBeenCalledTimes(1);
+      const count = frozenCanvases.length;
+      await flushStage(() => { client.ack(0, pictureFrame(base, 'resumed-image')); });
+      expect(images.decode).toHaveBeenCalledTimes(2);
+      await flushStage(() => { valid = false; images.release(1); });
+      expect(frozenCanvases).toHaveLength(count);
+      expect(drawnRaster(canvas)).toBe(raster);
+      await flushStage(() => {
+        valid = true; fit = { ...fit, generation: fit.generation + 1 }; view.rerender(strip());
+      });
+      expect(frozenCanvases).toHaveLength(count + 1);
+      expect(rasterTiles(drawnRaster(canvas)).some((tile) => calls(tile).some((entry) =>
+        entry.kind === 'drawImage' && entry.args[0] === images.requests[1].source))).toBe(true);
+      expect(images.decode).toHaveBeenCalledTimes(2);
+      await flushStage(() => { view.unmount(); store.dispose(); media.dispose(); });
+      expect(images.requests.map(({ close }) => close.mock.calls.length)).toEqual([1, 1]);
+    } finally {
+      view.unmount(); store.dispose(); media.dispose();
       await flushStage(images.releaseAll);
     }
   });

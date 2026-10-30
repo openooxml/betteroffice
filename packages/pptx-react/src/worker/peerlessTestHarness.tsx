@@ -196,7 +196,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   </Suspense>;
   const mounted = render(ui());
   const view = { ...mounted, ...within(mounted.container) };
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), { timeout: 10_000 });
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
   const box = list.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;

@@ -159,8 +159,10 @@ describe("apps/wopi/Dockerfile", () => {
     expect(files.size).toBeGreaterThan(50);
     expect(files.has("shared/office-session/types.ts")).toBe(true);
     expect(files.has("shared/media.ts")).toBe(true);
+    const manifests = copies(runtime).some((entry) => entry.source === "/manifests");
     for (const file of files) {
-      const covered = prefixes.some((prefix) => file === prefix || file.startsWith(`${prefix}/`));
+      const covered = prefixes.some((prefix) => file === prefix || file.startsWith(`${prefix}/`))
+        || (manifests && /^(apps|packages|bindings|crates)\/.+\/package\.json$/.test(file));
       expect(covered).toBe(true);
     }
     const pkg = JSON.parse(readFileSync(join(repoRoot, "apps/wopi/package.json"), "utf8")) as {

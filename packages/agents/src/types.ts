@@ -95,6 +95,12 @@ export interface DocumentOptions {
   renderer?: DocumentRenderer;
 }
 
+export function unknownMatchError(value: string, example: string, shape: RegExp, expiredMessage: string): DocumentToolError {
+  return new DocumentToolError('UNKNOWN_MATCH', typeof value === 'string' && shape.test(value)
+    ? expiredMessage
+    : `match takes a match ID from office_grep (such as ${example}), not the text to replace. Grep for the text, then copy the match field of the occurrence.`);
+}
+
 export class DocumentToolError extends Error {
   constructor(
     readonly code: string,

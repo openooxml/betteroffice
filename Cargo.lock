@@ -138,6 +138,7 @@ name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
+ "betteroffice-docx-layout",
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-opc",
@@ -263,6 +264,7 @@ name = "betteroffice-pptx-engine"
 version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
@@ -982,6 +984,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "wuff",
  "zstd",
 ]
 

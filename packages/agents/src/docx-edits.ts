@@ -527,6 +527,94 @@ export function commentRanges(session: YrsSession, id: string) {
   return ranges;
 }
 
+const COMMENT_MARKERS = new Set(['bookmarkStart', 'bookmarkEnd', 'commentRangeStart', 'commentRangeEnd', 'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd']);
+
+function guardedText(node: unknown): string {
+  if (Array.isArray(node)) return node.map(guardedText).join('');
+  if (!node || typeof node !== 'object') return '';
+  const item = node as { type?: string; text?: string };
+  if (item.type === 'text') return item.text ?? '';
+  const record = node as Record<string, unknown>;
+  let text = '';
+  for (const key of ['structuredChildren', 'structuredResult', 'content', 'children', 'fieldResult', 'inline']) {
+    if (key === 'children' && record.structuredChildren !== undefined) continue;
+    if (key === 'content' && record.structuredResult !== undefined) continue;
+    if (key === 'fieldResult' && record.structuredResult !== undefined) continue;
+    text += guardedText(record[key]);
+  }
+  return text;
+}
+
+export function replaceCommentText(session: YrsSession, id: string, find: string, replace: string): number {
+  plainText(find);
+  plainText(replace);
+  if (!find || /[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(find) || /[\t\r\n\u000b\u000c\ufffc\ufffe\uffff]/.test(replace)) {
+    throw new DocumentToolError('INVALID_ARGUMENT', 'Comment find and replace are one line of plain text: no tabs, line breaks, object placeholders or noncharacters.');
+  }
+  const comment = session.listComments().find(entry => entry.id === id);
+  if (!comment) throw new DocumentToolError('UNKNOWN_REF', "Unknown comment ID. List office_outline with story 'comments'.");
+  const body: Array<Record<string, unknown>> = typeof comment.body === 'string'
+    ? [{ type: 'paragraph', formatting: {}, content: comment.body ? [{ type: 'run', formatting: {}, content: [{ type: 'text', text: comment.body }] }] : [] }]
+    : Array.isArray(comment.body) ? structuredClone(comment.body) as Array<Record<string, unknown>> : [];
+  if (body.some(paragraph => paragraph?.type !== 'paragraph')) {
+    throw new DocumentToolError('UNSUPPORTED_TARGET', 'This comment holds more than plain paragraphs, which replace_comment_text leaves unchanged.');
+  }
+  interface Segment { part: { type?: string; text?: string }; start: number; end: number }
+  const plans: Array<{ paragraph: Record<string, unknown>; occurrences: Array<[number, number]>; segments: Segment[] }> = [];
+  let replacements = 0;
+  for (const paragraph of body) {
+    if (paragraph?.type !== 'paragraph' || !Array.isArray(paragraph.content)) continue;
+    let text = '';
+    const segments: Segment[] = [];
+    const guarded: Array<[number, number]> = [];
+    const barriers = new Set<number>();
+    for (const item of paragraph.content as Array<Record<string, unknown>>) {
+      if (item?.type === 'run' && Array.isArray(item.content)) {
+        for (const part of item.content as Array<{ type?: string; text?: string }>) {
+          if (part?.type === 'text' && typeof part.text === 'string') {
+            segments.push({ part, start: text.length, end: text.length + part.text.length });
+            text += part.text;
+          } else barriers.add(text.length);
+        }
+      } else if (item && COMMENT_MARKERS.has(item.type as string)) barriers.add(text.length);
+      else {
+        const start = text.length;
+        text += guardedText(item);
+        guarded.push([start, text.length]);
+        barriers.add(start);
+        barriers.add(text.length);
+      }
+    }
+    const occurrences: Array<[number, number]> = [];
+    for (let at = text.indexOf(find); at >= 0; at = text.indexOf(find, at + find.length)) {
+      const end = at + find.length;
+      if (guarded.some(([start, stop]) => start < end && at < stop) || [...barriers].some(point => at < point && point < end)) {
+        throw new DocumentToolError('UNSUPPORTED_TARGET', 'The text crosses a field, hyperlink or other non-run content in this comment, which replace_comment_text leaves unchanged.');
+      }
+      occurrences.push([at, end]);
+    }
+    if (occurrences.length) { plans.push({ paragraph, occurrences, segments }); replacements += occurrences.length; }
+  }
+  if (!replacements) {
+    const excerpt = commentText(comment.body).replace(/\n$/, '').slice(0, 80);
+    throw new DocumentToolError('NO_MATCH', `Comment ${id} does not contain ${JSON.stringify(find.slice(0, 80))}. Comment text begins ${JSON.stringify(excerpt)}.`);
+  }
+  for (const { occurrences, segments } of plans) {
+    for (const [start, end] of [...occurrences].reverse()) {
+      const touched = segments.filter(segment => segment.start < end && start < segment.end);
+      const first = touched[0];
+      const last = touched[touched.length - 1];
+      for (const segment of touched) {
+        const prefix = segment === first ? (segment.part.text ?? '').slice(0, start - segment.start) : '';
+        const suffix = segment === last ? (segment.part.text ?? '').slice(end - segment.start) : '';
+        segment.part.text = prefix + (segment === first ? replace : '') + suffix;
+      }
+    }
+  }
+  session.updateComment(id, { body });
+  return replacements;
+}
+
 export function commentText(body: unknown): string {
   if (typeof body === 'string') return body;
   if (Array.isArray(body)) return body.map(commentText).join('');
