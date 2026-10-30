@@ -1,7 +1,5 @@
-import { openWorkbookSession, type WorkbookHandle, type WorkbookSession } from '@betteroffice/xlsx';
-import {
-  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, type WorkbookEditPeer,
-} from '@betteroffice/xlsx/worker';
+import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
+import { failWorkbookEditPeer, type WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { XlsxInThreadEditorProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
@@ -12,14 +10,10 @@ import {
   createWorkerEditorApi, type WorkerEditorApiBridge, type WorkerEditorSessionAccess,
   type XlsxWorkerEditorApi, XlsxWorkerEditorCollaborationError,
 } from './createWorkerEditorApi';
+import { editableWorkbookSessionBackend } from './workbookSessionBackend';
 export { asError } from './asError';
 export { XlsxWorkerSessionFailedError } from './workerEditorErrors';
-
-export const editableWorkbookSessionBackend = {
-  open: openWorkbookSession,
-  hydrate: hydratePeer,
-  attach: createWorkbookEditPeer,
-};
+export { editableWorkbookSessionBackend } from './workbookSessionBackend';
 
 export type EditableSessionWorkbookProps = Omit<XlsxInThreadEditorProps, 'file' | 'onReady' | 'collaboration' | 'experimentalWorkerOpen'> & {
   file?: Uint8Array;
