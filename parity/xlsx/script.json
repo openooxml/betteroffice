@@ -126,19 +126,18 @@
       }
     },
     { "op": "save", "args": {} },
-    { "op": "sheetInfo", "args": {}, "targets": ["ts", "rust"] },
-    { "op": "calculationStatus", "args": {}, "targets": ["ts", "rust"] },
-    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 }, "targets": ["ts", "rust"] },
+    { "op": "sheetInfo", "args": {} },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
     {
       "op": "open",
-      "args": { "fixture": "packages/xlsx/test-fixtures/defined-names.xlsx" },
-      "targets": ["ts", "rust"]
+      "args": { "fixture": "packages/xlsx/test-fixtures/defined-names.xlsx" }
     },
-    { "op": "listDefinedNames", "args": { "limit": 2 }, "targets": ["ts", "rust"] },
-    { "op": "listDefinedNames", "args": { "offset": 2 }, "targets": ["ts", "rust"] },
-    { "op": "listDefinedNames", "args": { "scope": null }, "targets": ["ts", "rust"] },
-    { "op": "listDefinedNames", "args": { "scope": 0 }, "targets": ["ts", "rust"] },
-    { "op": "conditionalFormats", "args": { "sheet": 0 }, "targets": ["ts", "rust"] },
+    { "op": "listDefinedNames", "args": { "limit": 2 } },
+    { "op": "listDefinedNames", "args": { "offset": 2 } },
+    { "op": "listDefinedNames", "args": { "scope": null } },
+    { "op": "listDefinedNames", "args": { "scope": 0 } },
+    { "op": "conditionalFormats", "args": { "sheet": 0 } },
     {
       "op": "applyOps",
       "args": {
@@ -176,8 +175,15 @@
       "targets": ["ts", "rust"]
     },
     { "op": "cell", "args": { "sheet": 0, "row": 0, "col": 2 }, "targets": ["ts", "rust"] },
-    { "op": "cell", "args": { "sheet": 0, "row": 1, "col": 2 }, "targets": ["ts", "rust"] },
-    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 }, "targets": ["ts", "rust"] },
-    { "op": "calculationStatus", "args": {}, "targets": ["ts", "rust"] }
+    { "op": "cell", "args": { "sheet": 0, "row": 1, "col": 2 } },
+    { "op": "cell", "args": { "sheet": 0, "row": 2, "col": 2 } },
+    { "op": "calculationStatus", "args": {} },
+    { "op": "open", "args": { "fixture": "packages/xlsx/test-fixtures/charts.xlsx" } },
+    { "op": "searchText", "args": { "query": "REVENUE" } },
+    { "op": "searchText", "args": { "query": "revenue", "options": { "caseSensitive": true } } },
+    { "op": "searchText", "args": { "query": "Q", "options": { "limit": 2 } } },
+    { "op": "rangeCells", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "selectionFormatting", "args": { "sheet": 0, "range": "A1:B2" } },
+    { "op": "charts", "args": { "sheet": 0 } }
   ]
 }

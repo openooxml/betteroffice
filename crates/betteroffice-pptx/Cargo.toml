@@ -25,3 +25,6 @@ pptx-render.workspace = true
 [dev-dependencies]
 ooxml-opc.workspace = true
 png = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"

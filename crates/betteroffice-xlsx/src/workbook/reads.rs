@@ -1,6 +1,69 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CellRef, DifferentialFormat, Error, Result, SheetId, Workbook};
+use crate::{
+    CellEdit, CellRange, CellRef, DifferentialFormat, Error, Result, SheetId, SheetInfo, Viewport,
+    Workbook,
+};
+
+/// Sheet metadata shared by binding payloads.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetInfoWire {
+    sheet_ids: Vec<String>,
+    sheet_names: Vec<String>,
+    active_sheet: u32,
+    content_width: f32,
+    content_height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
+    auto_filter: Option<String>,
+}
+
+impl SheetInfoWire {
+    /// Combines typed sheet metadata with its auto-filter.
+    pub fn new(info: SheetInfo, auto_filter: Option<String>) -> Self {
+        Self {
+            sheet_ids: info.sheet_ids,
+            sheet_names: info.sheet_names,
+            active_sheet: info.active_sheet.0,
+            content_width: info.content_width,
+            content_height: info.content_height,
+            frozen_rows: info.frozen_rows,
+            frozen_cols: info.frozen_cols,
+            initial_scroll_x: info.initial_scroll_x,
+            initial_scroll_y: info.initial_scroll_y,
+            auto_filter,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellEditWire {
+    a1: String,
+    input: String,
+    is_formula: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_array_formula: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextSearchMatchWire {
+    sheet: u32,
+    sheet_id: String,
+    sheet_name: String,
+    row: u32,
+    col: u32,
+    a1: String,
+    text: String,
+}
+
+fn read_json(value: &impl Serialize) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| Error::InvalidOperation(error.to_string()))
+}
 
 /// Filters and pagination for [`Workbook::list_defined_names`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +155,103 @@ pub struct CalculationStatus {
 }
 
 impl Workbook {
+    /// Serializes metadata for the active sheet, including its auto-filter.
+    pub fn sheet_info_json(&self) -> Result<String> {
+        self.sheet_info_wire_json(self.sheet_info()?)
+    }
+
+    /// Serializes metadata for a sheet without changing the active sheet.
+    pub fn sheet_info_for_json(&self, sheet: SheetId) -> Result<String> {
+        self.sheet_info_wire_json(self.sheet_info_for(sheet)?)
+    }
+
+    fn sheet_info_wire_json(&self, info: SheetInfo) -> Result<String> {
+        let auto_filter = self.auto_filter(info.active_sheet)?;
+        read_json(&SheetInfoWire::new(info, auto_filter))
+    }
+
+    /// Serializes editable cell input with array-formula membership.
+    pub fn cell_json(&self, sheet: SheetId, cell: CellRef) -> Result<String> {
+        read_json(&self.cell_edit_wire(sheet, self.cell(sheet, cell)?)?)
+    }
+
+    fn cell_edit_wire(&self, sheet: SheetId, cell: CellEdit) -> Result<CellEditWire> {
+        Ok(CellEditWire {
+            a1: cell.cell.to_a1(),
+            is_array_formula: self.is_array_formula(sheet, cell.cell)?.then_some(true),
+            input: cell.input,
+            is_formula: cell.is_formula,
+        })
+    }
+
+    /// Serializes row-major editable cell inputs as a JSON array.
+    pub fn range_cells_json(&self, sheet: SheetId, range: CellRange) -> Result<String> {
+        let cells = self
+            .range_cells(sheet, range)?
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|cell| self.cell_edit_wire(sheet, cell))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        read_json(&cells)
+    }
+
+    /// Serializes formatted-text matches with sheet identities.
+    pub fn search_text_json(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<u32>,
+    ) -> Result<String> {
+        let info = self.sheet_info()?;
+        let matches = self
+            .search_text(query, case_sensitive, limit.map(|limit| limit as usize))
+            .into_iter()
+            .map(|result| {
+                let sheet = result.address.sheet.0;
+                TextSearchMatchWire {
+                    sheet,
+                    sheet_id: info.sheet_ids[sheet as usize].clone(),
+                    sheet_name: info.sheet_names[sheet as usize].clone(),
+                    row: result.address.cell.row,
+                    col: result.address.cell.col,
+                    a1: result.address.cell.to_a1(),
+                    text: result.text,
+                }
+            })
+            .collect::<Vec<_>>();
+        read_json(&matches)
+    }
+
+    /// Serializes uniform formatting properties for a selection.
+    pub fn selection_formatting_json(&self, sheet: SheetId, range: CellRange) -> Result<String> {
+        read_json(&self.selection_formatting(sheet, range)?)
+    }
+
+    /// Serializes overlapping merged ranges as a JSON array.
+    pub fn merged_range_list_json(&self, sheet: SheetId, range: CellRange) -> Result<String> {
+        read_json(&self.merged_ranges(sheet, range)?)
+    }
+
+    /// Serializes merged ranges visible in a JSON viewport as an array.
+    pub fn visible_merged_ranges_json(&self, sheet: SheetId, viewport: &str) -> Result<String> {
+        let viewport: Viewport = serde_json::from_str(viewport)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        read_json(&self.visible_merged_ranges(sheet, &viewport)?)
+    }
+
+    /// Serializes chart metadata for a sheet as a JSON array.
+    pub fn charts_json(&self, sheet: SheetId) -> Result<String> {
+        read_json(&self.charts(sheet)?)
+    }
+
+    /// Serializes limits reached by the last recalculation.
+    pub fn calculation_status_json(&self) -> Result<String> {
+        read_json(&self.calculation_status())
+    }
+
     /// Returns the sheet's auto-filter range in A1 notation, or None when absent.
     pub fn auto_filter(&self, sheet: SheetId) -> Result<Option<String>> {
         Ok(self

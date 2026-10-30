@@ -254,5 +254,5 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
 }
 
 fn js_error(error: pptx_engine::EngineError) -> JsValue {
-    JsValue::from_str(&error.message)
+    pptx_edit::wasm::to_js(error)
 }

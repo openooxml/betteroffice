@@ -487,18 +487,52 @@ fn rejects_a_font_over_the_size_budget() {
     assert_eq!(error.to_string(), "font exceeds 33554432 bytes");
 }
 
+fn distinct_face(index: u32) -> Vec<u8> {
+    let mut bytes = SMALL_FONT.to_vec();
+    bytes.extend_from_slice(&index.to_le_bytes());
+    bytes
+}
+
 #[test]
 fn rejects_more_faces_than_the_budget_allows() {
     let mut document = document();
     for index in 0..256 {
         document
-            .register_font(&format!("Family{index}"), false, false, SMALL_FONT)
+            .register_font(
+                &format!("Family{index}"),
+                false,
+                false,
+                &distinct_face(index),
+            )
             .unwrap_or_else(|error| panic!("face {index} was refused: {error}"));
     }
     let error = document
-        .register_font("OneTooMany", false, false, SMALL_FONT)
+        .register_font("OneTooMany", false, false, &distinct_face(256))
         .unwrap_err();
     assert_eq!(error.to_string(), "more than 256 font faces");
+    document
+        .register_font("Alias", true, false, &distinct_face(9))
+        .expect("a face already held is not a new one");
+}
+
+#[test]
+fn one_face_under_many_families_is_held_once() {
+    let mut document = document();
+    document
+        .register_font("Carlito", false, false, CARLITO)
+        .unwrap();
+    let (_, allocated) = allocated_by(|| {
+        for index in 0..300 {
+            document
+                .register_font(&format!("Alias{index}"), index % 2 == 1, false, CARLITO)
+                .unwrap_or_else(|error| panic!("alias {index} was refused: {error}"));
+        }
+    });
+    assert!(
+        allocated < CARLITO.len() as u64,
+        "300 aliases allocated {allocated} bytes for a {} byte face",
+        CARLITO.len()
+    );
 }
 
 #[test]
