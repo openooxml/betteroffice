@@ -177,6 +177,16 @@ describe("loadConfig", () => {
     ).toThrow(/WOPI_HOSTS/);
   });
 
+  test("parses journal dir, instance id and max editors", () => {
+    const config = loadConfig(env({ WOPI_JOURNAL_DIR: "/tmp/journal", WOPI_INSTANCE_ID: "inst-1", WOPI_MAX_EDITORS_PER_FILE: "7" }));
+    expect(config.journalDir).toBe("/tmp/journal");
+    expect(config.instanceId).toBe("inst-1");
+    expect(config.maxEditorsPerFile).toBe(7);
+    expect(loadConfig(env()).maxEditorsPerFile).toBe(50);
+    expect(loadConfig(env()).journalDir).toBeUndefined();
+    expect(() => loadConfig(env({ WOPI_MAX_EDITORS_PER_FILE: "0" }))).toThrow(/WOPI_MAX_EDITORS_PER_FILE/);
+  });
+
   test("requires at least one valid host entry", () => {
     expect(() => loadConfig(env({ WOPI_HOSTS: undefined }))).toThrow(/WOPI_HOSTS/);
     expect(() => loadConfig(env({ WOPI_HOSTS: "not json" }))).toThrow(/WOPI_HOSTS/);
