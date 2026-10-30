@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -26,6 +26,88 @@ beforeAll(async () => {
 });
 
 describe("FileJournal", () => {
+  test("creates a private journal directory and file with a permissive umask", () => {
+    const root = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const dir = join(root, "private");
+    const journal = new FileJournal(dir, "file-key");
+    const mask = process.umask(0o022);
+    try {
+      journal.begin(new Uint8Array([1, 2, 3]), "1");
+      if (process.platform !== "win32") {
+        expect(statSync(dir).mode & 0o777).toBe(0o700);
+        expect(statSync(journal.path).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      process.umask(mask);
+      journal.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const operation of ["read", "begin"] as const) {
+    test(`tightens an existing journal directory and file before ${operation}`, () => {
+      const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+      const journal = new FileJournal(dir, "file-key");
+      const source = new Uint8Array([1, 2, 3]);
+      const mask = process.umask(0o022);
+      let reopened: FileJournal | null = null;
+      try {
+        journal.begin(source, "1");
+        journal.close();
+        chmodSync(dir, 0o755);
+        chmodSync(journal.path, 0o644);
+        reopened = new FileJournal(dir, "file-key");
+        if (operation === "read") expect(reopened.read()?.source).toEqual(source);
+        else reopened.begin(source, "1");
+        if (process.platform !== "win32") {
+          expect(statSync(dir).mode & 0o777).toBe(0o700);
+          expect(statSync(journal.path).mode & 0o777).toBe(0o600);
+        }
+      } finally {
+        process.umask(mask);
+        journal.close();
+        reopened?.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test.skipIf(process.platform === "win32")("refuses a symlinked journal file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const journal = new FileJournal(dir, "target-key");
+    const linked = new FileJournal(dir, "linked-key");
+    try {
+      journal.begin(new Uint8Array([1, 2, 3]), "1");
+      journal.close();
+      symlinkSync(journal.path, linked.path);
+      expect(() => linked.read()).toThrow("journal path is a symlink");
+      expect(() => linked.begin(new Uint8Array([4, 5, 6]), "2")).toThrow("journal path is a symlink");
+    } finally {
+      journal.close();
+      linked.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("a symlinked journal directory is followed and made private", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
+    const target = join(dir, "target");
+    const path = join(dir, "linked");
+    try {
+      const journal = new FileJournal(target, "key");
+      journal.begin(new Uint8Array([1, 2, 3]), "1");
+      journal.close();
+      chmodSync(target, 0o755);
+      symlinkSync(target, path, "dir");
+      const linked = new FileJournal(path, "key");
+      expect(linked.read()?.source).toEqual(new Uint8Array([1, 2, 3]));
+      expect(statSync(target).mode & 0o777).toBe(0o700);
+      linked.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("records the source header, updates and written versions, deletes on request", () => {
     const dir = mkdtempSync(join(tmpdir(), "wopi-journal-"));
     const journal = new FileJournal(dir, "testhost:https://cloud.example.com/wopi/files/file1");
