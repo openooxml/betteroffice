@@ -595,6 +595,7 @@ mod tests {
         );
         let (anchored, _) = source(true);
         shape.position = anchored.position.clone();
+        shape.position.as_mut().unwrap().relative_height = Some(0.0);
         let mut context = context();
         let saved = replay(&shape, &mut context, true).unwrap().unwrap();
         assert!(saved.contains("<wp:anchor"));
@@ -606,9 +607,7 @@ mod tests {
             Some("inFront")
         );
         assert_eq!(reopened.position, shape.position);
-        let warnings = context.take_warnings();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("SmartArt wrap changes cannot be represented exactly"));
+        assert!(context.take_warnings().is_empty());
     }
 
     #[test]
