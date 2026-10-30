@@ -4,7 +4,7 @@ import Editor, { prepareFile, type EditorApi, type EditorView, type PreparedFile
 import { SessionEndedError, type SessionApi, type JoinResponse } from "./api";
 import { displayUserName, randomClientId, showCloseButton, type WopiPageConfig } from "./config";
 import type { PostMessageBridge, SaveOptions, WopiView } from "./postMessage";
-import { closeDocument, finishClose, recoverDocument, saveDocument } from "./documentActions";
+import { closeDocument, finishClose, flushDocumentInput, recoverDocument, saveDocument } from "./documentActions";
 import { createWopiTransport, type WopiTransport } from "./transport";
 
 type SaveState = "idle" | "saving" | "saved" | "failed";
@@ -101,14 +101,21 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const writable = useRef(loaded.join.canWrite);
   const [localRecovery, setLocalRecovery] = useState<{ bytes: Uint8Array; name: string } | null>(null);
   const closeRecovery = useRef<"pending" | "downloaded" | null>(null);
+  const recoveryVersion = useRef(0);
+  const downloadedVersion = useRef(0);
   const [recoveryFailed, setRecoveryFailed] = useState(false);
   const editorApi = useRef<EditorApi | null>(null);
   const transportRef = useRef<WopiTransport | null>(null);
   const editorContainer = useRef<HTMLElement | null>(null);
   const compositionActive = useRef(false);
+  const readOnlyPending = useRef(false);
+  const permissionController = useRef<AbortController | null>(null);
+  const permissionFlush = useRef<Promise<void> | null>(null);
   const loadedSent = useRef(false);
   const modified = useRef(false);
   const changeVersion = useRef(0);
+  const localVersion = useRef(0);
+  const savedLocalVersion = useRef(0);
   const closing = useRef<Promise<void> | null>(null);
   const finalSaved = useRef(false);
   const closeCompleted = useRef(false);
@@ -125,18 +132,71 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const userName = displayUserName(config.userFriendlyName);
   const room = useMemo(() => ({ id: "wopi", name: userName }), [userName]);
   const views = useRef<WopiView[]>([{ ViewId: loaded.clientId, UserName: userName }]);
+  const applyReadOnly = useCallback((): Promise<void> => {
+    if (permissionFlush.current) return permissionFlush.current;
+    if (!readOnlyPending.current) {
+      setReadOnly(true);
+      return Promise.resolve();
+    }
+    const controller = new AbortController();
+    permissionController.current = controller;
+    const pending = flushDocumentInput(editorApi.current, {
+      signal: controller.signal,
+      hasActiveComposition: () => compositionActive.current,
+      blockInput: () => { if (editorContainer.current) editorContainer.current.inert = true; },
+    }).then(() => {
+      if (controller.signal.aborted || !mounted.current) return;
+      readOnlyPending.current = false;
+      setReadOnly(true);
+      if (editorContainer.current && !closing.current && !recoveryController.current && !sessionEnded.current) editorContainer.current.inert = false;
+      setBanner((message) => message === COMPOSITION_ACTIVE_MESSAGE ? null : message);
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || !mounted.current) return;
+      if (editorContainer.current && compositionActive.current) editorContainer.current.inert = false;
+      setBanner(error instanceof Error && error.message === "compositionActive"
+        ? COMPOSITION_ACTIVE_MESSAGE
+        : "Could not finish pending input. Your document is still open. Retry Close to preserve your edits.");
+      throw error;
+    }).finally(() => {
+      if (permissionController.current === controller) {
+        permissionController.current = null;
+        permissionFlush.current = null;
+      }
+    });
+    permissionFlush.current = pending;
+    return pending;
+  }, []);
+
   const setWritable = useCallback((canWrite: boolean) => {
     const next = canWrite && (config.tokenExpiresAt === null || config.tokenExpiresAt > Date.now());
     writable.current = next;
-    setReadOnly(!next);
-  }, [config.tokenExpiresAt]);
+    if (next) {
+      permissionController.current?.abort();
+      permissionController.current = null;
+      permissionFlush.current = null;
+      readOnlyPending.current = false;
+      if (editorContainer.current && !closing.current && !recoveryController.current && !closeRecovery.current) editorContainer.current.inert = false;
+      setReadOnly(false);
+    } else {
+      if (compositionActive.current) {
+        readOnlyPending.current = true;
+        if (editorContainer.current) editorContainer.current.inert = false;
+      }
+      void applyReadOnly().catch(() => {});
+    }
+  }, [applyReadOnly, config.tokenExpiresAt]);
 
   useEffect(() => {
     const container = editorContainer.current;
     compositionActive.current = false;
     if (!container) return;
     const start = () => { compositionActive.current = true; };
-    const end = () => { compositionActive.current = false; };
+    const end = () => {
+      compositionActive.current = false;
+      queueMicrotask(() => {
+        if (mounted.current && readOnlyPending.current && !writable.current && !sessionEnded.current && !rejoining.current) void applyReadOnly().catch(() => {});
+      });
+    };
     container.addEventListener("compositionstart", start, true);
     container.addEventListener("compositionend", end, true);
     return () => {
@@ -144,10 +204,14 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       container.removeEventListener("compositionend", end, true);
       compositionActive.current = false;
     };
-  }, [closed]);
+  }, [applyReadOnly, closed]);
 
   const completeClose = useCallback(() => {
     if (closeCompleted.current) return;
+    if (localVersion.current > Math.max(savedLocalVersion.current, downloadedVersion.current) || compositionActive.current || readOnlyPending.current) {
+      setBanner("Your document is still open. Retry Close to preserve your local edits.");
+      throw new Error("localRecoveryRequired");
+    }
     closeCompleted.current = true;
     transportRef.current?.disconnect();
     setClosed(true);
@@ -160,7 +224,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     const name = dot > 0 ? `${config.fileName.slice(0, dot)}${suffix}${config.fileName.slice(dot)}` : `${config.fileName}${suffix}.${config.format}`;
     setLocalRecovery({ bytes, name });
     setBanner(beforeClose
-      ? "Download your recovered document to preserve your unsent edits and finish closing."
+      ? "Download your recovered document to preserve your unsaved edits and finish closing."
       : "This session has ended. Download your recovered document before reloading the page to continue editing.");
   }, [config.fileName, config.format]);
 
@@ -176,7 +240,11 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       signal: controller.signal,
       hasActiveComposition: () => compositionActive.current,
       blockInput: () => { if (editorContainer.current) editorContainer.current.inert = true; },
-      onFlushed: () => setReadOnly(true),
+      onFlushed: () => {
+        readOnlyPending.current = false;
+        setReadOnly(true);
+      },
+      hasUnsavedLocalChanges: () => localVersion.current > savedLocalVersion.current,
       hasUnacknowledgedUpdates: () => transportRef.current?.hasUnacknowledgedUpdates() ?? false,
       ...(kind === "baseline" ? { upload: (bytes: Uint8Array, signal: AbortSignal) => {
         serialized = bytes;
@@ -211,15 +279,17 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
   const endSession = useCallback(() => {
     if (lifetime.signal.aborted || sessionEnded.current) return;
     sessionEnded.current = true;
+    permissionController.current?.abort();
     handleClosed.resolve();
     transportRef.current?.disconnect();
-    if (finalSaved.current) completeClose();
+    if (finalSaved.current && localVersion.current <= Math.max(savedLocalVersion.current, downloadedVersion.current) && !compositionActive.current && !readOnlyPending.current) completeClose();
     else recover("local");
   }, [completeClose, handleClosed, lifetime, recover]);
 
   const rejoin = useCallback(() => {
     if (lifetime.signal.aborted || rejoining.current || sessionEnded.current) return;
     rejoining.current = true;
+    permissionController.current?.abort();
     lifetime.abort(new Error("rejoinRequired"));
     transportRef.current?.disconnect();
     recover("baseline");
@@ -232,20 +302,26 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     setSaveState("saving");
     try {
       let version = changeVersion.current;
+      let local = localVersion.current;
       await saveDocument(editorApi.current, api, {
         ...options,
         signal: lifetime.signal,
         canWrite: () => writable.current,
         hasActiveComposition: () => compositionActive.current,
         hasPendingResync: () => writable.current && (transportRef.current?.hasPendingResync() ?? true),
-        captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
-        onFlushed: () => { version = changeVersion.current; },
+        captureBarrier: () => {
+          const barrier = transportRef.current?.captureSaveBarrier() ?? null;
+          version = changeVersion.current;
+          local = localVersion.current;
+          return barrier;
+        },
         onProgress: wopiDebug,
       });
       lifetime.signal.throwIfAborted();
-      setSaveState("saved");
+      savedLocalVersion.current = Math.max(savedLocalVersion.current, local);
+      setSaveState(localVersion.current <= savedLocalVersion.current ? "saved" : "idle");
       setBanner((message) => message === COMPOSITION_ACTIVE_MESSAGE ? null : message);
-      if (modified.current && changeVersion.current === version) {
+      if (modified.current && changeVersion.current === version && localVersion.current <= savedLocalVersion.current) {
         modified.current = false;
         bridge.modified(false);
       }
@@ -271,22 +347,35 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     if (lifetime.signal.aborted) return Promise.reject(lifetime.signal.reason);
     if (closing.current) return closing.current;
     setSaveState("saving");
+    let local = localVersion.current;
+    let saveCaptured = false;
     const pending = closeDocument(editorApi.current, api, {
       signal: lifetime.signal,
       whenClosed: handleClosed.promise,
-      finalSaved: finalSaved.current,
-      onFinalSaved: () => { finalSaved.current = true; },
+      finalSaved: finalSaved.current && localVersion.current <= Math.max(savedLocalVersion.current, downloadedVersion.current) && !compositionActive.current && !readOnlyPending.current,
+      onFinalSaved: () => {
+        if (saveCaptured) savedLocalVersion.current = Math.max(savedLocalVersion.current, local);
+        finalSaved.current = true;
+      },
       canWrite: () => writable.current,
       preserveLocalWork: async () => {
-        if (closeRecovery.current) return closeRecovery.current === "downloaded";
-        if (!editorApi.current?.hasPendingUpdates() && !transportRef.current?.hasUnacknowledgedUpdates()) return true;
+        if (permissionFlush.current) await permissionFlush.current;
+        if (closeRecovery.current && recoveryVersion.current === localVersion.current && !compositionActive.current && !readOnlyPending.current) return closeRecovery.current === "downloaded";
+        if (localVersion.current <= savedLocalVersion.current && !compositionActive.current && !readOnlyPending.current && !editorApi.current?.hasPendingUpdates() && !transportRef.current?.hasUnacknowledgedUpdates()) return true;
         const result = await recoverDocument(editorApi.current, {
           signal: lifetime.signal,
           hasActiveComposition: () => compositionActive.current,
+          blockInput: () => { if (editorContainer.current) editorContainer.current.inert = true; },
+          onFlushed: () => {
+            readOnlyPending.current = false;
+            if (!writable.current) setReadOnly(true);
+          },
+          hasUnsavedLocalChanges: () => localVersion.current > savedLocalVersion.current,
           hasUnacknowledgedUpdates: () => transportRef.current?.hasUnacknowledgedUpdates() ?? false,
         });
         lifetime.signal.throwIfAborted();
         if (!result) return true;
+        recoveryVersion.current = localVersion.current;
         closeRecovery.current = "pending";
         offerLocalRecovery(result.bytes, true);
         setSaveState("idle");
@@ -294,11 +383,16 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       },
       hasActiveComposition: () => compositionActive.current,
       hasPendingResync: () => writable.current && (transportRef.current?.hasPendingResync() ?? true),
-      captureBarrier: () => transportRef.current?.captureSaveBarrier() ?? null,
+      captureBarrier: () => {
+        const barrier = transportRef.current?.captureSaveBarrier() ?? null;
+        local = localVersion.current;
+        saveCaptured = barrier !== null;
+        return barrier;
+      },
       onProgress: wopiDebug,
       setInputBlocked: (blocked) => {
         if (lifetime.signal.aborted) return;
-        if (editorContainer.current) editorContainer.current.inert = blocked || sessionEnded.current;
+        if (editorContainer.current) editorContainer.current.inert = (blocked && (writable.current || !compositionActive.current)) || sessionEnded.current || (readOnlyPending.current && !compositionActive.current);
       },
       onFailure: (error) => {
         if (lifetime.signal.aborted) return;
@@ -327,6 +421,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     setTimeout(() => URL.revokeObjectURL(url), 0);
     if (closeRecovery.current === "pending") {
       closeRecovery.current = "downloaded";
+      downloadedVersion.current = recoveryVersion.current;
       void close().catch(() => {});
     }
   }, [close, localRecovery]);
@@ -335,6 +430,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
     mounted.current = true;
     return () => {
       mounted.current = false;
+      permissionController.current?.abort();
       recoveryController.current?.abort();
       lifetime.abort(new Error("editorDisposed"));
     };
@@ -367,7 +463,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
       } else if (event.type === "rejoinRequired") {
         rejoin();
       } else if (event.type === "saved") {
-        setSaveState("saved");
+        if (localVersion.current <= savedLocalVersion.current) setSaveState("saved");
       } else if (event.type === "saveFailed") {
         setSaveState("failed");
       } else if (event.type === "conflict") {
@@ -486,7 +582,12 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
           downloadOnSave={false}
           onSaveRequest={onSaveRequest}
           onSave={() => undefined}
-          onLocalUpdate={() => { if (mounted.current) transportRef.current?.noteLocalUpdate(); }}
+          onLocalUpdate={() => {
+            if (!mounted.current) return;
+            localVersion.current += 1;
+            setSaveState((state) => state === "saved" ? "idle" : state);
+            transportRef.current?.noteLocalUpdate();
+          }}
           onChange={() => {
             if (lifetime.signal.aborted) return;
             changeVersion.current += 1;

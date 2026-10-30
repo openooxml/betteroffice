@@ -209,6 +209,7 @@ async function mount(replaceBeforeAttach = false, format: PreparedFile["format"]
     blockSource() { let release!: () => void; sourceGate = new Promise((resolve) => { release = resolve; }); return release; },
     failSource() { failSource = true; },
     closedEvent() { streams.at(-1)!.enqueue(new TextEncoder().encode("event: closed\ndata: {}\n\n")); },
+    savedEvent() { streams.at(-1)!.enqueue(new TextEncoder().encode('event: saved\ndata: {"itemVersion":"2"}\n\n')); },
     viewOnlyEvent() {
       canWrite = false;
       readOnlyRelay = true;
@@ -393,6 +394,216 @@ test("a failed read-only Close recovery keeps unsent work open for another Close
   await act(async () => { await h.loaded.actions.close!(); });
   expect(h.view.getByRole("button", { name: "Download recovered document" })).toBeDefined();
   expect(lifecycle).not.toContain("destroy");
+});
+
+test.each((["docx", "xlsx", "pptx"] as const).flatMap((format) =>
+  (["Close", "baseline replacement", "session end"] as const).map((action) => [format, action] as const),
+))("%s acknowledged local edits survive %s before a host save", async (format, action) => {
+  const h = await mount(false, format);
+  const local = new Doc();
+  const recovered = new Doc();
+  let blob: Blob | undefined;
+  const createUrl = spyOn(URL, "createObjectURL").mockImplementation((value) => { blob = value as Blob; return "blob:recovery"; });
+  const revokeUrl = spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  try {
+    serialize = async () => encodeStateAsUpdate(local);
+    await act(async () => {
+      local.getText("body").insert(0, "acknowledged but unsaved");
+      mounts[0]!.onLocalUpdate!();
+      expect(publish(encodeStateAsUpdate(local))).toBe(true);
+    });
+    expect(serverDoc.getText("body").toString()).toBe("acknowledged but unsaved");
+    expect(hasPendingUpdates()).toBe(false);
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+    await act(async () => {
+      if (action === "Close") { h.viewOnlyEvent(); await Promise.resolve(); }
+      else if (action === "baseline replacement") sockets[0]!.drop(4409);
+      else { h.endSession(); h.closedEvent(); }
+    });
+    if (action === "Close") await act(async () => { await h.loaded.actions.close!(); });
+    if (action === "baseline replacement") {
+      expect(h.copies).toHaveLength(1);
+      applyUpdate(recovered, h.copies[0]!);
+      expect(mounts).toHaveLength(2);
+    } else {
+      expect(h.view.getByTestId("editor")).toBeDefined();
+      expect(lifecycle).not.toContain("destroy");
+      expect(h.calls.filter((path) => path.endsWith("/close"))).toEqual([]);
+      expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toEqual([]);
+      await act(async () => h.view.getByRole("button", { name: "Download recovered document" }).click());
+      applyUpdate(recovered, new Uint8Array(await blob!.arrayBuffer()));
+      if (action === "Close") {
+        expect(h.view.queryByTestId("editor")).toBeNull();
+        expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toHaveLength(1);
+      }
+    }
+    expect(recovered.getText("body").toString()).toBe("acknowledged but unsaved");
+  } finally {
+    local.destroy(); recovered.destroy();
+    createUrl.mockRestore(); revokeUrl.mockRestore(); click.mockRestore();
+  }
+});
+
+test.each(["later edit", "edit during save", "unrelated saved event"])("Close recovers acknowledged work after %s", async (timing) => {
+  const h = await mount();
+  const local = new Doc();
+  const recovered = new Doc();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const save = spyOn(h.loaded.api, "save").mockImplementation(async () => { await gate; return { itemVersion: "2" }; });
+  let blob: Blob | undefined;
+  const createUrl = spyOn(URL, "createObjectURL").mockImplementation((value) => { blob = value as Blob; return "blob:recovery"; });
+  const revokeUrl = spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  try {
+    serialize = async () => encodeStateAsUpdate(local);
+    let saving: Promise<void> | undefined;
+    if (timing !== "unrelated saved event") {
+      await act(async () => {
+        local.getText("body").insert(0, "saved ");
+        mounts[0]!.onLocalUpdate!();
+        expect(publish(encodeStateAsUpdate(local))).toBe(true);
+        saving = h.loaded.actions.save!();
+      });
+      expect(save).toHaveBeenCalledTimes(1);
+      if (timing === "later edit") await act(async () => { release(); await saving; });
+    }
+    await act(async () => {
+      local.getText("body").insert(local.getText("body").length, "unsaved");
+      mounts[0]!.onLocalUpdate!();
+      expect(publish(encodeStateAsUpdate(local))).toBe(true);
+    });
+    await act(async () => { h.savedEvent(); release(); await saving; });
+    await act(async () => h.viewOnlyEvent());
+    await act(async () => { await h.loaded.actions.close!(); });
+    expect(h.view.getByTestId("editor")).toBeDefined();
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => h.view.getByRole("button", { name: "Download recovered document" }).click());
+    applyUpdate(recovered, new Uint8Array(await blob!.arrayBuffer()));
+    expect(recovered.getText("body").toString()).toBe(timing === "unrelated saved event" ? "unsaved" : "saved unsaved");
+  } finally {
+    release(); local.destroy(); recovered.destroy(); save.mockRestore();
+    createUrl.mockRestore(); revokeUrl.mockRestore(); click.mockRestore();
+  }
+});
+
+test.each((["docx", "xlsx", "pptx"] as const).flatMap((format) =>
+  (["viewOnly", "snapshot"] as const).map((permission) => [format, permission] as const),
+))("%s %s during composition fences its text before read-only and Close recovery", async (format, permission) => {
+  const h = await mount(false, format);
+  const input = h.view.getByTestId("editor");
+  const local = new Doc();
+  const recovered = new Doc();
+  let release!: () => void;
+  const worker = new Promise<void>((resolve) => { release = resolve; });
+  let commit = Promise.resolve();
+  const flushing = mock(async () => { await commit; });
+  flush = flushing;
+  serialize = async () => encodeStateAsUpdate(local);
+  input.addEventListener("compositionend", () => {
+    if (input.dataset.readonly === "true" || h.view.container.querySelector("main")!.inert) return;
+    commit = worker.then(() => {
+      local.getText("body").insert(0, "漢字");
+      mounts[0]!.onLocalUpdate!();
+      expect(publish(encodeStateAsUpdate(local))).toBe(true);
+    });
+  });
+  let blob: Blob | undefined;
+  const createUrl = spyOn(URL, "createObjectURL").mockImplementation((value) => { blob = value as Blob; return "blob:recovery"; });
+  const revokeUrl = spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  const warning = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      if (permission === "viewOnly") h.viewOnlyEvent();
+      else h.snapshotEvent(false, "lockedElsewhere");
+    });
+    expect(input.dataset.readonly).toBe("false");
+    expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    await act(async () => { await expect(h.loaded.actions.save!()).rejects.toThrow("notAllowed"); });
+    expect(flushing).not.toHaveBeenCalled();
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    expect(flushing).toHaveBeenCalledTimes(1);
+    expect(input.dataset.readonly).toBe("false");
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => { release(); await commit; });
+    expect(input.dataset.readonly).toBe("true");
+    expect(serverDoc.getText("body").toString()).toBe("漢字");
+    await act(async () => { await h.loaded.actions.close!(); });
+    expect(h.view.getByTestId("editor")).toBe(input);
+    expect(h.messages.filter((message) => message.MessageId === "UI_Close")).toEqual([]);
+    await act(async () => h.view.getByRole("button", { name: "Download recovered document" }).click());
+    applyUpdate(recovered, new Uint8Array(await blob!.arrayBuffer()));
+    expect(recovered.getText("body").toString()).toBe("漢字");
+    expect(h.view.queryByTestId("editor")).toBeNull();
+    expect(h.calls.filter((path) => path.endsWith("/save"))).toEqual([]);
+  } finally {
+    release(); await commit; local.destroy(); recovered.destroy(); warning.mockRestore();
+    createUrl.mockRestore(); revokeUrl.mockRestore(); click.mockRestore();
+  }
+});
+
+test("permission loss retains unfinished composition and Close after the flush deadline", async () => {
+  const h = await mount(false, "pptx");
+  const input = h.view.getByTestId("editor");
+  const local = new Doc();
+  const flushing = mock(async () => {});
+  flush = flushing;
+  serialize = async () => encodeStateAsUpdate(local);
+  input.addEventListener("compositionend", () => {
+    if (input.dataset.readonly === "true" || h.view.container.querySelector("main")!.inert) return;
+    local.getText("body").insert(0, "漢字");
+    mounts[0]!.onLocalUpdate!();
+    expect(publish(encodeStateAsUpdate(local))).toBe(true);
+  });
+  const schedule = globalThis.setTimeout;
+  const cancel = globalThis.clearTimeout;
+  const deadlines = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const timers = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay < 100 || delay > 3000) return schedule(callback, delay);
+    const timer = schedule(() => {}, delay);
+    deadlines.set(timer, callback);
+    return timer;
+  }) as typeof setTimeout);
+  const cancellations = spyOn(globalThis, "clearTimeout").mockImplementation(((timer: ReturnType<typeof setTimeout>) => {
+    deadlines.delete(timer); cancel(timer);
+  }) as typeof clearTimeout);
+  try {
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionstart", { bubbles: true }));
+      h.viewOnlyEvent();
+    });
+    expect(deadlines.size).toBe(1);
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); });
+    expect(h.view.getByRole("alert").textContent).toMatch(/finish typing/i);
+    expect(input.dataset.readonly).toBe("false");
+    expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    let closing!: Promise<void>;
+    await act(async () => { closing = h.loaded.actions.close!(); });
+    await act(async () => { for (const deadline of [...deadlines.values()]) deadline(); await closing; });
+    expect(h.view.getByTestId("editor")).toBe(input);
+    expect(input.dataset.readonly).toBe("false");
+    expect(h.view.container.querySelector("main")!.inert).not.toBe(true);
+    expect(flushing).not.toHaveBeenCalled();
+    expect(h.calls.filter((path) => path.endsWith("/save") || path.endsWith("/close"))).toEqual([]);
+    expect(lifecycle).not.toContain("destroy");
+    await act(async () => {
+      input.dispatchEvent(new Event("compositionend", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    });
+    await act(async () => { await h.loaded.actions.close!(); });
+    expect(local.getText("body").toString()).toBe("漢字");
+    expect(h.view.getByRole("button", { name: "Download recovered document" })).toBeDefined();
+    expect(lifecycle).not.toContain("destroy");
+  } finally {
+    for (const timer of deadlines.keys()) cancel(timer);
+    timers.mockRestore(); cancellations.mockRestore(); local.destroy();
+  }
 });
 
 test.each(["first attachment", "reconnection"])("permission snapshots apply on %s", async (attachment) => {
