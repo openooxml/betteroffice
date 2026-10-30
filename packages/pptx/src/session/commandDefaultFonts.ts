@@ -46,7 +46,8 @@ export function createCommandDefaultFonts(
       void provider.then(async (source) => {
         if (disposed || finished) return undefined;
         const load = source.resolve(face.family, face.bold, face.italic)
-          ?? source.resolveFamily(face.family, face.bold, face.italic);
+          ?? source.resolveFamily(face.family, face.bold, face.italic)
+          ?? source.resolveLightVariant?.(face.family, face.bold, face.italic);
         if (!load) return undefined;
         const bytes = await load();
         if (disposed || finished || families.has(face.family.trim().toLowerCase())) return undefined;
