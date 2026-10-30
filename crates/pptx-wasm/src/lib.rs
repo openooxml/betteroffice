@@ -66,6 +66,12 @@ impl PptxRenderer {
             .map_err(js_error)
     }
 
+    /// Enables browser metrics for uncovered characters. Off by default.
+    #[wasm_bindgen(js_name = setBrowserCoverageFallback)]
+    pub fn set_browser_coverage_fallback(&mut self, enabled: bool) {
+        self.inner.set_browser_coverage_fallback(enabled);
+    }
+
     /// requested font faces before layout, for one slide or the whole deck.
     #[wasm_bindgen(js_name = requestedFontFacesJson)]
     pub fn requested_font_faces_json(

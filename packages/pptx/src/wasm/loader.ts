@@ -11,6 +11,7 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { presentationContexts } from './presentationContext';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
@@ -429,44 +430,43 @@ export function replayPresentation(
   return peerInternal(handle).replay(envelope, captured);
 }
 
-const displayListJsonReaders = new WeakMap<PresentationHandle, (slideIndex: number) => string>();
-
 type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
 type PresentationMetadata = {
   slides: { id: string; index: number; name: string | null; layoutPartPath: string | null }[];
   size: { width: number; height: number };
 };
-const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
-const storyFormattingReaders = new WeakMap<PresentationHandle, (target: PptxStoryFormattingTarget) => StorySnapshot>();
-const paragraphJoiners = new WeakMap<PresentationHandle, (storyId: string, start: number, end: number) => TextReceipt>();
 type PptxStoryFormattingTarget = { slideId: string; shapeId: string; storyId: string };
 type StoryFormattingDocument = PptxDocument & { storyFormattingJson(args: string): string };
 
 export function presentationStoryFormatting(handle: PresentationHandle, target: PptxStoryFormattingTarget): StorySnapshot {
-  const read = storyFormattingReaders.get(handle);
-  if (!read) throw new Error('Presentation story formatting is unavailable');
-  return read(target);
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation story formatting is unavailable');
+  return context.jsonWasmCall(() => (context.doc as StoryFormattingDocument).storyFormattingJson(JSON.stringify({
+    slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
+  })));
 }
 
 export function presentationDeleteTextJoiningParagraphs(
   handle: PresentationHandle, storyId: string, start: number, end: number
 ): TextReceipt {
-  const join = paragraphJoiners.get(handle);
-  if (!join) throw new Error('Presentation paragraph joining is unavailable');
-  return join(storyId, start, end);
+  const context = presentationContexts.get(handle);
+  if (!context || context.peer) throw new Error('Presentation paragraph joining is unavailable');
+  return context.jsonWasmCall(() => context.doc.deleteTextJson(JSON.stringify({
+    storyId, start, end, allowParagraphJoin: true,
+  })), true);
 }
 
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
-  const read = metadataReaders.get(handle);
-  if (!read) throw new Error('Presentation metadata is unavailable');
-  return read();
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation metadata is unavailable');
+  return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
 }
 
 /** @experimental */
 export function presentationDisplayListJson(handle: PresentationHandle, slideIndex: number): string {
-  const read = displayListJsonReaders.get(handle);
-  if (!read) throw new Error('Presentation display list is unavailable');
-  return read(slideIndex);
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation display list is unavailable');
+  return context.wasmCall(() => context.renderer.layoutSlideJson(context.doc, slideIndex));
 }
 
 export function isProposalsAvailable(): boolean {
@@ -1189,20 +1189,7 @@ function openPresentationInternal(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
-  displayListJsonReaders.set(handle, (slideIndex) =>
-    wasmCall(() => renderer.layoutSlideJson(doc, slideIndex))
-  );
-  metadataReaders.set(handle, () =>
-    jsonWasmCall(() => (doc as SessionMetadataDocument).sessionMetadataJson())
-  );
-  storyFormattingReaders.set(handle, (target) =>
-    jsonWasmCall(() => (doc as StoryFormattingDocument).storyFormattingJson(JSON.stringify({
-      slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
-    })))
-  );
-  if (!peer) paragraphJoiners.set(handle, (storyId, start, end) =>
-    jsonWasmCall(() => doc.deleteTextJson(JSON.stringify({ storyId, start, end, allowParagraphJoin: true })), true)
-  );
+  presentationContexts.set(handle, { doc, renderer, wasmCall, jsonWasmCall, peer: Boolean(peer) });
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {
       snapshot: (): { snapshot: DeckSnapshot; keys: Record<string, string> } =>
