@@ -372,7 +372,7 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
@@ -380,8 +380,10 @@ describe('native package release wiring', () => {
       (step: any) => step.name === 'Test the xlsx packages on the native engine'
     );
     expect(xlsx.run).toContain(
-      'BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts'
     );
+    expect(xlsx.run).toContain('bun run build:docx-wasm');
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
@@ -402,10 +404,11 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('package assembly is path-filtered and builds every format', () => {
+  test('package assembly runs after merges to main, path-filtered, and builds every format', () => {
     expect(packages.name).toBe('Native packages');
-    expect(Object.keys(packages.on).sort()).toEqual(['pull_request', 'workflow_dispatch']);
-    expect(packages.on.pull_request.paths).toEqual([
+    expect(Object.keys(packages.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(packages.on.push.branches).toEqual(['main']);
+    expect(packages.on.push.paths).toEqual([
       'bindings/*-native/**',
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
@@ -513,7 +516,10 @@ describe('native package public names', () => {
         const triple = platform.name.replace(`@betteroffice/${format}-native-`, '');
         expect(identity).toBe(triple);
         expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
-        expect(platform.files).toEqual([platform.main]);
+        expect(platform.files).toEqual([platform.main, 'BSD-3-Clause-Zstandard.txt', 'MIT-wuff.txt']);
+        expect(read(`${path}/npm/${identity}/BSD-3-Clause-Zstandard.txt`))
+          .toBe(read('crates/betteroffice-fonts/vendor/zstd/LICENSE'));
+        expect(read(`${path}/npm/${identity}/MIT-wuff.txt`)).toBe(read('packages/fonts/LICENSES/MIT-wuff.txt'));
         expect(platform.description).toBe(manifest.description);
         expect(platform.keywords).toEqual(manifest.keywords);
       }

@@ -1,13 +1,14 @@
 import type { BundledFontScript } from '@betteroffice/fonts';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
+import { decodeFontFace } from '../wasm/loader';
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
   | { kind: 'coverage'; script: string; bold: boolean; italic: boolean };
 
 export const commandFontProvider = {
-  async load() { return (await import('@betteroffice/fonts')).createFontProvider(); },
+  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: decodeFontFace }); },
 };
 
 export function createCommandDefaultFonts(
@@ -55,6 +56,7 @@ export function createCommandDefaultFonts(
         let bold = face.bold;
         let italic = face.italic;
         let load: (() => Promise<ArrayBuffer>) | undefined;
+        let light: (() => Promise<ArrayBuffer>) | undefined;
         if (face.kind === 'coverage') {
           load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
           if (!load && (bold || italic)) {
@@ -63,16 +65,16 @@ export function createCommandDefaultFonts(
             load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
           }
         } else {
-          load = source.resolve(face.family, bold, italic)
-            ?? source.resolveFamily(face.family, bold, italic)
-            ?? source.resolveLightVariant?.(face.family, bold, italic);
+          const named = source.resolve(face.family, bold, italic) ?? source.resolveFamily(face.family, bold, italic);
+          light = named ? undefined : source.resolveLightVariant?.(face.family, bold, italic);
+          load = named ?? light;
         }
         if (!load) return undefined;
         const bytes = await load();
         if (disposed || finished || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
-          : { family: face.family, bold: face.bold, italic: face.italic, bytes };
+          : { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
         if (!loaded || disposed || finished) return undefined;
         const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic]);
         let installation = installations.get(identity);

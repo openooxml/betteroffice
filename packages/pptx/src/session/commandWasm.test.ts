@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import JSZip from 'jszip';
+import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { mainThreadWasmSpies } from '../../../../shared/office-session/testing/wasmWorker';
@@ -112,7 +113,7 @@ function workerTransport() {
   return { transport, requests, initializations };
 }
 
-test('p1_command_session_never_initializes_main_wasm', async () => {
+test.skipIf(engineKind === 'native')('p1_command_session_never_initializes_main_wasm', async () => {
   if (await isolated('p1_command_session_never_initializes_main_wasm')) return;
   const worker = workerTransport();
   const source = await deck();
@@ -156,7 +157,7 @@ test('p1_command_session_never_initializes_main_wasm', async () => {
   }
 }, 30_000);
 
-test('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async () => {
+test.skipIf(engineKind === 'native')('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async () => {
   if (await isolated('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm')) return;
   const spies = mainThreadWasmSpies();
   const initialize = mock(() => { throw new Error('Main wasm initialization'); });
@@ -167,7 +168,7 @@ test('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async
     default: initialize, initSync: initialize,
     PptxDocument: class { static openCollaborative = load; static open = load; },
     PptxRenderer: class { static open = load; },
-    decodeTiffPng: load, exportPptxMarkdownJson: load, exportPptxStructuredJson: load,
+    decodeFontFace: load, decodeTiffPng: load, exportPptxMarkdownJson: load, exportPptxStructuredJson: load,
     parsePptxJson: load, parsePptxJsonWithoutMedia: load, renderPptxMarkdownJson: load, rendererVersion: load,
   }));
   const pair = createInProcessPair();
@@ -229,7 +230,7 @@ test('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async
   }
 }, 30_000);
 
-test('p1_main_wasm_guard_detects_transitive_import_initialization', async () => {
+test.skipIf(engineKind === 'native')('p1_main_wasm_guard_detects_transitive_import_initialization', async () => {
   if (await isolated('p1_main_wasm_guard_detects_transitive_import_initialization')) return;
   const spies = mainThreadWasmSpies();
   const initialize = mock(() => WebAssembly.compile(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])));

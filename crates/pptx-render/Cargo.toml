@@ -30,6 +30,7 @@ unicode-properties = { version = "0.1.4", default-features = false, features = [
 unicode-segmentation = "1.12"
 
 [dev-dependencies]
+betteroffice-fonts.workspace = true
 libm.workspace = true
 ooxml-opc.workspace = true
 

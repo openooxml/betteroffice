@@ -1,9 +1,16 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import * as fonts from '@betteroffice/fonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts } from './commandDefaultFonts';
+import { decodeFontFace } from '../wasm/loader';
 
 const restorers: (() => void)[] = [];
+
+async function notoSansJP(): Promise<ArrayBuffer> {
+  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  return (await decodeFontFace(packed, { codec: 'zstd' })).font;
+}
 const regular = { family: 'Calibri', bold: false, italic: false };
 const bytes = new Uint8Array([1, 2, 3]).buffer;
 
@@ -22,6 +29,13 @@ function provider(
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+test('the manager decodes packed faces with the worker engine', async () => {
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  await commandFontProvider.load();
+  expect(create).toHaveBeenCalledWith(undefined, { decoder: decodeFontFace });
+});
 
 test('app families exclude all styles without importing the manager', async () => {
   const source = provider(() => async () => bytes);
@@ -77,12 +91,13 @@ test('resolves requested traits through manager mappings and skips unknown famil
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
     expect(faces).toHaveLength(1);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[0].ownWeight).toBeUndefined();
     structuredClone(faces, { transfer: faces.map((face) => face.bytes) });
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
 
-test('lighter members of bundled families load their regular face; other unknown names stay unregistered', async () => {
+test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
@@ -97,7 +112,7 @@ test('lighter members of bundled families load their regular face; other unknown
     const faces = await fonts.load();
     expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
     expect(resolveLastResort).not.toHaveBeenCalled();
-    expect(faces.map((face) => [face.family, face.bold])).toEqual([['Calibri Light', true]]);
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
     expect(register).toHaveBeenCalledTimes(1);
   } finally { fonts.dispose(); }
 });
@@ -185,7 +200,7 @@ test('script collection requests each style separately even when no script pack 
 });
 
 test('styled Japanese requests share installation by the resolved regular face', async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const source = provider(() => undefined, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const register = mock((_face: DefaultFontFace) => {});
   const settled = mock(() => {});
@@ -216,7 +231,7 @@ test('styled Japanese requests share installation by the resolved regular face',
 });
 
 test('a family requested as primary and as script coverage installs its face once', async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const source = provider((family) => family === 'Noto Sans JP' ? async () => japanese : undefined,
     (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const register = mock((_face: DefaultFontFace) => {});

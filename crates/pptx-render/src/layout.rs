@@ -66,6 +66,7 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const MAX_FONT_REGISTRATIONS: usize = 4_096;
 const BROWSER_FONT_ID: u32 = u32::MAX;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -262,18 +263,14 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        if self.font_count >= MAX_FONTS {
-            return Err(RenderError::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
+        self.check_font_budget(bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         let requested = normalize_family(family);
         let metrics = family_metrics(&requested, bold, italic);
@@ -296,6 +293,22 @@ impl SlideRenderer {
         Ok(id.to_u32())
     }
 
+    /// Only distinct font bytes count against [`MAX_FONTS`]; the same bytes
+    /// under another family or style share the face already held.
+    fn check_font_budget(&self, bytes: &[u8]) -> Result<(), RenderError> {
+        if self.font_count >= MAX_FONT_REGISTRATIONS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONT_REGISTRATIONS} font registrations"
+            )));
+        }
+        if self.fonts.face_count() >= MAX_FONTS && self.fonts.find_face(bytes).is_none() {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        Ok(())
+    }
+
     /// Registers a face drawn only where a run's own face has no glyph, the way
     /// PowerPoint reaches for a script's font when the named one cannot draw a
     /// character. The first registered face that covers a character draws it.
@@ -311,18 +324,14 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        if self.font_count >= MAX_FONTS {
-            return Err(RenderError::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
+        self.check_font_budget(bytes)?;
         let family = family.trim();
         if family.is_empty() {
             return Err(RenderError::Font("font family is empty".to_owned()));
         }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         self.coverage_faces.push((
             bold,
@@ -8906,6 +8915,78 @@ mod tests {
     }
 
     #[test]
+    fn one_face_under_many_families_holds_its_bytes_once() {
+        let mut renderer = SlideRenderer::new();
+        for index in 0..300 {
+            let family = format!("Alias {index}");
+            renderer
+                .register_font(&family, index % 2 == 1, false, FONT)
+                .unwrap();
+            renderer
+                .register_fallback_font(&family, false, index % 3 == 1, FONT)
+                .unwrap();
+        }
+        assert_eq!(renderer.fonts().face_count(), 1);
+        assert_eq!(renderer.font_count, 600);
+        let face = &renderer.faces[&(normalize_family("Alias 299"), true, false)];
+        assert_eq!(face.family, "Alias 299");
+        assert_eq!(renderer.fonts().byte_owner(face.id).unwrap().to_u32(), 0);
+        assert!(renderer.fonts().covers(face.id, 'A').unwrap());
+    }
+
+    #[test]
+    fn distinct_faces_past_the_budget_are_refused_but_aliases_are_not() {
+        let mut renderer = SlideRenderer::new();
+        let face = |index: usize| {
+            let mut bytes =
+                include_bytes!("../../docx-edit/tests/fonts/LiberationSans-Regular.ttf").to_vec();
+            bytes.extend_from_slice(&(index as u32).to_le_bytes());
+            bytes
+        };
+        for index in 0..MAX_FONTS {
+            renderer
+                .register_font(&format!("Face {index}"), false, false, &face(index))
+                .unwrap();
+        }
+        let error = renderer
+            .register_font("Overflow", false, false, &face(MAX_FONTS))
+            .unwrap_err();
+        assert!(
+            matches!(&error, RenderError::ResourceLimit(message) if message == "more than 256 font faces"),
+            "{error}"
+        );
+        assert!(
+            !renderer
+                .faces
+                .contains_key(&(normalize_family("Overflow"), false, false))
+        );
+        renderer
+            .register_fallback_font("Overflow", false, false, &face(7))
+            .unwrap();
+        renderer
+            .register_font("Face 3", true, false, &face(3))
+            .unwrap();
+        assert_eq!(renderer.fonts().face_count(), MAX_FONTS);
+    }
+
+    #[test]
+    fn registrations_past_their_own_budget_are_refused() {
+        let mut renderer = SlideRenderer::new();
+        for index in 0..MAX_FONT_REGISTRATIONS {
+            renderer
+                .register_font(&format!("Alias {index}"), false, false, FONT)
+                .unwrap();
+        }
+        let error = renderer
+            .register_font("One more", false, false, FONT)
+            .unwrap_err();
+        assert!(
+            matches!(&error, RenderError::ResourceLimit(message) if message.contains("font registrations")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn no_registered_fonts_preserve_shapes_and_text() {
         let session = DeckSession::open(FIXTURE, 8_002).unwrap();
         let rendered = SlideRenderer::new()
@@ -10459,9 +10540,9 @@ mod tests {
         let mut best: Option<std::time::Duration> = None;
         let mut output = None;
         for _ in 0..3 {
-            let start = std::time::Instant::now();
+            let start = thread_cpu_time();
             let result = workload();
-            let elapsed = start.elapsed();
+            let elapsed = thread_cpu_time() - start;
             if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
                 best = Some(elapsed);
             }
@@ -13313,13 +13394,15 @@ mod tests {
 
     #[test]
     fn named_japanese_clusters_use_composed_kana_advances() {
-        const NOTO_SANS_JP: &[u8] =
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf");
+        let font = betteroffice_fonts::decode(
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansJP-Regular.otf.zst"),
+            None,
+            64 << 20,
+        )
+        .unwrap();
         for family in ["MS PGothic", "MS PMincho", "MS UI Gothic"] {
             let mut renderer = SlideRenderer::new();
-            renderer
-                .register_font(family, false, false, NOTO_SANS_JP)
-                .unwrap();
+            renderer.register_font(family, false, false, &font).unwrap();
             let face = renderer
                 .resolve_face(family, false, false, &mut SubstitutionLog::default())
                 .unwrap();

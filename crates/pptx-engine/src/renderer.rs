@@ -77,7 +77,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -95,7 +95,7 @@ impl Renderer {
         let id = self
             .renderer
             .register_fallback_font(family, bold, italic, bytes)
-            .map_err(engine_error)?;
+            .map_err(font_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
         self.rendered.clear();
@@ -325,12 +325,12 @@ impl Renderer {
             .renderer
             .layout_scoped_slide(session.package(), &preview.scope)
             .map_err(engine_error)?;
-        serde_json::to_string(&serde_json::json!({
-            "proposal": preview.proposal,
-            "snapshot": preview.snapshot,
-            "textChanges": preview.text_changes,
-            "frame": rendered.display_list,
-        }))
+        serde_json::to_string(&pptx_render::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
         .map_err(engine_error)
     }
 }
@@ -502,6 +502,15 @@ impl Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn font_error(error: pptx_render::RenderError) -> EngineError {
+    match error {
+        pptx_render::RenderError::ResourceLimit(_) => {
+            EngineError::resource_limit(error.to_string())
+        }
+        error => engine_error(error),
     }
 }
 

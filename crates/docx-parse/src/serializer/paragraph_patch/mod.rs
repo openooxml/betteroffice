@@ -1,3 +1,4 @@
+mod drawing;
 mod lower;
 mod properties;
 mod text;
@@ -138,6 +139,8 @@ fn patch_inner(
     context: &PatchContext,
 ) -> Result<String, Failure> {
     let mut lowered = lower::lower(source, context, &patch.seed.units)?;
+    drawing::bind(source, &lowered, &patch.seed.units)?;
+    drawing::validate_edits(source, &lowered, patch)?;
     let source_units: Vec<_> = lowered.cells.iter().map(|cell| cell.unit.clone()).collect();
     if !same_content(&source_units, &patch.seed.units)
         || unit_sha256(&patch.seed.units) != patch.seed.unit_sha256
@@ -186,6 +189,7 @@ fn patch_inner(
         ));
     }
     let verified = lower::lower(&output, context, &units)?;
+    drawing::bind(&output, &verified, &units)?;
     verify::markers(
         &output,
         &verified,

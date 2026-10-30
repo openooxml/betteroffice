@@ -1,3 +1,8 @@
+export type FontDecoder = (
+  bytes: ArrayBuffer | Uint8Array,
+  options: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number },
+) => Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }>;
+
 interface NodeZlibLike {
   zstdDecompressSync?: (
     bytes: Uint8Array,

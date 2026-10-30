@@ -5,6 +5,17 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
+async function phase<T>(name: string, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${name} did not finish within 4 s`)), 4_000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test('esbuild deploys the published entry with separate Latin frames and decoder for baseUrl loading', async () => {
   const output = await mkdtemp(join(tmpdir(), 'latin-assets-'));
   const originalFetch = globalThis.fetch;
@@ -14,7 +25,7 @@ test('esbuild deploys the published entry with separate Latin frames and decoder
     const manifest: { faces: { file: string }[] } = JSON.parse(
       await readFile(new URL('./assets/manifest.json', latinPackage), 'utf8'),
     );
-    const result = await build({
+    const result = await phase('esbuild build', build({
       stdin: {
         contents: `import { loadBundledFontBytes, resolveBundledFamilyFace } from '@betteroffice/fonts';
 export const face = resolveBundledFamilyFace('Carlito', false, false);
@@ -36,7 +47,7 @@ export const load = (baseUrl) => loadBundledFontBytes(face, { baseUrl });`,
       loader: { '.zst': 'copy', '.wasm': 'copy' },
       external: ['@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
       define: { 'globalThis.process': 'undefined' },
-    });
+    }));
     expect(Object.keys(result.metafile.inputs).map((file) => resolve(file)))
       .toContain(fileURLToPath(import.meta.resolve('@betteroffice/fonts')));
     const outputs = new Map(Object.entries(result.metafile.outputs).map(([file, info]) => [resolve(file), info]));
@@ -60,9 +71,9 @@ export const load = (baseUrl) => loadBundledFontBytes(face, { baseUrl });`,
         ? { headers: { 'Content-Type': 'application/wasm' } }
         : undefined);
     }) as typeof fetch;
-    const bundled = await import(pathToFileURL(entry![0]).href);
+    const bundled = await phase('bundle import', import(pathToFileURL(entry![0]).href));
     expect(requested).toEqual([]);
-    const bytes = await bundled.load(new URL('fonts/', deployment));
+    const bytes = await phase<ArrayBuffer>('font load', bundled.load(new URL('fonts/', deployment)));
     expect(bytes.byteLength).toBe(bundled.face.byteLength);
     expect(new DataView(bytes).getUint32(0)).toBe(0x00010000);
     expect(requested).toEqual([

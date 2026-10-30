@@ -6,6 +6,6 @@ export type { ShapeDataRow, ShapeDataType } from './shapeData';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type { CollaborationErrorCode, CollaborationErrorListener, CollaborationProviderOptions, CollaborationReplica, CollaborationStatus, CollaborationStatusChange, CollaborationStatusListener, CollaborationTransport, CollaborationTransportEvent, CollaborationUser, VsdxPresence, VsdxPresenceCursor, VsdxPresenceListener, VsdxPresencePeer, VsdxPresenceState, VsdxPresenceUser } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
-export { initWasm, isWasmAvailable, openDiagram, wasmVersion } from './wasm/loader';
+export { initWasm, decodeFontFace, isWasmAvailable, openDiagram, wasmVersion } from './wasm/loader';
 export type { CellFormulaWrite, CollaborationResync, DiagramHandle, OpenDiagramOptions, ShapeDelete, ShapeMove, WasmInitInput } from './wasm/loader';
 export type * from './types';

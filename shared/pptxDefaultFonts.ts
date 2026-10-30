@@ -11,6 +11,8 @@ export interface DefaultFontFace {
   italic: boolean;
   bytes: ArrayBuffer;
   kind?: 'primary' | 'coverage';
+  /** A lighter family's regular face drawn at its own weight whatever weight the run claims. */
+  ownWeight?: boolean;
 }
 
 export interface DefaultFontPayload {

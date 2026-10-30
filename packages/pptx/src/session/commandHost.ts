@@ -3,7 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
-import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import { PptxDocument } from '../wasm/engine';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -13,7 +13,7 @@ import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
-  decodeTiffImage, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
+  decodeTiffImage, decodeFontFace, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
@@ -1511,6 +1511,13 @@ export function registerPresentationCommandHandlers(
   }
 
   const handlers = {
+    async decodeFontFace(_, bytes, input, wasm) {
+      if (disposed) throw new Error('Presentation command session is disposed');
+      await (options.initWasm ?? initWasm)(wasm);
+      if (disposed) throw new Error('Presentation command session is disposed');
+      const face = await decodeFontFace(bytes, input);
+      return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
       if (handle || opening) throw new Error('Presentation command session is already open');
@@ -1715,6 +1722,7 @@ export function registerPresentationCommandHandlers(
   }
 
   return { handlers, policies: {
+    decodeFontFace: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
