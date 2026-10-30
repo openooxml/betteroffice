@@ -383,7 +383,7 @@ describe("collab relay", () => {
 
       relay.handleMessage(viewer, encodeAwarenessFrame([announce(953101, 1)]));
       expect(closedB).toEqual([1008]);
-      await h.clock.drain();
+      await h.clock.advance(30_000);
       expect(b.user.connected).toBe(false);
       const removed = awarenessAt(framesA).filter((entry) => entry.isNull).map((entry) => entry.clientId);
       for (const id of [953100, ...ids.slice(1)]) expect(removed).toContain(id);
@@ -403,7 +403,7 @@ describe("collab relay", () => {
   });
 
   test("reconnecting saved handles cannot open more sockets than the editor limit", async () => {
-    const h = makeHarness({ maxEditorsPerFile: 2 });
+    const h = makeHarness({ maxEditorsPerFile: 2, reconnectGraceMs: 0 });
     addToken(h, TOKENS[0]!, "user-a");
     addToken(h, TOKENS[1]!, "viewer-b", { canWrite: false });
     const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
