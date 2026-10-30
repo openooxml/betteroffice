@@ -603,6 +603,15 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05d1\u05b8\u05d2', x: 70 }]);
   });
 
+  test('reads a right-to-left run past a zero-width second cluster', async () => {
+    const run = syntheticPositionedRun('בָ​אב', [
+      [0, 90, 0], [0, 80], [2, 80, 0], [3, 70], [4, 60],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'בָ​אב', x: 60 },
+    ]);
+  });
+
   test('keeps a left-to-right run whose second cluster opens with a zero-width glyph', async () => {
     const run = syntheticPositionedRun('ab', [[0, 40], [1, 50, 0], [1, 50]]);
     run.width = 20;

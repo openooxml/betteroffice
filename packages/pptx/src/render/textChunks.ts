@@ -31,13 +31,15 @@ function positionedTextChunks(
   // A right-to-left run's clusters step leftward: the canvas orders each tab-free
   // piece itself, drawn from that piece's leftmost glyph. A cluster can open
   // with a mark or dots glyph at its right edge, where the cluster before it
-  // ends, so it is the cluster's leftmost glyph that tells the direction.
-  const firstCluster = run.glyphs[0].cluster;
-  const nextCluster = run.glyphs.find((glyph) => glyph.cluster !== firstCluster)?.cluster;
-  const clusterLeft = (cluster: number): number => run.glyphs.reduce(
-    (left, glyph) => (glyph.cluster === cluster ? Math.min(left, glyph.x) : left), Infinity,
-  );
-  if (nextCluster !== undefined && clusterLeft(nextCluster) < clusterLeft(firstCluster)) {
+  // ends, so it is the clusters' leftmost glyphs that tell the direction, from
+  // the first one that a zero-width cluster does not leave in place.
+  const lefts = new Map<number, number>();
+  for (const glyph of run.glyphs) {
+    lefts.set(glyph.cluster, Math.min(lefts.get(glyph.cluster) ?? Infinity, glyph.x));
+  }
+  const [firstLeft, ...laterLefts] = lefts.values();
+  const nextLeft = laterLefts.find((left) => left !== firstLeft);
+  if (nextLeft !== undefined && nextLeft < firstLeft) {
     const texts = run.text.split('\t');
     const ends: number[] = [];
     let end = -1;
