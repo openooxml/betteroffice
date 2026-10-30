@@ -118,6 +118,20 @@ async function matchingSheetView(
 }
 
 describe('workbook sessions', () => {
+  test('forwards PNG initialization options to the host', async () => {
+    const pair = createInProcessPair();
+    const received: Array<{ png?: boolean } | undefined> = [];
+    createWorkbookSessionHost(pair.host, { initWasm: async (source, options) => {
+      received.push(options);
+      await initWasm(source, options);
+    } });
+    const worker = await createWorkbookSession(fixture, { png: false }, pair.client);
+    try {
+      expect(received).toEqual([{ png: false }]);
+      expect((await worker.save()).length).toBeGreaterThan(0);
+    } finally { await worker.dispose(); }
+  });
+
   test('selection queries cross the worker protocol without changing the workbook', async () => {
     const worker = await session();
     try {

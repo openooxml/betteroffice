@@ -185,3 +185,78 @@ fn incomplete_suggesting_author_matches_shim_error() {
     );
     assert_eq!(session.encode_state(), before);
 }
+
+#[test]
+fn selection_and_undo_run_without_wasm() {
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap();
+    session
+        .set_selection("body", para_id, 1, para_id, 4)
+        .unwrap();
+    let selection: Value = serde_json::from_str(&session.selection().unwrap()).unwrap();
+    assert_eq!(
+        selection,
+        serde_json::json!({
+            "anchor": { "story": "body", "paraId": para_id, "offset": 1 },
+            "head": { "story": "body", "paraId": para_id, "offset": 4 },
+        })
+    );
+
+    session.track_undo();
+    session
+        .insert_text("body", para_id, 5, "!", None, None)
+        .unwrap();
+    assert_eq!(paragraph_texts(&session), ["First!", "Second"]);
+    assert!(session.undo());
+    assert_eq!(paragraph_texts(&session), ["First", "Second"]);
+    assert!(session.can_redo());
+}
+
+#[test]
+fn comments_reads_and_identities_run_without_wasm() {
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap();
+    let ranges = serde_json::json!([{
+        "story": "body", "startPara": para_id, "startOffset": 0,
+        "endPara": para_id, "endOffset": 5,
+    }]);
+    let added: Value = serde_json::from_str(
+        &session
+            .add_comment(&ranges.to_string(), "Reviewer", "2026-01-01", r#""Note""#)
+            .unwrap(),
+    )
+    .unwrap();
+    let comments: Value = serde_json::from_str(&session.list_comments().unwrap()).unwrap();
+    assert_eq!(comments.as_array().unwrap().len(), 1);
+    assert_eq!(comments[0]["id"], added["commentId"]);
+    assert_eq!(comments[0]["body"], "Note");
+
+    let read: Value = serde_json::from_str(
+        &session
+            .read_paragraphs_json(r#"{"story":"body","view":"accepted"}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(read["ok"], true);
+    let paragraphs = read["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs.len(), 2);
+    assert_eq!(paragraphs[0]["text"], "First");
+    assert_eq!(paragraphs[1]["text"], "Second");
+    let identities: Value = serde_json::from_str(&session.paragraph_identities().unwrap()).unwrap();
+    let identities = identities["paragraphs"].as_array().unwrap();
+    assert_eq!(identities.len(), paragraphs.len());
+    for (identity, paragraph) in identities.iter().zip(paragraphs) {
+        assert_eq!(identity["session"]["paraId"], paragraph["paraId"]);
+    }
+}
+
+#[test]
+fn unknown_selection_story_matches_shim_error() {
+    let error = core(1)
+        .set_selection("missing", "p1", 0, "p1", 0)
+        .unwrap_err();
+    assert_eq!(error.kind, EngineErrorKind::Message);
+    assert_eq!(error.message, "story \"missing\" was not found");
+}

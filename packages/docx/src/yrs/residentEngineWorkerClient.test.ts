@@ -19,6 +19,10 @@ import type {
 } from './residentEngineWorkerProtocol';
 import type { DocxCommandFrame, DocxCommandInitReply } from './residentCommandProtocol';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
+import { extractEmbeddedFontFaces, type EmbeddedFontFace } from '../utils/embeddedFonts';
+import type { Document } from '../types/document';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { preloadDocxEngine } from './preloadDocxEngine';
 
 class FakeWorker implements ResidentEngineWorkerPort {
   static instances: FakeWorker[] = [];
@@ -233,6 +237,32 @@ for (const input of ['view', 'buffer', 'shared'] as const) {
     client.destroy();
   });
 }
+
+test.each(['whole', 'cut'] as const)('retains worker embedded faces after a %s open without loading host wasm', async kind => {
+  const worker = new FakeWorker();
+  const client = new DocxSourceWorkerClient(worker);
+  const document: Document = { package: { document: { content: [] }, fontTable: { fonts: [{
+    name: 'Embedded Serif', embedRegular: { relId: 'face' },
+  }] } } };
+  const faces: EmbeddedFontFace[] = [{ family: 'Embedded Serif', weight: 'normal', style: 'normal',
+    data: Uint8Array.of(1, 2, 3).buffer, subsetted: true }];
+  const memories = wasmModuleMemories();
+  try {
+    const pending = kind === 'cut'
+      ? client.openSourceCut({ bytes: Uint8Array.of(1), cut: { blocks: 1 } })
+      : client.openSource({ bytes: Uint8Array.of(1) });
+    worker.reply({ id: worker.lastId(), ok: true, sourceDocument: document, embeddedFontFaces: faces,
+      stateVector: new ArrayBuffer(0) });
+    const opened = await pending;
+    const metadata = opened && 'document' in opened ? opened.document : opened;
+    expect(metadata).toBeDefined();
+    expect(await extractEmbeddedFontFaces(metadata!)).toEqual(faces);
+    expect(await extractEmbeddedFontFaces(metadata!)).toEqual(faces);
+    expect(wasmModuleMemories()).toEqual(memories);
+  } finally {
+    client.destroy();
+  }
+});
 
 function stagedFrame(revision: number, closed: string[]): DocxCommandFrame {
   const bitmap = { close() { closed.push('page'); } } as ImageBitmap;
@@ -849,9 +879,40 @@ test('default windowed requests omit the retention flag', async () => {
 });
 
 describe('warmup', () => {
+  test('engine preload warms only the worker', async () => {
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+    const hostPreload = spyOn(wasm, 'preloadEditWasm').mockRejectedValue(new Error('Unexpected host preload'));
+    try {
+      const warming = preloadDocxEngine();
+      const worker = FakeWorker.instances[0]!;
+      worker.reply({ id: worker.lastId(), ok: true });
+      await warming;
+      expect(worker.posted).toEqual([{ id: 1, type: 'warm' }]);
+      expect(compileModule).not.toHaveBeenCalled();
+      expect(hostPreload).not.toHaveBeenCalled();
+    } finally {
+      hostPreload.mockRestore();
+    }
+  });
+
+  test('source warmup loads the engine in the worker without compiling it on the host', async () => {
+    const worker = new FakeWorker();
+    const client = new DocxSourceWorkerClient(worker);
+    try {
+      const warm = client.prewarm();
+      expect(worker.posted).toEqual([{ id: 1, type: 'warm' }]);
+      expect(compileModule).not.toHaveBeenCalled();
+      worker.reply({ id: worker.lastId(), ok: true });
+      await warm;
+      expect(compileModule).not.toHaveBeenCalled();
+    } finally {
+      client.destroy();
+    }
+  });
+
   test('waits for warm without marking a session ready or bootstrapped', async () => {
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     expect(worker.posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
     expect(client.isReady()).toBe(false);
     expect(client.bootstrapSent()).toBe(false);
@@ -871,7 +932,7 @@ describe('warmup', () => {
 
   test('a rejected warm leaves bootstrap usable', async () => {
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     worker.reply({ id: worker.lastId(), ok: false, error: 'init failed' });
     await expect(warm).rejects.toThrow('init failed');
     const bootstrap = client.bootstrap(snapshot, '');
@@ -889,7 +950,7 @@ describe('warmup', () => {
       })
     );
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     expect(compileModule).toHaveBeenCalledTimes(1);
     expect(worker.posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
     const watchdogs = [...timers.keys()];
@@ -913,7 +974,7 @@ describe('warmup', () => {
   test('posts null once when the host has no shared module', async () => {
     compileModule.mockResolvedValue(null);
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     await Promise.resolve();
     expect(compileModule).toHaveBeenCalledTimes(1);
     expect(worker.posted).toEqual([
@@ -929,7 +990,7 @@ describe('warmup', () => {
   test('posts null when compilation fails', async () => {
     compileModule.mockRejectedValue(new Error('compile failed'));
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     await Promise.resolve();
     expect(worker.posted).toEqual([
       { id: 1, type: 'warm', hostModule: true },
@@ -947,7 +1008,7 @@ describe('warmup', () => {
       })
     );
     const { worker, client } = setup();
-    const warm = client.warm();
+    const warm = client.warm(true);
     if (ending === 'destroy') client.destroy();
     else worker.onerror?.({ message: 'crashed' } as ErrorEvent);
     await expect(warm).rejects.toThrow();
@@ -968,7 +1029,7 @@ describe('warmup', () => {
       post(message, transfer);
     });
     try {
-      const warm = client.warm();
+      const warm = client.warm(true);
       await Promise.resolve();
       expect(posting.mock.calls.map(([message]) => message)).toEqual([
         { id: 1, type: 'warm', hostModule: true },
@@ -1013,10 +1074,9 @@ describe('preloaded worker', () => {
     worker.reply({ id: worker.lastId(), ok: true });
     await first;
     expect(worker.posted).toEqual([
-      { id: 1, type: 'warm', hostModule: true },
-      { type: 'editModule', module: editModule },
+      { id: 1, type: 'warm' },
     ]);
-    expect(compileModule).toHaveBeenCalledTimes(1);
+    expect(compileModule).not.toHaveBeenCalled();
     const client = takePreloadedResidentEngineWorker();
     expect(client).not.toBeNull();
     expect(takePreloadedResidentEngineWorker()).toBeNull();
@@ -1053,12 +1113,12 @@ describe('preloaded worker', () => {
     expect(retry).not.toBe(warm);
     expect(sharedRetry).toBe(retry);
     expect(worker.posted.filter((message) => 'id' in message)).toEqual([
-      { id: 1, type: 'warm', hostModule: true },
-      { id: 2, type: 'warm', hostModule: true },
+      { id: 1, type: 'warm' },
+      { id: 2, type: 'warm' },
     ]);
     worker.reply({ id: worker.lastId(), ok: true });
     await retry;
-    expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(2);
+    expect(worker.posted.filter((message) => message.type === 'editModule')).toHaveLength(0);
     expect(worker.terminated).toBe(false);
   });
 

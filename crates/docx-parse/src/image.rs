@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{ShapeOutline, Transform2D, parse_outline, rot_to_degrees};
+use crate::fmath;
 use crate::media::{MediaMap, resolve_image_data};
 use crate::relationships::{RelationshipMap, resolve_target};
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
@@ -766,8 +767,10 @@ fn rotation_bounds(
 ) -> Option<ImageRotationBounds> {
     let rotation = transform?.rotation.filter(|value| *value != 0.0)?;
     let radians = rotation * std::f64::consts::PI / 180.0;
-    let width = (size.width * radians.cos()).abs() + (size.height * radians.sin()).abs();
-    let height = (size.width * radians.sin()).abs() + (size.height * radians.cos()).abs();
+    let width =
+        (size.width * fmath::cos(radians)).abs() + (size.height * fmath::sin(radians)).abs();
+    let height =
+        (size.width * fmath::sin(radians)).abs() + (size.height * fmath::cos(radians)).abs();
     Some(ImageRotationBounds {
         width: Some(width),
         height: Some(height),

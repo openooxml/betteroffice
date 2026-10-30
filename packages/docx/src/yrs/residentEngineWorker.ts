@@ -21,6 +21,7 @@ import { echoBackgroundPage, stageCommandPresentation } from './residentCommandP
 import { registerCommandFonts } from './residentCommandFonts';
 import { residentSourceMetadata, validateResidentSource, type DocxSourceOpenRequest, type DocxSourcePreviewOptions } from './residentSource';
 import { decodeDocxHostJson } from './yrsSessionFacade';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces, type EmbeddedFontFace } from '../utils/embeddedFonts';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import { residentMediaImages } from './residentMediaImages';
 import { commandMayNeedNewFonts, ResidentSessionFonts, type DocxFontEnvironment } from './residentFontEnvironment';
@@ -110,7 +111,7 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -1269,6 +1270,24 @@ let openedViaSource = false;
 let openedParsed = false;
 let saveWasmPreloadTimer: ReturnType<typeof setTimeout> | null = null;
 let saveWasmPreload: Promise<void> | null = null;
+let saveWarmupTimer: ReturnType<typeof setTimeout> | null = null;
+let saveWarmupOwner: ResidentEngineSession | null = null;
+let saveWarmupAttempts = 0;
+let saveWarmupFinished = false;
+let saveWarmupRequestAt = Number.NEGATIVE_INFINITY;
+let saveWarmupInputAt = Number.NEGATIVE_INFINITY;
+let saveWarmupSaveReceivedAt: number | null = null;
+const saveWarmupStats: { saveDelayMs: number | null } = { saveDelayMs: null };
+interface SaveWarmup {
+  owner: ResidentEngineSession;
+  cancelled: boolean;
+  reject?: (error: unknown) => void;
+}
+let saveWarmup: SaveWarmup | null = null;
+const SAVE_WARMUP_IDLE_MS = 300;
+const SAVE_WARMUP_INPUT_IDLE_MS = 600;
+const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
+const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -1401,12 +1420,19 @@ scope.onmessage = (
   event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>
 ) => {
   const message = event.data;
+  interruptSaveWarmup(message.type);
   if (message.type === 'editModule') {
     // The queued warm waits for this message.
     resolveHostEditModule(message.module instanceof WebAssembly.Module ? message.module : null);
+    scheduleSaveWarmup();
+    return;
+  }
+  if (message.type === 'prepare-save') {
+    scheduleSaveWasmPreload();
     return;
   }
   scheduler.submit(classify(message));
+  scheduleSaveWarmup();
 };
 scope.onmessageerror = () => resolveHostEditModule(null);
 
@@ -1416,7 +1442,9 @@ function nextHostEditModule(): Promise<WebAssembly.Module | null> {
   });
 }
 
-function classify(request: DocxEngineWorkerRequest): SchedulerMessage {
+type ScheduledRequest = Exclude<DocxEngineWorkerRequest, { type: 'prepare-save' }>;
+
+function classify(request: ScheduledRequest): SchedulerMessage {
   const run = () => runRequest(request);
   switch (request.type) {
     case 'edit': {
@@ -1509,7 +1537,7 @@ function isLegacyMutation(request: DocxEngineWorkerRequest): boolean {
     (request.type === 'proposal' && request.operation.kind !== 'snapshot');
 }
 
-async function runRequest(request: DocxEngineWorkerRequest): Promise<void> {
+async function runRequest(request: ScheduledRequest): Promise<void> {
   runningIds.add(request.id);
   progressReported = performance.now();
   try {
@@ -1575,7 +1603,9 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
   if (trappedIds.has(id)) return;
   trappedIds.add(id);
   trap = error;
-  const failed = editFailedAllocationBytes();
+  let memory: ReturnType<typeof wasmModuleMemories> = [];
+  try { memory = wasmModuleMemories(); } catch {}
+  const failed = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
   reply({
     id,
     ok: false,
@@ -1585,10 +1615,10 @@ function trapped(id: number, error: WebAssembly.RuntimeError): void {
         : `Document worker trapped: ${error.message}`,
     terminal: true,
     ...(failed > 0 ? { outOfMemory: true } : {}),
-  });
+  }, [], memory);
 }
 
-async function handle(request: DocxEngineWorkerRequest): Promise<void> {
+async function handle(request: ScheduledRequest): Promise<void> {
   if (request.type === 'decodeFontFace') {
     try {
       await preloadEditWasm();
@@ -1749,6 +1779,7 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
         return;
       }
       const { document, hostJson } = opened;
+      const embeddedFontFaces = opened.embeddedFontFaces ?? await extractEmbeddedFontFaces(document);
       if (source.collaboration) collaboration = createResidentCollaboration(opening, { onPipeOutput: schedulePipeOutput });
       const metadata = residentSourceMetadata(document);
       const identity = { clientId: opening.clientId, clientClock: stateVectorClock(opening.encodeStateVector(), opening.clientId) };
@@ -1757,10 +1788,11 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
       const listed = svgMedia?.length ? { svgMedia } : {};
       if (source.preview) {
         await replySourcePreview(request.id, opening, typeof source.preview === 'object' ? source.preview : {},
-          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, hostJson, ...identity, ...listed });
+          () => JSON.stringify(buildResidentRegionLayoutRequest(metadata, 24, {})), started, { sourceDocument: metadata, embeddedFontFaces, hostJson, ...identity, ...listed });
       } else {
         const stateVector = exactBuffer(opening.encodeStateVector());
-        reply({ id: request.id, ok: true, sourceDocument: metadata, hostJson, stateVector, ...identity, ...listed }, [stateVector]);
+        reply({ id: request.id, ok: true, sourceDocument: metadata, embeddedFontFaces, hostJson, stateVector, ...identity, ...listed },
+          [stateVector, ...embeddedFontFaces.map(face => face.data)]);
       }
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -1960,6 +1992,10 @@ async function handle(request: DocxEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'save') {
+    if (saveWarmupSaveReceivedAt !== null) {
+      saveWarmupStats.saveDelayMs = performance.now() - saveWarmupSaveReceivedAt;
+      saveWarmupSaveReceivedAt = null;
+    }
     if (previewing) throw new SaveUnavailableError('Document worker is still opening');
     if (!session || (!openedSource && !openedParsed)) {
       throw new SaveUnavailableError('Document worker has no opened document to save');
@@ -3355,6 +3391,8 @@ function asciiProposalFontsUnchanged(
  */
 function destroySession(keepSurfaces = false): void {
   cancelSaveWasmPreload();
+  cancelSaveWarmup();
+  saveWarmupOwner = null;
   collaboration?.dispose(); collaboration = null;
   supersedeBackgroundPageBuild();
   fontRequirements = null;
@@ -3515,8 +3553,9 @@ function parsedToolbar(document: import('../types/document').Document): () => Do
 function adoptResidentSource(
   opening: ResidentEngineSession,
   source: DocxSourceOpenRequest
-): { document: import('../types/document').Document; hostJson?: string } | null {
+): { document: import('../types/document').Document; hostJson?: string; embeddedFontFaces?: EmbeddedFontFace[] } | null {
   let hostJson: string | undefined;
+  let embeddedFontFaces: EmbeddedFontFace[] | undefined;
   let document: import('../types/document').Document;
   let partial = false;
   const options = { ...source, initialUpdate: source.collaboration?.initialUpdate };
@@ -3529,11 +3568,14 @@ function adoptResidentSource(
     hostJson = cut;
     const host = decodeDocxHostJson(hostJson, source.bytes!);
     document = host.document;
+    embeddedFontFaces = getEmbeddedFontFaces(document.package.fontTable, host.embeddedFonts, host.fontTableRelationshipsXml);
     partial = host.wholeBody !== true;
   } else {
     hostJson = opening.openSourceDocx(source.bytes!, options);
     reportProgress();
-    document = decodeDocxHostJson(hostJson, source.bytes!).document;
+    const host = decodeDocxHostJson(hostJson, source.bytes!);
+    document = host.document;
+    embeddedFontFaces = getEmbeddedFontFaces(document.package.fontTable, host.embeddedFonts, host.fontTableRelationshipsXml);
     reportProgress();
   }
   if (!source.cut) opening.setDirectBatches(true);
@@ -3547,7 +3589,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
-  return { document, hostJson };
+  return { document, hostJson, embeddedFontFaces };
 }
 
 /** Restores a cut whose whole source failed to open, so the worker still holds the document its preview shows. */
@@ -3570,7 +3612,7 @@ async function replySourcePreview(
   preview: DocxSourcePreviewOptions,
   defaultLayoutInput: () => string,
   started: number,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; embeddedFontFaces?: EmbeddedFontFace[]; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   sourcePreviewing = true;
   const pages = preview.pages ?? 1;
@@ -3611,7 +3653,7 @@ async function replyFrame(
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null,
-  sourceOpened?: { sourceDocument: import('../types/document').Document; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
+  sourceOpened?: { sourceDocument: import('../types/document').Document; embeddedFontFaces?: EmbeddedFontFace[]; hostJson?: string; clientId: number; clientClock: number; svgMedia?: DocxSvgMedia[] }
 ): Promise<void> {
   const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
   const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
@@ -3699,6 +3741,7 @@ async function replyFrame(
       ...(layoutProvisional ? { layoutProvisional } : {}),
     },
     [...packed.transfer, ...updateBuffers, ...(stateVector ? [stateVector] : []),
+      ...(sourceOpened?.embeddedFontFaces?.map(face => face.data) ?? []),
       ...(layoutMeta ? [layoutMeta.pageSizes.buffer as ArrayBuffer] : [])]
   );
 }
@@ -3864,16 +3907,128 @@ function canPreloadSaveWasm(): boolean {
 }
 
 function scheduleSaveWasmPreload(): void {
-  if (saveWasmPreloadTimer !== null || saveWasmPreload || !canPreloadSaveWasm()) return;
+  if (!canPreloadSaveWasm()) return;
   const owner = session;
+  if (saveWasmPreload) {
+    void saveWasmPreload.then(() => prepareSaveWarmup(owner)).catch(() => {});
+    return;
+  }
+  if (saveWasmPreloadTimer !== null) return;
   saveWasmPreloadTimer = setTimeout(() => {
     saveWasmPreloadTimer = null;
     if (session !== owner || !canPreloadSaveWasm()) return;
-    void preloadSaveWasm().catch(() => {});
+    void preloadSaveWasm().then(() => prepareSaveWarmup(owner)).catch(() => {});
   }, 0);
 }
 
-function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []): void {
+function prepareSaveWarmup(owner: ResidentEngineSession | null): void {
+  if (!owner || session !== owner || !canPreloadSaveWasm()) return;
+  saveWarmupOwner = owner;
+  scheduleSaveWarmup();
+}
+
+function cancelSaveWarmup(): void {
+  if (saveWarmupTimer !== null) clearTimeout(saveWarmupTimer);
+  saveWarmupTimer = null;
+  if (!saveWarmup) return;
+  saveWarmup.cancelled = true;
+  saveWarmup.reject?.(trap ?? new Error('Save warmup cancelled'));
+}
+
+function interruptSaveWarmup(type: string): void {
+  saveWarmupRequestAt = performance.now();
+  if (type === 'edit' || type.startsWith('command') || type === 'applyInput' || type === 'applyDelete') {
+    saveWarmupInputAt = saveWarmupRequestAt;
+  }
+  if (type === 'save') {
+    if (saveWarmup && !saveWarmup.cancelled) saveWarmupSaveReceivedAt = saveWarmupRequestAt;
+    saveWarmupFinished = true;
+  }
+  cancelSaveWarmup();
+}
+
+function saveWarmupCurrent(attempt: SaveWarmup): boolean {
+  return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
+    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+}
+
+function saveWarmupHasHeadroom(): boolean {
+  const configured = openedDocument?.heapLimitBytes;
+  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
+  try {
+    memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+    return false;
+  }
+  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
+    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
+  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
+  const live = memory?.liveBytes;
+  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
+    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
+}
+
+function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!saveWarmupCurrent(attempt)) {
+      reject(trap ?? new Error('Save warmup cancelled'));
+      return;
+    }
+    attempt.reject = reject;
+    scheduler.schedule({
+      kind: 'saveWarmup', version: scheduler.version, generation: scheduler.generation,
+      onStale: () => 'continue',
+      run: () => {
+        attempt.reject = undefined;
+        if (saveWarmupCurrent(attempt)) resolve();
+        else reject(trap ?? new Error('Save warmup cancelled'));
+        return 'done';
+      },
+      cancel: () => reject(trap ?? new Error('Save warmup cancelled')),
+      fail: reject,
+    });
+  });
+}
+
+function scheduleSaveWarmup(): void {
+  if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
+  const owner = saveWarmupOwner;
+  const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
+    saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
+  saveWarmupTimer = setTimeout(() => {
+    saveWarmupTimer = null;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
+    const attempt: SaveWarmup = { owner, cancelled: false };
+    saveWarmup = attempt;
+    void yieldSaveWarmup(attempt).then(async () => {
+      if (!saveWarmupCurrent(attempt)) return;
+      saveWarmupAttempts += 1;
+      const { warmResidentSave } = await import('./residentSaveWarmup');
+      if (!saveWarmupCurrent(attempt)) return;
+      await warmResidentSave(() => yieldSaveWarmup(attempt));
+      if (!attempt.cancelled) saveWarmupFinished = true;
+    }).catch((error: unknown) => {
+      if (error instanceof WebAssembly.RuntimeError) {
+        trapped(0, error);
+        return;
+      }
+      if (!attempt.cancelled && session === owner) saveWarmupFinished = true;
+    }).finally(() => {
+      if (saveWarmup !== attempt) return;
+      saveWarmup = null;
+      scheduleSaveWarmup();
+    });
+  }, delay);
+}
+
+function reply(
+  response: DocxEngineWorkerResponse,
+  transfer: Transferable[] = [],
+  memory?: ReturnType<typeof wasmModuleMemories>
+): void {
   // A trap the raster painted past fails the request that would succeed, and
   // every request waiting on it, through the paths that answer failures.
   if (trap && response.ok) throw trap;
@@ -3881,7 +4036,5 @@ function reply(response: DocxEngineWorkerResponse, transfer: Transferable[] = []
   const { transfer: piped = [], ...collabUpdates } = drained ?? {};
   scope.postMessage({ ...response, ...(drained ? { collabUpdates: { ...collabUpdates,
     ...(commandInit ? { session: commandInit.session, incarnation: commandInit.incarnation, epoch: commandInit.epoch } : {}) } } : {}),
-    memory: wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
-  if (response.ok && (response.frame || response.commandInitial?.frame || response.commandAck?.frame ||
-    response.commandFrame?.frame)) scheduleSaveWasmPreload();
+    memory: memory ?? wasmModuleMemories() }, [...transfer, ...(drained?.updates ?? []), ...piped]);
 }

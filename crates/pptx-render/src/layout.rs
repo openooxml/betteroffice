@@ -69,6 +69,8 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
+/// Larger edited shapes save unfitted, as when no fonts are registered.
+const MAX_FITTED_TEXT_UTF16: u32 = 65_536;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
 /// Metafile fills and strokes one slide may draw, shared across its pictures.
@@ -391,6 +393,7 @@ impl SlideRenderer {
             deck.width_emu,
             deck.height_emu,
             slide_index,
+            None,
         )
     }
 
@@ -407,6 +410,7 @@ impl SlideRenderer {
             scope.width_emu,
             scope.height_emu,
             scope.index,
+            None,
         )
     }
 
@@ -465,6 +469,7 @@ impl SlideRenderer {
         width_emu: i64,
         height_emu: i64,
         slide_index: usize,
+        shape_filter: Option<&HashSet<String>>,
     ) -> Result<RenderedSlide, RenderError> {
         let SlideParents {
             slide: parsed_slide,
@@ -499,14 +504,18 @@ impl SlideRenderer {
         } else {
             parsed_slide.map(BackgroundSource::from_slide)
         };
-        let background_source = [
-            slide_background,
-            layout.map(BackgroundSource::from_layout),
-            master.map(BackgroundSource::from_master),
-        ]
-        .into_iter()
-        .flatten()
-        .find(BackgroundSource::is_declared);
+        let background_source = if shape_filter.is_none() {
+            [
+                slide_background,
+                layout.map(BackgroundSource::from_layout),
+                master.map(BackgroundSource::from_master),
+            ]
+            .into_iter()
+            .flatten()
+            .find(BackgroundSource::is_declared)
+        } else {
+            None
+        };
         let background_fill =
             background_source
                 .as_ref()
@@ -536,7 +545,7 @@ impl SlideRenderer {
             })
             .filter(|paint| !is_invisible(paint))
             .or_else(|| {
-                Some(Paint::Solid {
+                shape_filter.is_none().then(|| Paint::Solid {
                     color: "#ffffff".to_owned(),
                 })
             });
@@ -552,6 +561,7 @@ impl SlideRenderer {
             master_other_style_levels: None,
             layout,
             parsed_slide,
+            shape_filter,
             primitives: Vec::new(),
             hit_regions: Vec::new(),
             autofit: HashMap::new(),
@@ -571,7 +581,8 @@ impl SlideRenderer {
             background_picture: background_picture.cloned(),
         };
         let root_space = Space::root();
-        if let Some(picture) = background_picture
+        if shape_filter.is_none()
+            && let Some(picture) = background_picture
             && let Some(asset_id) = picture.media_part_path.clone()
         {
             let background_dpi = builder
@@ -606,8 +617,10 @@ impl SlideRenderer {
                 transform: Transform::default(),
             });
         }
-        for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
-            builder.render_parsed_shape(shape, &stable_id, root_space, false)?;
+        if shape_filter.is_none() {
+            for (shape, stable_id) in inherited_shapes(parsed_slide, layout, master) {
+                builder.render_parsed_shape(shape, &stable_id, root_space, false)?;
+            }
         }
         for shape in &deck_slide.shapes {
             builder.render_snapshot_shape(shape, root_space)?;
@@ -640,15 +653,23 @@ impl SlideRenderer {
                     slide.source_part_path.as_deref(),
                     slide.layout_part_path.as_deref(),
                 );
-                if !has_autofit_edits(
+                let shape_ids = autofit_edited_shapes(
                     &slide.shapes,
                     base.map_or(&[], |base| &base.shapes),
                     &parents,
-                ) {
+                );
+                if shape_ids.is_empty() {
                     continue;
                 }
                 let rendered = self
-                    .layout_slide(session.package(), snapshot, index)
+                    .layout_resolved(
+                        session.package(),
+                        slide,
+                        snapshot.width_emu,
+                        snapshot.height_emu,
+                        index,
+                        Some(&shape_ids),
+                    )
                     .map_err(|error| pptx_edit::EditError::Write(error.to_string()))?;
                 autofit.extend(rendered.autofit);
             }
@@ -764,22 +785,47 @@ impl SlideRenderer {
     }
 }
 
-fn has_autofit_edits(
+fn autofit_edited_shapes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     parents: &SlideParents<'_>,
+) -> HashSet<String> {
+    let mut edited = HashSet::new();
+    collect_autofit_edited_shapes(current, baseline, parents, &mut edited);
+    edited
+}
+
+fn collect_autofit_edited_shapes(
+    current: &[ShapeSnapshot],
+    baseline: &[ShapeSnapshot],
+    parents: &SlideParents<'_>,
+    edited: &mut HashSet<String>,
 ) -> bool {
-    current.iter().any(|shape| {
-        let base = baseline.iter().find(|base| base.id == shape.id);
-        if has_autofit_edits(
+    let mut has_edits = false;
+    let mut baseline_by_id = HashMap::with_capacity(baseline.len());
+    for shape in baseline {
+        baseline_by_id.entry(shape.id.as_str()).or_insert(shape);
+    }
+    for shape in current {
+        let base = baseline_by_id.get(shape.id.as_str()).copied();
+        let child_edited = collect_autofit_edited_shapes(
             &shape.children,
             base.map_or(&[], |base| &base.children),
             parents,
-        ) {
-            return true;
+            edited,
+        );
+        if child_edited && shape.kind == ShapeKind::Group {
+            edited.insert(shape.id.clone());
         }
+        has_edits |= child_edited;
         if base.is_some_and(|base| base.text_stories == shape.text_stories) {
-            return false;
+            continue;
+        }
+        let text_utf16 = shape.text_stories.iter().fold(0_u32, |length, story| {
+            length.saturating_add(story.length.saturating_sub(1))
+        });
+        if text_utf16 > MAX_FITTED_TEXT_UTF16 {
+            continue;
         }
         let original = parents
             .slide
@@ -794,14 +840,18 @@ fn has_autofit_edits(
                 .master
                 .and_then(|master| find_placeholder(&master.shapes, placeholder))
         });
-        matches!(
+        if matches!(
             [original, layout, master]
                 .into_iter()
                 .flatten()
                 .find_map(|node| node_text(node)?.autofit.as_ref()),
             Some(TextAutofit::Normal { .. })
-        )
-    })
+        ) {
+            edited.insert(shape.id.clone());
+            has_edits = true;
+        }
+    }
+    has_edits
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1334,6 +1384,7 @@ struct LayoutBuilder<'a> {
     master_other_style_levels: Option<[bool; 9]>,
     layout: Option<&'a SlideLayout>,
     parsed_slide: Option<&'a Slide>,
+    shape_filter: Option<&'a HashSet<String>>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
     autofit: HashMap<String, TextAutofit>,
@@ -1435,6 +1486,12 @@ impl<'a> LayoutBuilder<'a> {
         shape: &ShapeSnapshot,
         space: Space,
     ) -> Result<(), RenderError> {
+        if self
+            .shape_filter
+            .is_some_and(|shape_ids| !shape_ids.contains(&shape.id))
+        {
+            return Ok(());
+        }
         self.charge_shape()?;
         if shape.hidden {
             return Ok(());
@@ -1457,139 +1514,141 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         let stable_id = shape.id.clone();
-        let inherited = [original, layout_node, master_node];
-        let inherited_fill = self.resolved_fill(&inherited);
-        let inherited_outline = self.resolved_outline(&inherited);
-        let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
-        let picture = effective_fill
-            .filter(|fill| fill.fill_type == PICTURE_FILL)
-            .and_then(|_| picture_fill(&inherited));
-        let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
-        let background_picture = use_bg_fill
-            .then(|| self.background_picture.clone())
-            .flatten();
-        let picture = if use_bg_fill {
-            background_picture.as_ref()
-        } else {
-            picture
-        };
-        let fill = if use_bg_fill {
-            self.background_paint.clone()
-        } else {
-            effective_fill.and_then(|fill| paint(fill, self.theme))
-        };
-        let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
-            inherited_outline
-        } else {
-            shape
-                .outline
-                .as_ref()
-                .map(|edited| {
-                    if *edited == ShapeOutline::default() {
-                        edited.clone()
-                    } else {
-                        merge_outline(edited, inherited_outline.as_ref())
-                    }
-                })
-                .or(inherited_outline)
-        }
-        .and_then(|outline| stroke(&outline, self.theme));
-        let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
-        let shadow = node_effects
-            .as_ref()
-            .filter(|_| match shape.kind {
-                ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
-                ShapeKind::Picture => true,
-                ShapeKind::GraphicFrame | ShapeKind::Group => false,
-            })
-            .and_then(|effects| {
-                shadow(
-                    effects,
-                    self.theme,
-                    space,
-                    rect,
-                    resolved.rotation_deg as f32,
-                    resolved.flip_h,
-                    resolved.flip_v,
-                )
-            });
         let transform = Transform {
             rotation_deg: resolved.rotation_deg as f32,
             flip_h: resolved.flip_h,
             flip_v: resolved.flip_v,
         };
-        match shape.kind {
-            ShapeKind::Shape => {
-                let paths = custom_paths(original);
-                let (path, mut geometry_fallback) = geometry_path_with_fallback(
-                    &shape.geometry,
-                    &shape.adjust_values,
-                    f64::from(rect.w) / f64::from(rect.h),
-                );
-                if shape.geometry == "custom" && !paths.is_empty() {
-                    geometry_fallback = false;
+        if self.shape_filter.is_none() {
+            let inherited = [original, layout_node, master_node];
+            let inherited_fill = self.resolved_fill(&inherited);
+            let inherited_outline = self.resolved_outline(&inherited);
+            let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
+            let picture = effective_fill
+                .filter(|fill| fill.fill_type == PICTURE_FILL)
+                .and_then(|_| picture_fill(&inherited));
+            let use_bg_fill = shape.kind == ShapeKind::Shape && node_use_bg_fill(original);
+            let background_picture = use_bg_fill
+                .then(|| self.background_picture.clone())
+                .flatten();
+            let picture = if use_bg_fill {
+                background_picture.as_ref()
+            } else {
+                picture
+            };
+            let fill = if use_bg_fill {
+                self.background_paint.clone()
+            } else {
+                effective_fill.and_then(|fill| paint(fill, self.theme))
+            };
+            let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
+                inherited_outline
+            } else {
+                shape
+                    .outline
+                    .as_ref()
+                    .map(|edited| {
+                        if *edited == ShapeOutline::default() {
+                            edited.clone()
+                        } else {
+                            merge_outline(edited, inherited_outline.as_ref())
+                        }
+                    })
+                    .or(inherited_outline)
+            }
+            .and_then(|outline| stroke(&outline, self.theme));
+            let node_effects = self.resolved_effects(&[original, layout_node, master_node]);
+            let shadow = node_effects
+                .as_ref()
+                .filter(|_| match shape.kind {
+                    ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
+                    ShapeKind::Picture => true,
+                    ShapeKind::GraphicFrame | ShapeKind::Group => false,
+                })
+                .and_then(|effects| {
+                    shadow(
+                        effects,
+                        self.theme,
+                        space,
+                        rect,
+                        resolved.rotation_deg as f32,
+                        resolved.flip_h,
+                        resolved.flip_v,
+                    )
+                });
+            match shape.kind {
+                ShapeKind::Shape => {
+                    let paths = custom_paths(original);
+                    let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                        &shape.geometry,
+                        &shape.adjust_values,
+                        f64::from(rect.w) / f64::from(rect.h),
+                    );
+                    if shape.geometry == "custom" && !paths.is_empty() {
+                        geometry_fallback = false;
+                    }
+                    let primitive = Primitive::Shape {
+                        clip: None,
+                        even_odd: false,
+                        object_id: shape.source_id,
+                        shape_id: Some(stable_id.clone()),
+                        name: shape.name.clone(),
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        geometry: shape.geometry.clone(),
+                        path,
+                        geometry_fallback,
+                        adjust_values: shape
+                            .adjust_values
+                            .iter()
+                            .map(|(name, value)| (name.clone(), *value as f32))
+                            .collect(),
+                        fill,
+                        stroke: outline,
+                        shadow,
+                        transform,
+                    };
+                    if use_bg_fill {
+                        self.push_background_shape(primitive, paths, picture)?;
+                    } else {
+                        self.push_shape(primitive, paths, picture)?;
+                    }
                 }
-                let primitive = Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id: shape.source_id,
-                    shape_id: Some(stable_id.clone()),
-                    name: shape.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: shape.geometry.clone(),
-                    path,
-                    geometry_fallback,
-                    adjust_values: shape
-                        .adjust_values
-                        .iter()
-                        .map(|(name, value)| (name.clone(), *value as f32))
-                        .collect(),
-                    fill,
-                    stroke: outline,
-                    shadow,
-                    transform,
-                };
-                if use_bg_fill {
-                    self.push_background_shape(primitive, paths, picture)?;
-                } else {
-                    self.push_shape(primitive, paths, picture)?;
+                ShapeKind::Picture => {
+                    let source = picture_source(original);
+                    let asset_id = picture_asset_id(shape);
+                    self.render_picture(
+                        shape.source_id,
+                        &stable_id,
+                        &shape.name,
+                        rect,
+                        transform,
+                        asset_id.as_deref(),
+                        &shape.blip_effects,
+                        source.map(|picture| &picture.crop),
+                        source
+                            .map(|picture| picture_mask(picture, rect))
+                            .unwrap_or_default(),
+                        outline,
+                        shadow,
+                    );
                 }
+                ShapeKind::GraphicFrame => {
+                    self.render_graphic_frame(
+                        shape.source_id,
+                        &stable_id,
+                        &shape.name,
+                        rect,
+                        transform,
+                        space,
+                        shape.graphic.as_ref(),
+                        &shape.text_stories,
+                    )?;
+                }
+                ShapeKind::Group => unreachable!(),
             }
-            ShapeKind::Picture => {
-                let source = picture_source(original);
-                let asset_id = picture_asset_id(shape);
-                self.render_picture(
-                    shape.source_id,
-                    &stable_id,
-                    &shape.name,
-                    rect,
-                    transform,
-                    asset_id.as_deref(),
-                    &shape.blip_effects,
-                    source.map(|picture| &picture.crop),
-                    source
-                        .map(|picture| picture_mask(picture, rect))
-                        .unwrap_or_default(),
-                    outline,
-                    shadow,
-                );
-            }
-            ShapeKind::GraphicFrame => {
-                self.render_graphic_frame(
-                    shape.source_id,
-                    &stable_id,
-                    &shape.name,
-                    rect,
-                    transform,
-                    space,
-                    shape.graphic.as_ref(),
-                    &shape.text_stories,
-                )?;
-            }
-            ShapeKind::Group => unreachable!(),
         }
         let body_cascade = text_scope.cascade(
             [original, layout_node, master_node],
@@ -1616,7 +1675,7 @@ impl<'a> LayoutBuilder<'a> {
             }
         };
         let text_hit = if let Some(content) = text {
-            Some(self.render_text_box(
+            self.render_text_box(
                 shape.source_id,
                 &stable_id,
                 rect,
@@ -1625,17 +1684,19 @@ impl<'a> LayoutBuilder<'a> {
                 geometry_text_inset(original, rect),
                 content,
                 body_cascade,
-            )?)
+            )?
         } else {
             None
         };
-        self.hit_regions.push(HitRegion {
-            shape_id: stable_id,
-            rect,
-            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
-            transform,
-            text: text_hit,
-        });
+        if self.shape_filter.is_none() {
+            self.hit_regions.push(HitRegion {
+                shape_id: stable_id,
+                rect,
+                hit_rect: rect_covering_text(rect, text_hit.as_ref()),
+                transform,
+                text: text_hit,
+            });
+        }
         Ok(())
     }
 
@@ -1793,7 +1854,7 @@ impl<'a> LayoutBuilder<'a> {
         }
         let text_hit = if let Some(body) = node_text(shape) {
             let content = content_from_body(stable_id, body, self.theme, self.slide_number);
-            Some(self.render_text_box(
+            self.render_text_box(
                 base.id,
                 stable_id,
                 rect,
@@ -1812,7 +1873,7 @@ impl<'a> LayoutBuilder<'a> {
                     placeholder: base.placeholder.as_ref(),
                     style_color: shape_style_color(Some(shape)),
                 },
-            )?)
+            )?
         } else {
             None
         };
@@ -2491,7 +2552,7 @@ impl<'a> LayoutBuilder<'a> {
             }
         }
         for plan in &plans {
-            self.render_text_box(
+            let _ = self.render_text_box(
                 object_id,
                 shape_id,
                 plan.rect(&columns, &rows),
@@ -2603,7 +2664,7 @@ impl<'a> LayoutBuilder<'a> {
         preset_inset: (f32, f32),
         content: TextContent,
         cascade: BodyCascade<'_>,
-    ) -> Result<TextHit, RenderError> {
+    ) -> Result<Option<TextHit>, RenderError> {
         self.substitutions.enter_shape(shape_id);
         let mut resolved = resolve_content(
             self.renderer,
@@ -2686,6 +2747,9 @@ impl<'a> LayoutBuilder<'a> {
         } else {
             autofit_font_scale(cascade.autofit())
         };
+        if self.shape_filter.is_some() {
+            return Ok(None);
+        }
         let mut laid_out = self.layout_text_columns(&resolved, content_rect, cascade, scale)?;
         if cascade.fit_to_box {
             let largest_font = resolved
@@ -2795,13 +2859,13 @@ impl<'a> LayoutBuilder<'a> {
             overflow,
             transform: text_transform,
         });
-        Ok(TextHit {
+        Ok(Some(TextHit {
             overflow,
             story_id,
             rect: text_rect,
             transform: text_transform,
             lines,
-        })
+        }))
     }
 
     fn layout_text_columns(
@@ -4810,13 +4874,16 @@ fn split_by_direction(run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
         out.push(run);
         return;
     }
+    let mut offset = run.start;
     for (position, start) in cuts.iter().enumerate() {
         let end = cuts.get(position + 1).copied().unwrap_or(run.text.len());
+        let text = &run.text[*start..end];
         out.push(ResolvedRun {
-            text: run.text[*start..end].to_owned(),
-            start: run.start + utf16_len(&run.text[..*start]),
+            text: text.to_owned(),
+            start: offset,
             style: run.style.clone(),
         });
+        offset += utf16_len(text);
     }
 }
 
@@ -4934,6 +5001,7 @@ fn shape_paragraph(
     let mut global_byte = 0_usize;
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let mut segment_start = 0_usize;
+        let mut source_start = run.start;
         for (byte_index, character) in run.text.char_indices() {
             if character != '\n' && character != '\t' {
                 continue;
@@ -4945,13 +5013,14 @@ fn shape_paragraph(
                     run_index,
                     text: &run.text[segment_start..byte_index],
                     run_byte_start: segment_start,
+                    source_start,
                     global_run_byte: global_byte,
                     scale,
                     breaks: &breaks,
                 },
                 &mut clusters,
             )?;
-            let start = run.start + utf16_len(&run.text[..byte_index]);
+            let start = source_start + utf16_len(&run.text[segment_start..byte_index]);
             let hard = character == '\n';
             clusters.push(ShapedCluster {
                 text: character.to_string(),
@@ -4967,6 +5036,7 @@ fn shape_paragraph(
                 tab: !hard,
             });
             segment_start = byte_index + character.len_utf8();
+            source_start = start + 1;
         }
         add_shaped_segment(
             SegmentShape {
@@ -4975,6 +5045,7 @@ fn shape_paragraph(
                 run_index,
                 text: &run.text[segment_start..],
                 run_byte_start: segment_start,
+                source_start,
                 global_run_byte: global_byte,
                 scale,
                 breaks: &breaks,
@@ -4992,6 +5063,7 @@ struct SegmentShape<'a> {
     run_index: usize,
     text: &'a str,
     run_byte_start: usize,
+    source_start: u32,
     global_run_byte: usize,
     scale: f32,
     breaks: &'a HashMap<usize, bool>,
@@ -5051,6 +5123,7 @@ fn add_shaped_segment(
         run_index,
         text,
         run_byte_start,
+        mut source_start,
         global_run_byte,
         scale,
         breaks,
@@ -5072,29 +5145,30 @@ fn add_shaped_segment(
         ),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
-    let mut starts = shaped
-        .iter()
-        .map(|glyph| glyph.cluster as usize)
-        .filter(|start| *start < text.len() && text.is_char_boundary(*start))
+    let mut glyphs_by_cluster: HashMap<usize, Vec<ShapedGlyph>> = HashMap::new();
+    for glyph in shaped {
+        let start = glyph.cluster as usize;
+        if start < text.len() && text.is_char_boundary(start) {
+            glyphs_by_cluster.entry(start).or_default().push(glyph);
+        }
+    }
+    let mut starts = text
+        .char_indices()
+        .filter(|(start, _)| *start == 0 || glyphs_by_cluster.contains_key(start))
+        .map(|(start, _)| start)
         .collect::<Vec<_>>();
-    starts.push(0);
     starts.push(text.len());
-    starts.sort_unstable();
-    starts.dedup();
     for pair in starts.windows(2) {
         let start_byte = pair[0];
         let end_byte = pair[1];
         if start_byte == end_byte {
             continue;
         }
-        let source_start = run.start + utf16_len(&run.text[..run_byte_start + start_byte]);
-        let source_end = run.start + utf16_len(&run.text[..run_byte_start + end_byte]);
+        let text_slice = &text[start_byte..end_byte];
+        let source_end = source_start + utf16_len(text_slice);
         let mut glyph_x = 0.0;
         let mut glyphs = Vec::new();
-        for glyph in shaped
-            .iter()
-            .filter(|glyph| glyph.cluster as usize == start_byte)
-        {
+        for glyph in glyphs_by_cluster.remove(&start_byte).unwrap_or_default() {
             glyphs.push(ClusterGlyph {
                 glyph_id: glyph.glyph_id,
                 cluster: source_start,
@@ -5105,7 +5179,6 @@ fn add_shaped_segment(
             });
             glyph_x += glyph.x_advance;
         }
-        let text_slice = &text[start_byte..end_byte];
         // The glyphs keep the advances of the face that draws them, so a
         // backend laying the run out itself still sees where each one ends and
         // places the next cluster at the x this width put it.
@@ -5125,6 +5198,7 @@ fn add_shaped_segment(
             mandatory: breaks.get(&global_end).copied().unwrap_or(false),
             tab: false,
         });
+        source_start = source_end;
     }
     Ok(())
 }
@@ -9938,6 +10012,103 @@ mod tests {
             .unwrap()
     }
 
+    fn best_of_three<T>(mut workload: impl FnMut() -> T) -> (std::time::Duration, T) {
+        let mut best: Option<std::time::Duration> = None;
+        let mut output = None;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let result = workload();
+            let elapsed = start.elapsed();
+            if best.is_none_or(|best_elapsed| elapsed < best_elapsed) {
+                best = Some(elapsed);
+            }
+            output = Some(result);
+        }
+        (best.unwrap(), output.unwrap())
+    }
+
+    #[test]
+    fn a_text_box_with_a_large_single_run_lays_out_in_linear_time() {
+        let make_body = |text: String| TextBody {
+            paragraphs: vec![pptx_parse::TextParagraph {
+                runs: vec![pptx_parse::TextRun {
+                    text,
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let (small_elapsed, _) =
+            best_of_three(|| text_columns_slide(make_body("x".repeat(12_500))));
+        let (large_elapsed, rendered) =
+            best_of_three(|| text_columns_slide(make_body("x".repeat(50_000))));
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        let text = "x".repeat(50_000);
+        let lines = text_columns_lines(&rendered);
+        let laid_out: String = lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(laid_out, text);
+        assert_eq!(lines.last().unwrap().end, 50_000);
+    }
+
+    #[test]
+    fn a_text_box_with_a_large_mixed_direction_run_lays_out_in_linear_time() {
+        let make_body = |text: String| TextBody {
+            paragraphs: vec![pptx_parse::TextParagraph {
+                properties: ParagraphProperties {
+                    rtl: Some(true),
+                    ..ParagraphProperties::default()
+                },
+                runs: vec![pptx_parse::TextRun {
+                    text,
+                    properties: RunProperties {
+                        font_size_pt: Some(12.0),
+                        font_family: Some("Arial".to_owned()),
+                        ..RunProperties::default()
+                    },
+                    field_id: None,
+                    field_type: None,
+                    line_break: false,
+                }],
+                ..pptx_parse::TextParagraph::default()
+            }],
+            ..TextBody::default()
+        };
+        let (small_elapsed, _) =
+            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(6_250))));
+        let (large_elapsed, rendered) =
+            best_of_three(|| text_columns_slide(make_body("a\u{5d0}".repeat(25_000))));
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        let text = "a\u{5d0}".repeat(25_000);
+        let lines = text_columns_lines(&rendered);
+        let laid_out: String = lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(laid_out, text);
+        assert_eq!(lines.last().unwrap().end, 50_000);
+    }
+
     #[test]
     fn text_columns_fill_then_continue_at_the_next_column() {
         let rendered = text_columns_slide(text_columns_body());
@@ -10807,6 +10978,443 @@ mod tests {
             plain[0].width
         );
         assert!(tight[0].width >= 0.0, "{}", tight[0].width);
+    }
+
+    #[test]
+    fn autofit_edit_scan_is_linear_for_large_unchanged_slides() {
+        let shape = ShapeSnapshot {
+            id: String::new(),
+            source_id: 0,
+            kind: ShapeKind::Shape,
+            name: String::new(),
+            title: None,
+            description: None,
+            decorative: false,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            rotation_deg: 0.0,
+            flip_h: false,
+            flip_v: false,
+            inherited: None,
+            hidden: false,
+            text_box: false,
+            aspect_ratio_locked: false,
+            geometry: "rect".to_owned(),
+            adjust_values: BTreeMap::new(),
+            placeholder: None,
+            fill: None,
+            resolved_fill_color: None,
+            outline: None,
+            resolved_outline_color: None,
+            media_part_path: None,
+            pending_media: None,
+            blip_effects: Vec::new(),
+            table_structure: None,
+            graphic: None,
+            text_stories: Vec::new(),
+            children: Vec::new(),
+        };
+        let make_shapes = |count: u32| {
+            let baseline: Vec<_> = (0..count)
+                .map(|index| ShapeSnapshot {
+                    id: format!("slide1/shape{index:05}"),
+                    source_id: index,
+                    ..shape.clone()
+                })
+                .collect();
+            let mut current = baseline.clone();
+            current
+                .last_mut()
+                .unwrap()
+                .text_stories
+                .push(StorySnapshot {
+                    id: "changed".to_owned(),
+                    length: 7,
+                    paragraphs: vec![pptx_edit::ParagraphSnapshot {
+                        runs: vec![pptx_edit::TextRunSnapshot {
+                            text: "Changed".to_owned(),
+                            style: TextStyle::default(),
+                        }],
+                        ..pptx_edit::ParagraphSnapshot::default()
+                    }],
+                });
+            (current, baseline)
+        };
+        let (small_current, small_baseline) = make_shapes(7_500);
+        let (small_elapsed, _) = best_of_three(|| {
+            autofit_edited_shapes(&small_current, &small_baseline, &SlideParents::default())
+        });
+        let (large_current, large_baseline) = make_shapes(30_000);
+        let (large_elapsed, edited) = best_of_three(|| {
+            autofit_edited_shapes(&large_current, &large_baseline, &SlideParents::default())
+        });
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        assert!(edited.is_empty());
+    }
+
+    fn edited_autofit_session(
+        untouched_text: &str,
+        inherited: bool,
+        grouped: bool,
+    ) -> (DeckSession, StorySnapshot) {
+        edited_autofit_session_with_graphics(
+            untouched_text,
+            inherited,
+            grouped,
+            "",
+            &" words that must shrink to stay inside the title".repeat(6),
+        )
+    }
+
+    fn edited_autofit_session_with_graphics(
+        untouched_text: &str,
+        inherited: bool,
+        grouped: bool,
+        graphics: &str,
+        inserted_text: &str,
+    ) -> (DeckSession, StorySnapshot) {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let normal = r#"<a:normAutofit fontScale="100000"/>"#;
+        let transform =
+            r#"<a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1905000" cy="952500"/></a:xfrm>"#;
+        let title = format!(
+            r#"<p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+<p:spPr>{}{graphics}</p:spPr>
+<p:txBody><a:bodyPr lIns="0" rIns="0" tIns="0" bIns="0">{}</a:bodyPr><a:lstStyle/>
+<a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr sz="2400"><a:latin typeface="Arial"/></a:rPr><a:t>Start</a:t></a:r></a:p>
+</p:txBody></p:sp>"#,
+            if inherited { "" } else { transform },
+            if inherited { "" } else { normal },
+        );
+        let title = if grouped {
+            format!(
+                r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="4" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm><a:off x="952500" y="952500"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="0" y="0"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></p:grpSpPr>
+{title}</p:grpSp>"#
+            )
+        } else {
+            title
+        };
+        let slide = format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<p:cSld><p:spTree>{title}<p:sp>
+<p:nvSpPr><p:cNvPr id="3" name="Untouched"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="476250" y="1905000"/><a:ext cx="1905000" cy="952500"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>{untouched_text}</a:t></a:r></a:p></p:txBody>
+</p:sp></p:spTree></p:cSld></p:sld>"#
+        );
+        let slide_path = package.slides[0].part_path.clone();
+        assert!(package.replace_part(&slide_path, slide.into_bytes()));
+        if inherited {
+            let layout = format!(
+                r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" type="title">
+<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Inherited title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+<p:spPr>{transform}</p:spPr><p:txBody><a:bodyPr>{normal}</a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>"#
+            );
+            let layout_path = package.slides[0].layout_part_path.clone().unwrap();
+            assert!(package.replace_part(&layout_path, layout.into_bytes()));
+        }
+        let bytes = pptx_parse::write_pptx(&package).unwrap();
+        let session = DeckSession::open(&bytes, 8_031).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let root = &snapshot.slides[0].shapes[0];
+        let title = if grouped { &root.children[0] } else { root };
+        let story = title.text_stories[0].clone();
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story.id,
+                story.length - 1,
+                inserted_text,
+                &TextStyle::default(),
+            )
+            .unwrap();
+        (session, story)
+    }
+
+    fn autofit_custom_graphics(path_count: usize, stop_count: usize) -> String {
+        use std::fmt::Write as _;
+
+        let path = r#"<a:path w="100" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="0"/></a:lnTo><a:lnTo><a:pt x="50" y="100"/></a:lnTo><a:close/></a:path>"#;
+        let mut graphics = format!(
+            "<a:custGeom><a:pathLst>{}</a:pathLst></a:custGeom><a:gradFill><a:gsLst>",
+            path.repeat(path_count)
+        );
+        for index in 0..stop_count {
+            let position = index as u64 * 100_000 / stop_count.saturating_sub(1).max(1) as u64;
+            let color = if index % 2 == 0 { "112233" } else { "445566" };
+            write!(
+                graphics,
+                r#"<a:gs pos="{position}"><a:srgbClr val="{color}"/></a:gs>"#
+            )
+            .unwrap();
+        }
+        graphics.push_str(
+            r#"</a:gsLst><a:lin ang="5400000" scaled="1"/></a:gradFill>
+<a:ln w="19050"><a:solidFill><a:srgbClr val="778899"/></a:solidFill></a:ln>
+<a:effectLst><a:outerShdw blurRad="12700" dist="12700" dir="5400000"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst>"#,
+        );
+        graphics
+    }
+
+    fn edited_autofit_session_with_text(text: &str, inherited: bool, grouped: bool) -> DeckSession {
+        let (session, story) = edited_autofit_session("Untouched", inherited, grouped);
+        let story = session.story(&story.id).unwrap();
+        let context = EditCtx::local("test");
+        session
+            .delete_text(&context, &story.id, 0, story.length - 1)
+            .unwrap();
+        session
+            .insert_text(
+                &context,
+                &story.id,
+                0,
+                text,
+                &story.paragraphs[0].runs[0].style,
+            )
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn fitted_save_skips_edited_text_over_the_utf16_limit() {
+        let build = |text: &str| {
+            let mut contexts = Vec::new();
+            for inherited in [false, true] {
+                for grouped in [false, true] {
+                    let session = edited_autofit_session_with_text(text, inherited, grouped);
+                    let plain = pptx_parse::parse_pptx(&session.save().unwrap()).unwrap();
+                    let part = &plain.slides[0].part_path;
+                    let plain_bytes = plain.part_bytes(part).unwrap().to_vec();
+                    let plain_autofit = node_text(find_node(&plain.slides[0].shapes, 2).unwrap())
+                        .unwrap()
+                        .autofit
+                        .clone();
+                    contexts.push((session, plain_bytes, plain_autofit));
+                }
+            }
+            contexts
+        };
+        let small_text = format!("{}x", "\u{1f600}".repeat(32_768));
+        assert_eq!(utf16_len(&small_text), 65_537);
+        let large_text = format!("{}xx", "\u{1f600}".repeat(131_072));
+        assert_eq!(utf16_len(&large_text), 262_146);
+        let small_contexts = build(&small_text);
+        let large_contexts = build(&large_text);
+        let renderer = renderer();
+        let (small_elapsed, small_saved) = best_of_three(|| {
+            small_contexts
+                .iter()
+                .map(|(session, _, _)| renderer.save(session).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let (large_elapsed, large_saved) = best_of_three(|| {
+            large_contexts
+                .iter()
+                .map(|(session, _, _)| renderer.save(session).unwrap())
+                .collect::<Vec<_>>()
+        });
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        for ((_, plain_bytes, plain_autofit), saved) in small_contexts
+            .iter()
+            .zip(small_saved.iter())
+            .chain(large_contexts.iter().zip(large_saved.iter()))
+        {
+            let reopened = pptx_parse::parse_pptx(saved).unwrap();
+            let part = &reopened.slides[0].part_path;
+            assert_eq!(reopened.part_bytes(part).unwrap(), plain_bytes.as_slice());
+            let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+            assert_eq!(&title.autofit, plain_autofit);
+        }
+    }
+
+    #[test]
+    fn fitted_save_fits_edited_text_at_the_utf16_limit() {
+        let text = "\u{1f600}".repeat(32_768);
+        assert_eq!(utf16_len(&text), 65_536);
+        for inherited in [false, true] {
+            for grouped in [false, true] {
+                let session = edited_autofit_session_with_text(&text, inherited, grouped);
+                let saved = renderer().save(&session).unwrap();
+                let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                assert!(matches!(
+                    title.autofit,
+                    Some(TextAutofit::Normal { font_scale: Some(scale), .. }) if scale < 1.0
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn fitted_save_skips_untouched_text_over_the_render_limit() {
+        let untouched = "x".repeat(MAX_TEXT_BYTES + 1);
+        let (session, _) = edited_autofit_session(&untouched, false, false);
+        let renderer = renderer();
+        assert!(matches!(
+            renderer.layout_slide(session.package(), &session.snapshot().unwrap(), 0),
+            Err(RenderError::ResourceLimit(message)) if message.contains("text exceeds")
+        ));
+        let saved = renderer.save(&session).unwrap();
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+        assert!(matches!(
+            title.autofit,
+            Some(TextAutofit::Normal { font_scale: Some(scale), .. }) if scale < 1.0
+        ));
+        let untouched_node = find_node(&reopened.slides[0].shapes, 3).unwrap();
+        assert_eq!(
+            node_text(untouched_node).unwrap().paragraphs[0].runs[0].text,
+            untouched
+        );
+        assert_eq!(
+            Some(untouched_node),
+            find_node(&session.package().slides[0].shapes, 3)
+        );
+    }
+
+    #[test]
+    fn fitted_save_matches_full_layout_autofit() {
+        let graphics = autofit_custom_graphics(2, 2);
+        for inherited in [false, true] {
+            for grouped in [false, true] {
+                for graphics in ["", graphics.as_str()] {
+                    let (session, story) = edited_autofit_session_with_graphics(
+                        "Untouched",
+                        inherited,
+                        grouped,
+                        graphics,
+                        &" words that must shrink to stay inside the title".repeat(6),
+                    );
+                    let renderer = renderer();
+                    let rendered = renderer
+                        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+                        .unwrap();
+                    let expected = rendered.autofit.get(&story.id).unwrap();
+                    assert!(matches!(
+                        expected,
+                        TextAutofit::Normal { font_scale: Some(scale), .. } if *scale < 1.0
+                    ));
+                    let saved = renderer.save(&session).unwrap();
+                    let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+                    let title =
+                        node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+                    assert_eq!(title.autofit.as_ref(), Some(expected));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fitted_save_layout_emits_no_graphic_primitives() {
+        let graphics = autofit_custom_graphics(2, 2);
+        let (session, story) = edited_autofit_session_with_graphics(
+            "Untouched",
+            false,
+            false,
+            &graphics,
+            &" words that must shrink to stay inside the title".repeat(6),
+        );
+        let renderer = renderer();
+        let snapshot = session.snapshot().unwrap();
+        let full = renderer
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap();
+        assert!(
+            full.display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape {
+                        fill: Some(_),
+                        stroke: Some(_),
+                        shadow: Some(_),
+                        ..
+                    }
+                ))
+        );
+        let shapes = HashSet::from([snapshot.slides[0].shapes[0].id.clone()]);
+        let fitted = renderer
+            .layout_resolved(
+                session.package(),
+                &snapshot.slides[0],
+                snapshot.width_emu,
+                snapshot.height_emu,
+                0,
+                Some(&shapes),
+            )
+            .unwrap();
+        assert!(fitted.display_list.primitives.is_empty());
+        assert!(fitted.display_list.background.is_none());
+        assert!(fitted.hit_regions.is_empty());
+        assert!(fitted.autofit.contains_key(&story.id));
+        assert_eq!(fitted.autofit, full.autofit);
+    }
+
+    #[test]
+    fn fitted_save_skips_large_custom_geometry_and_gradient() {
+        let build = |path_count: usize, stop_count: usize| {
+            let graphics = autofit_custom_graphics(path_count, stop_count);
+            edited_autofit_session_with_graphics("Untouched", false, false, &graphics, "!")
+        };
+        let (small_session, _) = build(375, 12_500);
+        let (session, story) = build(1_500, 50_000);
+        assert_eq!(session.story(&story.id).unwrap().length, story.length + 1);
+        let ShapeNode::Shape(shape) = find_node(&session.package().slides[0].shapes, 2).unwrap()
+        else {
+            panic!("a custom shape");
+        };
+        assert_eq!(shape.paths.len(), 1_500);
+        assert!(shape.paths.iter().all(|path| path.commands.len() == 4));
+        assert_eq!(
+            shape
+                .fill
+                .as_ref()
+                .unwrap()
+                .gradient
+                .as_ref()
+                .unwrap()
+                .stops
+                .len(),
+            50_000
+        );
+        let renderer = renderer();
+        let (small_elapsed, _) = best_of_three(|| renderer.save(&small_session).unwrap());
+        let (large_elapsed, saved) = best_of_three(|| renderer.save(&session).unwrap());
+        let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
+        assert!(
+            ratio < 8.0,
+            "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
+        );
+        let reopened = pptx_parse::parse_pptx(&saved).unwrap();
+        let title = node_text(find_node(&reopened.slides[0].shapes, 2).unwrap()).unwrap();
+        assert_eq!(
+            title.autofit,
+            Some(TextAutofit::Normal {
+                font_scale: Some(1.0),
+                line_space_reduction: Some(0.0),
+            })
+        );
+        assert_eq!(
+            title.paragraphs[0]
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "Start!"
+        );
     }
 
     #[test]
