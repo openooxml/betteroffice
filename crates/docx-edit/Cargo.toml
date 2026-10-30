@@ -39,7 +39,9 @@ betteroffice-fonts = { workspace = true, optional = true }
 docx-layout.workspace = true
 docx-parse.workspace = true
 foldhash = { version = "0.2", default-features = false }
+libm.workspace = true
 ooxml-diff.workspace = true
+ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
 ooxml-text.workspace = true
 ryu-js = "1"

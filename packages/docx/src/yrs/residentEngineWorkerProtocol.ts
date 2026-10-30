@@ -53,6 +53,7 @@ import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
+import type { EmbeddedFontFace } from '../utils/embeddedFonts';
 import type {
   DocxProposalRegistryState,
   DocxProposalRequest,
@@ -226,6 +227,7 @@ export type DocxEngineWorkerHostModule = {
 export type DocxEngineWorkerRequest =
   | { id: number; type: 'warm'; hostModule?: true }
   | { id: number; type: 'decodeFontFace'; bytes: ArrayBuffer; codec: string; dict?: ArrayBuffer; maxOutput?: number }
+  | { id: number; type: 'prepare-save' }
   | { id: number; type: 'openSource'; source: DocxSourceOpenRequest }
   | { id: number; type: 'previewSource'; preview: DocxSourcePreviewOptions & { layoutInput: string } }
   | { id: number; type: 'commandInit'; request: DocxCommandInitRequest }
@@ -457,6 +459,7 @@ export type DocxEngineWorkerResponse = (
       /** An `open` reply: the opened package's host metadata JSON. */
       hostJson?: string;
       sourceDocument?: Document;
+      embeddedFontFaces?: EmbeddedFontFace[];
       /** An `openSource` reply: SVG pictures for the host to decode. */
       svgMedia?: DocxSvgMedia[];
       /** An `openSource` reply: the client id the opened replica writes with. */

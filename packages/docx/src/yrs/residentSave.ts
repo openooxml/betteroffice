@@ -26,12 +26,16 @@ export async function saveResidentDocument(
   comments: Comment[],
   record: ResidentSaveRecord,
   dirty: DirtyProjectionStories,
-  stories?: readonly string[]
+  stories?: readonly string[],
+  yieldSave?: () => Promise<void>
 ): Promise<ArrayBuffer> {
+  if (yieldSave) await yieldSave();
   const opened = wrapOpenedEditSession(raw, clientId, source, hostJson);
+  if (yieldSave) await yieldSave();
   const base = record.base ?? opened.session.materializeDocx();
   engineProgress();
   if (!base?.originalBuffer) throw new Error('The document worker holds no opened package');
+  if (yieldSave) await yieldSave();
   const pending = dirty.capture();
   const selected = new DirtyProjectionStories();
   for (const story of stories ?? pending.stories) selected.add(story);
@@ -41,7 +45,7 @@ export async function saveResidentDocument(
     selected.projectionOptions()
   );
   engineProgress();
-  const buffer = await saveEditorDocument(opened.session, projected, comments, record);
+  const buffer = await saveEditorDocument(opened.session, projected, comments, record, yieldSave);
   projected.originalBuffer = buffer;
   record.base = projected;
   pending.clear();

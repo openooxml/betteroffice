@@ -376,8 +376,16 @@ describe('native package release wiring', () => {
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
+    const xlsx = job.steps.find(
+      (step: any) => step.name === 'Test the xlsx packages on the native engine'
+    );
+    expect(xlsx.run).toContain(
+      'BETTEROFFICE_ENGINE=native bun test --isolate packages/xlsx scripts/parity/parity.test.ts'
+    );
+    expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
+    expect(root.scripts.test).toContain('scripts');
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');

@@ -107,6 +107,7 @@ export {
 } from './wasm/loader';
 export type {
   WasmInitInput,
+  WasmInitOptions,
   EngineBackend,
   OpenWorkbookOptions,
   WorkbookCalculationContext,

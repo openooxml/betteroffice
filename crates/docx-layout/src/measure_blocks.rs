@@ -3538,11 +3538,11 @@ fn table_content_widths(
     ) {
         return None;
     }
-    // Painting places each row's cells from column zero.
-    if table.rows.iter().any(|row| {
-        row.grid_before.is_some_and(|before| before > 0)
-            || row.cells.iter().any(|cell| cell.grid_start.is_some())
-    }) {
+    if table
+        .rows
+        .iter()
+        .any(|row| row.cells.iter().any(|cell| cell.grid_start.is_some()))
+    {
         return None;
     }
     Some(
@@ -6458,7 +6458,7 @@ mod tests {
             for (attrs, grid_before, grid_start) in [
                 (json!({"indent": {"left": 0, "hanging": 20}}), None, None),
                 (json!(null), None, Some(0)),
-                (json!(null), Some(1), None),
+                (json!({"indent": {"left": 0, "hanging": 20}}), Some(1), None),
             ] {
                 let mut table = autofit_repro_table(
                     50.0,

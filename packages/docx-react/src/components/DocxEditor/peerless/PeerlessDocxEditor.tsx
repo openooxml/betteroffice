@@ -406,6 +406,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     barrier?: Ticket;
     clipboard?: ReturnType<typeof createClipboardPrefetch>;
   } | null>(null);
+  const preparedSaveWorker = useRef<ResidentEngineWorkerClient | null>(null);
+  const prepareSave = useCallback(() => {
+    const client = worker.current;
+    const current = controller.getSnapshot();
+    if (!client || preparedSaveWorker.current === client || settings.current.readOnly ||
+      openedSource.current !== sourceKey || current.status !== 'ready' || current.view?.editState?.readOnly !== false) return;
+    preparedSaveWorker.current = client;
+    client.prepareSave();
+  }, [controller, sourceKey]);
+  useEffect(() => controller.ref.onDocumentChange(prepareSave), [controller, prepareSave]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.ctrlKey || event.metaKey) prepareSave();
+    };
+    document.addEventListener('keydown', keydown, true);
+    return () => document.removeEventListener('keydown', keydown, true);
+  }, [prepareSave]);
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
@@ -1253,7 +1270,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           if (heading) void navigation.scrollToParagraph(heading.paraId).catch((error) => reportRecoverableError(error)); },
         onClose: () => navigation.setShowOutline(false), scrollLeft: navigation.pageInfo.scrollLeft }}
       onToggleOutline={() => navigation.setShowOutline(!navigation.showOutline)} scrollPageInfo={navigation.pageInfo}
-      toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra }}>{chrome}</EditorChromeContext.Provider>}
+      toolbar={<EditorChromeContext.Provider value={{ showZoomControl: props.showZoomControl ?? true, toolbarExtra: props.toolbarExtra, prepareSave }}>{chrome}</EditorChromeContext.Provider>}
       renderDock={(placement, available) => <PluginDock host={pluginHost} placement={placement}
         activations={activations.filter((activation) => activation.plugin.panel?.placement === placement)} available={available} />}
       overlays={<>{contextMenu.element}<PluginOverlays host={pluginHost} activations={activations} target={host.current}

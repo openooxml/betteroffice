@@ -88,6 +88,7 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
   wasm?: ArrayBuffer | WebAssembly.Module;
+  png?: boolean;
   initialViewport?: WorkbookInitialPaintRequest;
   includeEditState?: boolean;
   initialUpdate?: Uint8Array;
@@ -161,7 +162,7 @@ export interface WorkbookSessionEvents {
  */
 export type WorkbookSessionMethods = FontDecoderMethods & {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
-  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm'>): WorkbookSessionOpenReply;
+  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
   version(): string;
   collaborationStateVector(): Uint8Array;
   collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;

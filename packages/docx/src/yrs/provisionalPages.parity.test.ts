@@ -12,6 +12,7 @@ import {
   type DisplayListBuildInputs,
 } from '../layout/render/rustDisplayList';
 import { decodePackedFontFace, preloadEditWasm } from '../wasm/edit';
+import { extractEmbeddedFontFaces, getEmbeddedFontFaces } from '../utils/embeddedFonts';
 import { decodeDocxHostJson, type YrsResidentWorkerSnapshot } from './index';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import { echoBackgroundPage } from './residentCommandPresentation';
@@ -36,6 +37,10 @@ beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
   const modules: Record<string, string> = {
     './yrsSessionFacade': 'export const decodeDocxHostJson = () => { throw new Error("Unused source opening"); };',
+    '../utils/embeddedFonts': `
+      export const extractEmbeddedFontFaces = (...args) => testHarness.extractEmbeddedFontFaces(...args);
+      export const getEmbeddedFontFaces = (...args) => testHarness.getEmbeddedFontFaces(...args);
+    `,
     './residentEngineSession':
       'export const createResidentEngineSession = async () => testHarness.session;',
     './wasm/index': `
@@ -45,7 +50,8 @@ beforeAll(async () => {
     `,
     '../docx/wasm': 'export const preloadOpcWasm = () => testHarness.preloadOpcWasm();',
     '../docx/parseWasm': 'export const preloadParseWasm = () => testHarness.preloadParseWasm();',
-    '../wasm/loadWasmAsset': 'export const wasmModuleMemories = () => [];',
+    './residentSaveWarmup': 'export const warmResidentSave = async () => {};',
+    '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
@@ -150,6 +156,7 @@ function worker(session: ResidentEngineSession, controlled = false, virtualTime 
   const timers = new Map<number, { at: number; callback: () => void }>();
   const harness = { session, decodePackedFontFace, echoBackgroundPage, encodeDisplayListFrameExtras, loadRustDisplayListQueryEngine,
     loadedRustDisplayListQueryEngine,
+    extractEmbeddedFontFaces, getEmbeddedFontFaces,
     preloadOpcWasm: () => import('../wasm/opc').then((wasm) => wasm.preloadOpcWasm()),
     preloadParseWasm: () => import('../wasm/parse').then((wasm) => wasm.preloadParseWasm()),
     ...(virtualTime ? {
