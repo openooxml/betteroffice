@@ -254,6 +254,9 @@ dependencies = [
  "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
  "png",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
