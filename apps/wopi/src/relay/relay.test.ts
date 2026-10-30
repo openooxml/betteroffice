@@ -118,14 +118,21 @@ class FrameClient {
   #closed = new Promise<void>((resolve) => {
     this.#resolveClosed = resolve;
   });
+  #detached = false;
 
   constructor(client: TestClient, ws: WebSocket) {
     this.client = client;
     this.ws = ws;
+    const destroy = client.destroy.bind(client);
+    client.destroy = () => {
+      this.#detached = true;
+      ws.close();
+      destroy();
+    };
     ws.binaryType = "arraybuffer";
     this.#onMessage = (event) => {
       const data = event.data;
-      if (typeof data === "string") return;
+      if (this.#detached || typeof data === "string") return;
       const frame = new Uint8Array(data as ArrayBuffer);
       if (decodeSequenceAck(frame)) return;
       for (const message of decodeMessages(frame)) {
