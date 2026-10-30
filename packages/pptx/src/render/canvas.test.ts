@@ -610,6 +610,12 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([
       { text: 'בָ​אב', x: 60 },
     ]);
+    const rounded = syntheticPositionedRun('בָ​אב', [
+      [0, 57.912, 0], [0, 47.9119987487793], [2, 47.91200256347656, 0], [3, 37.912], [4, 27.912],
+    ]);
+    expect((await paintPositionedRun(rounded)).calls).toEqual([
+      { text: 'בָ​אב', x: 27.912 },
+    ]);
   });
 
   test('keeps a left-to-right run whose second cluster opens with a zero-width glyph', async () => {

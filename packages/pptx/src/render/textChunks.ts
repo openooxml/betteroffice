@@ -38,7 +38,7 @@ function positionedTextChunks(
     lefts.set(glyph.cluster, Math.min(lefts.get(glyph.cluster) ?? Infinity, glyph.x));
   }
   const [firstLeft, ...laterLefts] = lefts.values();
-  const nextLeft = laterLefts.find((left) => left !== firstLeft);
+  const nextLeft = laterLefts.find((left) => Math.abs(left - firstLeft) > 0.01);
   if (nextLeft !== undefined && nextLeft < firstLeft) {
     const texts = run.text.split('\t');
     const ends: number[] = [];
