@@ -38,7 +38,7 @@ function source(
   loaders: Record<string, () => Promise<ArrayBuffer>>,
   script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
 ) {
-  const resolve = mock((family: string) => loaders[family]);
+  const resolve = mock((family: string, _bold?: boolean, _italic?: boolean) => loaders[family]);
   const resolveScriptFallback = mock(script);
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
     resolveScriptFallback, resolveLastResort: () => { throw new Error('Unrelated substitution'); } });
