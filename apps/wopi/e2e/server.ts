@@ -15,7 +15,8 @@ const FIXTURES: Record<string, { file: string; name: string }> = {
   pptx: { file: resolve(root, "apps/demo/public/betteroffice-demo.pptx"), name: "demo.pptx" },
 };
 
-const host = createReferenceHost();
+const checkFileInfo = new Map<string, Record<string, unknown>>();
+const host = createReferenceHost({ checkFileInfoExtras: (file) => checkFileInfo.get(file.id) ?? {} });
 for (const [format, fixture] of Object.entries(FIXTURES)) {
   host.setFile(`file-${format}`, new Uint8Array(readFileSync(fixture.file)), { name: fixture.name });
 }
@@ -31,8 +32,8 @@ const config = {
 
 const wopi = createHandler({ config, currentKey: generateKeyPair(), autosave: false });
 
-function hostPage(format: string): string {
-  const src = `${origin}/wopi-host/files/file-${format}`;
+function hostPage(fileId: string): string {
+  const src = `${origin}/wopi-host/files/${fileId}`;
   const action = `/wopi/edit?WOPISrc=${encodeURIComponent(src)}&ui=en-US`;
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Reference host</title></head>
@@ -73,7 +74,19 @@ const server = Bun.serve({
     const url = new URL(request.url);
     if (url.pathname === "/host-page") {
       const format = url.searchParams.get("format") ?? "docx";
-      return new Response(hostPage(format), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      const fixture = FIXTURES[format];
+      if (!fixture) return new Response("unsupported format", { status: 400 });
+      const close = url.searchParams.get("close");
+      let fileId = `file-${format}`;
+      if (close === "message" || close === "url") {
+        fileId += `-${close}`;
+        host.setFile(fileId, new Uint8Array(readFileSync(fixture.file)), { name: fixture.name });
+        checkFileInfo.set(fileId, { ClosePostMessage: close === "message", CloseUrl: close === "url" ? `${origin}/closed` : "" });
+      }
+      return new Response(hostPage(fileId), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    if (url.pathname === "/closed") {
+      return new Response("<!doctype html><title>Closed</title><p>Document closed.</p>", { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
     if (url.pathname === "/debug/puts") {
       const format = url.searchParams.get("format");
@@ -81,7 +94,7 @@ const server = Bun.serve({
     }
     if (url.pathname === "/debug/file") {
       const format = url.searchParams.get("format") ?? "docx";
-      const file = host.files.get(`file-${format}`);
+      const file = host.files.get(url.searchParams.get("file") ?? `file-${format}`);
       if (!file) return new Response("missing", { status: 404 });
       return new Response(Buffer.from(file.bytes).toString("base64"), { headers: { "Content-Type": "text/plain" } });
     }
