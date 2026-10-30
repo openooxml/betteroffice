@@ -252,11 +252,19 @@ test("docx: CloseUrl saves the final edit before navigating the top page", async
     await edit(frame, page, "docx", marker);
     expect(await savedText(page, "docx", "file-docx-url")).not.toContain(marker);
 
-    await Promise.all([
-      page.waitForURL(new URL("/closed", page.url()).href),
-      frame.getByRole("button", { name: "Close", exact: true }).click(),
-    ]);
+    let onSave!: (route: Route) => void;
+    const saving = new Promise<Route>((resolve) => { onSave = resolve; });
+    await page.route("**/api/session/save", (route) => { onSave(route); });
+    const closedUrl = new URL("/closed", page.url()).href;
+    await frame.getByRole("button", { name: "Close", exact: true }).click();
+    const request = await saving;
+    await page.waitForTimeout(500);
+    expect(new URL(page.url()).pathname).toBe("/host-page");
+    const response = await request.fetch();
+    expect(response.ok()).toBe(true);
     expect(await savedText(page, "docx", "file-docx-url")).toContain(marker);
+    expect(new URL(page.url()).pathname).toBe("/host-page");
+    await Promise.all([page.waitForURL(closedUrl), request.fulfill({ response })]);
   } catch (error) {
     await dumpDiagnostics(page, diagnostics, info);
     throw error;
