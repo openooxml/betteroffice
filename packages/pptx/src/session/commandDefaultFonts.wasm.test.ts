@@ -4,13 +4,18 @@ import JSZip from 'jszip';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
-import { initWasm } from '../wasm/loader';
+import { decodeFontFace, initWasm } from '../wasm/loader';
 import { PptxRenderer } from '../wasm/engine';
 import type { SlideDisplayList } from '../types';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
 import { createPresentationSessionHost } from './host';
 import type { PresentationCommandClient, PresentationCommandOpenOptions } from './commandProtocol';
+
+async function notoSansJP(): Promise<ArrayBuffer> {
+  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  return (await decodeFontFace(packed, { codec: 'zstd' })).font;
+}
 
 const restorers: (() => void)[] = [];
 const clients: PresentationCommandClient[] = [];
@@ -299,7 +304,7 @@ test('registered coverage fonts still precede the browser fallback', async () =>
 });
 
 for (const supplied of [false, true]) test(`script defaults install in the coverage chain with supplied primary ${supplied}`, async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const manager = source({}, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
   const primary = spyOn(PptxRenderer.prototype, 'registerFont');
@@ -340,7 +345,7 @@ test('missing CJK pack substitutes leave browser rendering and coverage registra
 });
 
 test('Japanese coverage loads once for an unmapped family and mixed Latin text with matching requested traits', async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const manager = source({ Calibri: async () => font }, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
   restorers.push(() => fallback.mockRestore());
@@ -363,7 +368,7 @@ test('Japanese coverage loads once for an unmapped family and mixed Latin text w
 });
 
 test('four Japanese styles acknowledge one coverage installation and registration', async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const manager = source({}, (script) => script === 'cjk-jp' ? async () => japanese : undefined);
   const fallback = spyOn(PptxRenderer.prototype, 'registerFallbackFont');
   restorers.push(() => fallback.mockRestore());
@@ -389,7 +394,7 @@ test('four Japanese styles acknowledge one coverage installation and registratio
 });
 
 test('inserting script text loads coverage after the family attempt and repaints the active slide', async () => {
-  const japanese = new Uint8Array(await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf', import.meta.url))).buffer;
+  const japanese = await notoSansJP();
   const requested = deferred<void>();
   const loaded = deferred<ArrayBuffer>();
   const manager = source({ Calibri: async () => font }, (script) => script === 'cjk-jp' ? () => {
