@@ -745,12 +745,13 @@ impl Workbook {
         }
         let model = projected;
         validate_model(&model)?;
-        let opened_anchors = model
-            .sheets
-            .iter()
-            .flat_map(|sheet| &sheet.charts)
-            .map(|chart| (chart.frame_id(), chart.anchor))
-            .collect();
+        let opened_anchors = model.sheets.iter().flat_map(|sheet| &sheet.charts).fold(
+            BTreeMap::new(),
+            |mut anchors, chart| {
+                anchors.insert(chart.frame_id(), chart.anchor);
+                anchors
+            },
+        );
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {

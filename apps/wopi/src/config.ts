@@ -11,6 +11,9 @@ export interface WopiConfig {
   proofOldKeyFile?: string;
   maxFileBytes: number;
   hosts: WopiHostConfig[];
+  journalDir?: string;
+  instanceId?: string;
+  maxEditorsPerFile?: number;
 }
 
 export const DEFAULT_MAX_FILE_BYTES = 536870912;
@@ -138,6 +141,15 @@ function optionalFile(env: Record<string, string | undefined>, name: string): st
   return value ? value : undefined;
 }
 
+function parseMaxEditors(env: Record<string, string | undefined>): number {
+  const raw = env.WOPI_MAX_EDITORS_PER_FILE;
+  if (raw === undefined) return 50;
+  if (!/^\d+$/.test(raw)) fail("WOPI_MAX_EDITORS_PER_FILE must be a positive integer");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) fail("WOPI_MAX_EDITORS_PER_FILE must be a positive integer");
+  return value;
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): WopiConfig {
   return {
     publicUrl: parsePublicUrl(env),
@@ -145,5 +157,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     proofOldKeyFile: optionalFile(env, "WOPI_PROOF_OLD_KEY_FILE"),
     maxFileBytes: parseMaxFileBytes(env),
     hosts: parseHosts(env),
+    journalDir: optionalFile(env, "WOPI_JOURNAL_DIR"),
+    instanceId: optionalFile(env, "WOPI_INSTANCE_ID"),
+    maxEditorsPerFile: parseMaxEditors(env),
   };
 }

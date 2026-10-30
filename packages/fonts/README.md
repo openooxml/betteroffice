@@ -56,7 +56,7 @@ import { configureDefaultFonts } from '@betteroffice/docx/layout';
 configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 ```
 
-In browsers, international faces also load a decoder pinned to the installed `@betteroffice/fonts` version.
+In browsers, packed faces also load a decoder pinned to the installed `@betteroffice/fonts` version.
 
 To use your own CDN, create a provider and pass it to `DocxEditor` as `measurementFontProvider`:
 
@@ -83,14 +83,12 @@ configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fo
 - With a single `baseUrl`, every face, including optional add-on faces, loads from that directory. Copy the `assets/`
   of the installed font packages into it; the filenames do not collide.
 - A relative `baseUrl` resolves against the current page; outside a browser it must be absolute.
-- Each decoded face is checked against the manifest's byte length, which detects truncation but not
-  tampering, so use an origin you trust. A CDN can see which faces a document requests.
-- Intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
+- Packed faces are checked against the manifest's lengths and SHA-256 hashes. A CDN can see which
+  faces a document requests.
+- Latin, RTL and intl assets use `.ttf.zst` files decoded by the manager; keep those filenames when hosting them.
 - With a custom `baseUrl` in either entry, copy `node_modules/@betteroffice/fonts/dist/decoder/fontpack.wasm`
   to `<baseUrl>/decoder/fontpack.wasm` and serve it as `application/wasm`. The package build ships this decoder in `dist/decoder/`.
-- Serve the raw TTF/OTF files with `br` or `gzip` encoding. The base and CJK faces are raw TTF/OTF, because the browser and
-  the WebAssembly engine must measure the same bytes; compression brings the 65 faces from 14,527 KB to
-  7,156 KB.
+- CJK assets remain raw OTF files and can use `br` or `gzip` encoding.
 
 ## Bundlers
 
@@ -98,15 +96,28 @@ With rollup, esbuild or a Vite build that inlines the package, mark the font pac
 so their asset URLs survive, or configure a `baseUrl`:
 
 ```bash
-esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk --external:@betteroffice/fonts-intl
+esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk --external:@betteroffice/fonts-intl --external:@betteroffice/fonts-latin
 ```
 
 ```js
 // rollup.config.js
 export default {
-  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl'],
+  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin'],
 };
 ```
+
+To inline the manager with esbuild, use `baseUrl` and add the pack's `.zst` files and
+the manager's `dist/decoder/fontpack.wasm` as explicit entry points with
+`loader: { '.zst': 'copy', '.wasm': 'copy' }`. Preserve the face filenames under
+the asset root and place the decoder at `decoder/fontpack.wasm`. Keep the pack
+packages external. Esbuild does not emit assets referenced only by
+`new URL(..., import.meta.url)`.
+
+Latin and RTL assets ship in the regular dependency `@betteroffice/fonts-latin`.
+The manager loads compressed faces on demand and returns decoded, independently
+owned sfnt buffers. `BundledFontFace.file` names the `.ttf.zst` asset. For a custom
+`baseUrl`, copy the Latin pack assets alongside international assets and serve
+`@betteroffice/fonts/dist/decoder/fontpack.wasm` at `<baseUrl>/decoder/fontpack.wasm`.
 
 ## Bundled faces
 
@@ -158,6 +169,7 @@ sources and other consumers:
 - [Packages and fonts](https://docs.betteroffice.dev/docs/packages#fonts)
 - [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk)
 - [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl)
+- [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin)
 - [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx)
 
 ## Licensing
