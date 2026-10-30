@@ -18,7 +18,7 @@ const PAGES = new Uint8Array(
   )
 );
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function layoutRequest(session: YrsSession, host: YrsDocxHost): string {
   const font = session.registerFont(FONT);

@@ -19,7 +19,7 @@ const originalWorker = globalThis.Worker;
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
-)))));
+)))), 30_000);
 
 afterEach(() => {
   cleanup();

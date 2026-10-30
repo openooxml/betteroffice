@@ -87,7 +87,8 @@ beforeAll(() =>
         resolve(import.meta.dir, '../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm')
       )
     )
-  )
+  ),
+  30_000
 );
 const sessions: YrsSession[] = [];
 const restoreClocks: Array<() => void> = [];

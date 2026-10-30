@@ -14,7 +14,7 @@ const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
 beforeAll(async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
   await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
+}, 30_000);
 
 test.each(['split', 'existing'])('%s paragraph hyperlinks resolve relationships under a conflicting source prefix', async (kind) => {
   const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([

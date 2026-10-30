@@ -26,7 +26,7 @@ const FONT = new Uint8Array(
   )
 );
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
 function renderEnvironment(document: Document): YrsRenderEnv {
   const themeColors: Record<string, string> = {};
