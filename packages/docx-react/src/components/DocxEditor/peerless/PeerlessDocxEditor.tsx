@@ -1163,15 +1163,14 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
     const previousY = commentPlacement.positions.get(item.id);
     const pending = () => previousY !== undefined ? { ...item, fixedY: previousY } : { ...item, hidden: true };
-    if (!commentGeometryCurrent || shellState.view?.geometry?.layoutProvisional ||
-      shellState.view?.geometry?.pages.some(page => page.displayPage?.unbuilt)) return pending();
+    if (!commentGeometryCurrent) return pending();
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
     const rect = (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
       (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
-    return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
+    return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : pending();
   }), [commentItems, commentPlacement, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, commentGeometryCurrent, shellState.view?.geometry, trackedChanges, geometry, zoom]);
   useLayoutEffect(() => {
     if (review?.uiComments) commentPlacement.comments = review.uiComments;

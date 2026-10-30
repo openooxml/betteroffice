@@ -785,6 +785,48 @@ test('zero-length comments with native ids keep their first-page position throug
   h.controller.dispose();
 });
 
+test('current comment geometry positions new and moved cards while another page stays unbuilt', async () => {
+  const h = proposalHost({ automatic: false });
+  const pages: PeerlessFrameGeometry['pages'] = [0, 1].map(pageIndex => ({
+    page: { pageId: String(pageIndex), pageIndex }, bounds: { x: 0, y: pageIndex * 820, width: 600, height: 800 },
+    transform: [1, 0, 0, 1, 0, pageIndex * 820] as const,
+    displayPage: { pageIndex, width: 600, height: 800, primitives: [], unbuilt: pageIndex === 1 },
+  }));
+  h.binding.viewStore.getSnapshot().geometry!.pages = pages;
+  const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version) as { value: yrs.DocxReviewSnapshot };
+  let review: yrs.DocxReviewSnapshot = { ...base.value, uiComments: [noteComment(3, 'Anchored note')], commentIds: { native: 3 },
+    commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 40, width: 50, height: 12 }] } };
+  const readAt = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation((async (request: { kind: string }, version: string) =>
+    ({ status: 'ok', version, value: request.kind === 'reviewSnapshot' ? review
+      : request.kind === 'toolbarMetadata' ? { styles: [], fontFamilies: [] } : null })) as never);
+  const column = spyOn(sidebarView, 'UnifiedSidebar');
+  restorers.push(() => readAt.mockRestore(), () => column.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { surface.mock.calls[0]![0].onReady!(h.binding); });
+  const cardItem = () => column.mock.calls.at(-1)![0].items.find(item => item.id === 'comment-3');
+  const wrapper = () => view.container.querySelector<HTMLElement>('.docx-comment-card')!.parentElement!;
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(88));
+  expect(cardItem()?.hidden).not.toBe(true);
+  expect(wrapper().style.top).toBe('88px');
+  expect(wrapper().style.opacity).toBe('1');
+  await act(async () => {
+    await h.submit('insertText', { text: 'x' }, {}).ack;
+    h.present();
+    const frame = h.binding.viewStore.getSnapshot().geometry!;
+    frame.pages = pages;
+    review = { ...review, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
+      commentGeometry: { native: [{ pageIndex: 0, x: 30, y: 70, width: 50, height: 12 }] } };
+  });
+  await waitFor(() => expect(cardItem()?.fixedY).toBe(118));
+  expect(cardItem()?.hidden).not.toBe(true);
+  expect(wrapper().style.top).toBe('118px');
+  expect(wrapper().style.opacity).toBe('1');
+  expect(h.binding.viewStore.getSnapshot().geometry!.pages[1]!.displayPage!.unbuilt).toBe(true);
+  view.unmount();
+  h.controller.dispose();
+});
+
 test('controlled comments replace the worker comment projection in the sidebar and follow prop updates', async () => {
   const h = proposalHost({ automatic: false });
   h.binding.viewStore.getSnapshot().geometry!.pages = [{ page: { pageId: '0', pageIndex: 0 },
