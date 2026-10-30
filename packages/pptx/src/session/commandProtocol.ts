@@ -1,5 +1,6 @@
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { PptxPresenceCursor, PptxPresencePeer } from '../collaboration/types';
+import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
@@ -178,7 +179,15 @@ export class CommandOutcomeUnknown extends Error {
   }
 }
 
-export type PresentationCommandFailure = Error;
+/** Opening needed more than an engine budget allows (today: more than 256 distinct font faces). */
+export class PptxResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PptxResourceLimitError';
+  }
+}
+
+export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure | PptxResourceLimitError;
 
 export interface PresentationCommandOutcome {
   seq: number;

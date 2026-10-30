@@ -1389,7 +1389,7 @@ test('p1_subscriber_flush_throw_stops_frame_and_ack_notifications', async () => 
       const crash = () => { rejected = opened.flush().catch((error: unknown) => error); };
       opened.subscribeFailure((error) => {
         failures.push(error);
-        if (error instanceof SessionFailure) {
+        if ('code' in error) {
           expect(error.code).toBe('crash');
           expect(error.diagnostics).toBe('frame subscriber');
         } else throw new Error('Expected transport failure');

@@ -115,24 +115,21 @@ describe.skipIf(engineBackend() === 'native')('peerless session wasm reuse', () 
     finally { await cached.dispose(); }
   });
 
-  for (const code of [undefined, 'font-face-limit'] as const) test(`preserves a named host open error${code ? ' with code' : ''}`, async () => {
+  for (const name of ['PptxResourceLimitError', 'PptxEditDecodeError']) test(`types a host open ${name} without a closed connection`, async () => {
     const h = factory();
-    const original = Object.assign(new Error('render resource limit exceeded: more than 256 font faces'), {
-      name: 'PptxResourceLimitError', ...(code === undefined ? {} : { code }),
-    });
+    const original = Object.assign(new Error(name === 'PptxResourceLimitError'
+      ? 'render resource limit exceeded: more than 256 font faces' : 'invalid presentation'), { name });
     h.rejectInitialize(original);
     const session = h.client.createPptxWorkerSession(new Uint8Array());
     const failures: Error[] = [];
     session.subscribeFailure((error) => failures.push(error));
     try {
       const error = await session.ready.then(() => undefined, (error: unknown) => error);
-      expect(error).toBeInstanceOf(Error);
-      expect(error).toMatchObject({ name: original.name, message: original.message });
       if (!(error instanceof Error)) throw new Error('Expected an open error');
-      expect(error.message).toContain('more than 256 font faces');
+      if (name === 'PptxResourceLimitError') expect(error.constructor.name).toBe('PptxResourceLimitError');
+      expect(error).toMatchObject(name === 'PptxResourceLimitError' ? { name } : { name: 'SessionFailure', code: 'crash' });
+      expect(error.message).toBe(original.message);
       expect(error.message).not.toContain('connection closed');
-      expect('code' in error).toBe(code !== undefined);
-      if (code !== undefined) expect(error).toHaveProperty('code', code);
       expect(session.failure).toBe(error);
       expect(failures).toEqual([error]);
       const late: Error[] = [];
