@@ -12,6 +12,7 @@ import initWasmModule, {
 } from './engine';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { presentationContexts } from './presentationContext';
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
@@ -78,6 +79,16 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 
 export interface InspectPresentationOptions {
   includeMedia?: boolean;
+}
+
+/**
+ * Faces a save lays out text with, in a renderer of its own, so the saved
+ * bytes do not depend on the faces earlier renders registered with the handle.
+ */
+export interface SavePresentationOptions {
+  fonts: ReadonlyArray<PptxFontFace>;
+  /** Faces drawn only for characters the run's own face has no glyph for. */
+  fallbackFonts?: ReadonlyArray<PptxFontFace>;
 }
 
 export interface OpenPresentationOptions {
@@ -168,8 +179,12 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
-  /** serialize the presentation back to .pptx bytes, edits included. */
-  save(): Uint8Array;
+  /**
+   * serialize the presentation back to .pptx bytes, edits included. Normal
+   * autofit text the edits changed is fitted with the registered faces, or
+   * with `options.fonts` alone when given.
+   */
+  save(options?: SavePresentationOptions): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   /** `insertText` with the boundary's stage timings attached. */
   insertTextProfiled(
@@ -416,44 +431,43 @@ export function replayPresentation(
   return peerInternal(handle).replay(envelope, captured);
 }
 
-const displayListJsonReaders = new WeakMap<PresentationHandle, (slideIndex: number) => string>();
-
 type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
 type PresentationMetadata = {
   slides: { id: string; index: number; name: string | null; layoutPartPath: string | null }[];
   size: { width: number; height: number };
 };
-const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
-const storyFormattingReaders = new WeakMap<PresentationHandle, (target: PptxStoryFormattingTarget) => StorySnapshot>();
-const paragraphJoiners = new WeakMap<PresentationHandle, (storyId: string, start: number, end: number) => TextReceipt>();
 type PptxStoryFormattingTarget = { slideId: string; shapeId: string; storyId: string };
 type StoryFormattingDocument = PptxDocument & { storyFormattingJson(args: string): string };
 
 export function presentationStoryFormatting(handle: PresentationHandle, target: PptxStoryFormattingTarget): StorySnapshot {
-  const read = storyFormattingReaders.get(handle);
-  if (!read) throw new Error('Presentation story formatting is unavailable');
-  return read(target);
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation story formatting is unavailable');
+  return context.jsonWasmCall(() => (context.doc as StoryFormattingDocument).storyFormattingJson(JSON.stringify({
+    slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
+  })));
 }
 
 export function presentationDeleteTextJoiningParagraphs(
   handle: PresentationHandle, storyId: string, start: number, end: number
 ): TextReceipt {
-  const join = paragraphJoiners.get(handle);
-  if (!join) throw new Error('Presentation paragraph joining is unavailable');
-  return join(storyId, start, end);
+  const context = presentationContexts.get(handle);
+  if (!context || context.peer) throw new Error('Presentation paragraph joining is unavailable');
+  return context.jsonWasmCall(() => context.doc.deleteTextJson(JSON.stringify({
+    storyId, start, end, allowParagraphJoin: true,
+  })), true);
 }
 
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
-  const read = metadataReaders.get(handle);
-  if (!read) throw new Error('Presentation metadata is unavailable');
-  return read();
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation metadata is unavailable');
+  return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
 }
 
 /** @experimental */
 export function presentationDisplayListJson(handle: PresentationHandle, slideIndex: number): string {
-  const read = displayListJsonReaders.get(handle);
-  if (!read) throw new Error('Presentation display list is unavailable');
-  return read(slideIndex);
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation display list is unavailable');
+  return context.wasmCall(() => context.renderer.layoutSlideJson(context.doc, slideIndex));
 }
 
 export function isProposalsAvailable(): boolean {
@@ -843,8 +857,16 @@ function openPresentationInternal(
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
     },
-    save(): Uint8Array {
-      return wasmCall(() => renderer.saveBytes(doc));
+    save(options?: SavePresentationOptions): Uint8Array {
+      if (!options) return wasmCall(() => renderer.saveBytes(doc));
+      const saver = construct(() => new PptxRenderer());
+      try {
+        for (const face of options.fonts) wasmCall(() => registerFont(saver, face));
+        for (const face of options.fallbackFonts ?? []) wasmCall(() => registerFont(saver, face, true));
+        return wasmCall(() => saver.saveBytes(doc));
+      } finally {
+        saver.free();
+      }
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(
@@ -1175,20 +1197,7 @@ function openPresentationInternal(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
-  displayListJsonReaders.set(handle, (slideIndex) =>
-    wasmCall(() => renderer.layoutSlideJson(doc, slideIndex))
-  );
-  metadataReaders.set(handle, () =>
-    jsonWasmCall(() => (doc as SessionMetadataDocument).sessionMetadataJson())
-  );
-  storyFormattingReaders.set(handle, (target) =>
-    jsonWasmCall(() => (doc as StoryFormattingDocument).storyFormattingJson(JSON.stringify({
-      slideId: target.slideId, shapeId: target.shapeId, storyId: target.storyId,
-    })))
-  );
-  if (!peer) paragraphJoiners.set(handle, (storyId, start, end) =>
-    jsonWasmCall(() => doc.deleteTextJson(JSON.stringify({ storyId, start, end, allowParagraphJoin: true })), true)
-  );
+  presentationContexts.set(handle, { doc, renderer, wasmCall, jsonWasmCall, peer: Boolean(peer) });
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {
       snapshot: (): { snapshot: DeckSnapshot; keys: Record<string, string> } =>

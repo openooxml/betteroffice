@@ -6,6 +6,7 @@ import { Window } from 'happy-dom';
 import JSZip from 'jszip';
 import * as manifest from '../../packages/fonts/src/manifest';
 import { fontProvider } from '../../packages/fonts/src/provider';
+import { SCRIPT_PATTERNS } from '../../packages/fonts/src/scripts';
 import { normalFontIndex } from './xlsx-styles';
 
 interface RendererFace {
@@ -34,6 +35,7 @@ async function loadHarness() {
     jszip: JSZip,
     '../../packages/fonts/src/cdn': { createFontProvider: () => provider },
     '../../packages/fonts/src/manifest': manifest,
+    '../../packages/fonts/src/scripts': { SCRIPT_PATTERNS },
     './xlsx-styles': { normalFontIndex },
   };
   const context = {
@@ -120,16 +122,16 @@ test('registers real bundled bold and italic files with their metadata', async (
   const harness = await loadHarness();
   const faces = await harness.fontsFor(await deck('Hello'));
   expect(harness.registrations.filter((face) => face.family === 'Arial')).toEqual([
-    { family: 'Arial', file: 'LiberationSans-Regular.ttf', weight: '400', style: 'normal' },
-    { family: 'Arial', file: 'LiberationSans-Bold.ttf', weight: '700', style: 'normal' },
-    { family: 'Arial', file: 'LiberationSans-Italic.ttf', weight: '400', style: 'italic' },
-    { family: 'Arial', file: 'LiberationSans-BoldItalic.ttf', weight: '700', style: 'italic' },
+    { family: 'Arial', file: 'LiberationSans-Regular.ttf.zst', weight: '400', style: 'normal' },
+    { family: 'Arial', file: 'LiberationSans-Bold.ttf.zst', weight: '700', style: 'normal' },
+    { family: 'Arial', file: 'LiberationSans-Italic.ttf.zst', weight: '400', style: 'italic' },
+    { family: 'Arial', file: 'LiberationSans-BoldItalic.ttf.zst', weight: '700', style: 'italic' },
   ]);
   expect(rendererFaces(faces.filter((face) => face.family === 'Arial'))).toEqual([
-    { family: 'Arial', bold: false, italic: false, file: 'LiberationSans-Regular.ttf' },
-    { family: 'Arial', bold: true, italic: false, file: 'LiberationSans-Bold.ttf' },
-    { family: 'Arial', bold: false, italic: true, file: 'LiberationSans-Italic.ttf' },
-    { family: 'Arial', bold: true, italic: true, file: 'LiberationSans-BoldItalic.ttf' },
+    { family: 'Arial', bold: false, italic: false, file: 'LiberationSans-Regular.ttf.zst' },
+    { family: 'Arial', bold: true, italic: false, file: 'LiberationSans-Bold.ttf.zst' },
+    { family: 'Arial', bold: false, italic: true, file: 'LiberationSans-Italic.ttf.zst' },
+    { family: 'Arial', bold: true, italic: true, file: 'LiberationSans-BoldItalic.ttf.zst' },
   ]);
 });
 
@@ -137,12 +139,25 @@ test('registers a script fallback with a real bundled bold file at 700', async (
   const harness = await loadHarness();
   const faces = await harness.fallbackFontsFor(await deck('مرحبا'));
   expect(harness.registrations).toEqual([
-    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Regular.ttf', weight: '400', style: 'normal' },
-    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Bold.ttf', weight: '700', style: 'normal' },
+    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Regular.ttf.zst', weight: '400', style: 'normal' },
+    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Bold.ttf.zst', weight: '700', style: 'normal' },
   ]);
   expect(rendererFaces(faces)).toEqual([
-    { family: 'Noto Sans Arabic', bold: false, italic: false, file: 'NotoSansArabic-Regular.ttf' },
-    { family: 'Noto Sans Arabic', bold: true, italic: false, file: 'NotoSansArabic-Bold.ttf' },
+    { family: 'Noto Sans Arabic', bold: false, italic: false, file: 'NotoSansArabic-Regular.ttf.zst' },
+    { family: 'Noto Sans Arabic', bold: true, italic: false, file: 'NotoSansArabic-Bold.ttf.zst' },
+  ]);
+});
+
+test('registers international script coverage beside Latin family fallbacks', async () => {
+  const harness = await loadHarness();
+  const faces = await harness.fallbackFontsFor(await deck('กকக', 'Arial'));
+  expect(rendererFaces(faces).map((face) => face.file)).toEqual([
+    'NotoSansThai-Regular.ttf.zst',
+    'NotoSansThai-Bold.ttf.zst',
+    'NotoSansBengali-Regular.ttf.zst',
+    'NotoSansBengali-Bold.ttf.zst',
+    'NotoSansTamil-Regular.ttf.zst',
+    'NotoSansTamil-Bold.ttf.zst',
   ]);
 });
 
@@ -152,16 +167,16 @@ test('italic Segoe UI registers its true italic last resort beside upright Selaw
   zip.file('ppt/slides/slide1.xml', '<root><latin typeface="Segoe UI"/><r><t>Text</t></r></root>');
   const faces = rendererFaces(await harness.fontsFor(await zip.generateAsync({ type: 'uint8array' })));
   expect(faces.filter((face) => face.family === 'Segoe UI')).toEqual([
-    { family: 'Segoe UI', bold: false, italic: false, file: 'Selawik-Regular.ttf' },
-    { family: 'Segoe UI', bold: true, italic: false, file: 'Selawik-Bold.ttf' },
-    { family: 'Segoe UI', bold: false, italic: true, file: 'Carlito-Italic.ttf' },
-    { family: 'Segoe UI', bold: true, italic: true, file: 'Carlito-BoldItalic.ttf' },
+    { family: 'Segoe UI', bold: false, italic: false, file: 'Selawik-Regular.ttf.zst' },
+    { family: 'Segoe UI', bold: true, italic: false, file: 'Selawik-Bold.ttf.zst' },
+    { family: 'Segoe UI', bold: false, italic: true, file: 'Carlito-Italic.ttf.zst' },
+    { family: 'Segoe UI', bold: true, italic: true, file: 'Carlito-BoldItalic.ttf.zst' },
   ]);
   expect(harness.registrations.filter((face) => face.family === 'Segoe UI')).toEqual([
-    { family: 'Segoe UI', file: 'Selawik-Regular.ttf', weight: '400', style: 'normal' },
-    { family: 'Segoe UI', file: 'Selawik-Bold.ttf', weight: '700', style: 'normal' },
-    { family: 'Segoe UI', file: 'Carlito-Italic.ttf', weight: '400', style: 'italic' },
-    { family: 'Segoe UI', file: 'Carlito-BoldItalic.ttf', weight: '700', style: 'italic' },
+    { family: 'Segoe UI', file: 'Selawik-Regular.ttf.zst', weight: '400', style: 'normal' },
+    { family: 'Segoe UI', file: 'Selawik-Bold.ttf.zst', weight: '700', style: 'normal' },
+    { family: 'Segoe UI', file: 'Carlito-Italic.ttf.zst', weight: '400', style: 'italic' },
+    { family: 'Segoe UI', file: 'Carlito-BoldItalic.ttf.zst', weight: '700', style: 'italic' },
   ]);
 });
 

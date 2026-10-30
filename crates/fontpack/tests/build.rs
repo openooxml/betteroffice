@@ -71,7 +71,7 @@ fn builder_emits_a_sorted_manifest_and_verified_faces() {
     }
     assert_eq!(
         manifest,
-        json!({ "format": 1, "pack": "synthetic", "version": "1.2.3", "faces": expected })
+        json!({ "format": 1, "schema": 1, "pack": "synthetic", "version": "1.2.3", "faces": expected })
     );
 }
 
@@ -349,4 +349,52 @@ fn builder_accepts_a_dot_suffixed_output_and_skips_stale_staging() {
     assert!(temp.path().join("out/manifest.json").is_file());
     assert!(stale.is_dir());
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 3);
+}
+
+#[test]
+fn builder_auto_selects_the_smaller_family_encoding() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    copy_fixtures(&src);
+    let mut manifests = Vec::new();
+    for codec in ["zstd", "woff2t", "auto"] {
+        let out = temp.path().join(codec);
+        let result = Command::new(env!("CARGO_BIN_EXE_fontpack"))
+            .args(["build", "--src"])
+            .arg(&src)
+            .arg("--out")
+            .arg(&out)
+            .args([
+                "--pack",
+                "synthetic",
+                "--version",
+                "1.2.3",
+                "--codec",
+                codec,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(out.join("manifest.json")).unwrap()).unwrap();
+        manifests.push(manifest);
+    }
+    let total = |manifest: &Value| {
+        manifest["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|face| face["encodedLength"].as_u64().unwrap())
+            .sum::<u64>()
+    };
+    let expected = if total(&manifests[1]) < total(&manifests[0]) {
+        &manifests[1]
+    } else {
+        &manifests[0]
+    };
+    assert_eq!(manifests[2], *expected);
 }

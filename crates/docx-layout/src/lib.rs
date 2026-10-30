@@ -68,7 +68,9 @@
 mod anchor;
 pub mod canonical;
 mod extent_key;
+mod fmath;
 pub mod hooks;
+mod line_fit;
 pub mod page_flow;
 pub mod paragraph_spacing;
 pub mod place;
@@ -128,7 +130,7 @@ pub(crate) fn warn_degraded(message: &str) {
 /// unreachable executed`. Log the panic first so it stays diagnosable. Runs on
 /// module init for every wasm core that links this crate (layout and edit).
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(start)]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen(start))]
 pub fn install_panic_hook() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
@@ -205,7 +207,7 @@ pub fn layout_to_canonical_json(input: &str) -> Result<String, LayoutError> {
 }
 
 /// wasm wrapper over [`layout_to_json`].
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
     with_module_fonts(|| layout_to_json(input)).map_err(|e| JsValue::from_str(&e))
 }
@@ -553,7 +555,7 @@ pub fn update_resident_display_list_incremental_partial_cached_shifts_observed(
 
 /// wasm compatibility wrapper. Resident engine users call
 /// [`build_display_list_value`] and keep the typed result.
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
     with_module_fonts(|| {
         build_display_list_value(input).and_then(|display_list| {
@@ -565,7 +567,7 @@ pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
 
 /// wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
 /// point in, document position (or `null`) as JSON out.
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn hit_test_json(
     display_list: &str,
     page_index: u32,
@@ -833,7 +835,7 @@ impl Drop for MeasureFontsScope {
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
 /// error at this boundary, mirroring `FontStore::register`.
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     with_module_fonts(|| register_measure_font_bytes(bytes)).map_err(|e| JsValue::from_str(&e))
 }
@@ -844,7 +846,7 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// this for a face they substituted, and put the result at the head of that
 /// family's chain. Pagination, the display list and glyph outlines all read
 /// this one store, so a widened view measures and paints at one pitch.
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
     with_module_fonts(|| register_substitute_measure_font_id(base, requested_family))
         .map_err(|e| JsValue::from_str(&e))
@@ -875,7 +877,10 @@ pub fn clear_measure_fonts() {
 
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
-#[wasm_bindgen(js_name = clear_measure_fonts)]
+#[cfg_attr(
+    not(feature = "wasm-query"),
+    wasm_bindgen(js_name = clear_measure_fonts)
+)]
 pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
     with_module_fonts(clear_measure_fonts);
     Ok(())
@@ -954,7 +959,7 @@ pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Opt
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
 /// out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
 /// must fall back to browser measurement for that block.
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
     with_module_fonts(|| measure_paragraph_json_resident(input)).map_err(|e| JsValue::from_str(&e))
 }
@@ -1047,7 +1052,7 @@ pub(crate) fn min_content_width_typed_resident(
 /// {"t":"C","c1x":..,"c1y":..,"c2x":..,"c2y":..,"x":..,"y":..},{"t":"Z"}]}`.
 /// The canvas caches this per `(fontId, glyphId)` and scales by `size/upem`,
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
     with_module_fonts(|| outline_glyph_json_resident(font_id, glyph_id))
         .map_err(|e| JsValue::from_str(&e))

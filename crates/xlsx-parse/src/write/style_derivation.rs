@@ -239,14 +239,14 @@ fn xml_key(bytes: &[u8]) -> Vec<u8> {
         .filter(|attribute| !attribute.name.starts_with("xmlns"))
         .map(|attribute| (attribute.name, attribute.value))
         .collect();
-    attributes.sort();
+    sort_by_shared(&mut attributes, Ord::cmp);
     let mut children: Vec<_> = template
         .children
         .iter()
         .map(|child| xml_key(&child.bytes))
         .collect();
     if name == "font" {
-        children.sort();
+        sort_by_shared(&mut children, Ord::cmp);
     }
     format!("{name:?}{attributes:?}{children:?}").into_bytes()
 }

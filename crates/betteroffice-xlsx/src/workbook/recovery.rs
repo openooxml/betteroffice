@@ -856,7 +856,7 @@ impl Workbook {
         }
         let mut reader = Reader::new(payload);
         let checkpoint: RecoveryCheckpoint =
-            serde_json::from_slice(reader.bytes().map_err(invalid)?).map_err(invalid)?;
+            serde_json::from_str(reader.str().map_err(invalid)?).map_err(invalid)?;
         pulse();
         if checkpoint.engine != env!("CARGO_PKG_VERSION") {
             return Err(invalid("Workbook recovery engine version mismatch"));
