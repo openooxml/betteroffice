@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { checkCrates, checkNpm } from './check-publish-targets.mjs';
 import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
@@ -19,18 +20,46 @@ function versions(...published: string[]) {
   return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
 }
 
+function registry(respond: (name: string) => Response | Promise<Response>) {
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: (request) => respond(decodeURIComponent(new URL(request.url).pathname.slice(1)))
+  });
+  return { server, origin: `http://127.0.0.1:${server.port}` };
+}
+
+/** Runs a guard in this process against a fake registry, collecting what it prints. */
+async function check(
+  mode: '--npm' | '--crates',
+  respond: (name: string) => Response | Promise<Response>,
+  options: { timeoutMs?: number; bootstrap?: boolean } = {}
+) {
+  const { server, origin } = registry(respond);
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const out = { log: (line: string) => stdout.push(line), error: (line: string) => stderr.push(line) };
+  try {
+    const started = performance.now();
+    const status =
+      mode === '--npm'
+        ? await checkNpm({ registry: origin, out, timeoutMs: options.timeoutMs })
+        : await checkCrates({ registry: origin, out, timeoutMs: options.timeoutMs, bootstrap: options.bootstrap ?? false });
+    return { status, stdout: stdout.join('\n'), stderr: stderr.join('\n'), elapsed: performance.now() - started };
+  } finally {
+    server.stop(true);
+  }
+}
+
+const SPAWN_BUDGET_MS = 30_000;
+
 // Bun.spawnSync would block the loop this fake registry answers on.
 async function guard(
   mode: string,
   respond: (name: string) => Response | Promise<Response>,
   env: object = {}
 ) {
-  const server = Bun.serve({
-    port: 0,
-    hostname: '127.0.0.1',
-    fetch: (request) => respond(decodeURIComponent(new URL(request.url).pathname.slice(1)))
-  });
-  const origin = `http://127.0.0.1:${server.port}`;
+  const { server, origin } = registry(respond);
   try {
     const started = performance.now();
     const child = Bun.spawn(['node', script, mode], {
@@ -80,7 +109,7 @@ describe('npm publish targets', () => {
   });
 
   test('a package that exists at its release version passes', async () => {
-    const result = await guard('--npm', (name) => {
+    const result = await check('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
       return found ? versions(found.version) : notFound();
     });
@@ -89,7 +118,7 @@ describe('npm publish targets', () => {
   });
 
   test('a package that exists at an older version passes: that is a normal publish', async () => {
-    const result = await guard('--npm', () => versions('0.0.0'));
+    const result = await check('--npm', () => versions('0.0.0'));
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('is a new version of a package on npm.');
     expect(result.stderr).toBe('');
@@ -97,7 +126,7 @@ describe('npm publish targets', () => {
 
   test('a package that does not exist fails, by name', async () => {
     const missing = packages[0]!.name;
-    const result = await guard('--npm', (name) => {
+    const result = await check('--npm', (name) => {
       if (name === missing) return notFound();
       const found = packages.find((entry) => entry.name === name);
       return versions(found!.version);
@@ -115,13 +144,13 @@ describe('crates.io publish targets', () => {
   });
 
   test('a crate that exists passes', async () => {
-    const result = await guard('--crates', () => Response.json({}));
+    const result = await check('--crates', () => Response.json({}));
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${crates[0]} is on crates.io.`);
   });
 
   test('a crate that does not exist fails, by name', async () => {
-    const result = await guard('--crates', (name) =>
+    const result = await check('--crates', (name) =>
       name === crates[0] ? notFound() : Response.json({})
     );
     expect(result.status).toBe(1);
@@ -130,10 +159,10 @@ describe('crates.io publish targets', () => {
   });
 
   test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
-    const result = await guard(
+    const result = await check(
       '--crates',
       (name) => (name === crates[0] ? notFound() : Response.json({})),
-      { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
+      { bootstrap: true }
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
@@ -230,7 +259,7 @@ describe('a registry that misbehaves', () => {
           })
         : published(name)
     );
-    const result = await guard('--npm', registry.respond);
+    const result = await check('--npm', registry.respond);
 
     expect(result.status).toBe(0);
     expect(registry.calls.get(first)).toBe(2);
@@ -241,7 +270,7 @@ describe('a registry that misbehaves', () => {
     const registry = flaky((name, call) =>
       name === first && call === 1 ? new Promise<Response>(() => {}) : published(name)
     );
-    const result = await guard('--npm', registry.respond, { REGISTRY_TIMEOUT_MS: '400' });
+    const result = await check('--npm', registry.respond, { timeoutMs: 400 });
 
     expect(result.status).toBe(0);
     expect(registry.calls.get(first)).toBe(2);
@@ -254,7 +283,7 @@ describe('a registry that misbehaves', () => {
         ? new Response('{"versions":{"0.0.1"', { headers: { 'Content-Type': 'application/json' } })
         : published(name)
     );
-    const result = await guard('--npm', registry.respond);
+    const result = await check('--npm', registry.respond);
 
     expect(result.status).toBe(0);
     expect(registry.calls.get(first)).toBe(2);
@@ -265,20 +294,14 @@ describe('a registry that misbehaves', () => {
       () =>
         new Response('{"error":"unavailable"}', { status: 503, headers: { 'Retry-After': '0' } })
     );
-    const result = await guard('--npm', registry.respond);
-
-    expect(result.status).not.toBe(0);
+    await expect(check('--npm', registry.respond)).rejects.toThrow('503');
     expect(registry.calls.get(first)).toBe(5);
-    expect(result.stderr).toContain('503');
   });
 
   test('a 4xx that is not a rate limit is not retried', async () => {
     const registry = flaky(() => new Response('{"error":"gone"}', { status: 410 }));
-    const result = await guard('--npm', registry.respond);
-
-    expect(result.status).not.toBe(0);
+    await expect(check('--npm', registry.respond)).rejects.toThrow('410');
     expect(registry.calls.get(first)).toBe(1);
-    expect(result.stderr).toContain('410');
   });
 });
 
@@ -287,5 +310,12 @@ describe('the mode argument', () => {
     const result = await guard('--npmm', () => Response.json({}));
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('--npm or --crates');
-  });
+  }, SPAWN_BUDGET_MS);
+
+  test('--npm checks the registry NPM_REGISTRY_URL names and exits with the result', async () => {
+    const missing = packages[0]!.name;
+    const result = await guard('--npm', (name) => (name === missing ? notFound() : published(name)));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${missing} is not on npm.`);
+  }, SPAWN_BUDGET_MS);
 });
