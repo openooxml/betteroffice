@@ -3379,8 +3379,9 @@ test('a preloaded spare worker takes the open that starts alongside the preview'
   const { workers, posted, hostModules } = installWorker();
   await preloadResidentEngineWorker();
   expect(workers).toHaveLength(1);
-  expect(posted).toEqual([{ id: 1, type: 'warm', hostModule: true }]);
-  expect(hostModules).toEqual([{ type: 'editModule', module: editModule }]);
+  expect(posted).toEqual([{ id: 1, type: 'warm' }]);
+  expect(hostModules).toEqual([]);
+  expect(compileModule).not.toHaveBeenCalled();
   const frames = holdFrames();
   try {
     const { result, unmount } = renderHook(useHarness, {

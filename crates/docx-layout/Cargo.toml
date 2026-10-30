@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 test-support = []
+wasm-query = []
 
 # wasm-pack runs a wasm-opt post-pass after rustc/LLVM codegen. Pin it to -O3
 # (speed) here so the layout wasm — the per-keystroke display-list hot path — is

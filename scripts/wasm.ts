@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 export interface WasmModule {
   /** Directory under crates/. */
   crate: string;
-  /** wasm-bindgen artifact base name: the crate name with dashes underscored. */
+  /** wasm-bindgen artifact base name. */
   name: string;
   /** Destination for the vendored output, relative to the repo root. */
   generated: string;
@@ -205,6 +205,8 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
           '--release',
           '--target',
           'web',
+          '--out-name',
+          name,
           '--out-dir',
           output,
           ...(cargoArgs.length ? ['--', ...cargoArgs] : ['--locked']),
