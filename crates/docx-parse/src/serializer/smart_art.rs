@@ -589,16 +589,26 @@ mod tests {
     #[test]
     fn smart_art_inline_moved_to_anchor_writes_a_wrap_element() {
         let (mut shape, _) = source(false);
-        assert_eq!(shape.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()), Some("inline"));
+        assert_eq!(
+            shape.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()),
+            Some("inline")
+        );
         let (anchored, _) = source(true);
         shape.position = anchored.position.clone();
         let mut context = context();
         let saved = replay(&shape, &mut context, true).unwrap().unwrap();
         assert!(saved.contains("<wp:anchor"));
         assert_eq!(saved.matches("<wp:wrapNone/>").count(), 1);
+        assert!(saved.find("<wp:wrapNone/>") < saved.find("<wp:docPr"));
         let (reopened, _) = capture(saved);
-        assert_eq!(reopened.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()), Some("inFront"));
-        assert!(context.take_warnings().is_empty());
+        assert_eq!(
+            reopened.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()),
+            Some("inFront")
+        );
+        assert_eq!(reopened.position, shape.position);
+        let warnings = context.take_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("SmartArt wrap changes cannot be represented exactly"));
     }
 
     #[test]
