@@ -39,6 +39,7 @@ export {
   openPresentation,
   renderPptxMarkdown,
   wasmVersion,
+  engineBackend,
 } from './wasm/loader';
 export { PptxExportError } from './structuredExport';
 export type {
@@ -82,6 +83,7 @@ export type {
   PresentationHandle,
   UndoCaptureMode,
   WasmInitInput,
+  EngineBackend,
 } from './wasm/loader';
 export type {
   EditSuccess,

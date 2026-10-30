@@ -11,7 +11,7 @@ import type { PptxReadResult, PptxStoryText } from '../edits';
 import type { PresentationCommandFailure } from '../worker';
 import type { SlideDisplayList } from '../types';
 import { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection } from '../textFormatting';
-import type { PptxDocument } from '../wasm/generated/pptx_wasm.js';
+import type { PptxDocument } from '../wasm/engine';
 import * as wasm from '../wasm/loader';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { registerPresentationCommandHandlers } from './commandHost';
@@ -120,7 +120,7 @@ async function engineHost() {
     const { initWasm } = await import('../wasm/loader');
     await initWasm(source ?? await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
   } });
-  const { PptxDocument: Document } = await import('../wasm/generated/pptx_wasm.js');
+  const { PptxDocument: Document } = await import('../wasm/engine');
   const documents: PptxDocument[] = [];
   const handles: wasm.PresentationHandle[] = [];
   const openPresentation = wasm.openPresentation;
@@ -131,7 +131,7 @@ async function engineHost() {
   });
   const original = Document.openCollaborative;
   const opened = spyOn(Document, 'openCollaborative').mockImplementation((...args) => {
-    const document = original(...args);
+    const document = original.call(Document, ...args);
     documents.push(document);
     return document;
   });
@@ -2437,7 +2437,7 @@ test('p8_malformed_cloneable_frame_refuses_without_throwing_and_next_command_app
 
 test('remote_update_chunks_apply_in_order_as_one_remote_command', async () => {
   await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
-  const { PptxDocument: Document } = await import('../wasm/generated/pptx_wasm.js');
+  const { PptxDocument: Document } = await import('../wasm/engine');
   const author = Document.openCollaborative(await deck(['alpha']), 9001);
   const seed = author.encodeStateAsUpdate();
   const story = content(JSON.parse(author.readContentJson('{}')) as PptxReadResult).stories[0]!;
