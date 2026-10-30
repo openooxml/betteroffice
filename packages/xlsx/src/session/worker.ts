@@ -21,11 +21,20 @@ const moduleTransport = {
     transport.post(...args);
   },
 };
+const initialize = createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(), initWasm, async (url) => {
+  module = await compileWasm(url);
+  return module;
+});
+let initializeLean: ReturnType<typeof createWorkerWasmInitializer> | undefined;
 const host = createWorkbookSessionHost(transport, {
-  initWasm: createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(), initWasm, async (url) => {
-    module = await compileWasm(url);
-    return module;
-  }),
+  initWasm: (input, options) => {
+    if (options?.png !== false) return initialize(input);
+    initializeLean ??= createWorkerWasmInitializer(moduleTransport, wasmAssetUrl(false), initWasm, async (url) => {
+      module = await compileWasm(url);
+      return module;
+    });
+    return initializeLean(input);
+  },
   wasmModule: () => module,
 });
 Object.assign(globalThis, { __betterofficeEngineProgress: () => host.progress() });

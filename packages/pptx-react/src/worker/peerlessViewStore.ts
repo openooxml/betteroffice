@@ -10,6 +10,7 @@ import type {
   PresentationCommandSelectionReference, CommandGeometryLine, CommandRect,
 } from '@betteroffice/pptx/worker';
 import { measureEchoPosition } from './localEchoPainter';
+import type { DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 
 export const PEERLESS_ACTIVE_CONTEXT_BYTES = 16 * 1024;
@@ -186,6 +187,9 @@ export function createPeerlessViewStore(
     appliedThroughSeq: initial.throughSeq, presentedThroughSeq: initial.frame?.coversThroughSeq ?? initial.throughSeq,
     editState: initial.editState, thumbnails: new Map(), dirtyThumbnailIds: new Set(),
   };
+  const fontLandings = new WeakSet<object>();
+  const initialFonts = (initial as DefaultFontPayload).defaultFonts;
+  if (initialFonts) fontLandings.add(initialFonts);
 
   function withMedia(frame: PeerlessConfirmedFrame): PeerlessConfirmedFrame {
     const additions: PresentationCommandFrame['media'] = [];
@@ -309,6 +313,16 @@ export function createPeerlessViewStore(
   function receiveAck(ack: PresentationCommandAck): void {
     if (disposed || failure || !matches(ack) || ack.throughSeq < view.appliedThroughSeq) return;
     if (ack.throughSeq === view.appliedThroughSeq) {
+      const fonts = (ack as DefaultFontPayload).defaultFonts;
+      if (fonts?.length && !fontLandings.has(fonts) && !ack.outcomes.length &&
+        ack.dirtySlideIds.some((id) => !view.dirtyThumbnailIds.has(id) || view.thumbnails.has(id))) {
+        fontLandings.add(fonts);
+        const dirtyThumbnailIds = new Set(view.dirtyThumbnailIds);
+        const thumbnails = new Map(view.thumbnails);
+        for (const id of ack.dirtySlideIds) { dirtyThumbnailIds.add(id); thumbnails.delete(id); }
+        view = { ...view, thumbnails, dirtyThumbnailIds };
+        notify(structure);
+      }
       if (ack.frame) install(ack.frame);
       return;
     }
