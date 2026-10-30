@@ -1291,6 +1291,7 @@ const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
+let saveSeedStatesScheduled = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
@@ -1549,6 +1550,7 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport') {
       await commandHost.withFrameWork(() => handle(request));
     } else await handle(request);
+    if (request.type === 'commandInit' || request.type === 'bootstrap') scheduleSaveSeedStates();
   } catch (error) {
     replyFailure(request.id, error);
   } finally {
@@ -1796,6 +1798,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
+    saveSeedStatesScheduled = false;
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -3407,6 +3410,7 @@ function destroySession(keepSurfaces = false): void {
   openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
+  saveSeedStatesScheduled = false;
   openedVersion = undefined;
   previewing = false;
   cutPartial = false;
@@ -3572,6 +3576,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
+  saveSeedStatesScheduled = false;
   return { document, hostJson, embeddedFontFaces };
 }
 
@@ -3887,6 +3892,24 @@ function preloadSaveWasm(): Promise<void> {
 function canPreloadSaveWasm(): boolean {
   return !!session && !previewing && !sourcePreviewing && commandInit?.readOnly !== true &&
     (!!openedSource || openedParsed) && !trap && !projectionFailure;
+}
+
+function scheduleSaveSeedStates(): void {
+  if (saveSeedStatesScheduled || !session || !canPreloadSaveWasm()) return;
+  const owner = session;
+  saveSeedStatesScheduled = true;
+  scheduler.schedule({
+    kind: 'saveSeedStates', version: scheduler.version, generation: scheduler.generation,
+    idleAfterInputMs: COMPLETION_IDLE_MS,
+    onStale: () => 'continue',
+    fail: (error) => {
+      if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+    },
+    run: () => {
+      if (session === owner && canPreloadSaveWasm()) owner.primeSaveSeedStates();
+      return 'done';
+    },
+  });
 }
 
 function scheduleSaveWasmPreload(): void {

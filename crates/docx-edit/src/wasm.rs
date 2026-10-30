@@ -2665,6 +2665,11 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Caches save seed states without reseeding.
+    pub fn prime_save_seed_states(&self) -> bool {
+        self.core.prime_save_seed_states()
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,

@@ -428,6 +428,9 @@ pub(crate) struct SourceIndex {
     comment_references: BTreeSet<u32>,
     #[serde(skip)]
     seed_states: OnceLock<SeedStates>,
+    #[cfg(test)]
+    #[serde(skip)]
+    reseed_calls: std::sync::atomic::AtomicUsize,
     #[serde(skip)]
     own_digest: OnceLock<bool>,
     #[serde(skip)]
@@ -513,7 +516,6 @@ impl SourceIndex {
         &self.package_sha256
     }
 
-    #[cfg(test)]
     pub(crate) fn seed_states_initialized(&self) -> bool {
         self.seed_states.get().is_some()
     }
@@ -682,6 +684,8 @@ impl SourceIndex {
             seeded,
             comment_references,
             seed_states: OnceLock::new(),
+            #[cfg(test)]
+            reseed_calls: std::sync::atomic::AtomicUsize::new(0),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
             run_size_sources: Mutex::new(BTreeMap::new()),
@@ -805,6 +809,8 @@ impl SourceIndex {
     }
 
     fn reseeded(&self) -> SeedStates {
+        #[cfg(test)]
+        self.reseed_calls.fetch_add(1, Ordering::Relaxed);
         let scratch = EditingDoc::new(0);
         if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
             return SeedStates::default();
@@ -3052,6 +3058,34 @@ impl EditingDoc {
         }
     }
 
+    fn live_save_seed_states(&self, stories: HashMap<String, StoryState>) -> SeedStates {
+        SeedStates {
+            stories,
+            patch_table_styles: self
+                .source_metadata()
+                .map(|metadata| metadata.patch_table_styles().clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Caches save seed states without reseeding; returns whether they are known.
+    pub fn prime_save_seed_states(&self) -> bool {
+        let Some(source) = self.source_index() else {
+            return false;
+        };
+        if source.seed_states_initialized() {
+            return true;
+        }
+        if !self.unchanged_since_seeded() || !source.opened_under_own_digest() {
+            return false;
+        }
+        source.seed_states_or(|| {
+            let txn = self.yrs_doc().transact();
+            self.live_save_seed_states(story_states_in(self, &txn))
+        });
+        true
+    }
+
     /// The paragraph IDs a save of this session applies; see
     /// [`ParagraphSavePlan`]. A part is patched in place only when every
     /// story seeded from it, nested ones included, gives the save projection
@@ -3080,13 +3114,7 @@ impl EditingDoc {
         };
         let metadata = self.source_metadata();
         let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
-            source.seed_states_or(|| SeedStates {
-                stories: live.clone(),
-                patch_table_styles: metadata
-                    .as_ref()
-                    .map(|metadata| metadata.patch_table_styles().clone())
-                    .unwrap_or_default(),
-            })
+            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
         } else {
             source.seed_states()
         };
@@ -3817,6 +3845,97 @@ mod tests {
 
     fn ctx() -> EditCtx {
         EditCtx::local("", DATE)
+    }
+
+    fn save_seed_session() -> crate::session::EditSessionCore {
+        let bytes = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ])
+        .unwrap();
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(&bytes, true, None, None).unwrap();
+        session
+    }
+
+    #[test]
+    fn priming_save_seed_states_preserves_the_plan_without_reseeding() {
+        let primed = save_seed_session();
+        let fallback = save_seed_session();
+        let source = primed.engine.doc().source_index().unwrap();
+        assert!(source.opened_under_own_digest());
+        assert!(!source.seed_states_initialized());
+        assert!(primed.prime_save_seed_states());
+        assert!(primed.prime_save_seed_states());
+        assert!(source.seed_states_initialized());
+        for session in [&primed, &fallback] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        assert!(primed.prime_save_seed_states());
+        let plan = primed.paragraph_save_plan().unwrap();
+        assert_eq!(plan, fallback.paragraph_save_plan().unwrap());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            fallback
+                .engine
+                .doc()
+                .source_index()
+                .unwrap()
+                .reseed_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+        let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+        assert_eq!(plan["splicedParts"][0]["changed"], serde_json::json!([0]));
+    }
+
+    #[test]
+    fn priming_after_an_edit_declines_without_reseeding() {
+        let session = save_seed_session();
+        let expected = save_seed_session();
+        assert!(expected.prime_save_seed_states());
+        for session in [&session, &expected] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        let source = session.engine.doc().source_index().unwrap();
+        assert!(!session.prime_save_seed_states());
+        assert!(!source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            session.paragraph_save_plan().unwrap(),
+            expected.paragraph_save_plan().unwrap()
+        );
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
+        assert!(session.prime_save_seed_states());
     }
 
     #[test]
