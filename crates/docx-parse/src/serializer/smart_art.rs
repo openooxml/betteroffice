@@ -168,8 +168,7 @@ fn wrap(container: &mut XmlElement, value: &ImageWrap, context: &mut SerializerC
         return;
     }
     let local = match value.wrap_type.as_str() {
-        "inline" => return,
-        "none" | "behind" | "inFront" => "wrapNone",
+        "inline" | "none" | "behind" | "inFront" => "wrapNone",
         "square" => "wrapSquare",
         "tight" => "wrapTight",
         "through" => "wrapThrough",
@@ -194,7 +193,11 @@ fn wrap(container: &mut XmlElement, value: &ImageWrap, context: &mut SerializerC
     if matches!(local, "wrapSquare" | "wrapTight" | "wrapThrough") {
         attribute(element, "wrapText", value.wrap_text.clone());
     }
-    if let Some(points) = &value.polygon {
+    if let Some(points) = value
+        .polygon
+        .as_ref()
+        .filter(|_| matches!(local, "wrapTight" | "wrapThrough"))
+    {
         let polygon = ensure(element, "wrapPolygon");
         polygon.children.retain(|child| !matches!(child, XmlNode::Element(child) if matches!(child.local_name(), "start" | "lineTo")));
         for (at, point) in points.iter().enumerate() {
@@ -581,6 +584,46 @@ mod tests {
         let (reopened, _) = capture(saved);
         assert_eq!(reopened.wrap, shape.wrap);
         assert!(context.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn smart_art_inline_moved_to_anchor_writes_a_wrap_element() {
+        let (mut shape, _) = source(false);
+        assert_eq!(shape.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()), Some("inline"));
+        let (anchored, _) = source(true);
+        shape.position = anchored.position.clone();
+        let mut context = context();
+        let saved = replay(&shape, &mut context, true).unwrap().unwrap();
+        assert!(saved.contains("<wp:anchor"));
+        assert_eq!(saved.matches("<wp:wrapNone/>").count(), 1);
+        let (reopened, _) = capture(saved);
+        assert_eq!(reopened.wrap.as_ref().map(|wrap| wrap.wrap_type.as_str()), Some("inFront"));
+        assert!(context.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn smart_art_polygon_stays_out_of_wraps_without_one() {
+        let (_, xml) = source(true);
+        for from in ["wrapTight", "wrapThrough"] {
+            let xml = xml.replace("<wp:docPr", &format!(r#"<wp:{from} wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/><wp:lineTo x="21600" y="21600"/></wp:wrapPolygon></wp:{from}><wp:docPr"#));
+            for (to, element, reopens) in [
+                ("square", "wrapSquare", "square"),
+                ("topAndBottom", "wrapTopAndBottom", "topAndBottom"),
+                ("none", "wrapNone", "inFront"),
+            ] {
+                let (mut shape, _) = capture(xml.clone());
+                assert!(shape.wrap.as_ref().unwrap().polygon.is_some());
+                shape.wrap.as_mut().unwrap().wrap_type = to.to_owned();
+                let mut context = context();
+                let saved = replay(&shape, &mut context, true).unwrap().unwrap();
+                assert!(saved.contains(&format!("<wp:{element}")), "{from} -> {to}");
+                assert!(!saved.contains(from), "{from} -> {to}");
+                assert!(!saved.contains("wrapPolygon"), "{from} -> {to}");
+                let (reopened, _) = capture(saved);
+                assert_eq!(reopened.wrap.as_ref().unwrap().wrap_type, reopens);
+                assert!(reopened.wrap.as_ref().unwrap().polygon.is_none());
+            }
+        }
     }
 
     #[test]
