@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 
 import {
-  engineBackend,
   initWasm,
   openWorkbook,
   type EditResult,
@@ -13,6 +12,7 @@ import {
   type XlsxMarkdownOptions,
   type XlsxReadRequest
 } from '../../packages/xlsx/src/index';
+import { engineKind } from '../../packages/xlsx/src/wasm/engine';
 import type { Format } from './harness';
 
 function mutationResult({ applied, changed = [], limitedCells = [] }: EditResult) {
@@ -24,7 +24,7 @@ function mutationResult({ applied, changed = [], limitedCells = [] }: EditResult
 }
 
 export const xlsx: Format = {
-  engineBackend,
+  engineKind,
   async open(bytes, script) {
     await initWasm(
       readFileSync(

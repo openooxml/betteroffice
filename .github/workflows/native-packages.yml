@@ -1,7 +1,8 @@
 name: Native packages
 
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - 'bindings/*-native/**'
       - 'scripts/native-bindings.mjs'

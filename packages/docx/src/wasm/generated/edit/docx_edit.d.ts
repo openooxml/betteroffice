@@ -863,6 +863,11 @@ export class EditSession {
      * when nothing was changed.
      */
     persist_paragraph_ids(): string;
+    /**
+     * Caches save seed states without reseeding, within the paragraph and
+     * inflated package budgets.
+     */
+    prime_save_seed_states(paragraphs: number, inflated: number): boolean;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -1889,6 +1894,7 @@ export interface InitOutput {
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];

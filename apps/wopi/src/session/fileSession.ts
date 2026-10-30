@@ -1,7 +1,9 @@
 import { randomInt, randomUUID } from "node:crypto";
+import { DEFAULT_RECONNECT_GRACE_MS } from "../config";
 import type { CheckFileInfo, HostClient } from "../host/client";
 import { WopiHostError } from "../host/errors";
 import { redactText } from "../host/redact";
+import { blankDocument } from "../blank";
 import { openServerReplica, type Format, type JoinPayload, type ServerReplica } from "../replica/replica";
 import { electLeader } from "./leader";
 import { UserSession } from "./userSession";
@@ -98,6 +100,8 @@ export interface FileSessionDeps {
   scheduler?: SessionScheduler;
   journal?: FileJournal | null;
   maxEditorsPerFile?: number;
+  reconnectGraceMs?: number;
+  autosave?: boolean;
   openReplica?: typeof openServerReplica;
   onClosed?: (session: FileSession) => void;
   isLiveLock?: (lock: string) => boolean;
@@ -163,6 +167,7 @@ export class FileSession {
   #autosaveTimer: ReturnType<typeof setTimeout> | null = null;
   #holdTimer: ReturnType<typeof setTimeout> | null = null;
   #sweepTimer: ReturnType<typeof setInterval> | null = null;
+  #reconnectTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
   #userTimers = new Map<string, Array<ReturnType<typeof setTimeout>>>();
   #format: Format | null = null;
   #sourceBytes: Uint8Array | null = null;
@@ -365,7 +370,13 @@ export class FileSession {
         this.#fileSize = info.Size;
         this.#lastModifiedTime = info.LastModifiedTime ?? null;
         this.#itemVersion = info.Version ?? null;
-        const bytes = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+        const fetched = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: input.accessToken });
+        const isBlank = fetched.byteLength === 0;
+        const bytes = isBlank ? await blankDocument(this.#format) : fetched;
+        if (isBlank) {
+          this.#savedVersion = -1;
+          this.#firstDirtyAt = this.#now();
+        }
         this.#sourceBytes = bytes;
         const open = this.#deps.openReplica ?? openServerReplica;
         this.#attachReplica(await open(this.#format, bytes, { clientId: randomInt(1, 2000000000) }));
@@ -434,6 +445,7 @@ export class FileSession {
       joinedAt: now,
       postMessageOrigin: info.PostMessageOrigin ?? "",
       closeUrl: info.CloseUrl ?? "",
+      closePostMessage: info.ClosePostMessage === true,
     });
     this.#users.set(user.id, user);
     this.#history.push(user);
@@ -697,6 +709,11 @@ export class FileSession {
     }
   }
 
+  #clearReconnectTimer(id: string): void {
+    for (const timer of this.#reconnectTimers.get(id) ?? []) this.#scheduler.clearTimeout(timer);
+    this.#reconnectTimers.delete(id);
+  }
+
   #clearUserTimers(id: string): void {
     const handles = this.#userTimers.get(id);
     if (handles) for (const handle of handles) this.#scheduler.clearTimeout(handle);
@@ -712,6 +729,7 @@ export class FileSession {
       this.#scheduler.clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
+    for (const id of [...this.#reconnectTimers.keys()]) this.#clearReconnectTimer(id);
     for (const id of [...this.#userTimers.keys()]) this.#clearUserTimers(id);
   }
 
@@ -744,6 +762,7 @@ export class FileSession {
     }, handles);
     this.#setTimerAt(user.expiresAt, () => {
       if (!this.#users.has(user.id) || this.#state !== "open") return;
+      this.#clearReconnectTimer(user.id);
       this.#emit("userInvalidated", { userId: user.id });
       this.#enqueueTask(async () => {
         if (!this.#users.has(user.id) || this.#state !== "open") return;
@@ -925,10 +944,14 @@ export class FileSession {
       if (candidate.expiresAt === null || candidate.expiresAt > now) candidate.expiresAt = now;
       candidate.canWrite = false;
       this.#clearUserTimers(candidate.id);
+      this.#clearReconnectTimer(candidate.id);
     }
     this.#syncLeader();
     for (const candidate of affected) this.#emit("userInvalidated", { userId: candidate.id, reason: "unauthorized" });
-    this.#enqueueTask(() => this.#maybeCloseAfterDeparture(affected));
+    this.#enqueueTask(async () => {
+      for (const candidate of affected) await this.#disconnectInternal(candidate.id, candidate.connectionGeneration);
+      await this.#maybeCloseAfterDeparture(affected);
+    });
   }
 
   /** Whether one user's token is still valid on the session clock. */
@@ -975,7 +998,7 @@ export class FileSession {
 
   #scheduleAutosave(): void {
     this.#clearTimer("autosave");
-    if (!this.dirty || this.#state !== "open") return;
+    if (this.#deps.autosave === false || !this.dirty || this.#state !== "open") return;
     const first = this.#firstDirtyAt ?? this.#lastUpdateAt;
     const target = Math.min(this.#lastUpdateAt + AUTOSAVE_DEBOUNCE_MS, first + AUTOSAVE_MAX_MS);
     const delay = Math.max(0, target - this.#now());
@@ -986,7 +1009,7 @@ export class FileSession {
 
   #scheduleAutosaveRetry(): void {
     this.#clearTimer("autosave");
-    if (!this.dirty || this.#state !== "open") return;
+    if (this.#deps.autosave === false || !this.dirty || this.#state !== "open") return;
     this.#autosaveTimer = this.#scheduler.setTimeout(() => {
       this.#enqueueTask(() => this.#runAutosave());
     }, AUTOSAVE_DEBOUNCE_MS);
@@ -1022,6 +1045,7 @@ export class FileSession {
     const user = this.#users.get(userId);
     if (!user) throw new SessionError("unknownUser", "unknown user");
     if (user.connectionGeneration !== generation) return;
+    this.#clearReconnectTimer(userId);
     user.lastSeen = this.#now();
     if (user.connected) return;
     user.connected = true;
@@ -1036,9 +1060,23 @@ export class FileSession {
     });
   }
 
-  /** Marks a user disconnected and runs the departure policy. */
   disconnect(userId: string, generation = this.#users.get(userId)?.connectionGeneration): Promise<void> {
-    return this.#enqueue(() => this.#disconnectInternal(userId, generation));
+    const user = this.#users.get(userId);
+    if (!user || user.connectionGeneration !== generation || !user.connected || this.#reconnectTimers.has(userId)) return Promise.resolve();
+    const grace = this.#deps.reconnectGraceMs ?? DEFAULT_RECONNECT_GRACE_MS;
+    if (!user.isTokenValidAt(this.#now()) || grace === 0) {
+      return this.#enqueue(() => this.#disconnectInternal(userId, generation));
+    }
+    const handles: Array<ReturnType<typeof setTimeout>> = [];
+    this.#reconnectTimers.set(userId, handles);
+    this.#setTimerAt(this.#now() + grace, () => {
+      this.#enqueueTask(async () => {
+        if (this.#reconnectTimers.get(userId) !== handles) return;
+        this.#clearReconnectTimer(userId);
+        await this.#disconnectInternal(userId, generation);
+      });
+    }, handles);
+    return Promise.resolve();
   }
 
   async #disconnectInternal(userId: string, generation: number | undefined): Promise<void> {
@@ -1060,6 +1098,7 @@ export class FileSession {
     if (!user) throw new SessionError("unknownUser", "unknown user");
     const leaderBefore = this.#leader;
     this.#users.delete(userId);
+    this.#clearReconnectTimer(userId);
     this.#clearUserTimers(userId);
     user.connected = false;
     this.#emit("userInvalidated", { userId });
@@ -1071,7 +1110,7 @@ export class FileSession {
   async #sweepInternal(): Promise<void> {
     if (this.#state !== "open") return;
     const now = this.#now();
-    const stale = [...this.#users.values()].filter((user) => user.connected && now - user.lastSeen >= HEARTBEAT_TIMEOUT_MS);
+    const stale = [...this.#users.values()].filter((user) => user.connected && !this.#reconnectTimers.has(user.id) && now - user.lastSeen >= HEARTBEAT_TIMEOUT_MS);
     for (const user of stale) {
       user.connected = false;
       this.#log("info", "user disconnected after heartbeat timeout", { userId: user.id });
@@ -1210,7 +1249,19 @@ export class FileSession {
     }
   }
 
-  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number, tokenUser: UserSession, tried: Set<string>): Promise<SaveResult> {
+  recoverCopy(userId: string, bytes: Uint8Array): Promise<{ copyName: string }> {
+    return this.#enqueue(async () => {
+      const user = this.#users.get(userId);
+      if (!user || !user.isTokenValidAt(this.#now())) throw new SessionError("unknownUser", "unknown user");
+      if (this.#state !== "open") throw new SessionError("closed", "file session is not open");
+      if (!user.canWrite) throw new SessionError("notAllowed", "read only");
+      const result = await this.#saveConflictCopy(bytes, null, user, new Set());
+      if (!result.saved || !result.conflictName) throw new SessionError("saveFailed", "recovery copy failed");
+      return { copyName: result.conflictName };
+    });
+  }
+
+  async #saveConflictCopy(bytes: Uint8Array, versionAtStart: number | null, tokenUser: UserSession, tried: Set<string>): Promise<SaveResult> {
     const target = conflictTargetName(this.#fileName, this.#now());
     let current: UserSession | null = tokenUser;
     while (current) {
@@ -1223,8 +1274,10 @@ export class FileSession {
           suggestedTarget: target,
           lock: this.#lockHeld ? this.lockId : undefined,
         });
-        this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
-        if (!this.dirty) this.#firstDirtyAt = null;
+        if (versionAtStart !== null) {
+          this.#savedVersion = Math.max(this.#savedVersion, versionAtStart);
+          if (!this.dirty) this.#firstDirtyAt = null;
+        }
         try {
           this.#deps.journal?.flush();
         } catch {
@@ -1374,6 +1427,7 @@ export class FileSession {
       this.#scheduler.clearInterval(this.#sweepTimer);
       this.#sweepTimer = null;
     }
+    for (const id of [...this.#reconnectTimers.keys()]) this.#clearReconnectTimer(id);
     for (const id of [...this.#userTimers.keys()]) this.#clearUserTimers(id);
     if (deleteJournal && !this.dirty && this.#journalActive && !this.#journalBroken) {
       try {

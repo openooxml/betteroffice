@@ -5,7 +5,7 @@ import {
   createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
   isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
 } from 'typescript';
-import { engineBackend } from '../wasm/engine';
+import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -56,7 +56,7 @@ test('keeps worker URLs and options statically evaluable', () => {
   expect(workers).toEqual([{ type: 'module' }]);
 });
 
-describe.skipIf(engineBackend() === 'native')('presentation session wasm reuse', () => {
+describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () => {
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();

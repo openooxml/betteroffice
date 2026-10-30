@@ -144,6 +144,13 @@ impl EditSessionCore {
         serde_json::to_string(&result).map_err(EngineError::message)
     }
 
+    /// Caches save seed states without reseeding, within the paragraph and
+    /// inflated package budgets.
+    pub fn prime_save_seed_states(&self, paragraphs: u32, inflated: u32) -> bool {
+        let doc = self.engine.doc();
+        doc.prime_save_seed_states(paragraphs, inflated)
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,

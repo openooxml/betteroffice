@@ -11,8 +11,10 @@ const CHILD = 'XLSX_REMOTE_UPDATE_ORDER_TEST';
 
 async function isolated(name: string): Promise<boolean> {
   if (process.env[CHILD] === name) return false;
-  const child = Bun.spawn([process.execPath, 'test', import.meta.path, '-t', name], {
-    env: { ...process.env, [CHILD]: name }, stdout: 'pipe', stderr: 'pipe',
+  const { BUN_OPTIONS, ...env } = process.env;
+  const options = BUN_OPTIONS ? BUN_OPTIONS.split(' ') : [];
+  const child = Bun.spawn([process.execPath, 'test', ...options, import.meta.path, '-t', name], {
+    env: { ...env, [CHILD]: name }, stdout: 'pipe', stderr: 'pipe',
   });
   const deadline = setTimeout(() => child.kill(), 20_000);
   const [status, stdout, stderr] = await Promise.all([
