@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-mod engine;
+pub mod engine;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 

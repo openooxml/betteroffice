@@ -1,14 +1,19 @@
 #![allow(clippy::too_many_arguments)]
 
+use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use docx_engine::{Document, EngineError, EngineErrorKind, Host};
 use napi::bindgen_prelude::{
-    Array, ArrayBuffer, Either, JsObjectValue, Uint8Array, Uint8ArraySlice, Uint32Array, Undefined,
+    Array, ArrayBuffer, Either, Float64Array, FnArgs, Function, FunctionRef, JsObjectValue, Null,
+    Object, Uint8Array, Uint8ArraySlice, Uint32Array, Undefined,
 };
-use napi::{Env, Error, Result, Status};
+use napi::{Env, Error, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 
 fn byte_result(env: Env, bytes: Vec<u8>) -> Result<Uint8Array> {
@@ -81,30 +86,596 @@ fn map_error(env: Env, error: EngineError) -> Error {
     }
 }
 
+fn borrow_error() -> Error {
+    Error::from_reason(
+        "recursive use of an object detected which would lead to unsafe aliasing in rust",
+    )
+}
+
+type UpdateCallback = FunctionRef<FnArgs<(Uint8Array, u32)>, ()>;
+type UpdateQueue = Rc<RefCell<VecDeque<(Vec<u8>, bool)>>>;
+
+struct UpdateObserver {
+    _subscription: docx_engine::UpdateSubscription,
+    callback: Rc<UpdateCallback>,
+    env: Env,
+    pending: UpdateQueue,
+}
+
+struct PendingUpdate {
+    callback: Rc<UpdateCallback>,
+    env: Env,
+    bytes: Vec<u8>,
+    remote: bool,
+}
+
+fn take_pending_exception(env: Env) -> Option<napi::sys::napi_value> {
+    let mut pending = false;
+    let status = unsafe { napi::sys::napi_is_exception_pending(env.raw(), &mut pending) };
+    if status != napi::sys::Status::napi_ok || !pending {
+        return None;
+    }
+    let mut exception = std::ptr::null_mut();
+    let status = unsafe { napi::sys::napi_get_and_clear_last_exception(env.raw(), &mut exception) };
+    if status == napi::sys::Status::napi_ok && !exception.is_null() {
+        Some(exception)
+    } else {
+        None
+    }
+}
+
+struct DeliveringUpdates<'a> {
+    running: &'a Cell<bool>,
+    env: Env,
+    exception: Option<napi::sys::napi_value>,
+}
+
+impl Drop for DeliveringUpdates<'_> {
+    fn drop(&mut self) {
+        self.running.set(false);
+        if let Some(exception) = self.exception {
+            unsafe { napi::sys::napi_throw(self.env.raw(), exception) };
+        }
+    }
+}
+
+struct UpdateDelivery<'a>(&'a EditSession);
+
+impl Drop for UpdateDelivery<'_> {
+    fn drop(&mut self) {
+        self.0.deliver_updates();
+    }
+}
+
+struct DocumentGuard<'a, T> {
+    core: T,
+    _delivery: UpdateDelivery<'a>,
+}
+
+impl<T: Deref<Target = Document>> Deref for DocumentGuard<'_, T> {
+    type Target = Document;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl<T: DerefMut<Target = Document>> DerefMut for DocumentGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
 #[napi(js_name = "EditSession")]
 pub struct EditSession {
-    core: Option<Document>,
+    update_observer: RefCell<Option<UpdateObserver>>,
+    delivering: Cell<bool>,
+    core: RefCell<Option<Document>>,
 }
 
 impl EditSession {
-    fn document(&self) -> Result<&Document> {
-        self.core
-            .as_ref()
-            .ok_or_else(|| Error::from_reason("EditSession was freed"))
+    fn document(&self) -> Result<DocumentGuard<'_, Ref<'_, Document>>> {
+        let core = self.core.try_borrow().map_err(|_| borrow_error())?;
+        let core = Ref::filter_map(core, Option::as_ref)
+            .map_err(|_| Error::from_reason("EditSession was freed"))?;
+        Ok(DocumentGuard {
+            core,
+            _delivery: UpdateDelivery(self),
+        })
     }
 
-    fn document_mut(&mut self) -> Result<&mut Document> {
-        self.core
-            .as_mut()
-            .ok_or_else(|| Error::from_reason("EditSession was freed"))
+    fn document_mut(&self) -> Result<DocumentGuard<'_, RefMut<'_, Document>>> {
+        let core = self.core.try_borrow_mut().map_err(|_| borrow_error())?;
+        let core = RefMut::filter_map(core, Option::as_mut)
+            .map_err(|_| Error::from_reason("EditSession was freed"))?;
+        Ok(DocumentGuard {
+            core,
+            _delivery: UpdateDelivery(self),
+        })
+    }
+
+    fn clear_observer(&self) -> Result<()> {
+        let observer = self
+            .update_observer
+            .try_borrow_mut()
+            .map_err(|_| borrow_error())?
+            .take();
+        drop(observer);
+        Ok(())
+    }
+
+    fn next_update(&self) -> Option<PendingUpdate> {
+        let observer = self.update_observer.try_borrow().ok()?;
+        let observer = observer.as_ref()?;
+        let (bytes, remote) = observer.pending.try_borrow_mut().ok()?.pop_front()?;
+        Some(PendingUpdate {
+            callback: Rc::clone(&observer.callback),
+            env: observer.env,
+            bytes,
+            remote,
+        })
+    }
+
+    fn deliver_updates(&self) {
+        if self.delivering.get() {
+            return;
+        }
+        let Ok(core) = self.core.try_borrow_mut() else {
+            return;
+        };
+        if core.is_none() {
+            return;
+        }
+        drop(core);
+        let Some(update) = self.next_update() else {
+            return;
+        };
+        self.delivering.set(true);
+        let _delivery = DeliveringUpdates {
+            running: &self.delivering,
+            env: update.env,
+            exception: take_pending_exception(update.env),
+        };
+        let mut next = Some(update);
+        while let Some(update) = next {
+            let PendingUpdate {
+                callback,
+                env,
+                bytes,
+                remote,
+            } = update;
+            let _ = (|| -> Result<()> {
+                let bytes = byte_result(env, bytes)?;
+                callback
+                    .borrow_back(&env)?
+                    .apply(Null, (bytes, u32::from(remote)).into())
+            })();
+            let _ = take_pending_exception(env);
+            next = self.next_update();
+        }
     }
 }
 
 #[napi]
 impl EditSession {
     #[napi(js_name = "free")]
-    pub fn free(&mut self) {
-        self.core = None;
+    pub fn free(&self) -> Result<()> {
+        let mut core = self.core.try_borrow_mut().map_err(|_| borrow_error())?;
+        self.clear_observer()?;
+        drop(core.take());
+        Ok(())
+    }
+
+    #[napi(js_name = "register_measure_font")]
+    pub fn register_measure_font(&self, env: Env, bytes: Uint8Array) -> Result<u32> {
+        self.document()?
+            .register_measure_font(&bytes)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "decode_font")]
+    pub fn decode_font(&self, env: Env, bytes: Uint8Array) -> Result<Uint8Array> {
+        self.document()?
+            .decode_font(&bytes)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "register_substitute_measure_font")]
+    pub fn register_substitute_measure_font(
+        &self,
+        env: Env,
+        base: u32,
+        requested_family: String,
+    ) -> Result<u32> {
+        self.document()?
+            .register_substitute_measure_font(base, &requested_family)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "clear_measure_fonts")]
+    pub fn clear_measure_fonts(&self) -> Result<()> {
+        self.document()?.clear_measure_fonts();
+        Ok(())
+    }
+
+    #[napi(js_name = "measure_paragraph_json")]
+    pub fn measure_paragraph_json(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .measure_paragraph_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_json")]
+    pub fn layout_document_json(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .layout_document_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_font_requirements_json")]
+    pub fn layout_font_requirements_json(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .layout_font_requirements_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_json")]
+    pub fn layout_document_with_regions_json(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .layout_document_with_regions_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_retained_json")]
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        env: Env,
+        input: String,
+    ) -> Result<String> {
+        self.document()?
+            .layout_document_with_regions_retained_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_retained_meta")]
+    pub fn layout_document_with_regions_retained_meta(
+        &self,
+        env: Env,
+        input: String,
+    ) -> Result<RetainedLayoutMeta> {
+        self.document()?
+            .layout_document_with_regions_retained_meta(&input)
+            .map_err(|error| map_error(env, error))
+            .map(|inner| RetainedLayoutMeta { inner: Some(inner) })
+    }
+
+    #[napi(js_name = "retained_layout_json")]
+    pub fn retained_layout_json(&self, env: Env) -> Result<String> {
+        self.document()?
+            .retained_layout_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_retained")]
+    pub fn layout_document_with_regions_retained(&self, env: Env, input: String) -> Result<()> {
+        self.document()?
+            .layout_document_with_regions_retained(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_after_edit")]
+    pub fn layout_document_with_regions_after_edit(&self, env: Env, input: String) -> Result<()> {
+        self.document()?
+            .layout_document_with_regions_after_edit(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "retained_headers_footers_json")]
+    pub fn retained_headers_footers_json(&self, env: Env) -> Result<Either<String, Undefined>> {
+        self.document()?
+            .retained_headers_footers_json()
+            .map_err(|error| map_error(env, error))
+            .map(optional_result)
+    }
+
+    #[napi(js_name = "layout_document_with_regions_prefix_retained_json")]
+    pub fn layout_document_with_regions_prefix_retained_json(
+        &self,
+        env: Env,
+        input: String,
+        pages: u32,
+    ) -> Result<String> {
+        self.document()?
+            .layout_document_with_regions_prefix_retained_json(&input, pages)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "layout_document_with_regions_exact_prefix_retained")]
+    pub fn layout_document_with_regions_exact_prefix_retained(
+        &self,
+        env: Env,
+        input: String,
+        pages: u32,
+    ) -> Result<String> {
+        self.document()?
+            .layout_document_with_regions_exact_prefix_retained(&input, pages)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "begin_region_layout")]
+    pub fn begin_region_layout(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .begin_region_layout(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "resume_region_layout")]
+    pub fn resume_region_layout(&self, env: Env, blocks: u32) -> Result<String> {
+        self.document()?
+            .resume_region_layout(blocks)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "retained_kernel_inputs_json")]
+    pub fn retained_kernel_inputs_json(&self, env: Env) -> Result<String> {
+        self.document()?
+            .retained_kernel_inputs_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "reset_frame_base")]
+    pub fn reset_frame_base(&self) -> Result<()> {
+        self.document()?.reset_frame_base();
+        Ok(())
+    }
+
+    #[napi(js_name = "build_display_list_json")]
+    pub fn build_display_list_json(&self, env: Env, input: String) -> Result<String> {
+        self.document()?
+            .build_display_list_json(&input)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "build_display_list_frame")]
+    pub fn build_display_list_frame(
+        &self,
+        env: Env,
+        input: String,
+        expected_frame_epoch: f64,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .build_display_list_frame(&input, expected_frame_epoch)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "set_display_window")]
+    pub fn set_display_window(&self, start: u32, end: u32) -> Result<()> {
+        self.document()?.set_display_window(start, end);
+        Ok(())
+    }
+
+    #[napi(js_name = "set_display_retain_built_pages")]
+    pub fn set_display_retain_built_pages(&self, retain: bool) -> Result<()> {
+        self.document()?.set_display_retain_built_pages(retain);
+        Ok(())
+    }
+
+    #[napi(js_name = "set_local_lowering")]
+    pub fn set_local_lowering(&self, enabled: bool) -> Result<()> {
+        self.document()?.set_local_lowering(enabled);
+        Ok(())
+    }
+
+    #[napi(js_name = "set_direct_batches")]
+    pub fn set_direct_batches(&self, enabled: bool) -> Result<()> {
+        self.document()?.set_direct_batches(enabled);
+        Ok(())
+    }
+
+    #[napi(js_name = "direct_batches_applied")]
+    pub fn direct_batches_applied(&self) -> Result<f64> {
+        Ok(self.document()?.direct_batches_applied())
+    }
+
+    #[napi(js_name = "set_windowed_incremental_builds")]
+    pub fn set_windowed_incremental_builds(&self, enabled: bool) -> Result<()> {
+        self.document()?.set_windowed_incremental_builds(enabled);
+        Ok(())
+    }
+
+    #[napi(js_name = "build_display_pages_frame")]
+    pub fn build_display_pages_frame(
+        &self,
+        env: Env,
+        pages: Uint32Array,
+        expected_frame_epoch: f64,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .build_display_pages_frame(pages.to_vec(), expected_frame_epoch)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "release_display_pages_frame")]
+    pub fn release_display_pages_frame(
+        &self,
+        env: Env,
+        pages: Uint32Array,
+        expected_frame_epoch: f64,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .release_display_pages_frame(pages.to_vec(), expected_frame_epoch)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "resident_caret_snapshot_json")]
+    pub fn resident_caret_snapshot_json(&self, env: Env) -> Result<String> {
+        self.document()?
+            .resident_caret_snapshot_json()
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "apply_input")]
+    pub fn apply_input(
+        &self,
+        env: Env,
+        text: String,
+        expected_frame_epoch: f64,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .apply_input(&text, expected_frame_epoch)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "apply_input_profiled")]
+    pub fn apply_input_profiled(
+        &self,
+        env: Env,
+        text: String,
+        expected_frame_epoch: f64,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .apply_input_profiled(&text, expected_frame_epoch)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "apply_delete")]
+    pub fn apply_delete(
+        &self,
+        env: Env,
+        direction: String,
+        expected_frame_epoch: f64,
+        count: u32,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .apply_delete(&direction, expected_frame_epoch, count)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "resident_deleted_units")]
+    pub fn resident_deleted_units(&self) -> Result<u32> {
+        Ok(self.document()?.resident_deleted_units())
+    }
+
+    #[napi(js_name = "apply_delete_profiled")]
+    pub fn apply_delete_profiled(
+        &self,
+        env: Env,
+        direction: String,
+        expected_frame_epoch: f64,
+        count: u32,
+    ) -> Result<Uint8Array> {
+        self.document()?
+            .apply_delete_profiled(&direction, expected_frame_epoch, count)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(js_name = "apply_input_profile_json")]
+    pub fn apply_input_profile_json(&self) -> Result<String> {
+        Ok(self.document()?.apply_input_profile_json())
+    }
+
+    #[napi(js_name = "display_hit_test_regions_json")]
+    pub fn display_hit_test_regions_json(
+        &self,
+        env: Env,
+        page_index: u32,
+        x: f64,
+        y: f64,
+    ) -> Result<String> {
+        self.document()?
+            .display_hit_test_regions_json(page_index, x, y)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "display_vertical_move_json")]
+    pub fn display_vertical_move_json(
+        &self,
+        env: Env,
+        position: f64,
+        direction: String,
+        goal_x: f64,
+    ) -> Result<String> {
+        self.document()?
+            .display_vertical_move_json(position, &direction, goal_x)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "display_range_rects_json")]
+    pub fn display_range_rects_json(&self, env: Env, from: f64, to: f64) -> Result<String> {
+        self.document()?
+            .display_range_rects_json(from, to)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "display_range_rects_on_pages_json")]
+    pub fn display_range_rects_on_pages_json(
+        &self,
+        env: Env,
+        from: f64,
+        to: f64,
+        first_page: f64,
+        last_page: f64,
+    ) -> Result<String> {
+        self.document()?
+            .display_range_rects_on_pages_json(from, to, first_page, last_page)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "display_range_rects_region_json")]
+    pub fn display_range_rects_region_json(
+        &self,
+        env: Env,
+        region: String,
+        part_id: String,
+        from: f64,
+        to: f64,
+    ) -> Result<String> {
+        self.document()?
+            .display_range_rects_region_json(&region, &part_id, from, to)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "display_range_rects_batch")]
+    pub fn display_range_rects_batch(
+        &self,
+        env: Env,
+        region: String,
+        part_id: String,
+        ranges: Float64Array,
+    ) -> Result<Float64Array> {
+        self.document()?
+            .display_range_rects_batch(&region, &part_id, ranges.to_vec())
+            .map_err(|error| map_error(env, error))
+            .map(Float64Array::new)
+    }
+
+    #[napi(js_name = "outline_glyph_json")]
+    pub fn outline_glyph_json(&self, env: Env, font_id: u32, glyph_id: u32) -> Result<String> {
+        self.document()?
+            .outline_glyph_json(font_id, glyph_id)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(js_name = "echo_glyph_set_json")]
+    pub fn echo_glyph_set_json(
+        &self,
+        env: Env,
+        font_id: u32,
+        size: f64,
+        kern: bool,
+        alphabet: String,
+    ) -> Result<String> {
+        self.document()?
+            .echo_glyph_set_json(font_id, size as f32, kern, &alphabet)
+            .map_err(|error| map_error(env, error))
     }
 
     #[napi(js_name = "accept_change")]
@@ -311,7 +882,7 @@ impl EditSession {
     }
 
     #[napi(js_name = "clear_update_event_observation")]
-    pub fn clear_update_event_observation(&mut self) -> Result<()> {
+    pub fn clear_update_event_observation(&self) -> Result<()> {
         self.document_mut()?.clear_update_event_observation();
         Ok(())
     }
@@ -988,7 +1559,9 @@ impl EditSession {
             ));
         }
         Ok(Self {
-            core: Some(Document::new(client_id as u64, native_host())),
+            update_observer: RefCell::new(None),
+            delivering: Cell::new(false),
+            core: RefCell::new(Some(Document::new(client_id as u64, native_host()))),
         })
     }
 
@@ -1267,7 +1840,7 @@ impl EditSession {
 
     #[napi(js_name = "run_inheritance")]
     pub fn run_inheritance(&self, env: Env, styles_json: String) -> Result<RunInheritance> {
-        self.document()?;
+        let _core = self.document()?;
         let styles = serde_json::from_str(&styles_json)
             .map_err(|error| map_error(env, EngineError::message(error)))?;
         Ok(RunInheritance {
@@ -1684,8 +2257,48 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Runs callbacks before each call returns, after its transactions commit, allowing session reads and edits.
+    /// For calls with multiple commits, every callback sees the state after the call.
+    #[napi(js_name = "set_update_observer", ts_args_type = "callback: Function")]
+    pub fn set_update_observer(
+        &self,
+        env: Env,
+        callback: Function<'_, FnArgs<(Uint8Array, u32)>, ()>,
+    ) -> Result<()> {
+        let core = self.document_mut()?;
+        let callback = Rc::new(callback.create_ref()?);
+        let pending = Rc::new(RefCell::new(VecDeque::new()));
+        let observed = Rc::clone(&pending);
+        let subscription = core
+            .observe_updates(move |update, remote| {
+                if let Ok(mut pending) = observed.try_borrow_mut() {
+                    pending.push_back((update.to_vec(), remote));
+                }
+            })
+            .map_err(|error| map_error(env, error))?;
+        let observer = UpdateObserver {
+            _subscription: subscription,
+            callback,
+            env,
+            pending,
+        };
+        let previous = self
+            .update_observer
+            .try_borrow_mut()
+            .map_err(|_| borrow_error())?
+            .replace(observer);
+        drop(previous);
+        Ok(())
+    }
+
+    #[napi(js_name = "clear_update_observer")]
+    pub fn clear_update_observer(&self) -> Result<()> {
+        let _core = self.document_mut()?;
+        self.clear_observer()
+    }
+
     #[napi(js_name = "start_update_event_observation")]
-    pub fn start_update_event_observation(&mut self, env: Env) -> Result<()> {
+    pub fn start_update_event_observation(&self, env: Env) -> Result<()> {
         self.document_mut()?
             .start_update_event_observation()
             .map_err(|error| map_error(env, error))
@@ -1851,6 +2464,57 @@ impl EditSession {
     }
 }
 
+#[napi(js_name = "RetainedLayoutMeta")]
+pub struct RetainedLayoutMeta {
+    inner: Option<docx_engine::RetainedLayoutMeta>,
+}
+
+impl RetainedLayoutMeta {
+    fn meta(&self) -> Result<&docx_engine::RetainedLayoutMeta> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("RetainedLayoutMeta was freed"))
+    }
+}
+
+#[napi]
+impl RetainedLayoutMeta {
+    #[napi(js_name = "free")]
+    pub fn free(&mut self) {
+        self.inner = None;
+    }
+
+    #[napi(getter, js_name = "page_count")]
+    pub fn page_count(&self) -> Result<u32> {
+        Ok(self.meta()?.page_count as u32)
+    }
+
+    #[napi(getter, js_name = "partial")]
+    pub fn partial(&self) -> Result<bool> {
+        Ok(self.meta()?.partial)
+    }
+
+    #[napi(getter, js_name = "provisional")]
+    pub fn provisional(&self) -> Result<bool> {
+        Ok(self.meta()?.provisional)
+    }
+
+    #[napi(getter, js_name = "notes_converged")]
+    pub fn notes_converged(&self) -> Result<bool> {
+        Ok(self.meta()?.notes_converged)
+    }
+
+    #[napi(js_name = "page_sizes")]
+    pub fn page_sizes(&self) -> Result<Float64Array> {
+        Ok(Float64Array::new(self.meta()?.page_sizes.clone()))
+    }
+
+    #[napi(js_name = "layout_shell_json")]
+    pub fn layout_shell_json(&self) -> Result<String> {
+        Ok(self.meta()?.layout_shell_json.clone())
+    }
+}
+
 #[napi(js_name = "RunInheritance")]
 pub struct RunInheritance {
     inner: Option<docx_engine::RunInheritance>,
@@ -1927,3 +2591,414 @@ impl RunInheritance {
             .map_err(|error| map_error(env, EngineError::message(error)))
     }
 }
+
+#[napi(js_name = "export_docx_structured_json")]
+pub fn export_docx_structured_json(env: Env, bytes: Uint8Array, options: String) -> Result<String> {
+    docx_engine::export_docx_structured_json(&bytes, &options)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "export_docx_markdown_json")]
+pub fn export_docx_markdown_json(env: Env, bytes: Uint8Array, options: String) -> Result<String> {
+    docx_engine::export_docx_markdown_json(&bytes, &options).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "list_docx_content_controls_json")]
+pub fn list_docx_content_controls_json(
+    env: Env,
+    bytes: Uint8Array,
+    options: String,
+) -> Result<String> {
+    docx_engine::list_docx_content_controls_json(&bytes, &options)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "find_docx_content_controls_json")]
+pub fn find_docx_content_controls_json(
+    env: Env,
+    bytes: Uint8Array,
+    query: String,
+    options: String,
+) -> Result<String> {
+    docx_engine::find_docx_content_controls_json(&bytes, &query, &options)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "render_docx_markdown_json")]
+pub fn render_docx_markdown_json(env: Env, content: String, options: String) -> Result<String> {
+    docx_engine::render_docx_markdown_json(&content, &options)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "render_docx_markdown_with_pages_json")]
+pub fn render_docx_markdown_with_pages_json(
+    env: Env,
+    content: String,
+    options: String,
+) -> Result<String> {
+    docx_engine::render_docx_markdown_with_pages_json(&content, &options)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "build_display_list_json")]
+pub fn build_display_list_json(env: Env, input: String) -> Result<String> {
+    docx_engine::build_display_list_json(&input).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "layout_document_json")]
+pub fn layout_document_json(env: Env, input: String) -> Result<String> {
+    docx_engine::layout_document_json(&input).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "measure_paragraph_json")]
+pub fn measure_paragraph_json(env: Env, input: String) -> Result<String> {
+    docx_engine::measure_paragraph_json(&input).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "register_measure_font")]
+pub fn register_measure_font(env: Env, bytes: Uint8Array) -> Result<u32> {
+    docx_engine::register_measure_font(&bytes).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "register_substitute_measure_font")]
+pub fn register_substitute_measure_font(
+    env: Env,
+    base: u32,
+    requested_family: String,
+) -> Result<u32> {
+    docx_engine::register_substitute_measure_font(base, &requested_family)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "clear_measure_fonts")]
+pub fn clear_measure_fonts(env: Env) -> Result<()> {
+    docx_engine::clear_measure_fonts().map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "outline_glyph_json")]
+pub fn outline_glyph_json(env: Env, font_id: u32, glyph_id: u32) -> Result<String> {
+    docx_engine::outline_glyph_json(font_id, glyph_id).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "open_display_list")]
+pub fn open_display_list(env: Env, display_list: String) -> Result<u32> {
+    docx_engine::open_display_list(&display_list).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "close_display_list")]
+pub fn close_display_list(handle: u32) {
+    docx_engine::close_display_list(handle)
+}
+
+#[napi(js_name = "update_display_list")]
+pub fn update_display_list(env: Env, handle: u32, update: String) -> Result<()> {
+    docx_engine::update_display_list(handle, &update).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "hit_test_json")]
+pub fn hit_test_json(
+    env: Env,
+    display_list: String,
+    page_index: u32,
+    x: f64,
+    y: f64,
+) -> Result<String> {
+    docx_engine::hit_test_json(&display_list, page_index, x, y)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "hit_test_regions_json")]
+pub fn hit_test_regions_json(
+    env: Env,
+    display_list: String,
+    page_index: u32,
+    x: f64,
+    y: f64,
+) -> Result<String> {
+    docx_engine::hit_test_regions_json(&display_list, page_index, x, y)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "hit_test_regions_by_handle")]
+pub fn hit_test_regions_by_handle(
+    env: Env,
+    handle: u32,
+    page_index: u32,
+    x: f64,
+    y: f64,
+) -> Result<String> {
+    docx_engine::hit_test_regions_by_handle(handle, page_index, x, y)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_json")]
+pub fn range_rects_json(env: Env, display_list: String, from: f64, to: f64) -> Result<String> {
+    docx_engine::range_rects_json(&display_list, from, to).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_by_handle")]
+pub fn range_rects_by_handle(env: Env, handle: u32, from: f64, to: f64) -> Result<String> {
+    docx_engine::range_rects_by_handle(handle, from, to).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_on_pages_json")]
+pub fn range_rects_on_pages_json(
+    env: Env,
+    display_list: String,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String> {
+    docx_engine::range_rects_on_pages_json(&display_list, from, to, first_page, last_page)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_on_pages_by_handle")]
+pub fn range_rects_on_pages_by_handle(
+    env: Env,
+    handle: u32,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String> {
+    docx_engine::range_rects_on_pages_by_handle(handle, from, to, first_page, last_page)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_region_json")]
+pub fn range_rects_region_json(
+    env: Env,
+    display_list: String,
+    region: String,
+    part_id: String,
+    from: f64,
+    to: f64,
+) -> Result<String> {
+    docx_engine::range_rects_region_json(&display_list, &region, &part_id, from, to)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "range_rects_region_by_handle")]
+pub fn range_rects_region_by_handle(
+    env: Env,
+    handle: u32,
+    region: String,
+    part_id: String,
+    from: f64,
+    to: f64,
+) -> Result<String> {
+    docx_engine::range_rects_region_by_handle(handle, &region, &part_id, from, to)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "vertical_move_json")]
+pub fn vertical_move_json(
+    env: Env,
+    display_list: String,
+    position: f64,
+    direction: String,
+    goal_x: f64,
+) -> Result<String> {
+    docx_engine::vertical_move_json(&display_list, position, &direction, goal_x)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "vertical_move_by_handle")]
+pub fn vertical_move_by_handle(
+    env: Env,
+    handle: u32,
+    position: f64,
+    direction: String,
+    goal_x: f64,
+) -> Result<String> {
+    docx_engine::vertical_move_by_handle(handle, position, &direction, goal_x)
+        .map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_relationships")]
+pub fn parse_docx_relationships(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_relationships(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s2")]
+pub fn parse_docx_s2(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s2(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s3")]
+pub fn parse_docx_s3(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s3(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s4")]
+pub fn parse_docx_s4(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s4(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s5")]
+pub fn parse_docx_s5(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s5(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s6")]
+pub fn parse_docx_s6(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s6(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s7")]
+pub fn parse_docx_s7(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s7(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s8")]
+pub fn parse_docx_s8(env: Env, data: Uint8Array) -> Result<String> {
+    docx_engine::parse_docx_s8(&data).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_docx_s9")]
+pub fn parse_docx_s9(env: Env, data: Uint8Array, options_json: String) -> Result<String> {
+    docx_engine::parse_docx_s9(&data, &options_json).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "parse_relationships_xml")]
+pub fn parse_relationships_xml(env: Env, xml: Uint8Array, part_path: String) -> Result<String> {
+    docx_engine::parse_relationships_xml(&xml, &part_path).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "serialize_docx_s10")]
+pub fn serialize_docx_s10(env: Env, request_json: String) -> Result<String> {
+    docx_engine::serialize_docx_s10(&request_json).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "serialize_docx_s11")]
+pub fn serialize_docx_s11(env: Env, request_json: String) -> Result<String> {
+    docx_engine::serialize_docx_s11(&request_json).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "serialize_docx_s12")]
+pub fn serialize_docx_s12(env: Env, request_json: String) -> Result<String> {
+    docx_engine::serialize_docx_s12(&request_json).map_err(|error| map_error(env, error))
+}
+
+#[napi(js_name = "paragraphPatchWriterVersion")]
+pub fn paragraph_patch_writer_version() -> u32 {
+    docx_engine::paragraph_patch_writer_version()
+}
+
+#[napi(js_name = "write_docx_s13_wasm")]
+pub fn write_docx_s13_wasm(
+    env: Env,
+    request_json: String,
+    original_docx: Uint8Array,
+) -> Result<Uint8Array> {
+    docx_engine::write_docx_s13_wasm(&request_json, &original_docx)
+        .map_err(|error| map_error(env, error))
+        .and_then(|bytes| byte_result(env, bytes))
+}
+
+#[napi(js_name = "write_docx_s13_wasm_with_warnings")]
+pub fn write_docx_s13_wasm_with_warnings(
+    env: Env,
+    request_json: String,
+    original_docx: Uint8Array,
+) -> Result<Uint8Array> {
+    docx_engine::write_docx_s13_wasm_with_warnings(&request_json, &original_docx)
+        .map_err(|error| map_error(env, error))
+        .and_then(|bytes| byte_result(env, bytes))
+}
+
+#[napi(js_name = "decodeTiffPng")]
+pub fn decode_tiff_png(env: Env, data: Uint8Array) -> Result<Uint8Array> {
+    docx_engine::decode_tiff_png(&data)
+        .map_err(|error| map_error(env, error))
+        .and_then(|bytes| byte_result(env, bytes))
+}
+
+#[napi(js_name = "sanitizeOoxml")]
+pub fn sanitize_ooxml(env: Env, data: Uint8Array, expected_format: String) -> Result<Uint8Array> {
+    docx_engine::sanitize_ooxml(&data, &expected_format)
+        .map_err(|error| map_error(env, error))
+        .and_then(|bytes| byte_result(env, bytes))
+}
+
+#[napi(js_name = "unzip_docx", ts_return_type = "any")]
+pub fn unzip_docx<'env>(env: Env, data: Uint8Array) -> Result<Object<'env>> {
+    let parts = docx_engine::unzip_docx(&data).map_err(|error| map_error(env, error))?;
+    let mut output = Object::new(&env)?;
+    for (name, bytes) in parts {
+        output.set(name, byte_result(env, bytes)?)?;
+    }
+    Ok(output)
+}
+
+#[napi(js_name = "rezip_docx", ts_args_type = "entries: any")]
+pub fn rezip_docx(env: Env, entries: Unknown<'_>) -> Result<Uint8Array> {
+    if !matches!(entries.get_type()?, ValueType::Object | ValueType::Function) {
+        return Err(map_error(
+            env,
+            EngineError::message("rezip_docx: expected an object"),
+        ));
+    }
+    let object: Object<'_> = unsafe { entries.cast()? };
+    let global = env.get_global()?;
+    let constructor: Function<'_, (), ()> = global.get_named_property("Object")?;
+    let keys: Function<'_, Unknown<'_>, Array<'_>> = constructor.get_named_property("keys")?;
+    let keys = keys.call(entries)?;
+    let array: Function<'_, Unknown<'_>, ()> = global.get_named_property("Uint8Array")?;
+    let mut collected = Vec::with_capacity(keys.len() as usize);
+    for index in 0..keys.len() {
+        let key = keys
+            .get::<Unknown<'_>>(index)?
+            .ok_or_else(|| map_error(env, EngineError::message("rezip_docx: non-string key")))?;
+        if key.get_type()? != ValueType::String {
+            return Err(map_error(
+                env,
+                EngineError::message("rezip_docx: non-string key"),
+            ));
+        }
+        let name: String = unsafe { key.cast()? };
+        let value: Unknown<'_> = object.get_property(key)?;
+        let bytes: Uint8Array = unsafe { array.new_instance(value)?.cast()? };
+        collected.push((name, bytes.to_vec()));
+    }
+    docx_engine::rezip_docx(collected)
+        .map_err(|error| map_error(env, error))
+        .and_then(|bytes| byte_result(env, bytes))
+}
+
+/// Native no-op; native allocations are not counted.
+#[napi(js_name = "wasm_heap_counted")]
+pub fn wasm_heap_counted() -> bool {
+    false
+}
+
+/// Native no-op; native allocations are not counted.
+#[napi(js_name = "wasm_live_bytes")]
+pub fn wasm_live_bytes() -> f64 {
+    0.0
+}
+
+/// Native no-op; native allocations are not counted.
+#[napi(js_name = "wasm_peak_bytes")]
+pub fn wasm_peak_bytes() -> f64 {
+    0.0
+}
+
+/// Native no-op; native allocations are not counted.
+#[napi(js_name = "wasm_failed_allocation_bytes")]
+pub fn wasm_failed_allocation_bytes() -> f64 {
+    0.0
+}
+
+/// Native no-op; native allocations are not counted.
+#[napi(js_name = "reset_wasm_peak_bytes")]
+pub fn reset_wasm_peak_bytes() {}
+
+/// Native no-op; native allocations are not limited.
+#[napi(js_name = "set_wasm_heap_limit")]
+pub fn set_wasm_heap_limit(_bytes: f64) {}
+
+#[napi(js_name = "install_panic_hook")]
+pub fn install_panic_hook() {}
