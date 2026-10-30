@@ -246,6 +246,7 @@ export interface PresentationCommandOpenOptions
   activeSlideIndex?: number;
   collaboration?: boolean;
   observeChanges?: boolean;
+  defaultFonts?: boolean;
 }
 
 export interface PresentationCommandOpenResult extends PresentationCommandAck {

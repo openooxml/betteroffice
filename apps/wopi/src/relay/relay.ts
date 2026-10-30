@@ -38,6 +38,8 @@ export interface ResolvedHandle {
 
 const AWARENESS_RATE_CAPACITY = 30;
 const AWARENESS_REFILL_PER_SECOND = 30;
+/** Client ids one socket may keep in awareness; a page announces only its own. */
+export const MAX_AWARENESS_CLIENTS_PER_SOCKET = 8;
 
 interface SocketState {
   ws: RelaySocket;
@@ -107,8 +109,14 @@ export class CollabRelay {
       try { ws.close(4409, "rejoin from source"); } catch {}
       return null;
     }
-    const generation = resolved.session.connect(resolved.user.id);
     const previous = this.#byUser.get(resolved.user.id);
+    const sockets = this.#rooms.get(resolved.session.fileKey);
+    const others = sockets ? sockets.size - (previous && sockets.has(previous) ? 1 : 0) : 0;
+    if (others >= resolved.session.maxEditorsPerFile) {
+      try { ws.close(1013, "too many editors"); } catch {}
+      return null;
+    }
+    const generation = resolved.session.connect(resolved.user.id);
     if (previous && previous.ws !== ws) {
       this.#remove(previous, true);
       try {
@@ -414,6 +422,11 @@ export class CollabRelay {
             state.awareness.delete(entry.clientId);
             state.awarenessFrames.delete(entry.clientId);
           } else {
+            if (!state.awareness.has(entry.clientId) && state.awareness.size >= MAX_AWARENESS_CLIENTS_PER_SOCKET) {
+              this.#close(state, 1008, "too many awareness clients");
+              this.detach(state.ws);
+              return;
+            }
             state.awareness.set(entry.clientId, entry.clock);
             state.awarenessFrames.set(entry.clientId, encodeAwarenessUpdateRaw([entry]));
           }
