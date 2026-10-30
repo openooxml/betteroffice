@@ -6,6 +6,7 @@ import os
 from typing import Any, Iterator, Mapping, Sequence, Union
 
 from ._betteroffice_docx import (
+    decode_font_face,
     DisplayList,
     Edit,
     EditError,
@@ -32,6 +33,7 @@ from ._betteroffice_docx import Document as _Document
 from ._betteroffice_docx import DocxError, __version__
 
 __all__ = [
+    "decode_font_face",
     "DisplayList",
     "Document",
     "DocxError",

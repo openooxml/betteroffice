@@ -39,3 +39,8 @@ test('font preflight remains an unpublished path-only development dependency', (
   expect(dependencies['ooxml-font-preflight']).toBeUndefined();
   expect(preflight.package.publish).toBe(false);
 });
+
+test('the shared font decoder publishes before every engine', () => {
+  expect(RUST_CRATES[0]).toEqual({ name: 'betteroffice-fonts', dependency: 'betteroffice-fonts' });
+  expect(RUST_PUBLISH_CRATES[0]!.name).toBe('betteroffice-fonts');
+});

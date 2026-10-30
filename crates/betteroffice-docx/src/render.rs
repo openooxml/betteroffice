@@ -14,6 +14,7 @@ use crate::{Document, Error, Result};
 
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const MAX_FONT_REGISTRATIONS: usize = 4_096;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
 pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
@@ -26,7 +27,7 @@ pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
 pub(crate) struct FontRegistry {
     store: Mutex<FontStore>,
     chains: FontChains,
-    faces: usize,
+    registrations: usize,
     glyphs: Mutex<GlyphCache>,
 }
 
@@ -37,7 +38,13 @@ impl FontRegistry {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
-        if self.faces >= MAX_FONTS {
+        if self.registrations >= MAX_FONT_REGISTRATIONS {
+            return Err(Error::ResourceLimit(format!(
+                "more than {MAX_FONT_REGISTRATIONS} font registrations"
+            )));
+        }
+        let store = self.store.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if store.face_count() >= MAX_FONTS && store.find_face(bytes).is_none() {
             return Err(Error::ResourceLimit(format!(
                 "more than {MAX_FONTS} font faces"
             )));
@@ -46,17 +53,14 @@ impl FontRegistry {
         if family.is_empty() {
             return Err(Error::Font("font family is empty".to_owned()));
         }
-        let id = self
-            .store
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .register(bytes.to_vec())
+        let id = store
+            .register_slice(bytes)
             .map_err(|error| Error::Font(error.to_string()))?;
         self.chains
             .entry(chain_key(family, bold, italic))
             .or_default()
             .push(id);
-        self.faces += 1;
+        self.registrations += 1;
         Ok(id.to_u32())
     }
 }
@@ -129,9 +133,10 @@ fn chain_key(family: &str, bold: bool, italic: bool) -> String {
 }
 
 impl Document {
-    /// Registers one font face for rendering, returning its font id. Faces are
-    /// capped at 256 and each font at 32 MiB; either budget is a
-    /// [`Error::ResourceLimit`] rather than a truncated accept.
+    /// Registers one font face for rendering, returning its font id. Distinct
+    /// faces are capped at 256, registrations at 4096 and each font at 32 MiB;
+    /// any budget is a [`Error::ResourceLimit`] rather than a truncated accept.
+    /// The same bytes registered again share the face already held.
     pub fn register_font(
         &mut self,
         family: &str,

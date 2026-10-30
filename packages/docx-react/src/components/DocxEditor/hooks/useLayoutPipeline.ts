@@ -615,7 +615,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version
           );
           stampRevisionPreviewKey(newLayout, previewKey);
-          stampReservationsKey(newLayout, resolvedReservationsKey(passRenderEnv.reservationSets ?? passRenderEnv.reservations));
+          const reservations = passRenderEnv.reservationSets ?? passRenderEnv.reservations;
+          stampReservationsKey(newLayout, resolvedReservationsKey(reservations), reservations);
           laidOutRef.current = {
             session,
             layout: newLayout,

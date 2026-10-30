@@ -32,7 +32,7 @@ export interface ReferenceFile {
 
 export interface ReferenceHostQuirks {
   timestampConflict?: boolean;
-  relativeUrlToken?: string;
+  relativeUrlToken?: boolean | string;
   tokenExpired?: boolean;
   slowBody?: boolean;
   noContentLength?: boolean;
@@ -171,7 +171,7 @@ export function createReferenceHost(options: ReferenceHostOptions = {}): Referen
     const sourceToken = url.searchParams.get("access_token");
     if (sourceToken !== null && !tokens.has(sourceToken)) tokens.set(sourceToken, user);
     user.fileIds?.add(fileId);
-    const token = quirks.relativeUrlToken ?? randomUUID();
+    const token = typeof quirks.relativeUrlToken === "string" ? quirks.relativeUrlToken : randomUUID();
     tokens.set(token, user);
     url.pathname = url.pathname.replace(/[^/]+$/, encodeURIComponent(fileId));
     url.search = "";

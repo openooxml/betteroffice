@@ -6,6 +6,12 @@ from .render import HitTestResult, PresentationInspection, ProposalDiffSlide
 __version__: str
 MAX_COLLABORATION_BYTES: int
 
+def decode_font_face(
+    data: bytes, codec: str, *, dict: bytes | None = None, max_output: int | None = None
+) -> tuple[bytes, bytes | None]:
+    """Decode a font pack face and return font bytes and an optional transformed payload."""
+    ...
+
 def inspect_presentation(
     data: bytes, *, include_media: bool = ...,
 ) -> PresentationInspection: ...

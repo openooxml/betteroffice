@@ -132,6 +132,7 @@ export {
   setGoogleFontsEnabled,
   isGoogleFontsEnabled,
 } from './utils/fontLoader';
+export { decodeFontFace } from './wasm/fontDecoder';
 
 export {
   type PrintOptions,

@@ -3,6 +3,7 @@ import { version as fontsCjkVersion } from '../../fonts-cjk/package.json';
 import { version as fontsLatinVersion } from '../../fonts-latin/package.json';
 import { version as fontsIntlVersion } from '../../fonts-intl/package.json';
 import { loadFontBytes } from './bytes';
+import type { FontDecoder } from './decode';
 import { loadPackedFontBytes, isLatinFont } from './packed';
 import { fontProvider, type BundledFontSource } from './provider';
 
@@ -28,6 +29,7 @@ function assetBase(value: string | URL): URL {
 /** Loads pinned CDN fonts without bundling font assets or add-ons. */
 export function createFontProvider(
   options: CdnFontOptions = {},
+  runtime?: { decoder?: FontDecoder },
 ): BundledFontSource {
   const base = assetBase(options.baseUrl ?? BASE_URL);
   const cjkBase = assetBase(
@@ -44,6 +46,8 @@ export function createFontProvider(
         async (dependency) => new URL(dependency.file, isLatinFont(face.file) ? base : intlBase),
         30_000,
         decoderUrl,
+        undefined,
+        runtime,
       );
     }
     return loadFontBytes(

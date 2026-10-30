@@ -59,6 +59,7 @@ from .render import (
 )
 
 from ._betteroffice_pptx import (
+    decode_font_face,
     AdjustEdit,
     CaretAnchor,
     CollaborativeStateError,
@@ -99,6 +100,7 @@ from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
 
 __all__ = [
+    "decode_font_face",
     "AdjustEdit",
     "CaretAnchor",
     "PptxShapeAdjustStep",
