@@ -9,6 +9,7 @@ const nextConfig: NextConfig = {
     "@betteroffice/fonts",
     "@betteroffice/fonts-cjk",
     "@betteroffice/fonts-intl",
+    "@betteroffice/fonts-latin",
     "@betteroffice/vsdx",
     "@betteroffice/vsdx-react",
   ],

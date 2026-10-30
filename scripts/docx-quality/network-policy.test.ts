@@ -2,13 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { version as fontsLatinVersion } from '../../packages/fonts-latin/package.json';
 import { version as fontsVersion } from '../../packages/fonts/package.json';
 import { version as fontsCjkVersion } from '../../packages/fonts-cjk/package.json';
 import { version as fontsIntlVersion } from '../../packages/fonts-intl/package.json';
 import { isAllowedFontRequest } from './network-policy.mjs';
 
-const latin = (version = fontsVersion, file = 'Carlito-Regular.ttf') =>
-  `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${version}/assets/${file}`;
+const latin = (version = fontsLatinVersion, file = 'Carlito-Regular.ttf.zst') =>
+  `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@${version}/assets/${file}`;
 const cjk = (version = fontsCjkVersion) =>
   `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${version}/assets/NotoSansJP-Regular.otf`;
 const intl = (version = fontsIntlVersion) =>
@@ -38,10 +39,10 @@ describe('font network policy', () => {
 
   test('blocks other versions and query strings', () => {
     const blocked = [
-      latin(next(fontsVersion)),
+      latin(next(fontsLatinVersion)),
       latin('0.0.0'),
       latin('latest'),
-      latin(fontsVersion.replaceAll('.', 'x')),
+      latin(fontsLatinVersion.replaceAll('.', 'x')),
       cjk(next(fontsCjkVersion)),
       intl(next(fontsIntlVersion)),
       decoder(next(fontsVersion)),
@@ -119,7 +120,7 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
         QUALITY_LOCAL_ONLY: '1',
         ...(assets === undefined ? {} : { QUALITY_FONT_ASSETS: assets }),
       });
-      const prefix = `/@fs${assets ?? resolve('packages/fonts/assets')}/`;
+      const prefix = `/@fs${assets ?? resolve('packages/fonts-latin/assets')}/`;
       expect(JSON.parse(config.define.__QUALITY_FONT_BASE__)).toBe(prefix);
       expect(JSON.parse(config.define.__QUALITY_FONT_BASE_CJK__))
         .toBe(`/@fs${resolve('packages/fonts-cjk/assets')}/`);
@@ -130,7 +131,7 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
       for (const [file, target] of [
         ['decoder/fontpack.wasm', `/@fs${resolve('packages/fonts/dist/decoder/fontpack.wasm')}`],
         ['NotoSansThai-Regular.ttf.zst', `/@fs${resolve('packages/fonts-intl/assets/NotoSansThai-Regular.ttf.zst')}`],
-        ['Carlito-Regular.ttf', `${prefix}Carlito-Regular.ttf`],
+        ['Carlito-Regular.ttf.zst', `${prefix}Carlito-Regular.ttf.zst`],
         ['decoder/other.wasm', `${prefix}decoder/other.wasm`],
       ]) {
         const request = { url: `${prefix}${file}` };
