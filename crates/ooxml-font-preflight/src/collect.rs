@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -278,17 +279,157 @@ fn scripts(runs: &[Run<'_>]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static NUMBERING_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn visited(_count: usize) {
+    #[cfg(test)]
+    NUMBERING_VISITS.with(|visits| visits.set(visits.get() + _count));
+}
+
+struct AbstractNum<'a> {
+    levels: BTreeMap<&'a str, &'a Node>,
+    has_levels: bool,
+    style_link: Option<&'a str>,
+}
+
+struct NumInstance<'a> {
+    abstract_id: Option<&'a str>,
+    overrides: BTreeMap<&'a str, Option<&'a Node>>,
+}
+
+#[derive(Clone)]
+struct Marker {
+    family: Option<Rc<str>>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+}
+
+/// Numbering instances and definitions indexed once per document.
+pub(crate) struct Numbering<'a> {
+    instances: BTreeMap<&'a str, NumInstance<'a>>,
+    abstracts: Vec<AbstractNum<'a>>,
+    by_id: BTreeMap<&'a str, usize>,
+    by_style_link: BTreeMap<&'a str, usize>,
+    markers: RefCell<BTreeMap<*const Node, Option<Marker>>>,
+}
+
+impl<'a> Numbering<'a> {
+    pub(crate) fn new(root: &'a Node) -> Self {
+        let mut numbering = Self {
+            instances: BTreeMap::new(),
+            abstracts: Vec::new(),
+            by_id: BTreeMap::new(),
+            by_style_link: BTreeMap::new(),
+            markers: RefCell::new(BTreeMap::new()),
+        };
+        for node in &root.children {
+            visited(1);
+            match node.name {
+                "w:num" => {
+                    let Some(id) = node.attr("numId") else {
+                        continue;
+                    };
+                    numbering.instances.entry(id).or_insert_with(|| {
+                        let mut overrides = BTreeMap::new();
+                        for child in &node.children {
+                            if child.name == "w:lvlOverride"
+                                && let Some(ilvl) = child.attr("ilvl")
+                            {
+                                overrides
+                                    .entry(ilvl)
+                                    .or_insert_with(|| child.child("w:lvl"));
+                            }
+                        }
+                        NumInstance {
+                            abstract_id: node.val("w:abstractNumId"),
+                            overrides,
+                        }
+                    });
+                }
+                "w:abstractNum" => {
+                    let index = numbering.abstracts.len();
+                    let mut levels = BTreeMap::new();
+                    let mut has_levels = false;
+                    for child in &node.children {
+                        if child.name == "w:lvl" {
+                            has_levels = true;
+                            if let Some(ilvl) = child.attr("ilvl") {
+                                levels.entry(ilvl).or_insert(child);
+                            }
+                        }
+                    }
+                    numbering.abstracts.push(AbstractNum {
+                        levels,
+                        has_levels,
+                        style_link: node.val("w:numStyleLink"),
+                    });
+                    if let Some(id) = node.attr("abstractNumId") {
+                        numbering.by_id.entry(id).or_insert(index);
+                    }
+                    if let Some(link) = node.val("w:styleLink") {
+                        numbering.by_style_link.entry(link).or_insert(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        numbering
+    }
+
+    fn level(&self, num_id: &str, ilvl: &str) -> Option<&'a Node> {
+        visited(1);
+        let instance = self.instances.get(num_id)?;
+        if let Some(&Some(level)) = instance.overrides.get(ilvl) {
+            return Some(level);
+        }
+        let mut abstract_num = &self.abstracts[*self.by_id.get(instance.abstract_id?)?];
+        if !abstract_num.has_levels
+            && let Some(link) = abstract_num.style_link
+            && let Some(&linked) = self.by_style_link.get(link)
+        {
+            abstract_num = &self.abstracts[linked];
+        }
+        abstract_num.levels.get(ilvl).copied()
+    }
+
+    fn marker(&self, level: &Node, theme: &Theme) -> Option<Marker> {
+        self.markers
+            .borrow_mut()
+            .entry(std::ptr::from_ref(level))
+            .or_insert_with(|| {
+                let props = Props::parse(level.child("w:rPr"), theme);
+                (props.hidden != Some(true)
+                    && level
+                        .val("w:lvlText")
+                        .is_some_and(|value| !value.is_empty()))
+                .then(|| Marker {
+                    family: props.fonts[0]
+                        .as_ref()
+                        .or(props.fonts[1].as_ref())
+                        .filter(|family| !family.is_empty())
+                        .cloned(),
+                    bold: props.bold,
+                    italic: props.italic,
+                })
+            })
+            .clone()
+    }
+}
+
 pub(crate) struct Scan<'a> {
     pub(crate) styles: &'a Styles,
     pub(crate) theme: &'a Theme,
-    pub(crate) numbering: Option<&'a Node>,
+    pub(crate) numbering: Option<&'a Numbering<'a>>,
     pub(crate) complete: &'a mut bool,
     pub(crate) collector: &'a mut Collector,
     pub(crate) note_label: bool,
     pub(crate) shape: bool,
 }
 
-impl Scan<'_> {
+impl<'a> Scan<'a> {
     pub(crate) fn walk(&mut self, node: &Node, table: &Props) {
         if self.collector.limited {
             return;
@@ -463,15 +604,13 @@ impl Scan<'_> {
         {
             let level = level.as_deref().unwrap_or("0");
             if let Some(level) = self.level(&id, level) {
-                let props = Props::parse(level.child("w:rPr"), self.theme);
-                if props.hidden != Some(true)
-                    && level
-                        .val("w:lvlText")
-                        .is_some_and(|value| !value.is_empty())
+                if let Some(marker) = self
+                    .numbering
+                    .and_then(|numbering| numbering.marker(level, self.theme))
                 {
-                    let family = props
-                        .latin()
-                        .filter(|family| !family.is_empty())
+                    let family = marker
+                        .family
+                        .as_deref()
                         .or_else(|| {
                             runs.iter().find_map(|(props, text)| {
                                 text.as_ref().and_then(|_| props.family())
@@ -480,8 +619,8 @@ impl Scan<'_> {
                         .unwrap_or(&default);
                     self.collector.name(
                         family,
-                        props.bold.or(mark.bold).unwrap_or(false),
-                        props.italic.or(mark.italic).unwrap_or(false),
+                        marker.bold.or(mark.bold).unwrap_or(false),
+                        marker.italic.or(mark.italic).unwrap_or(false),
                         &scripts,
                         true,
                     );
@@ -646,43 +785,11 @@ impl Scan<'_> {
         }
     }
 
-    fn level(&self, num_id: &str, ilvl: &str) -> Option<&Node> {
+    fn level(&self, num_id: &str, ilvl: &str) -> Option<&'a Node> {
         if number(Some(ilvl)).is_none_or(|value| value > 8) {
             return None;
         }
-        let numbering = self.numbering?;
-        let instance = numbering
-            .children
-            .iter()
-            .find(|node| node.name == "w:num" && node.attr("numId") == Some(num_id))?;
-        if let Some(level) = instance
-            .children
-            .iter()
-            .find(|node| node.name == "w:lvlOverride" && node.attr("ilvl") == Some(ilvl))
-            .and_then(|node| node.child("w:lvl"))
-        {
-            return Some(level);
-        }
-        let abstract_id = instance.val("w:abstractNumId")?;
-        let mut abstract_num = numbering.children.iter().find(|node| {
-            node.name == "w:abstractNum" && node.attr("abstractNumId") == Some(abstract_id)
-        })?;
-        if !abstract_num
-            .children
-            .iter()
-            .any(|node| node.name == "w:lvl")
-            && let Some(link) = abstract_num.val("w:numStyleLink")
-            && let Some(linked) = numbering
-                .children
-                .iter()
-                .find(|node| node.name == "w:abstractNum" && node.val("w:styleLink") == Some(link))
-        {
-            abstract_num = linked;
-        }
-        abstract_num
-            .children
-            .iter()
-            .find(|node| node.name == "w:lvl" && node.attr("ilvl") == Some(ilvl))
+        self.numbering?.level(num_id, ilvl)
     }
 
     #[inline(never)]

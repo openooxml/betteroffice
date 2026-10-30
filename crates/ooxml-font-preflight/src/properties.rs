@@ -47,6 +47,7 @@ impl Props {
         let Some(node) = node else {
             return Self::default();
         };
+        crate::collect::visited(node.children.len());
         let mut props = Self::default();
         if let Some(fonts) = node.child("w:rFonts") {
             for (index, (explicit, reference)) in [

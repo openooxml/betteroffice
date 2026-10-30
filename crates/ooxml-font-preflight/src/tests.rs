@@ -338,6 +338,68 @@ fn header_relationship_and_unused_header() {
 }
 
 #[test]
+fn numbering_lookups_do_not_rescan_instances_per_paragraph() {
+    let instances = 50_000;
+    let paragraphs = 20_000;
+    let mut numbering = String::from(
+        r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:lvlText w:val="•"/><w:rPr><w:rFonts w:ascii="Bullet"/></w:rPr></w:lvl></w:abstractNum>"#,
+    );
+    for id in 1..=instances {
+        numbering.push_str(&format!(
+            r#"<w:num w:numId="{id}"><w:abstractNumId w:val="0"/></w:num>"#
+        ));
+    }
+    numbering.push_str("</w:numbering>");
+    let body = format!(
+        r#"<w:p><w:pPr><w:numPr><w:numId w:val="{instances}"/><w:ilvl w:val="0"/></w:numPr></w:pPr></w:p>"#
+    )
+    .repeat(paragraphs);
+    collect::NUMBERING_VISITS.with(|visits| visits.set(0));
+    let result = docx_font_preflight(&fixture(
+        "",
+        &body,
+        &[("word/numbering.xml", &numbering)],
+        true,
+    ))
+    .unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Bullet", false, false)));
+    let visits = collect::NUMBERING_VISITS.with(|visits| visits.get());
+    assert!(
+        visits <= 2 * (instances + 1) + 4 * paragraphs,
+        "{visits} numbering nodes visited"
+    );
+}
+
+#[test]
+fn numbering_level_properties_are_read_once() {
+    let fonts = 50_000;
+    let paragraphs = 2_000;
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:lvlText w:val="•"/><w:rPr>{}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+        r#"<w:rFonts w:ascii="Bullet"/>"#.repeat(fonts)
+    );
+    let body =
+        r#"<w:p><w:pPr><w:numPr><w:numId w:val="1"/><w:ilvl w:val="0"/></w:numPr></w:pPr></w:p>"#
+            .repeat(paragraphs);
+    collect::NUMBERING_VISITS.with(|visits| visits.set(0));
+    let result = docx_font_preflight(&fixture(
+        "",
+        &body,
+        &[("word/numbering.xml", &numbering)],
+        true,
+    ))
+    .unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Bullet", false, false)));
+    let visits = collect::NUMBERING_VISITS.with(|visits| visits.get());
+    assert!(
+        visits <= 2 * fonts + 4 * paragraphs,
+        "{visits} numbering nodes visited"
+    );
+}
+
+#[test]
 fn numbering_reads_only_used_levels_and_instances() {
     let result = docx_font_preflight(&fixture("",
         r#"<w:p><w:pPr><w:numPr><w:numId w:val="1"/><w:ilvl w:val="0"/></w:numPr></w:pPr><w:r><w:t>List</w:t></w:r></w:p>"#,

@@ -10,7 +10,7 @@ use std::fmt;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use collect::{Collector, Scan};
+use collect::{Collector, Numbering, Scan};
 use map::Map;
 use properties::{Props, Styles, Theme};
 use xml::Node;
@@ -306,6 +306,7 @@ pub fn docx_font_preflight(bytes: &[u8]) -> Result<FontPreflight, PreflightError
     } else {
         None
     };
+    let numbering = numbering.as_ref().map(Numbering::new);
     let mut collector = Collector::default();
     let mut stories = Map::new();
     stories.insert("body".to_owned(), &document);
