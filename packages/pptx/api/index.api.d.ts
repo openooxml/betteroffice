@@ -1547,6 +1547,7 @@ export type ClientMessage = {
 export interface ReplyError {
     name: string;
     message: string;
+    code?: string;
     refusal?: unknown;
 }
 export type HostMessage = {

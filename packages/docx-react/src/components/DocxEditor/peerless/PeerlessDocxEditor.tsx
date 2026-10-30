@@ -46,6 +46,7 @@ import { UnifiedSidebar } from '../../UnifiedSidebar';
 import { createWorkerPluginGeometry, workerDocumentVersion, workerReadRefusal } from './workerPluginGeometry';
 import { workerProposalSidebarItems } from './workerProposalSidebar';
 import { workerReviewRects } from './workerReviewRects';
+import { reviewMatches } from './workerReview';
 import { workerRevisionCallbacks, workerRevisionRequest } from './workerRevisions';
 import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
@@ -1141,8 +1142,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   useLayoutEffect(() => controller.revisions(commentReview, revisionRead), [controller, commentReview, revisionRead]);
   const trackedChanges = controller.trackedChanges();
   const revisionCallbacks = useMemo(() => workerRevisionCallbacks(controller), [controller]);
-  const comments = props.comments ?? review?.uiComments ?? sourceComments.current;
   const documentKey = shellState.view?.identity.session;
+  const commentPlacement = useMemo(() => ({ comments: undefined as DocxEditorProps['comments'], positions: new Map<string, number>() }),
+    [sourceKey, documentKey, shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
+  const comments = props.comments ?? review?.uiComments ?? commentPlacement.comments ?? sourceComments.current;
   const dotsMode = props.trackedChanges?.display === 'dots';
   const hasComments = comments.some(comment => comment.parentId == null);
   const hasCards = (dotsMode ? hasComments : comments.length > 0) || (!dotsMode && !!trackedChanges?.entries.length);
@@ -1157,16 +1160,25 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     [comments, commentsOpen, dotsMode]);
   const commentItems = useCommentSidebarItems({ comments: visibleComments, trackedChanges: commentsOpen || dotsMode ? trackedChanges?.entries ?? EMPTY_CHANGES : EMPTY_CHANGES,
     callbacks: commentCallbacks, showResolved: commentsOpen, isAddingComment: commentsOpen && workerComments.adding, addCommentYPosition: workerComments.addCommentY });
+  const commentGeometryCurrent = !!(documentReady && shellState.view && review && reviewMatches(shellState.view, review));
   const positionedComments = useMemo(() => commentItems.map(item => {
     if (item.isTemporary) return workerComments.composerHidden ? { ...item, hidden: true } : item;
+    const previousY = commentPlacement.positions.get(item.id);
+    if (!commentGeometryCurrent && previousY !== undefined) return { ...item, fixedY: previousY };
     const nativeId = Object.entries(review?.commentIds ?? {}).find(([, id]) => item.id === `comment-${id}`)?.[0];
     const firstPage = shellState.view?.geometry?.pages[0]?.page.pageIndex;
     const rect = !documentReady ? undefined : (nativeId ? review?.commentGeometry[nativeId]?.[0] : item.anchorKey ? trackedChanges?.anchors.get(item.anchorKey) : undefined) ??
       (review && item.anchorKey?.startsWith('comment-') && firstPage !== undefined ? { pageIndex: firstPage, y: 0 } : undefined);
     const page = rect && shellState.view?.geometry?.pages.find(page => page.page.pageIndex === rect.pageIndex);
     const bounds = rect && (geometry?.dom.getPageBounds(rect.pageIndex) ?? (page ? { y: page.bounds.y + 48 / zoom } : null));
-    return bounds && rect ? { ...item, fixedY: bounds.y + rect.y } : { ...item, hidden: true };
-  }), [commentItems, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, review != null, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+    if (bounds && rect) return { ...item, fixedY: bounds.y + rect.y };
+    return previousY !== undefined ? { ...item, fixedY: previousY } : { ...item, hidden: true };
+  }), [commentItems, commentPlacement, workerComments.composerHidden, review?.commentIds, review?.commentGeometry, commentGeometryCurrent, documentReady, shellState.view?.geometry, trackedChanges, geometry, zoom]);
+  useLayoutEffect(() => {
+    if (review?.uiComments) commentPlacement.comments = review.uiComments;
+    commentPlacement.positions = new Map(positionedComments.flatMap(item =>
+      !item.hidden && !item.isTemporary && item.fixedY != null ? [[item.id, item.fixedY] as const] : []));
+  }, [commentPlacement, review, positionedComments]);
   const selected = shellState.view?.workerSelection;
   const floating = documentReady && !effectiveReadOnly && !workerComments.adding && !dragSelecting && !!selected &&
     (selected.focus.story === 'body' || selected.focus.story.startsWith('body:')) && selected.anchor.story === selected.focus.story &&

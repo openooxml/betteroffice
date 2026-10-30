@@ -978,7 +978,7 @@ pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
     with_measure_fonts(|store| {
         store
             .borrow_mut()
-            .register(bytes.to_vec())
+            .register_slice(bytes)
             .map(|id| id.to_u32())
             .map_err(|error| error.to_string())
     })

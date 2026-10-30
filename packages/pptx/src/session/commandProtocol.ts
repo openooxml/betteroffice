@@ -180,7 +180,15 @@ export class CommandOutcomeUnknown extends Error {
   }
 }
 
-export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure;
+/** Opening needed more than an engine budget allows (today: more than 256 distinct font faces). */
+export class PptxResourceLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PptxResourceLimitError';
+  }
+}
+
+export type PresentationCommandFailure = CommandOutcomeUnknown | SessionFailure | PptxResourceLimitError;
 
 export interface PresentationCommandOutcome {
   seq: number;
