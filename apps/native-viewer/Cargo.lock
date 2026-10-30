@@ -419,6 +419,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "quick-xml",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
