@@ -15,17 +15,30 @@ pub use self::host::Host;
 pub(crate) mod args;
 mod controls;
 mod crdt;
+mod display;
 mod error;
+mod exports;
+mod fonts;
+mod frames;
+pub mod free;
+mod history;
 mod host;
+mod identity;
+mod input;
+mod json;
+mod layout;
+mod metadata;
 mod open;
 mod raw;
+mod reads;
+mod review;
+mod selection;
 mod tables;
 mod text;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct ParagraphIdentitiesCache {
     pub(crate) version: crate::DocumentVersion,
     pub(crate) source: Option<Arc<crate::identity::SourceIndex>>,
@@ -40,7 +53,6 @@ pub struct UpdateEventObserver {
 /// Per-peer selection state. These sticky positions are deliberately held
 /// outside the yrs document: an awareness transport may publish them, but they
 /// are never serialized as document content or included in save updates.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 #[derive(Clone)]
 pub struct LocalSelection {
     pub(crate) story: String,
@@ -50,7 +62,6 @@ pub struct LocalSelection {
 
 /// One endpoint of a local table selection. The cell story is the stable
 /// identity; row/column are a fallback if that cell is removed locally.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct LocalCellPoint {
     pub(crate) cell_story: String,
     pub(crate) row: u32,
@@ -60,7 +71,6 @@ pub struct LocalCellPoint {
 /// Per-peer cell selection, held outside the yrs document. The sticky table
 /// position survives unrelated edits in the parent story; cell-story identity
 /// lets each endpoint follow inserted/deleted rows and columns.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct LocalCellSelection {
     pub(crate) parent_story: String,
     pub(crate) table: StickyIndex,
@@ -68,31 +78,29 @@ pub struct LocalCellSelection {
     pub(crate) head: LocalCellPoint,
 }
 
-// Until slice 4 moves the remaining bodies, some state is read only by the wasm shim.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub struct EditSessionCore {
-    pub(crate) host: Host,
+    host: Host,
     pub(crate) engine: EngineSession,
     pub(crate) paragraph_identities_cache: RefCell<Option<ParagraphIdentitiesCache>>,
     /// This session's measurement fonts; see the module docs.
     pub(crate) fonts: docx_layout::MeasureFonts,
     pub(crate) docx_source: RefCell<Option<PackageBytes>>,
-    pub(crate) paragraph_styles: RefCell<Option<crate::seed::StyleResolver>>,
+    paragraph_styles: RefCell<Option<crate::seed::StyleResolver>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     pub(crate) docx_digest: RefCell<Option<String>>,
-    pub(crate) awaiting_comment_baseline: Cell<bool>,
-    pub(crate) update_event_observer: Option<UpdateEventObserver>,
+    awaiting_comment_baseline: Cell<bool>,
+    update_event_observer: Option<UpdateEventObserver>,
     pub(crate) undo: UndoSession,
     pub(crate) selection: RefCell<Option<LocalSelection>>,
-    pub(crate) cell_selection: RefCell<Option<LocalCellSelection>>,
-    pub(crate) last_apply_profile_json: RefCell<String>,
-    pub(crate) resident_deleted_units: Cell<u32>,
+    cell_selection: RefCell<Option<LocalCellSelection>>,
+    last_apply_profile_json: RefCell<String>,
+    resident_deleted_units: Cell<u32>,
     /// The story and resulting doc epoch of the last resident text edit, until a relayout takes it.
     pub(crate) resident_text_edit: RefCell<Option<(String, u64)>>,
     /// The comparison applied here, awaiting its saved bytes.
-    pub(crate) compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
+    compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
     /// Seed images as `media:{n}` tokens rather than `data:` URLs.
-    pub(crate) media_tokens: Cell<bool>,
+    media_tokens: Cell<bool>,
 }
 
 impl EditSessionCore {
@@ -123,18 +131,5 @@ impl EditSessionCore {
 
     pub fn client_id(&self) -> f64 {
         self.engine.doc().client_id() as f64
-    }
-
-    pub(crate) fn story_ids(&self) -> Vec<String> {
-        use yrs::{ReadTxn, Transact};
-        let txn = self.engine.doc().yrs_doc().transact();
-        let Some(stories) = txn.get_map(crate::STORIES) else {
-            return Vec::new();
-        };
-        let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
-            .map(|(id, _)| id.to_string())
-            .collect();
-        ids.sort();
-        ids
     }
 }

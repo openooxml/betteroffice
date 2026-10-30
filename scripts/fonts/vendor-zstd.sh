@@ -26,7 +26,7 @@ source_dir="$work_dir/zstd-${ZSTD_VERSION}"
   cd "$source_dir/build/single_file_libs"
   sh create_single_file_decoder.sh
 )
-destination="$repo_root/vendor/zstd"
+destination="$repo_root/crates/betteroffice-fonts/vendor/zstd"
 mkdir -p "$destination"
 cp "$source_dir/build/single_file_libs/zstddeclib.c" "$destination/zstddeclib.c"
 cp "$source_dir/LICENSE" "$destination/LICENSE"

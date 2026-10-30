@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/pptx/src/wasm/generated/pptx_wasm.js';
+import type { SlideDisplayList } from '../../packages/pptx/src/types';
 import { expectSavedPartsEqual } from '../native-parity';
+import { expectFontFace, fontCases, fontErrorCases } from '../font-fixtures';
 
 type Engine = Pick<typeof wasm,
   | 'PptxDocument'
@@ -14,6 +16,7 @@ type Engine = Pick<typeof wasm,
   | 'compileSlideJson'
   | 'rendererVersion'
   | 'decodeTiffPng'
+  | 'decodeFontFace'
 >;
 
 const native = require('./index.js') as Engine & { engineVersion(): string };
@@ -25,10 +28,12 @@ type Snapshot = {
   slides: { id: string; shapes: { textStories: { id: string }[] }[] }[];
 };
 
+let wasmMemory: WebAssembly.Memory;
+
 beforeAll(async () => {
-  await initWasm({
+  ({ memory: wasmMemory } = await initWasm({
     module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
-  });
+  }));
 });
 
 function storyId(doc: wasm.PptxDocument): string {
@@ -71,6 +76,34 @@ function expectThrownParity(wasmCall: () => unknown, nativeCall: () => unknown):
   }
   return actual;
 }
+
+test('linked font decoder returns known answers and matching native and wasm errors', () => {
+  expect(typeof wasm.decodeFontFace).toBe('function');
+  expect(typeof native.decodeFontFace).toBe('function');
+  for (const entry of fontCases()) {
+    const expected = wasm.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+    const actual = native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput);
+    expectFontFace(expected, entry);
+    expectFontFace(actual, entry);
+    expectPlainBytes(expected.font);
+    expectPlainBytes(actual.font);
+    expect(actual.font).toEqual(expected.font);
+    expect(actual.payload).toEqual(expected.payload);
+    expect('payload' in expected).toBe(entry.payload !== undefined);
+    if (expected.payload && actual.payload) {
+      expectPlainBytes(expected.payload);
+      expectPlainBytes(actual.payload);
+    }
+  }
+  for (const entry of fontErrorCases()) {
+    const expected = caughtValue(() => wasm.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput));
+    const actual = caughtValue(() => native.decodeFontFace(entry.bytes, entry.codec, entry.dict, entry.maxOutput));
+    expect(expected).toBeInstanceOf(Error);
+    expect(actual).toBeInstanceOf(Error);
+    expect(expected).toMatchObject({ name: 'Error', message: entry.message });
+    expect(actual).toMatchObject({ name: 'Error', message: entry.message });
+  }
+});
 
 function runScript(engine: Engine) {
   const doc = engine.PptxDocument.openCollaborative(bytes(), 7);
@@ -238,6 +271,50 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('browser coverage fallback is opt-in and toggles equally in native and wasm', () => {
+    const font = readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(bytes(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        const slideId = (JSON.parse(doc.snapshotJson()) as Snapshot).slides[0].id;
+        const { shapeId } = JSON.parse(doc.addTextBoxJson(JSON.stringify({ slideId, draft: {
+          name: 'Coverage', rect: { x: 100000, y: 100000, width: 3000000, height: 1000000 },
+          text: 'A👩‍💻हB', style: { fontFamily: 'Arial', fontSizePt: 18, color: '#000000' },
+        } }))) as { shapeId: string };
+        const fontId = renderer.registerFont('Arial', false, false, new Uint8Array(font));
+        const layout = () => {
+          const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+          return list.primitives.filter((primitive) => primitive.kind === 'textBox' && primitive.shapeId === shapeId)
+            .flatMap((box) => box.kind === 'textBox' ? box.lines.flatMap((line) => line.runs) : []);
+        };
+        const initial = layout();
+        expect(initial.map((piece) => piece.text).join('')).toBe('A👩‍💻हB');
+        expect(initial.every((piece) => piece.fontId === fontId)).toBe(true);
+        const originalKey = renderer.slideLayoutKey(doc, 0);
+        renderer.setBrowserCoverageFallback(false);
+        expect(renderer.slideLayoutKey(doc, 0)).toBe(originalKey);
+        renderer.setBrowserCoverageFallback(true);
+        const enabledKey = renderer.slideLayoutKey(doc, 0);
+        expect(enabledKey).not.toBe(originalKey);
+        expect(renderer.setActiveSlide(doc, slideId, originalKey)).toBe(false);
+        const enabled = layout();
+        expect(enabled.some((piece) => piece.fontId === 0xffffffff)).toBe(true);
+        expect(enabled.map((piece) => piece.text).join('')).toBe('A👩‍💻हB');
+        renderer.setBrowserCoverageFallback(true);
+        expect(renderer.slideLayoutKey(doc, 0)).toBe(enabledKey);
+        renderer.setBrowserCoverageFallback(false);
+        expect(renderer.slideLayoutKey(doc, 0)).not.toBe(enabledKey);
+        expect(layout()).toEqual(initial);
+        return [initial, enabled].map((pieces) => pieces.map(({ text, start, end, fontId }) => ({ text, start, end, fontId })));
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);
@@ -279,6 +356,44 @@ describe('pptx native engine parity', () => {
     } finally {
       wasmDoc.free();
       nativeDoc.free();
+    }
+  });
+
+  test('one face under many names is held once and a face past the budget throws the same typed error', () => {
+    const large = new Uint8Array(readFileSync(new URL('../../packages/fonts/assets/Carlito-BoldItalic.ttf', import.meta.url)));
+    const small = readFileSync(new URL('../../crates/docx-edit/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+    const face = (index: number) => {
+      const bytes = new Uint8Array(small.byteLength + 4);
+      bytes.set(small);
+      new DataView(bytes.buffer).setUint32(small.byteLength, index, true);
+      return bytes;
+    };
+    const renderers = [new wasm.PptxRenderer(), new native.PptxRenderer()];
+    try {
+      const ids = renderers.map((renderer) => renderer.registerFont('Carlito', true, true, large));
+      const before = wasmMemory.buffer.byteLength;
+      for (let index = 0; index < 300; index++) {
+        ids.push(...renderers.map((renderer) => renderer.registerFont(`Alias ${index}`, index % 2 === 1, false, large)));
+      }
+      expect(wasmMemory.buffer.byteLength - before).toBeLessThan(2 * large.byteLength);
+      for (let index = 0; index < ids.length; index += 2) expect(ids[index + 1]).toBe(ids[index]);
+      for (let index = 1; index < 256; index++) {
+        for (const renderer of renderers) renderer.registerFont(`Face ${index}`, false, false, face(index));
+      }
+      const failure = expectThrownParity(
+        () => renderers[0].registerFont('Overflow', false, false, face(256)),
+        () => renderers[1].registerFont('Overflow', false, false, face(256)),
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).name).toBe('PptxResourceLimitError');
+      expect((failure as Error).message).toBe('render resource limit exceeded: more than 256 font faces');
+      expectThrownParity(
+        () => renderers[0].registerFallbackFont('Overflow', false, false, face(256)),
+        () => renderers[1].registerFallbackFont('Overflow', false, false, face(256)),
+      );
+      for (const renderer of renderers) renderer.registerFallbackFont('Overflow', false, false, face(7));
+    } finally {
+      for (const renderer of renderers) renderer.free();
     }
   });
 
@@ -357,6 +472,7 @@ describe('pptx native engine parity', () => {
       () => renderer.hitTestJson(0, 0), () => renderer.layoutSlideJson(doc, 0),
       () => renderer.saveBytes(doc), () => renderer.setActiveSlide(doc, 'slide', 'key'),
       () => renderer.registerFont('Arial', false, false, new Uint8Array()),
+      () => renderer.setBrowserCoverageFallback(true),
     ]) {
       const failure = caughtValue(call);
       expect(failure).toBeInstanceOf(Error);

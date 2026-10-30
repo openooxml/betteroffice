@@ -119,6 +119,8 @@ export declare class PptxRenderer {
   snapshotWithLayoutKeysJson(document: PptxDocument): string
   slideLayoutKey(document: PptxDocument, slideIndex: number): string
   hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string
+  /** Enables browser metrics for uncovered characters. Off by default. */
+  setBrowserCoverageFallback(enabled: boolean): void
   requestedFontFacesJson(document: PptxDocument, slideId?: string | undefined | null): string
   layoutProposalSlideJson(document: PptxDocument, id: string, slideIndex: number): string
   layoutProposalDiffSlideJson(document: PptxDocument, id: string, slideIndex: number): string
@@ -205,6 +207,14 @@ export interface CommentReplyInput {
 }
 
 export declare function compileSlideJson(slideJson: string): string
+
+export interface DecodedFontFace {
+  font: Uint8Array
+  payload?: Uint8Array
+}
+
+/** Decodes one font pack face using this engine's linked decoder. */
+export declare function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace
 
 export declare function decodeTiffPng(data: Uint8Array): Uint8Array
 

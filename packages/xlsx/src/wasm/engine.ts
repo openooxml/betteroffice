@@ -3,6 +3,7 @@ import wasmInit, {
   XlsxDocument as WasmXlsxDocument,
   XlsxSnapshotBuilder as WasmXlsxSnapshotBuilder,
   allocationFailure as wasmAllocationFailure,
+  decodeFontFace as wasmDecodeFontFace,
   displayListCellLimit as wasmDisplayListCellLimit,
   exportXlsxMarkdownJson as wasmExportXlsxMarkdownJson,
   exportXlsxStructuredJson as wasmExportXlsxStructuredJson,
@@ -32,6 +33,7 @@ interface NativeEngineModule {
   XlsxDocument?: unknown;
   XlsxSnapshotBuilder?: unknown;
   allocationFailure?: unknown;
+  decodeFontFace?: unknown;
   displayListCellLimit?: unknown;
   exportXlsxStructuredJson?: unknown;
   exportXlsxMarkdownJson?: unknown;
@@ -170,6 +172,14 @@ export function engineBackend(): EngineBackend {
 }
 
 const nativeModule = backend === 'native' ? (loadedNative as NativeEngineModule) : undefined;
+
+export function decodeFontFace(...args: Parameters<typeof wasmDecodeFontFace>): ReturnType<typeof wasmDecodeFontFace> {
+  if (backend === 'wasm') return wasmDecodeFontFace(...args);
+  if (typeof nativeModule?.decodeFontFace !== 'function') {
+    throw new Error('@betteroffice/xlsx-native does not export decodeFontFace');
+  }
+  return (nativeModule.decodeFontFace as typeof wasmDecodeFontFace)(...args);
+}
 
 export const XlsxDocument = (nativeModule?.XlsxDocument ?? WasmXlsxDocument) as typeof WasmXlsxDocument;
 export type XlsxDocument = WasmXlsxDocument;

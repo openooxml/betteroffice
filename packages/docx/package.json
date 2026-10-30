@@ -208,7 +208,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSES"
   ],
   "scripts": {
     "build": "bun ../../scripts/build-docx-wasm.ts && NODE_OPTIONS=--max-old-space-size=8192 tsup && bun scripts/copy-assets.ts",

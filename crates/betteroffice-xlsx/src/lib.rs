@@ -1,5 +1,8 @@
 //! Typed facade for opening, editing, calculating, rendering, and saving XLSX files.
 
+/// The font pack decoder shared by every engine.
+pub use betteroffice_fonts as fonts;
+
 mod authority;
 mod error;
 mod move_range;
@@ -43,6 +46,12 @@ pub use workbook::batch::{
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES, StepGuard, ValidationOutcome, outcome_json,
+};
+#[doc(hidden)]
+pub use workbook::reads::SheetInfoWire;
+pub use workbook::reads::{
+    CalculationStatus, ConditionalFormatInfo, DefinedNameInfo, DefinedNamesRequest,
+    DefinedNamesResult,
 };
 pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::target::{

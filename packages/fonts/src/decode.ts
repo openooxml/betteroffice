@@ -1,3 +1,8 @@
+export type FontDecoder = (
+  bytes: ArrayBuffer | Uint8Array,
+  options: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number },
+) => Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }>;
+
 interface NodeZlibLike {
   zstdDecompressSync?: (
     bytes: Uint8Array,
@@ -134,7 +139,11 @@ async function instantiate(url: URL): Promise<Decoder> {
     instance = result.instance;
   } else {
     if (typeof fetch !== 'function') throw new Error('Cannot fetch font decoder wasm');
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(30_000),
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+    });
     if (!response.ok) {
       throw new Error(`Cannot load font decoder wasm: HTTP ${response.status}`);
     }
@@ -298,8 +307,7 @@ export async function decodeFontFace(
   if (codec === 'woff2t+zstd' && (input.length > maxOutput || (dictionary?.length ?? 0) > maxOutput)) {
     throw new Error('Font face is too large for maxOutput');
   }
-  const zlib = options?.wasmUrl || codec === 'woff2t+zstd'
-    ? undefined : builtinModule<NodeZlibLike>('node:zlib');
+  const zlib = codec === 'woff2t+zstd' ? undefined : builtinModule<NodeZlibLike>('node:zlib');
   if (typeof zlib?.zstdDecompressSync === 'function') {
     try {
       const buffer = builtinModule<NodeBufferLike>('node:buffer');
@@ -314,7 +322,7 @@ export async function decodeFontFace(
       throw new Error(`Font face is corrupt or uses a wrong dictionary: ${detail}`);
     }
   }
-  const url = options?.wasmUrl ?? new URL('../dist/decoder/fontpack.wasm', import.meta.url);
+  const url = options?.wasmUrl ?? new URL('./decoder/fontpack.wasm', import.meta.url);
   let instance = await decoder(url);
   while (instance.failed) instance = await decoder(url);
   return decodeWasm(instance, input, dictionary, maxOutput, expectedSize, codec);

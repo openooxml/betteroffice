@@ -1,0 +1,1 @@
+{"type":"setHyperlinks","sheet":2,"hyperlinks":[{"range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}},"external_target":"https://example.com","location":"Sheet1!A1","tooltip":"Tip","display":"Link"}]}

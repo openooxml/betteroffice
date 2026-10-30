@@ -78,6 +78,7 @@
 //! to integers so the fields typed as integers survive a round trip through a
 //! host with a single number type.
 
+use crate::fmath;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
@@ -9093,7 +9094,7 @@ fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
         .as_ref()
         .and_then(|transform| transform.rotation)
         .unwrap_or(0.0);
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let width = frag.width * cos.abs() + frag.height * sin.abs();
     let height = frag.width * sin.abs() + frag.height * cos.abs();
     ClipRect {
@@ -9358,7 +9359,7 @@ fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation:
     if rotation == 0.0 {
         return;
     }
-    let (sin, cos) = rotation.to_radians().sin_cos();
+    let (sin, cos) = fmath::sin_cos(rotation.to_radians());
     let delta = |x: f64, y: f64| {
         let dx = x - center.0;
         let dy = y - center.1;

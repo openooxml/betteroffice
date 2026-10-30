@@ -1,6 +1,8 @@
 /** Lazy default-font provider resolution. @packageDocumentation */
 
 import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
 
@@ -35,8 +37,11 @@ export function excludeHostedFontFamilies(
   return filtered;
 }
 
-function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): BundledFontProvider {
-  const provider = manager.createFontProvider();
+function implicitFontProvider(
+  manager: typeof import('@betteroffice/fonts'),
+  runtime: { decoder?: FontDecoder }
+): BundledFontProvider {
+  const provider = manager.createFontProvider(undefined, runtime);
   const providesFamily = (family: string) =>
     manager.resolveMetricCompatFamily(family) !== undefined ||
     manager.resolveBundledFamilyFace(family, false, false) !== undefined;
@@ -81,7 +86,7 @@ function implicitFontProvider(manager: typeof import('@betteroffice/fonts')): Bu
 
 /** The consumed font-manager contract. @public */
 export interface BundledFontModule {
-  createFontProvider(options?: { baseUrl?: string | URL }): BundledFontProvider;
+  createFontProvider(options?: { baseUrl?: string | URL }, runtime?: { decoder?: FontDecoder }): BundledFontProvider;
 }
 
 /** Override the lazy `@betteroffice/fonts` default. @public */
@@ -95,7 +100,8 @@ export interface DefaultFontOptions {
 }
 
 let options: DefaultFontOptions = {};
-let resolved: Promise<BundledFontProvider | undefined> | undefined;
+const engineRuntime = { decoder: decodeFontFace };
+let resolved = new WeakMap<object, Promise<BundledFontProvider | undefined>>();
 
 function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
   if (baseUrl === undefined) return undefined;
@@ -123,19 +129,19 @@ export function hasConfiguredFontSource(): boolean {
 /** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
-  resolved = undefined;
+  resolved = new WeakMap();
 }
 
-async function load(): Promise<BundledFontProvider | undefined> {
+async function load(runtime: { decoder?: FontDecoder }): Promise<BundledFontProvider | undefined> {
   const { baseUrl, fonts, load: loader } = options;
   try {
     if (fonts === undefined && loader === undefined && baseUrl === undefined) {
-      return implicitFontProvider(await import('@betteroffice/fonts'));
+      return implicitFontProvider(await import('@betteroffice/fonts'), runtime);
     }
     const module = fonts ?? (
       (loader ? await loader() : await import('@betteroffice/fonts')) as BundledFontModule
     );
-    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl });
+    return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, runtime);
   } catch (error) {
     console.warn('[configureDefaultFonts] the configured font source failed to load', error);
     return undefined;
@@ -143,13 +149,17 @@ async function load(): Promise<BundledFontProvider | undefined> {
 }
 
 /** Resolve the default provider, or `undefined` after a retryable failure. @public */
-export function resolveDefaultFontProvider(): Promise<BundledFontProvider | undefined> {
-  if (resolved === undefined) {
-    const promise = load();
+export function resolveDefaultFontProvider(
+  runtime: { decoder?: FontDecoder } = engineRuntime
+): Promise<BundledFontProvider | undefined> {
+  let pending = resolved.get(runtime);
+  if (pending === undefined) {
+    const promise = load(runtime);
     promise.then((provider) => {
-      if (provider === undefined && resolved === promise) resolved = undefined;
+      if (provider === undefined && resolved.get(runtime) === promise) resolved.delete(runtime);
     });
-    resolved = promise;
+    resolved.set(runtime, promise);
+    pending = promise;
   }
-  return resolved;
+  return pending;
 }

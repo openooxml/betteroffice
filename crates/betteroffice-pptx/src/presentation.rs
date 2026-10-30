@@ -11,7 +11,7 @@ use pptx_edit::{
     ShapeRect, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt,
     SlideReceipt, SlideScope, StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition,
     TableReceipt, TextParagraphDraft, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateSubscription, ValidationOutcome,
+    TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateSubscription, ValidationOutcome,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -48,6 +48,10 @@ impl Presentation {
         Ok(self.session.proposals()?)
     }
 
+    pub fn list_proposals(&self) -> Result<Vec<crate::Proposal>> {
+        self.proposals()
+    }
+
     pub fn preview_proposal(&self, id: &str) -> Result<crate::ProposalPreview> {
         Ok(self.session.preview_proposal(id)?)
     }
@@ -59,6 +63,31 @@ impl Presentation {
             self.renderer
                 .layout_scoped_slide(preview.package(), &scope)?,
         )
+    }
+
+    pub fn layout_proposal_diff_slide(
+        &self,
+        id: &str,
+        slide_index: usize,
+    ) -> Result<crate::ProposalDiffSlide> {
+        let preview = self
+            .session
+            .preview_proposal_diff_slide(id, slide_index)
+            .map_err(|error| match error {
+                crate::ProposalError::Edit(EditError::OutOfBounds { .. }) => {
+                    crate::Error::from(RenderError::SlideNotFound(slide_index))
+                }
+                error => error.into(),
+            })?;
+        let rendered = self
+            .renderer
+            .layout_scoped_slide(self.session.package(), &preview.scope)?;
+        Ok(crate::ProposalDiffSlide {
+            proposal: preview.proposal,
+            snapshot: preview.snapshot,
+            text_changes: preview.text_changes,
+            frame: rendered.display_list,
+        })
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -79,6 +108,20 @@ impl Presentation {
 
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), client_id)
+    }
+
+    pub fn open_from_update(update: &[u8], client_id: u64, source: Option<&[u8]>) -> Result<Self> {
+        let session = DeckSession::open_from_update(update, client_id)?;
+        let session = match source {
+            Some(source) => session.attach_source_if_matching(source)?,
+            None => session,
+        };
+        Ok(Self {
+            session,
+            renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            caches: crate::render::RenderCaches::default(),
+        })
     }
 
     pub fn open_collaborative_with_limits(
@@ -106,6 +149,14 @@ impl Presentation {
 
     pub fn client_id(&self) -> u64 {
         self.session.client_id()
+    }
+
+    pub fn set_collaborative(&self) -> Result<()> {
+        Ok(self.session.set_collaborative()?)
+    }
+
+    pub fn is_collaborative(&self) -> bool {
+        self.session.is_collaborative()
     }
 
     pub fn package(&self) -> &PptxPackage {
@@ -712,6 +763,32 @@ impl Presentation {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
     }
 
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32> {
+        Ok(self
+            .renderer
+            .register_fallback_font(family, bold, italic, bytes)?)
+    }
+
+    /// Tests a slide point in display-list pixels, measured from the top left.
+    pub fn hit_test(
+        &self,
+        slide_index: usize,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<crate::HitTestResult>> {
+        let scope = slide_scope(&self.session, slide_index)?;
+        Ok(self
+            .renderer
+            .layout_scoped_slide(self.session.package(), &scope)?
+            .hit_test(x, y))
+    }
+
     #[cfg(feature = "raster")]
     pub(crate) fn renderer(&self) -> &SlideRenderer {
         &self.renderer
@@ -751,16 +828,35 @@ impl Presentation {
         self.session.encode_state_vector_v1()
     }
 
+    pub fn encode_state_vector(&self) -> Vec<u8> {
+        self.encode_state_vector_v1()
+    }
+
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
         self.session.encode_state_as_update_v1()
+    }
+
+    pub fn encode_state_as_update(&self, remote_state_vector: Option<&[u8]>) -> Result<Vec<u8>> {
+        match remote_state_vector {
+            Some(state_vector) => self.encode_diff_v1(state_vector),
+            None => Ok(self.encode_state_as_update_v1()),
+        }
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>> {
         Ok(self.session.encode_diff_v1(remote_state_vector)?)
     }
 
+    pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>> {
+        self.encode_diff_v1(remote_state_vector)
+    }
+
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn apply_update(&self, update: &[u8]) -> Result<DeckSnapshot> {
+        self.apply_update_v1(update)
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
@@ -793,6 +889,18 @@ impl Presentation {
 
     pub fn add_undo_barrier(&self) {
         self.session.add_undo_barrier();
+    }
+
+    pub fn add_undo_boundary(&self) {
+        self.add_undo_barrier();
+    }
+
+    pub fn undo_capture_mode(&self) -> UndoCaptureMode {
+        self.session.undo_capture_mode()
+    }
+
+    pub fn set_undo_capture_mode(&self, mode: UndoCaptureMode) {
+        self.session.set_undo_capture_mode(mode);
     }
 }
 

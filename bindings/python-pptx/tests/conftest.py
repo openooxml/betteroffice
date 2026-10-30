@@ -1,11 +1,12 @@
 from pathlib import Path
 
 import pytest
+from betteroffice_pptx import decode_font_face
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = ROOT / "apps" / "demo" / "public"
 FONTS = ROOT / "crates" / "ooxml-text" / "tests" / "fonts"
-HEAVY_FONT = ROOT / "packages" / "fonts-cjk" / "assets" / "NotoSerifSC-Regular.otf"
+HEAVY_FONT = ROOT / "packages" / "fonts-cjk" / "assets" / "NotoSerifSC-Regular.otf.zst"
 
 
 def _read(path: Path) -> bytes:
@@ -33,7 +34,8 @@ def font_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
-def heavy_font_path() -> Path:
-    if not HEAVY_FONT.exists():
-        pytest.skip(f"fixture missing: {HEAVY_FONT}")
-    return HEAVY_FONT
+def heavy_font_path(tmp_path_factory) -> Path:
+    font, _ = decode_font_face(HEAVY_FONT.read_bytes(), "zstd")
+    path = tmp_path_factory.mktemp("fonts") / HEAVY_FONT.stem
+    path.write_bytes(font)
+    return path

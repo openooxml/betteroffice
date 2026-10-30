@@ -23,7 +23,10 @@ source TTF. For `woff2t`, each `<face>.source.sha256` sidecar lists the SHA-256
 of the `.ttf`, `.uw2` and `.woff2` in `sha256sum` format, one line each in that
 order; the builder rejects a face whose sidecar is missing or does not match all
 three current files. Regenerate companions with `scripts/fonts/woff2-transform.py`.
-The default `--codec zstd` preserves source bytes. File names stay
+`--codec auto` compares the encoded totals for each family and selects
+`woff2t+zstd` only when it is smaller, keeping dictionary codecs consistent.
+It requires the same companions for TTF faces. The default `--codec zstd`
+preserves source bytes. File names stay
 `<face>.ttf.zst` for both codecs.
 
 WOFF2 reconstruction produces a valid sfnt but does not preserve the source TTF
@@ -56,6 +59,13 @@ font bytes.
 
 ## Decoding and ownership
 
+The published `betteroffice-fonts` Rust crate owns decoding. Every engine links
+it and exposes `decodeFontFace(bytes, codec, dict?, maxOutput?)` in wasm and
+Node bindings. Python exposes `decode_font_face`; Rust facades re-export the
+crate as `fonts`. Engine calls return owned font bytes and the optional woff2t
+payload. The standalone wasm decoder links the same crate. Its vendored C
+decoder lives at `crates/betteroffice-fonts/vendor/zstd`.
+
 Decoders sniff only `28 B5 2F FD`. Other input, including TTF (`00 01 00 00`),
 OTF (`OTTO`), WOFF (`wOFF`) and WOFF2 (`wOF2`), passes through without decoding.
 Decoding is a single operation, with no recursive attempt on the result.
@@ -64,8 +74,12 @@ For plain zstd, the internal TypeScript decoder uses the built-in Node zstd
 decompressor when available, otherwise the standalone wasm decoder. An explicit
 `wasmUrl` selects wasm; without it the decoder loads `dist/decoder/fontpack.wasm`
 from the package root. `woff2t+zstd` always uses the full wasm pipeline,
-including in Node. Both codecs share one module, which links the
-decompression-only zstd C source and wuff 0.2.9 with default features disabled.
+including in Node. Both codecs share one module, which links `ruzstd` 0.9.1
+(a zstd decoder in Rust, so building it needs no C compiler with a wasm target)
+and wuff 0.2.9 with default features disabled. Native builds of the crate decode
+with the decompression-only zstd C source instead; both report the same errors.
+A raw-content dictionary reaches `ruzstd` wrapped as a formatted dictionary whose
+entropy tables a prefix-compressed frame never uses.
 Wuff reconstructs the font with `decompress_woff2_with_custom_brotli` and an
 identity callback; brotli and flate2 are absent from this wasm feature set. The
 builder alone enables brotli for reference verification.
@@ -77,7 +91,8 @@ font face codec error before decoding or passthrough. Omitting the option for
 standalone byte decoding selects `zstd`.
 
 The frame must declare its content size before output allocation. The default
-TypeScript `maxOutput` is 64 MiB; Rust callers supply their own limit. Oversized
+TypeScript `maxOutput` and Rust `decode_font_face` limit are 64 MiB by default.
+Explicit limits must be integers from 0 to 2,147,483,647. Oversized
 frames fail before output allocation. Decoders reject missing checksums,
 corruption, truncation and output lengths that disagree with the header.
 For `woff2t+zstd`, `maxOutput` bounds both the zstd payload and the reconstructed
@@ -101,7 +116,8 @@ Passthrough does not apply the decoded-output limit.
 TypeScript always returns a fresh, independently owned `ArrayBuffer`, including
 for passthrough. A caller may transfer that buffer. The wasm instance is reused,
 but its output is copied and freed after each call. Rust passthrough returns a
-borrowed `Cow`; decoded output is owned.
+borrowed `Cow` through `decode_or_passthrough`; `decode_font_face` always returns
+owned bytes.
 If any wasm export throws, TypeScript discards that instance and reports
 `Font face could not be decoded`. It makes no further calls into that instance;
 the next decode loads a fresh module instance.
@@ -115,6 +131,11 @@ their plain zstd behavior.
 
 ## Manifest schema
 
+`schema: 1` versions the manifest structure independently of the binary `format`.
+Consumers ignore unknown top-level and per-face fields. Optional additions do
+not require a schema bump. The per-face name `slices` is reserved for optional
+future data; format 1 loaders do not interpret it.
+
 `manifest.json` is UTF-8 JSON. `faces` is sorted by `file`. File names are
 relative to the pack directory. `family` is the source filename stem before its
 last `-`, or the entire stem when there is no `-`.
@@ -122,6 +143,7 @@ last `-`, or the entire stem when there is no `-`.
 ```json
 {
   "format": 1,
+  "schema": 1,
   "pack": "synthetic",
   "version": "1.2.3",
   "faces": [

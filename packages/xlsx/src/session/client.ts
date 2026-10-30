@@ -61,6 +61,7 @@ const PEER_SNAPSHOT_SLICE_MS = 8;
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
+  png?: boolean;
   /** Retain source bytes and a compiled module for edit peer hydration. */
   retainPeerHydration?: boolean;
   /** Aborting closes the session worker while the open is still in flight. */
@@ -96,7 +97,7 @@ export interface WorkbookSession {
   markPresented(frame: WorkbookCommandFrame | Pick<WorkbookCommandFrame, 'session' | 'incarnation' | 'coversThroughSeq'>): boolean;
   whenPresented(seq: number): Promise<void>;
   readonly call: Promisified<Omit<WorkbookSessionMethods,
-    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' |
+    'open' | 'openRecovery' | 'dispose' | 'frame' | 'command' | 'edit' | 'checkpoint' | 'commandFrame' | 'decodeFontFace' |
     'renderPng' | 'renderRangePng' | 'printDisplayList'>> & {
     renderPng(viewport: Viewport, options?: WorkbookFrameOptions): Promise<Uint8Array>;
     renderRangePng(options?: { range?: string; scale?: number }, frameOptions?: WorkbookFrameOptions): Promise<Uint8Array>;
@@ -156,13 +157,14 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     initialViewport: options.initialViewport ? { ...options.initialViewport } : undefined,
     includeEditState: options.includeEditState,
     initialUpdate: options.initialUpdate?.slice(),
+    png: options.png,
   };
   if (options.wasm instanceof ArrayBuffer ||
     Object.prototype.toString.call(options.wasm) === '[object ArrayBuffer]') {
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
-  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl(options.png !== false).href);
   return { document, input, transfer };
 }
 
@@ -254,7 +256,8 @@ export async function openWorkbookSession(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
-  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+  if (!options.worker && options.wasm === undefined && options.png !== false &&
+    !wasmModules.has(wasmAssetUrl().href)) {
     requestWasmCompile(transport);
   }
   return createWorkbookSession(bytes, options, transport);
@@ -313,7 +316,7 @@ export async function createWorkbookSession(
     client = createSessionClient<Methods, Events>(pipeTransport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
       onWasmModuleMessage: ({ url, module, hydration, version, sequence }) => {
-        if (url !== wasmAssetUrl().href) return;
+        if (url !== wasmAssetUrl(options.png !== false).href) return;
         if (peerSource) {
           if (hydration === undefined) {
             rejectHydration!(new WorkbookPeerHydrationError('missing-hydration',

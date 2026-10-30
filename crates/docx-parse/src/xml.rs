@@ -735,7 +735,7 @@ fn repaired(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 ///
 /// The loader names elements and attributes by their written prefix and local name, so a part
 /// is also refused where that reading and a namespace-aware one could differ: a standard prefix
-/// bound to another namespace or a standard namespace under another prefix, an element of another
+/// used for another namespace or a loader-sensitive name under another prefix, an element of another
 /// namespace inside a `w` element, and an unprefixed attribute on a WordprocessingML element. It is
 /// refused too where a `w:t`, `w:delText`, `w:instrText`, `w:delInstrText` or `m:t` holds an
 /// element or, without `xml:space="preserve"` in scope, a leading or trailing space, and where
@@ -813,7 +813,7 @@ type PlainAttribute<'a> = (&'a [u8], &'a [u8], &'a [u8]);
 /// An element [`PlainXml`] has read the start tag of.
 struct OpenElement<'a> {
     name: &'a [u8],
-    prefix: &'a [u8],
+    namespace: &'a [u8],
     /// The length of `bindings` before its start tag.
     mark: usize,
     /// Whether `xml:space="preserve"` is in scope.
@@ -983,27 +983,27 @@ impl<'a> PlainXml<'a> {
                 || value
                     .iter()
                     .any(|&byte| byte == b'&' || is_xml_space(&byte))
-                || STANDARD_NAMESPACES.iter().any(|(standard, namespace)| {
-                    (standard.as_bytes() == declared) != (namespace.as_bytes() == value)
-                })
             {
                 return false;
             }
             self.bindings.push((declared, value));
         }
+        let namespace = self.resolve(prefix).unwrap_or(UNPREFIXED);
         if prefix == b"xmlns"
             || (!prefix.is_empty() && self.resolve(prefix).is_none())
+            || !Self::name_reads_as_written(prefix, local, namespace, false)
             || parent.is_some_and(|parent| {
                 parent.text.is_some()
-                    || (parent.prefix == b"w"
+                    || (parent.namespace == namespaces::W.as_bytes()
                         && !STANDARD_NAMESPACES
                             .iter()
-                            .any(|(standard, _)| standard.as_bytes() == prefix))
+                            .any(|(_, uri)| uri.as_bytes() == namespace))
             })
-            || (WORD_PREFIXES.contains(&prefix)
-                && attributes.iter().any(|&(key_prefix, key_local, _)| {
-                    key_prefix.is_empty() && key_local != b"xmlns"
-                }))
+            || (STANDARD_NAMESPACES.iter().any(|(standard, uri)| {
+                WORD_PREFIXES.contains(&standard.as_bytes()) && uri.as_bytes() == namespace
+            }) && attributes
+                .iter()
+                .any(|&(key_prefix, key_local, _)| key_prefix.is_empty() && key_local != b"xmlns"))
         {
             return false;
         }
@@ -1023,6 +1023,11 @@ impl<'a> PlainXml<'a> {
             } else {
                 key_local
             };
+            if namespace != XMLNS_NAMESPACE
+                && !Self::name_reads_as_written(key_prefix, key_local, namespace, true)
+            {
+                return false;
+            }
             names.push((namespace, local));
         }
         names.sort_unstable();
@@ -1035,13 +1040,13 @@ impl<'a> PlainXml<'a> {
         if empty {
             self.bindings.truncate(mark);
         } else {
-            let text = ((prefix == b"w"
+            let text = ((namespace == namespaces::W.as_bytes()
                 && matches!(local, b"t" | b"delText" | b"instrText" | b"delInstrText"))
-                || (prefix == b"m" && local == b"t"))
+                || (namespace == namespaces::M.as_bytes() && local == b"t"))
                 .then_some(self.at);
             self.open.push(OpenElement {
                 name,
-                prefix,
+                namespace,
                 mark,
                 preserve,
                 text,
@@ -1109,6 +1114,33 @@ impl<'a> PlainXml<'a> {
             .rev()
             .find(|(bound, _)| *bound == prefix)
             .map(|(_, namespace)| *namespace)
+    }
+
+    fn name_reads_as_written(
+        prefix: &[u8],
+        local: &[u8],
+        namespace: &[u8],
+        attribute: bool,
+    ) -> bool {
+        if namespace == namespaces::MC.as_bytes()
+            && if attribute {
+                matches!(
+                    local,
+                    b"Ignorable"
+                        | b"MustUnderstand"
+                        | b"ProcessContent"
+                        | b"PreserveElements"
+                        | b"PreserveAttributes"
+                )
+            } else {
+                matches!(local, b"AlternateContent" | b"Choice" | b"Fallback")
+            }
+        {
+            return true;
+        }
+        STANDARD_NAMESPACES
+            .iter()
+            .all(|(standard, uri)| (standard.as_bytes() == prefix) == (uri.as_bytes() == namespace))
     }
 
     fn attribute_value(&mut self) -> Option<&'a [u8]> {
@@ -1401,7 +1433,13 @@ fn retain_replayed_namespace_aliases(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
     let row = element.name == "w:tr" && !element.attributes.is_empty();
-    if !row && !matches!(element.local_name(), "pict" | "object") {
+    let smart_art =
+        element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
+    let smart_art_run = element.local_name() == "r"
+        && element.child_elements().any(|child| {
+            child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
+        });
+    if !row && !smart_art && !smart_art_run && !matches!(element.local_name(), "pict" | "object") {
         return Ok(());
     }
     let mut bindings = IndexMap::new();
@@ -1460,7 +1498,10 @@ fn retain_replayed_namespace_aliases(
             }
         }
         if !row {
-            pending.extend(node.child_elements());
+            pending.extend(
+                node.child_elements()
+                    .filter(|child| !smart_art_run || child.local_name() != "drawing"),
+            );
         }
     }
     let mut attribute_bytes: usize = element
@@ -1932,6 +1973,34 @@ mod tests {
     }
 
     #[test]
+    fn reads_as_written_accepts_unused_namespace_aliases_and_mc_names_by_uri() {
+        for (_, namespace) in STANDARD_NAMESPACES {
+            let xml = format!(
+                "<w:document xmlns:w=\"{}\" xmlns:alias=\"{namespace}\"><w:body><w:p/></w:body></w:document>",
+                namespaces::W
+            );
+            assert!(reads_as_written(xml.as_bytes()), "{xml}");
+        }
+        let default = format!(
+            "<w:document xmlns:w=\"{}\" xmlns=\"http://schemas.microsoft.com/office/tasks/2019/documenttasks\"><w:body><w:p/></w:body></w:document>",
+            namespaces::W
+        );
+        assert!(reads_as_written(default.as_bytes()));
+        for prefix in ["ve", "wp14"] {
+            for metadata in [String::new(), format!(" {prefix}:Ignorable=\"v\"")] {
+                let xml = format!(
+                    "<w:document xmlns:w=\"{}\" xmlns:{prefix}=\"{}\" xmlns:mc=\"{}\" xmlns:v=\"{}\"{metadata}><w:body><w:p><w:r><{prefix}:AlternateContent><{prefix}:Choice Requires=\"v\"><w:pict><v:shape/></w:pict></{prefix}:Choice><{prefix}:Fallback/></{prefix}:AlternateContent></w:r></w:p></w:body></w:document>",
+                    namespaces::W,
+                    namespaces::MC,
+                    namespaces::MC,
+                    namespaces::V
+                );
+                assert!(reads_as_written(xml.as_bytes()), "{xml}");
+            }
+        }
+    }
+
+    #[test]
     fn reads_as_written_only_plain_xml() {
         let w = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"";
         let part = |body: &str| {
@@ -2039,15 +2108,15 @@ mod tests {
             ),
             (
                 "standard prefix bound to another namespace",
-                part("<w:p xmlns:r=\"urn:unrelated\"/>"),
+                part("<w:p xmlns:r=\"urn:unrelated\" r:id=\"1\"/>"),
             ),
             (
                 "standard namespace under another prefix",
-                part(&format!("<w:p xmlns:x=\"{}\"/>", namespaces::R)),
+                part(&format!("<w:p xmlns:x=\"{}\" x:id=\"1\"/>", namespaces::R)),
             ),
             (
                 "standard namespace as the default",
-                part(&format!("<w:p xmlns=\"{}\"/>", namespaces::W)),
+                part(&format!("<w:p xmlns=\"{}\"><r/></w:p>", namespaces::W)),
             ),
             (
                 "element of another namespace in a w element",

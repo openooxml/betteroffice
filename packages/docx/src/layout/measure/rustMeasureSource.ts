@@ -1,4 +1,5 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
+import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
 import {
   excludeHostedFontFamilies,
   hostedFontFamilies,
@@ -74,6 +75,7 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
+  runtime?: { decoder?: FontDecoder };
 }): RustMeasureSource {
   const engine = options.engine;
   const hosted = hostedFontFamilies(options.bundled);
@@ -89,7 +91,7 @@ export function createRustMeasureSource(options: {
     },
     { bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
-      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(), hosted);
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }) },

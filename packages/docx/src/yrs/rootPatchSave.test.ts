@@ -7,6 +7,7 @@ const ROOTS = [
   `<w:document  xmlns:x='urn:source' x:token = 'a&amp;b' xmlns:w = '${W}' >`,
   `<w:document xmlns:x='urn:source' xmlns:mc='${MC}' mc:Ignorable = 'x' xmlns:w='${W}' x:token='a&amp;b' >`,
   `<w:document xmlns:w='${W}' xmlns:mc='${MC}' xmlns:x='urn:source' x:token='a&amp;b' >`,
+  `<w:document xmlns:w='${W}' xmlns:mc='${MC}' xmlns='http://schemas.microsoft.com/office/tasks/2019/documenttasks' >`,
 ];
 
 describe.each([...SAVE_PATHS])('%s paragraph insertion patches the source root', (path) => {

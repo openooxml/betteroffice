@@ -2476,7 +2476,7 @@ fn automatic_text_needs_white(color: &str) -> bool {
         if channel <= 0.04045 {
             channel / 12.92
         } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
+            crate::fmath::pow((channel + 0.055) / 1.055, 2.4)
         }
     };
     let red = linearize((value >> 16) & 255);
@@ -2536,8 +2536,10 @@ fn image_transform_metrics(
         .unwrap_or(0.0)
         .rem_euclid(360.0);
     let radians = rotation.to_radians();
-    let bounds_width = width * radians.cos().abs() + height * radians.sin().abs();
-    let bounds_height = width * radians.sin().abs() + height * radians.cos().abs();
+    let bounds_width =
+        width * crate::fmath::cos(radians).abs() + height * crate::fmath::sin(radians).abs();
+    let bounds_height =
+        width * crate::fmath::sin(radians).abs() + height * crate::fmath::cos(radians).abs();
     let bounds = (rotation != 0.0).then(|| {
         serde_json::json!({
             "width": bounds_width,

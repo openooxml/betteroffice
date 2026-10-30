@@ -428,6 +428,9 @@ pub(crate) struct SourceIndex {
     comment_references: BTreeSet<u32>,
     #[serde(skip)]
     seed_states: OnceLock<SeedStates>,
+    #[cfg(test)]
+    #[serde(skip)]
+    reseed_calls: std::sync::atomic::AtomicUsize,
     #[serde(skip)]
     own_digest: OnceLock<bool>,
     #[serde(skip)]
@@ -513,7 +516,6 @@ impl SourceIndex {
         &self.package_sha256
     }
 
-    #[cfg(test)]
     pub(crate) fn seed_states_initialized(&self) -> bool {
         self.seed_states.get().is_some()
     }
@@ -526,6 +528,16 @@ impl SourceIndex {
 
     pub(crate) fn bytes(&self) -> PackageBytes {
         self.bytes.clone()
+    }
+
+    fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
+        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
+        let position = package.parts().position(|(path, _)| path == part.path())?;
+        let xml = String::from_utf8(package.read(position).ok()?).ok()?;
+        let start = part.occurrence(ordinal)?.tag.start;
+        let paragraph = &xml[start..];
+        let span = docx_parse::serializer::element_span(paragraph, &[])?;
+        Some(paragraph[span].to_owned())
     }
 
     pub(crate) fn run_size_source(&self, key: &str, story: &str) -> Option<Arc<ParagraphSizes>> {
@@ -672,6 +684,8 @@ impl SourceIndex {
             seeded,
             comment_references,
             seed_states: OnceLock::new(),
+            #[cfg(test)]
+            reseed_calls: std::sync::atomic::AtomicUsize::new(0),
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
             run_size_sources: Mutex::new(BTreeMap::new()),
@@ -795,6 +809,8 @@ impl SourceIndex {
     }
 
     fn reseeded(&self) -> SeedStates {
+        #[cfg(test)]
+        self.reseed_calls.fetch_add(1, Ordering::Relaxed);
         let scratch = EditingDoc::new(0);
         if crate::seed::seed_stories(&scratch, &self.bytes).is_err() {
             return SeedStates::default();
@@ -884,6 +900,17 @@ fn story_states(doc: &EditingDoc) -> HashMap<String, StoryState> {
 }
 
 fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, StoryState> {
+    story_states_within(doc, txn, None).unwrap_or_default()
+}
+
+/// [`story_states_in`] within `budget` bytes, when given one, of media URLs
+/// written and of segment text held, each counted at every use; `None` once
+/// it runs out.
+fn story_states_within(
+    doc: &EditingDoc,
+    txn: &Transaction<'_>,
+    mut budget: Option<usize>,
+) -> Option<HashMap<String, StoryState>> {
     let (scan, mut comments) = {
         let scan = doc.committed_scan(txn);
         let comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>> = scan
@@ -896,22 +923,26 @@ fn story_states_in(doc: &EditingDoc, txn: &Transaction<'_>) -> HashMap<String, S
             .collect();
         (scan, comments)
     };
-    scan.stories
-        .iter()
-        .filter_map(|story| {
-            let comments = comments.remove(story).unwrap_or_default();
-            let (fingerprint, units) = story_fingerprint_in(doc, txn, story, &comments)?;
-            Some((
-                story.clone(),
-                StoryState {
-                    root: scan.root(story).to_owned(),
-                    fingerprint,
-                    units,
-                    comments,
-                },
-            ))
-        })
-        .collect()
+    let mut states = HashMap::new();
+    for story in &scan.stories {
+        let comments = comments.remove(story).unwrap_or_default();
+        let fingerprint = story_fingerprint_within(doc, txn, story, &comments, &mut budget);
+        if budget == Some(0) {
+            return None;
+        }
+        let Some((fingerprint, units)) = fingerprint else {
+            continue;
+        };
+        let root = scan.root(story).to_owned();
+        let state = StoryState {
+            root,
+            fingerprint,
+            units,
+            comments,
+        };
+        states.insert(story.clone(), state);
+    }
+    Some(states)
 }
 
 fn ordered(value: &Any) -> serde_json::Value {
@@ -950,6 +981,37 @@ fn segment_value(segment: &crate::StorySegment) -> serde_json::Value {
 /// Writes into `entry` the JSON of [`segment_value`], and into `section` the JSON of that value
 /// with its pilcrow's section properties left out, or with a null pilcrow when it has none,
 /// byte for byte as `serde_json` writes them, without building either value.
+/// The bytes of text and strings `segment` holds, each counted at every use:
+/// about what [`segment_canonical`] copies of it.
+fn segment_text_len(segment: &crate::StorySegment) -> usize {
+    let content = match &segment.content {
+        crate::SegmentContent::Text(text) => text.len(),
+        crate::SegmentContent::Pilcrow(properties) => entries_text_len(&properties.values),
+        crate::SegmentContent::OtherEmbed { payload, .. } => entries_text_len(payload),
+    };
+    content.saturating_add(entries_text_len(&segment.attributes))
+}
+
+fn entries_text_len<'a>(entries: impl IntoIterator<Item = (&'a String, &'a Any)>) -> usize {
+    entries.into_iter().fold(0, |total, (key, value)| {
+        total
+            .saturating_add(key.len())
+            .saturating_add(any_text_len(value))
+    })
+}
+
+fn any_text_len(value: &Any) -> usize {
+    match value {
+        Any::String(text) => text.len(),
+        Any::Buffer(bytes) => bytes.len(),
+        Any::Array(items) => items
+            .iter()
+            .fold(0, |total, item| total.saturating_add(any_text_len(item))),
+        Any::Map(map) => entries_text_len(map.iter()),
+        _ => 8,
+    }
+}
+
 fn segment_canonical(segment: &crate::StorySegment, entry: &mut Vec<u8>, section: &mut Vec<u8>) {
     entry.clear();
     section.clear();
@@ -1147,7 +1209,7 @@ fn story_fingerprint(
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     let txn = doc.yrs_doc().transact();
-    story_fingerprint_in(doc, &txn, story, comments)
+    story_fingerprint_within(doc, &txn, story, comments, &mut None)
 }
 
 #[cfg(test)]
@@ -1240,11 +1302,16 @@ pub(crate) fn run_size_fingerprint<'a>(
     Some(digest.finish())
 }
 
-fn story_fingerprint_in(
+/// Each paragraph's [`UnitState`] and the SHA-256 of their digests in order,
+/// hashing the story's save segments with media tokens expanded; takes the
+/// media URLs it writes and the segment text it hashes off `budget` when
+/// given one, which it leaves at `Some(0)` once spent.
+fn story_fingerprint_within(
     doc: &EditingDoc,
     txn: &Transaction<'_>,
     story: &str,
     comments: &BTreeMap<String, Vec<(u32, u32)>>,
+    budget: &mut Option<usize>,
 ) -> Option<([u8; 32], Vec<UnitState>)> {
     use sha2::{Digest, Sha256};
     #[cfg(test)]
@@ -1252,7 +1319,17 @@ fn story_fingerprint_in(
     let mut segments = doc.story_segments_in(txn, story).ok()?;
     strip_display_only_keys(&mut segments);
     if let Some(media) = doc.media_table() {
-        crate::media::write_segment_data_urls(&mut segments, &media).ok()?;
+        match budget.as_mut() {
+            None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
+            Some(budget) => {
+                let written =
+                    crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
+                if !written.ok()? {
+                    *budget = 0;
+                    return None;
+                }
+            }
+        }
     }
     let mut boundaries: Vec<(u32, &str, bool)> = comments
         .iter()
@@ -1279,6 +1356,13 @@ fn story_fingerprint_in(
     let mut bytes = Vec::new();
     let mut section_bytes = Vec::new();
     for segment in segments {
+        if let Some(budget) = budget.as_mut() {
+            let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
+                *budget = 0;
+                return None;
+            };
+            *budget = rest;
+        }
         segment_canonical(&segment, &mut bytes, &mut section_bytes);
         unit.segment(&bytes);
         section_content.update(&section_bytes);
@@ -3042,6 +3126,63 @@ impl EditingDoc {
         }
     }
 
+    fn live_save_seed_states(&self, stories: HashMap<String, StoryState>) -> SeedStates {
+        SeedStates {
+            stories,
+            patch_table_styles: self
+                .source_metadata()
+                .map(|metadata| metadata.patch_table_styles().clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Caches save seed states without reseeding, declining a document of
+    /// more than `max_paragraphs` paragraphs or a package of more than
+    /// `max_inflated_bytes` bytes, packed or as its parts declare them
+    /// inflated, and stopping once the media URLs and text its stories hold,
+    /// counted at every use, would take more than that; returns whether they
+    /// are known.
+    pub fn prime_save_seed_states(&self, max_paragraphs: u32, max_inflated_bytes: u32) -> bool {
+        let bytes = match self.source.lock().unwrap().as_ref() {
+            Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => return true,
+            Some(SourcePackage::Ready(index)) => index.bytes(),
+            Some(SourcePackage::Pending(bytes, _)) => bytes.clone(),
+            None => return false,
+        };
+        if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
+            return false;
+        }
+        if bytes.as_ref().len() as u64 > u64::from(max_inflated_bytes) {
+            return false;
+        }
+        let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(bytes) else {
+            return false;
+        };
+        let inflated = package.parts().map(|(_, size)| size);
+        if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
+            return false;
+        }
+        let txn = self.yrs_doc().transact();
+        if self.committed_scan(&txn).pilcrows.len() > max_paragraphs as usize {
+            return false;
+        }
+        let Some(source) = self.source_index() else {
+            return false;
+        };
+        if source.seed_states_initialized() {
+            return true;
+        }
+        if !source.opened_under_own_digest() {
+            return false;
+        }
+        let budget = (max_inflated_bytes as usize).max(1);
+        let Some(stories) = story_states_within(self, &txn, Some(budget)) else {
+            return false;
+        };
+        source.seed_states_or(|| self.live_save_seed_states(stories));
+        true
+    }
+
     /// The paragraph IDs a save of this session applies; see
     /// [`ParagraphSavePlan`]. A part is patched in place only when every
     /// story seeded from it, nested ones included, gives the save projection
@@ -3070,13 +3211,7 @@ impl EditingDoc {
         };
         let metadata = self.source_metadata();
         let seeded = if self.unchanged_since_seeded() && source.opened_under_own_digest() {
-            source.seed_states_or(|| SeedStates {
-                stories: live.clone(),
-                patch_table_styles: metadata
-                    .as_ref()
-                    .map(|metadata| metadata.patch_table_styles().clone())
-                    .unwrap_or_default(),
-            })
+            source.seed_states_or(|| self.live_save_seed_states(live.clone()))
         } else {
             source.seed_states()
         };
@@ -3106,11 +3241,13 @@ impl EditingDoc {
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
+                        let source_paragraph = || source.paragraph_xml(part, ordinal);
                         let context = crate::paragraph_patch_plan::PatchContext {
                             ordinal,
                             session_key: key,
                             story,
                             metadata: metadata.as_deref(),
+                            source_paragraph: Some(&source_paragraph),
                             source: Some(&source),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
@@ -3807,6 +3944,119 @@ mod tests {
         EditCtx::local("", DATE)
     }
 
+    fn save_seed_session() -> crate::session::EditSessionCore {
+        let bytes = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ])
+        .unwrap();
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(&bytes, true, None, None).unwrap();
+        session
+    }
+
+    #[test]
+    fn priming_save_seed_states_preserves_the_plan_without_reseeding() {
+        let primed = save_seed_session();
+        let fallback = save_seed_session();
+        let source = primed.engine.doc().source_index().unwrap();
+        assert!(source.opened_under_own_digest());
+        assert!(!source.seed_states_initialized());
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(source.seed_states_initialized());
+        for session in [&primed, &fallback] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        assert!(primed.prime_save_seed_states(u32::MAX, u32::MAX));
+        let plan = primed.paragraph_save_plan().unwrap();
+        assert_eq!(plan, fallback.paragraph_save_plan().unwrap());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            fallback
+                .engine
+                .doc()
+                .source_index()
+                .unwrap()
+                .reseed_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+        let plan: serde_json::Value = serde_json::from_str(&plan).unwrap();
+        assert_eq!(plan["splicedParts"][0]["changed"], serde_json::json!([0]));
+    }
+
+    #[test]
+    fn priming_after_an_edit_declines_without_reseeding() {
+        let session = save_seed_session();
+        let expected = save_seed_session();
+        assert!(expected.prime_save_seed_states(u32::MAX, u32::MAX));
+        for session in [&session, &expected] {
+            session
+                .engine
+                .doc()
+                .insert_text(
+                    &ctx(),
+                    Position::new("body", 0),
+                    "New ",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+        }
+        let source = session.engine.doc().source_index().unwrap();
+        assert!(!session.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(!source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            session.paragraph_save_plan().unwrap(),
+            expected.paragraph_save_plan().unwrap()
+        );
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
+        assert!(session.prime_save_seed_states(u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn priming_declines_past_the_paragraph_or_inflated_budget() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let paragraphs = {
+            let txn = doc.yrs_doc().transact();
+            doc.committed_scan(&txn).pilcrows.len() as u32
+        };
+        let packed = source.bytes().as_ref().len() as u32;
+        let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = package.parts().map(|(_, size)| size).sum::<u64>() as u32;
+        let size = packed.max(inflated);
+        assert!(paragraphs > 0 && size > 0);
+        assert!(!session.prime_save_seed_states(paragraphs - 1, u32::MAX));
+        assert!(!session.prime_save_seed_states(u32::MAX, size - 1));
+        assert!(!source.seed_states_initialized());
+        assert!(session.prime_save_seed_states(paragraphs, size));
+        assert!(source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
         let xml = concat!(
@@ -3987,6 +4237,22 @@ mod tests {
                 Some(unit.digest),
             );
         }
+    }
+
+    #[test]
+    fn segment_text_len_counts_a_shared_string_at_every_use() {
+        let url: Arc<str> = Arc::from("data:image/png;base64,AQID");
+        let source = HashMap::from([("src".to_owned(), Any::String(Arc::clone(&url)))]);
+        let item = Any::Map(Arc::new(source));
+        let payload = BTreeMap::from([("content".to_owned(), Any::Array(vec![item; 3].into()))]);
+        let segment = crate::StorySegment {
+            content: crate::SegmentContent::OtherEmbed {
+                kind: "sdt".to_owned(),
+                payload,
+            },
+            attributes: BTreeMap::new(),
+        };
+        assert!(segment_text_len(&segment) >= 3 * url.len());
     }
 
     #[test]

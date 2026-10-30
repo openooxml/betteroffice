@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
 import { DEFAULT_COMPATIBILITY_FLAGS } from '../../docx/settingsParser';
-import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE } from './defaultFontProvider';
+import { configureDefaultFonts, IMPLICIT_FONT_COVERAGE, resolveDefaultFontProvider } from './defaultFontProvider';
 import {
   createRustMeasureSource,
   type ResidentFontRequirement,
@@ -210,9 +210,26 @@ test('a base URL configures the default manager without a source warning', async
     expect(create).not.toHaveBeenCalled();
     const source = createRustMeasureSource({ engine: { registerFont: () => 1, clearFonts() {} } });
     await source.prepareFontRequirements([regular]);
-    expect(create).toHaveBeenCalledWith({ baseUrl: new URL('https://example.test/fonts/') });
+    expect(create).toHaveBeenCalledWith({ baseUrl: new URL('https://example.test/fonts/') }, expect.objectContaining({ decoder: expect.any(Function) }));
     expect(warn).not.toHaveBeenCalled();
   } finally { create.mockRestore(); warn.mockRestore(); }
+});
+
+test('default providers retain the decoder of each editor runtime', async () => {
+  const first = { decoder: async () => ({ font: new ArrayBuffer(4) }) };
+  const second = { decoder: async () => ({ font: new ArrayBuffer(8) }) };
+  const seen: unknown[] = [];
+  configureDefaultFonts({ fonts: { createFontProvider(_options, runtime) {
+    seen.push(runtime);
+    return { resolve: () => async () => (await runtime!.decoder!(new ArrayBuffer(0), { codec: 'zstd' })).font };
+  } } });
+  const a = await resolveDefaultFontProvider(first);
+  const b = await resolveDefaultFontProvider(second);
+  expect(await resolveDefaultFontProvider(first)).toBe(a);
+  expect(a).not.toBe(b);
+  expect((await a!.resolve('Arial', false, false)!()).byteLength).toBe(4);
+  expect((await b!.resolve('Arial', false, false)!()).byteLength).toBe(8);
+  expect(seen).toEqual([first, second]);
 });
 
 test('a Japanese preflight settles atomically when font sources are unavailable', async () => {

@@ -61,9 +61,9 @@ export async function createWorkbookRecoverySession(
     if (options.collaborative) throw new Error('Recovery is unavailable for collaborative workbooks');
     const wasm = options.wasm instanceof ArrayBuffer ? options.wasm.slice(0) : options.wasm;
     const opened = checkpoint
-      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm })
+      ? await client.call.openRecovery({ ...checkpoint, state: checkpoint.state.slice() }, { wasm, png: options.png })
       : await client.call.open(bytes.slice().buffer, { collaborative: options.collaborative,
-        clientId: options.clientId, calculation: options.calculation, wasm,
+        clientId: options.clientId, calculation: options.calculation, wasm, png: options.png,
         initialViewport: options.initialViewport, includeEditState: true, recoveryVersion: version });
     const context: WorkbookCommandContext | undefined = opened.commandContext;
     if (!context) throw new Error('Workbook recovery omitted command context');

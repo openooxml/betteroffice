@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { readFontTraits } from '../fontTraits';
-import { installBrowserFonts, installFonts } from './peerlessFonts';
+import { installBrowserFonts, installDefaultFonts, installFonts } from './peerlessFonts';
 import { installFonts as installViewerFonts } from '../viewer/sessionPaint';
 
 function sfnt({ weight = 400, selection = 0, macStyle = 0, os2 = true, signature = 0x00010000, collection = false } = {}): Uint8Array {
@@ -34,6 +34,77 @@ test('reads selection flags while keeping the weight class authoritative', () =>
   expect(readFontTraits(sfnt({ weight: 600, selection: 32 }))).toEqual({
     weight: 600, bold: true, italic: false, oblique: false,
   });
+});
+
+test('default faces install under requested families with the face weight and style before their gate resolves', async () => {
+  const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const created: { family: string; descriptors: FontFaceDescriptors }[] = [];
+  const added: FontFace[] = [];
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  class Face {
+    constructor(readonly family: string, _source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) { created.push(this); }
+    async load() { await pending; return this; }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: FontFace) => added.push(face) } } });
+  try {
+    const installed: FontFace[] = [];
+    const ready = installDefaultFonts([
+      { family: 'Calibri', bold: true, italic: true, bytes: sfnt({ weight: 700, selection: 1 }).buffer as ArrayBuffer },
+      { family: 'Microsoft YaHei', bold: true, italic: true, bytes: sfnt().buffer as ArrayBuffer },
+      { family: 'Calibri Light', bold: true, italic: false, bytes: sfnt().buffer as ArrayBuffer, ownWeight: true },
+      { family: 'Unparsed', bold: true, italic: false, bytes: new ArrayBuffer(8) },
+    ], installed, () => true, () => {});
+    for (let tick = 0; tick < 20 && created.length < 4; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(added).toEqual([]);
+    expect(created.map(({ family, descriptors }) => ({ family, descriptors }))
+      .sort((left, right) => left.family.localeCompare(right.family))).toEqual([
+      { family: 'Calibri', descriptors: { weight: '700', style: 'italic' } },
+      { family: 'Calibri Light', descriptors: { weight: '700', style: 'normal' } },
+      { family: 'Microsoft YaHei', descriptors: { weight: '400', style: 'normal' } },
+      { family: 'Unparsed', descriptors: { weight: '700', style: 'normal' } },
+    ]);
+    finish();
+    await ready;
+    expect(installed).toEqual(added);
+    expect(installed).toHaveLength(4);
+  } finally {
+    finish();
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
+test('a slow default browser face times out without a late installation', async () => {
+  const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  const added: FontFace[] = [];
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  class Face { async load() { await pending; return this; } }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: { add: (face: FontFace) => added.push(face) } } });
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+    timeout(callback, delay === 5000 ? 10 : delay, ...args)) as typeof setTimeout);
+  try {
+    const warnings: boolean[] = [];
+    await installDefaultFonts([{ family: 'Calibri', bold: false, italic: false, bytes: new ArrayBuffer(0) }], [],
+      () => true, () => { warnings.push(true); });
+    expect(warnings).toEqual([true]);
+    finish();
+    await Promise.resolve();
+    expect(added).toEqual([]);
+  } finally {
+    finish();
+    timer.mockRestore();
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
 });
 
 test('installs fonts using the face weight and style instead of request flags', async () => {

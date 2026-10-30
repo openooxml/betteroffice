@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import JSZip from 'jszip';
+import { createFontProvider } from '@betteroffice/fonts';
 import { openPresentation } from '@betteroffice/pptx';
 import { attachPptx, openPptx } from '../src/pptx';
 import type { PptxAgentPresentation } from '../src/pptx';
@@ -449,6 +450,114 @@ test('PPTX maps layout placeholders atomically and preview matches export', asyn
       expect((await reopened.preview(slide.id)).png).toEqual(preview.png);
     } finally { reopened.close(); }
   } finally { deck.close(); }
+});
+
+for (const mapped of [false, true]) {
+  test(`PPTX export fits an overflowing autofit title the same with or without a preview (${mapped ? 'mapped' : 'unmapped'} layout change)`, async () => {
+    const zip = await JSZip.loadAsync(await layoutFixture());
+    const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+    const master = 'ppt/slideMasters/slideMaster1.xml';
+    zip.file(master, (await zip.file(master)!.async('string')).replace('<p:sldMaster ', `<p:sldMaster xmlns:a="${a}" `).replace('<p:spTree/>', '<p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:p/></p:txBody></p:sp></p:spTree>'));
+    const path = 'ppt/slides/slide1.xml';
+    zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>'));
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const saved: string[] = [];
+    for (const preview of [false, true]) {
+      const deck = await openPptx(bytes);
+      try {
+        const target = first(deck);
+        apply(deck, [
+          { op: 'set_slide_layout', slide: target.slide, layout: 'Title Only', ...(mapped ? { placeholders: [{ shape: target.shape, layoutPlaceholder: 'Heading' }] } : {}) },
+          { op: 'replace_text', slide: target.slide, shape: target.shape, text: 'Punishments: 2011 to 2018 '.repeat(4).trim() },
+        ]);
+        if (preview) await deck.preview(target.slide);
+        const exported = await JSZip.loadAsync(await deck.export());
+        saved.push(await exported.file(path)!.async('string'));
+      } finally { deck.close(); }
+    }
+    expect(saved[1]).toBe(saved[0]);
+    expect(saved[0]).toMatch(/<a:bodyPr><a:normAutofit fontScale="\d+"/);
+  });
+}
+
+for (const previewed of [false, true]) test(`PPTX export falls back to a plain save when the edited text exceeds render limits (${previewed ? 'after' : 'without'} a preview)`, async () => {
+  const zip = await JSZip.loadAsync(await presentationFixture());
+  const path = 'ppt/slides/slide1.xml';
+  const xml = await zip.file(path)!.async('string');
+  const title = xml.match(/<a:p>[\s\S]*?<\/a:p>/u)![0];
+  zip.file(path, xml.replace('<a:bodyPr/>', '<a:bodyPr><a:normAutofit/></a:bodyPr>').replace(title, `<a:p><a:r><a:rPr lang="en-US"/><a:t>Quarterly</a:t></a:r></a:p>${'<a:p/>'.repeat(20_000)}`));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const deck = await openPptx(bytes);
+  const handle = openPresentation(bytes);
+  const plain = attachPptx(handle);
+  try {
+    if (previewed) await deck.preview(apply(deck, [{ op: 'add_slide', layout: deck.outline().layouts[0].id }]).results[0].slideId as string);
+    for (const presentation of [deck, plain]) apply(presentation, [{ op: 'find_replace', query: 'Quarterly', replacement: 'Annual' }]);
+    const expected = await (await JSZip.loadAsync(handle.save())).file(path)!.async('string');
+    const exported = await (await JSZip.loadAsync(await deck.export())).file(path)!.async('string');
+    expect(exported).toBe(expected);
+    expect(exported).toContain('<a:t>Annual</a:t>');
+    expect(exported).toContain('<a:normAutofit/>');
+  } finally { deck.close(); plain.close(); handle.dispose(); }
+}, 60_000);
+
+test('PPTX attached export fits inherited theme fonts with the live renderer', async () => {
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const rels = 'ppt/slideMasters/_rels/slideMaster1.xml.rels';
+  zip.file(rels, (await zip.file(rels)!.async('string')).replace('</Relationships>', `<Relationship Id="theme" Type="${r}/theme" Target="../theme/theme1.xml"/></Relationships>`));
+  zip.file('ppt/theme/theme1.xml', `<a:theme xmlns:a="${a}"><a:themeElements><a:fontScheme name="s"><a:majorFont><a:latin typeface="Times New Roman"/></a:majorFont><a:minorFont><a:latin typeface="Times New Roman"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>`);
+  zip.file('[Content_Types].xml', (await zip.file('[Content_Types].xml')!.async('string')).replace('</Types>', '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>'));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>').replace('<a:bodyPr/>', '<a:bodyPr><a:normAutofit/></a:bodyPr>').replace('b="1" sz="2400"', 'sz="2400"'));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const seed = await openPptx(bytes);
+  seed.close();
+  const load = createFontProvider().resolve('Times New Roman', false, false)!;
+  const font = new Uint8Array(await load());
+  const handle = openPresentation(bytes);
+  handle.registerFont({ family: 'Times New Roman', bold: false, italic: false, bytes: font });
+  const deck = attachPptx(handle);
+  try {
+    const target = first(deck);
+    apply(deck, [{ op: 'replace_text', ...target, text: 'Punishments: 2011 to 2018 '.repeat(4).trim() }]);
+    expect(deck.readSlide({ slide: target.slide }).shapes[0].stories[0].paragraphs[0].runs[0].formatting.fontFamily).toBeFalsy();
+    const expected = await (await JSZip.loadAsync(handle.save())).file(path)!.async('string');
+    const exported = await (await JSZip.loadAsync(await deck.export())).file(path)!.async('string');
+    expect(expected).toMatch(/<a:normAutofit fontScale="\d+"/);
+    expect(Number(expected.match(/fontScale="(\d+)"/)?.[1])).toBeLessThan(100000);
+    expect(exported).toBe(expected);
+  } finally { deck.close(); handle.dispose(); }
+});
+
+test('PPTX export saves the version it fitted and refuses a document closed while fonts load', async () => {
+  const closing = await openPptx(await presentationFixture());
+  const target = first(closing);
+  apply(closing, [{ op: 'replace_text', slide: target.slide, shape: target.shape, text: 'First edit' }]);
+  const refused = closing.export();
+  closing.close();
+  await expect(refused).rejects.toThrow('closed');
+  const zip = await JSZip.loadAsync(await layoutFixture());
+  const a = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const master = 'ppt/slideMasters/slideMaster1.xml';
+  zip.file(master, (await zip.file(master)!.async('string')).replace('<p:sldMaster ', `<p:sldMaster xmlns:a="${a}" `).replace('<p:spTree/>', '<p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:p/></p:txBody></p:sp></p:spTree>'));
+  const path = 'ppt/slides/slide1.xml';
+  zip.file(path, (await zip.file(path)!.async('string')).replace('<a:ext cx="8000000" cy="1000000"/>', '<a:ext cx="8000000" cy="360000"/>'));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  const title = 'Punishments: 2011 to 2018 '.repeat(4).trim();
+  const firstEdit = (deck: PptxAgentPresentation) => { const target = first(deck); apply(deck, [{ op: 'set_slide_layout', slide: target.slide, layout: 'Title Only' }, { op: 'replace_text', slide: target.slide, shape: target.shape, text: title }]); };
+  const secondEdit = (deck: PptxAgentPresentation) => { const target = first(deck); apply(deck, [{ op: 'set_paragraphs', slide: target.slide, shape: target.shape, paragraphs: [{ runs: [{ text: title, fontFamily: 'Times New Roman' }] }] }]); };
+  const savedXml = async (saved: Promise<Uint8Array>) => await (await JSZip.loadAsync(await saved)).file(path)!.async('string');
+  const exportWith = async (second: boolean, raced: boolean) => { const deck = await openPptx(bytes); try { firstEdit(deck); if (!second) return await savedXml(deck.export()); if (!raced) { secondEdit(deck); return await savedXml(deck.export()); } const pending = deck.export(); secondEdit(deck); return await savedXml(pending); } finally { deck.close(); } };
+  const raced = await exportWith(true, true);
+  const fitted = await exportWith(true, false);
+  const plain = await exportWith(false, false);
+  expect(raced).toBe(fitted);
+  expect(raced).toMatch(/<a:bodyPr><a:normAutofit fontScale="\d+"/);
+  expect(raced).not.toBe(plain);
+  expect(fitted).not.toBe(plain);
+  expect(raced.match(/<a:normAutofit fontScale="(\d+)"/)?.[1]).not.toBe(plain.match(/<a:normAutofit fontScale="(\d+)"/)?.[1]);
 });
 
 test('PPTX layout placeholder inventories paginate within the outline budget', async () => {

@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 export class PptxDocument {
     private constructor();
@@ -172,11 +174,22 @@ export class PptxRenderer {
     requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
     saveBytes(document: PptxDocument): Uint8Array;
     setActiveSlide(document: PptxDocument, id: string, key: string): boolean;
+    /**
+     * Enables browser metrics for uncovered characters. Off by default.
+     */
+    setBrowserCoverageFallback(enabled: boolean): void;
     slideLayoutKey(document: PptxDocument, slide_index: number): string;
     snapshotWithLayoutKeysJson(document: PptxDocument): string;
 }
 
 export function compileSlideJson(slide_json: string): string;
+
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
 
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
@@ -217,6 +230,7 @@ export interface InitOutput {
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly exportPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -328,6 +342,7 @@ export interface InitOutput {
     readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly pptxrenderer_setBrowserCoverageFallback: (a: number, b: number) => void;
     readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
     readonly renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
