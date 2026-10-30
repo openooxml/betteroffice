@@ -459,6 +459,7 @@ export type ListNumPr = {
  * w:pPr plus resolved list/numbering state).
  */
 export type ParagraphAttrs = {
+  leadingInlineBox?: { width: number; height: number };
   alignment?: 'left' | 'center' | 'right' | 'justify';
   spacing?: ParagraphSpacing;
   /** See ParagraphFormatting.spacingExplicit. */

@@ -100,6 +100,7 @@ export interface FileSessionDeps {
   maxEditorsPerFile?: number;
   openReplica?: typeof openServerReplica;
   onClosed?: (session: FileSession) => void;
+  isLiveLock?: (lock: string) => boolean;
 }
 
 interface SaveOptions {
@@ -390,28 +391,30 @@ export class FileSession {
       }
     }
     const lockJustAcquired = !lockHeldBefore && this.#lockHeld;
-    if (lockJustAcquired) {
-      try {
+    try {
+      if (lockJustAcquired) {
         await this.#refreshSourceUnderLock(input.accessToken);
         this.#lockNeedsRecovery = false;
         if (this.#viewOnlyReason === "lockLost") {
           this.#viewOnlyReason = null;
           this.#emit("writable", {});
         }
-      } catch (err) {
+      }
+      if (this.#lockHeld && !this.#journalActive) {
+        await this.#activateJournal(this.#itemVersion, input.accessToken);
+      }
+    } catch (err) {
+      if (lockJustAcquired) {
+        try {
+          await this.#host.unlock({ wopiSrc: this.wopiSrc, accessToken: input.accessToken, lock: this.lockId });
+        } catch {
+          this.#log("warn", "unlock after failed open failed");
+        }
         this.#loseLock();
         this.#scheduleRefresh();
-        if (first) this.#failOpening();
-        throw err;
       }
-    }
-    if (this.#lockHeld && !this.#journalActive) {
-      try {
-        await this.#activateJournal(this.#itemVersion, input.accessToken);
-      } catch (err) {
-        if (first) this.#failOpening();
-        throw err;
-      }
+      if (first) this.#failOpening();
+      throw err;
     }
     let canWrite = wantsWrite && this.#viewOnlyReason === null;
     const now = this.#now();
@@ -534,7 +537,8 @@ export class FileSession {
     try {
       const info = await this.#host.checkFileInfo({ wopiSrc: this.wopiSrc, accessToken });
       this.#requireLock();
-      if ((info.Version ?? null) === this.#itemVersion && (info.LastModifiedTime ?? null) === this.#lastModifiedTime) return;
+      const identified = (info.Version && this.#itemVersion) || (info.LastModifiedTime && this.#lastModifiedTime);
+      if (identified && (info.Version ?? null) === this.#itemVersion && (info.LastModifiedTime ?? null) === this.#lastModifiedTime) return;
       if (this.dirty || this.#journalActive) {
         this.#setViewOnly("externalChange");
         return;
@@ -657,7 +661,7 @@ export class FileSession {
           if (lockErr instanceof WopiHostError && lockErr.kind === "unauthorized") throw lockErr;
         }
       }
-      if (current && current.startsWith(OUR_LOCK_PREFIX)) {
+      if (current && this.#isStaleOwnLock(current)) {
         try {
           const relockRequestedAt = this.#now();
           await this.#host.unlockAndRelock({ wopiSrc: this.wopiSrc, accessToken, lock: this.lockId, oldLock: current });
@@ -797,6 +801,13 @@ export class FileSession {
   #requireLock(): void {
     this.#checkLockLease();
     if (!this.#lockHeld) throw new SessionError("lockLost", "file session lock is lost");
+  }
+
+  #isStaleOwnLock(lock: string): boolean {
+    if (lock === this.lockId) return true;
+    if (!lock.startsWith(OUR_LOCK_PREFIX)) return false;
+    const owner = lock.slice(OUR_LOCK_PREFIX.length, lock.lastIndexOf(":"));
+    return owner === this.#deps.instanceId && !(this.#deps.isLiveLock?.(lock) ?? false);
   }
 
   #loseLock(): void {
@@ -1152,6 +1163,7 @@ export class FileSession {
         if (unauthorized) this.#markTokenDead(current);
         const by = options.by && options.by === current.id ? options.by : current.id;
         this.#emit("saved", { itemVersion: this.#itemVersion, by });
+        if (this.#holdPending && !this.dirty) await this.#maybeCloseAfterDeparture([current]);
         return { saved: true, itemVersion: this.#itemVersion, by };
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
@@ -1218,6 +1230,7 @@ export class FileSession {
         this.#log("warn", "save conflict, wrote a conflict copy", { name: result.name });
         const saved: SaveResult = { saved: true, itemVersion: this.#itemVersion, by: candidate.id, conflictName: result.name };
         if (details.url) saved.conflictUrl = details.url;
+        if (this.#holdPending && !this.dirty) await this.#maybeCloseAfterDeparture([candidate]);
         return saved;
       } catch (err) {
         const kind = err instanceof WopiHostError ? err.kind : "unknown";
@@ -1261,6 +1274,8 @@ export class FileSession {
         }
         continue;
       }
+      this.#holdPending = false;
+      this.#clearTimer("hold");
       if (this.#lockHeld) {
         const unlocked = await this.#unlockWith(departing);
         if (this.#connectedEditors().length > 0) {
@@ -1330,6 +1345,10 @@ export class FileSession {
       this.#enqueueTask(async () => {
         if (!this.#holdPending || this.#state !== "open") return;
         if (this.#connectedEditors().length > 0) return;
+        if (!this.dirty) {
+          await this.#maybeCloseAfterDeparture([]);
+          return;
+        }
         this.#holdPending = false;
         this.#log("error", "lost flush after hold window");
         this.#emit("lostFlush", {});

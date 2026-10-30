@@ -228,9 +228,12 @@ A `Document` is not pinned to a thread: the engine's document type is `Send` and
 layout, rasterization, and saving release the GIL for their duration, so several
 documents genuinely proceed in parallel.
 
-## Status
+## Compatibility
 
-Pre-1.0: the API may change between minor versions. Text replacement preserves
+Releases are versioned with Changesets. The API can change between minor versions; every change
+is listed in the changelog, and deprecations are announced before removal.
+
+Text replacement preserves
 paragraph and run formatting.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows

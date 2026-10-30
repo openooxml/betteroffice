@@ -7,6 +7,7 @@ import { openFreshClient, openTestClient, sourceBytes, type TestClient } from ".
 import { addToken, makeHarness, SRC, ttl, type Harness } from "../../test/session/harness";
 import { FileSession } from "./fileSession";
 import { FileJournal } from "./journal";
+import { SessionRegistry } from "./registry";
 import { WopiHostError } from "../host/errors";
 
 beforeAll(async () => {
@@ -316,6 +317,56 @@ describe("last leave, disconnect and hold", () => {
     }
   });
 
+  for (const save of ["autosave", "explicit save"] as const) {
+    test(`${save} after a failed exit save unlocks and closes the held session`, async () => {
+      const h = makeHarness();
+      addToken(h, "tok-a", "user-a");
+      const fetch = h.host.fetch.bind(h.host);
+      let failed = false;
+      h.host.fetch = async (request) => {
+        if (!failed && request.headers.get("X-WOPI-Override") === "PUT" && request.headers.get("X-COOL-WOPI-IsExitSave") === "true") {
+          failed = true;
+          return new Response(null, { status: 500 });
+        }
+        return fetch(request);
+      };
+      const a = await joinEditor(h, "tok-a");
+      const session = a.session;
+      const client = await clientFor(session, a.joinPayload);
+      const lost: unknown[] = [];
+      session.on("lostFlush", (event) => lost.push(event));
+      try {
+        edit(session, a.user.id, client, "held-save-edit ");
+        if (save === "autosave") await session.leave(a.user.id);
+        else await session.disconnect(a.user.id);
+        expect(failed).toBe(true);
+        expect(session.awaitingFlushToken).toBe(true);
+        expect(session.state).toBe("open");
+        expect(h.callsFor("UNLOCK")).toHaveLength(0);
+        if (save === "autosave") {
+          await h.clock.advance(30000);
+          await h.clock.drain();
+        } else {
+          expect((await session.requestSave(a.user.id)).saved).toBe(true);
+        }
+        expect(session.state).toBe("closed");
+        expect(await savedContains(h, "held-save-edit")).toBe(true);
+        await h.clock.advance(30 * 60000 + 1000);
+        expect(h.putCount()).toBe(2);
+        expect(h.callsFor("UNLOCK")).toHaveLength(1);
+        expect(h.callsFor("UNLOCK")[0]?.headers.get("X-WOPI-Lock")).toBe(session.lockId);
+        expect(h.host.files.get("file1")!.lock).toBeNull();
+        expect(session.state).toBe("closed");
+        expect(session.awaitingFlushToken).toBe(false);
+        expect(h.registry.list()).toEqual([]);
+        expect(lost).toEqual([]);
+      } finally {
+        client.destroy();
+        await session.close();
+      }
+    });
+  }
+
   test("expired leaver token falls back to another valid token", async () => {
     const h = makeHarness();
     addToken(h, "tok-a", "user-a");
@@ -447,18 +498,90 @@ describe("locks, conflicts and permissions", () => {
   test("stale own prefix lock is reclaimed with unlock and relock", async () => {
     const h = makeHarness();
     addToken(h, "tok-a", "user-a");
-    h.host.files.get("file1")!.lock = "bo1:old-instance:old-session";
+    h.host.files.get("file1")!.lock = "bo1:inst-test:old-session";
     h.host.files.get("file1")!.lockExpiresAt = h.clock.t + 30 * 60000;
     const a = await joinEditor(h, "tok-a");
     const session = [...h.registry.list()][0]!;
     try {
       expect(a.user.canWrite).toBe(true);
-      const relocks = h.calls.filter((c) => c.override === "LOCK" && c.headers.get("X-WOPI-OldLock") === "bo1:old-instance:old-session");
+      const relocks = h.calls.filter((c) => c.override === "LOCK" && c.headers.get("X-WOPI-OldLock") === "bo1:inst-test:old-session");
       expect(relocks.length).toBe(1);
       expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
       expect(session.lockId).toMatch(/^bo1:inst-test:/);
     } finally {
       await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("another instance opens read only without reclaiming a live lock", async () => {
+    const h = makeHarness({ instanceId: "inst-a" });
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const registry = new SessionRegistry({
+      config: h.config, hostClient: h.hostClient, instanceId: "inst-b",
+      logger: h.logger, now: h.clock.now, scheduler: h.scheduler,
+    });
+    const a = await joinEditor(h, "tok-a");
+    const session = a.session;
+    const client = await clientFor(session, a.joinPayload);
+    try {
+      const b = await registry.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(b.user.canWrite).toBe(false);
+      expect(b.file.readOnly).toBe(true);
+      expect(b.viewOnlyReason).toBe("lockedElsewhere");
+      expect(h.calls.some((call) => call.headers.has("X-WOPI-OldLock"))).toBe(false);
+      expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
+      edit(session, a.user.id, client, "original-instance-edit ");
+      expect((await session.requestSave(a.user.id)).saved).toBe(true);
+      expect(await savedContains(h, "original-instance-edit")).toBe(true);
+      expect(h.host.files.size).toBe(1);
+      await b.session.leave(b.user.id);
+      expect(h.host.files.get("file1")!.lock).toBe(session.lockId);
+      expect(h.callsFor("UNLOCK")).toHaveLength(0);
+    } finally {
+      client.destroy();
+      await registry.closeAll();
+      await session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a lock of an instance whose id extends ours is not reclaimed", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    h.host.files.get("file1")!.lock = "bo1:inst-test:2:live-session";
+    h.host.files.get("file1")!.lockExpiresAt = h.clock.t + 30 * 60000;
+    const a = await joinEditor(h, "tok-a");
+    try {
+      expect(a.user.canWrite).toBe(false);
+      expect(a.viewOnlyReason).toBe("lockedElsewhere");
+      expect(h.calls.some((call) => call.headers.has("X-WOPI-OldLock"))).toBe(false);
+      expect(h.host.files.get("file1")!.lock).toBe("bo1:inst-test:2:live-session");
+    } finally {
+      await a.session.leave(a.user.id).catch(() => {});
+    }
+  });
+
+  test("a second session of this instance for an alias of the file does not reclaim the live lock", async () => {
+    const h = makeHarness();
+    addToken(h, "tok-a", "user-a");
+    addToken(h, "tok-b", "user-b");
+    const a = await joinEditor(h, "tok-a");
+    const client = await clientFor(a.session, a.joinPayload);
+    try {
+      const b = await h.registry.join({ hostId: "testhost", wopiSrc: `${SRC}?alias=1`, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
+      expect(b.session).not.toBe(a.session);
+      expect(b.user.canWrite).toBe(false);
+      expect(b.viewOnlyReason).toBe("lockedElsewhere");
+      expect(h.calls.some((call) => call.headers.has("X-WOPI-OldLock"))).toBe(false);
+      expect(h.host.files.get("file1")!.lock).toBe(a.session.lockId);
+      edit(a.session, a.user.id, client, "alias-safe-edit ");
+      expect((await a.session.requestSave(a.user.id)).saved).toBe(true);
+      expect(await savedContains(h, "alias-safe-edit")).toBe(true);
+      await b.session.leave(b.user.id);
+    } finally {
+      client.destroy();
+      await a.session.leave(a.user.id).catch(() => {});
+      await h.registry.closeAll();
     }
   });
 
@@ -811,6 +934,43 @@ describe("review fixes: expiry, fallback and departure races", () => {
     await expect(joinEditor(h, "tok-a")).rejects.toThrow();
     expect(h.registry.list().length).toBe(0);
   });
+
+  for (const failure of ["journal begin", "under-lock CheckFileInfo"] as const) {
+    test(`a failed ${failure} releases the opening lock and removes the session`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "wopi-opening-"));
+      const h = makeHarness({ journalDir: dir });
+      addToken(h, "tok-a", "user-a");
+      const error = new Error(`${failure} failed`);
+      const begin = FileJournal.prototype.begin;
+      const checkFileInfo = h.hostClient.checkFileInfo;
+      if (failure === "journal begin") FileJournal.prototype.begin = () => { throw error; };
+      else h.hostClient.checkFileInfo = async (input) => {
+        if (h.host.files.get("file1")!.lock !== null) throw error;
+        return checkFileInfo(input);
+      };
+      const session = h.registry.create("testhost", SRC);
+      try {
+        await expect(joinEditor(h, "tok-a")).rejects.toBe(error);
+        const locks = h.callsFor("LOCK");
+        const unlocks = h.callsFor("UNLOCK");
+        expect(locks).toHaveLength(1);
+        expect(unlocks).toHaveLength(1);
+        expect(unlocks[0]?.token).toBe("tok-a");
+        expect(unlocks[0]?.headers.get("X-WOPI-Lock")).toBe(locks[0]?.headers.get("X-WOPI-Lock"));
+        expect(h.host.files.get("file1")!.lock).toBeNull();
+        expect(h.registry.size).toBe(0);
+        expect(session.state).toBe("closed");
+        await h.clock.advance(30 * 60000 + 1000);
+        expect(h.callsFor("REFRESH_LOCK")).toHaveLength(0);
+        expect(h.callsFor("UNLOCK")).toHaveLength(1);
+      } finally {
+        FileJournal.prototype.begin = begin;
+        h.hostClient.checkFileInfo = checkFileInfo;
+        await h.registry.closeAll();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   test("view only viewers who time out close the session", async () => {
     const h = makeHarness();
@@ -1596,10 +1756,22 @@ describe("session safety regressions", () => {
     }
   });
 
-  for (const changed of ["version", "timestamp"] as const) {
-    test(`first writer reloads a viewer's source when the ${changed} changes under the lock`, async () => {
+  for (const changed of ["version", "timestamp", "missing metadata"] as const) {
+    const reason = changed === "missing metadata" ? "metadata is missing" : `${changed} changes under the lock`;
+    test(`first writer reloads a viewer's source when the ${reason}`, async () => {
       let onCheck = async () => {};
       const h = makeHarness({ beforeCheckFileInfo: () => onCheck() });
+      if (changed === "missing metadata") {
+        const fetch = h.host.fetch.bind(h.host);
+        h.host.fetch = async (request) => {
+          const response = await fetch(request);
+          if (request.method !== "GET" || new URL(request.url).pathname.endsWith("/contents")) return response;
+          const info = await response.json() as Record<string, unknown>;
+          delete info.Version;
+          delete info.LastModifiedTime;
+          return new Response(JSON.stringify(info), { status: response.status, headers: response.headers });
+        };
+      }
       addToken(h, "tok-v", "viewer", { canWrite: false });
       addToken(h, "tok-a", "writer");
       const viewer = await joinEditor(h, "tok-v", "view");
@@ -1614,6 +1786,7 @@ describe("session safety regressions", () => {
       try {
         external.edit("external-before-lock ");
         const bytes = await external.save();
+        if (changed === "missing metadata") h.host.files.get("file1")!.bytes = bytes;
         let changedUnderLock = false;
         onCheck = async () => {
           const file = h.host.files.get("file1")!;
@@ -1621,7 +1794,7 @@ describe("session safety regressions", () => {
           changedUnderLock = true;
           file.bytes = bytes;
           if (changed === "version") file.itemVersion = "2";
-          else file.lastModifiedTime = "2026-10-28T12:00:00.000Z";
+          else if (changed === "timestamp") file.lastModifiedTime = "2026-10-28T12:00:00.000Z";
         };
         const writer = await joinEditor(h, "tok-a");
         expect(changedUnderLock).toBe(true);

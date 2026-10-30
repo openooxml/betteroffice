@@ -3,6 +3,7 @@ import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
+import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
 import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
@@ -62,6 +63,10 @@ export interface PresentationCommandRegistration {
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
   dispose(): void;
+}
+
+function engineVersion(): string | undefined {
+  try { return PptxDocument.version(); } catch { return undefined; }
 }
 
 export function registerPresentationCommandHandlers(
@@ -1347,10 +1352,13 @@ export function registerPresentationCommandHandlers(
         cacheStories(content);
         for (const slide of openedMetadata.slides) revisions.set(slide.id, 0);
         const result = ack();
-        const recoveryUpdate = ownedBuffer(handle.encodeStateAsUpdate());
+        const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
+        const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         return transferable({ ...result.value, shared: projection.ack(result.value),
           slides: openedMetadata.slides, size: openedMetadata.size,
-          activeSlideId, frame: result.value.frame ?? null, recoveryUpdate }, [...result.transfer, recoveryUpdate]);
+          activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
+          recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}) },
+          [...result.transfer, ...(recoveryUpdate ? [recoveryUpdate] : [])]);
       } catch (error) {
         dispose();
         throw error;

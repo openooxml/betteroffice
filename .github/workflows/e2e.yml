@@ -38,7 +38,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          ROUTE_GROUPS: browser:2 corpus
+          ROUTE_GROUPS: browser:4 corpus
           ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '6' }}
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
@@ -46,27 +46,12 @@ jobs:
           BO_CI_RUNNER: ${{ vars.BO_CI_RUNNER }}
         run: node scripts/ci-route.mjs
 
-  scenarios:
-    name: ${{ matrix.name }}
+  corpus:
+    name: Corpus scenarios
     needs: route
     if: ${{ !cancelled() }}
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && (matrix.suite == 'corpus' && needs.route.outputs.corpus || matrix.suite != 'corpus' && needs.route.outputs.browser) || 'kyora-8x8' }}
-    timeout-minutes: ${{ matrix.timeout }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: corpus
-            name: Corpus scenarios
-            timeout: 60
-          - suite: browser
-            shard: 1
-            name: Browser editors (1/2)
-            timeout: 70
-          - suite: browser
-            shard: 2
-            name: Browser editors (2/2)
-            timeout: 70
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.corpus || 'kyora-8x8' }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -75,9 +60,7 @@ jobs:
           printf '%s\n' \
             "BETTEROFFICE_E2E_VENV=$RUNNER_TEMP/e2e-venv" \
             "QUALITY_ASSET_CACHE=$RUNNER_TEMP/e2e-assets" \
-            "BETTEROFFICE_E2E_OUTPUT=$RUNNER_TEMP/e2e-results" \
-            "BETTEROFFICE_BROWSER_OUTPUT=$RUNNER_TEMP/browser-results" \
-            "PLAYWRIGHT_BROWSERS_PATH=$HOME/.cache/ms-playwright" >> "$GITHUB_ENV"
+            "BETTEROFFICE_E2E_OUTPUT=$RUNNER_TEMP/e2e-results" >> "$GITHUB_ENV"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -89,7 +72,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          shared-key: e2e-${{ matrix.suite }}
+          shared-key: e2e-corpus
           workspaces: |
             . -> target
             bindings -> target
@@ -113,18 +96,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Check the harness contracts
-        if: matrix.suite == 'corpus'
         run: |
           bun run typecheck:e2e
           bun run test:e2e:harness
 
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
-        if: matrix.suite == 'corpus'
         with:
           version: '0.11.8'
 
       - name: Build the Python bindings
-        if: matrix.suite == 'corpus'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/bindings/target
         run: |
@@ -132,45 +112,16 @@ jobs:
           bun e2e/python-env.ts
 
       - name: Restore the pinned corpus documents
-        if: matrix.suite == 'corpus'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/e2e-assets
           key: e2e-assets-${{ hashFiles('e2e/corpus.ts') }}
 
       - name: Run the corpus scenarios
-        if: matrix.suite == 'corpus'
         run: bun run test:e2e
 
-      - name: Resolve the Playwright version
-        if: matrix.suite == 'browser'
-        id: playwright
-        run: |
-          version="$(bunx playwright --version | awk '{print $2}')"
-          test -n "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the Playwright browsers
-        if: matrix.suite == 'browser'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
-
-      - name: Install headless Chromium
-        if: matrix.suite == 'browser'
-        run: bunx playwright install --with-deps chromium
-
-      - name: Run the production editors in Chromium
-        if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser --shard=${{ matrix.shard }}/2
-
-      - name: Run the editor plugin hosts in Chromium
-        if: matrix.suite == 'browser'
-        run: bun run test:e2e:browser:plugins --shard=${{ matrix.shard }}/2
-
       - name: Upload corpus results
-        if: always() && matrix.suite == 'corpus'
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-timings
@@ -178,8 +129,124 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  browser-build:
+    name: Browser build
+    needs: route
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.browser || 'kyora-8x8' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.3'
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: e2e-browser
+          workspaces: |
+            . -> target
+            bindings -> target
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the packages and the desktop app
+        run: bun run pretest:e2e:browser
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: e2e-browser-build
+          path: |
+            apps/desktop/dist
+            packages/*/dist
+            packages/*/src/wasm
+            target/wasm-pack
+          if-no-files-found: error
+          retention-days: 3
+
+  browser:
+    name: ${{ matrix.name }}
+    needs: [route, browser-build]
+    if: ${{ !cancelled() }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || vars.BO_CI_SPILL != 'off' && needs.route.outputs.browser || 'kyora-8x8' }}
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            name: Browser editors (1/3)
+          - shard: 2
+            name: Browser editors (2/3)
+          - shard: 3
+            name: Browser editors (3/3)
+    env:
+      BETTEROFFICE_BROWSER_SHARD: ${{ matrix.shard }}/3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Configure test paths
+        run: |
+          printf '%s\n' \
+            "BETTEROFFICE_BROWSER_OUTPUT=$RUNNER_TEMP/browser-results" \
+            "PLAYWRIGHT_BROWSERS_PATH=$HOME/.cache/ms-playwright" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.3'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: e2e-browser-build
+
+      - name: Resolve the Playwright version
+        id: playwright
+        run: |
+          version="$(bunx playwright --version | awk '{print $2}')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+
+      - name: Install headless Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run the production editors in Chromium
+        run: bunx playwright test --config e2e/browser/playwright.config.ts --pass-with-no-tests
+
+      - name: Run the editor plugin hosts in Chromium
+        run: bunx playwright test --config e2e/browser/plugin-host/playwright.config.ts --pass-with-no-tests
+
       - name: Upload browser report and failure traces
-        if: always() && matrix.suite == 'browser'
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: e2e-browser-${{ matrix.shard }}
@@ -189,7 +256,7 @@ jobs:
 
   publish:
     name: Publish corpus timings
-    needs: scenarios
+    needs: corpus
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'openooxml/betteroffice'
     runs-on: ubuntu-latest
     timeout-minutes: 10

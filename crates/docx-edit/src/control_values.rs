@@ -5,11 +5,9 @@
 
 use std::collections::HashMap;
 
-#[cfg(feature = "wasm")]
 use yrs::Transact;
 use yrs::{Any, Map, MapRef, Out, ReadTxn};
 
-#[cfg(feature = "wasm")]
 use crate::{EditError, EditResult, EditingDoc};
 use crate::{KIND_KEY, OpError, OpResult};
 
@@ -192,7 +190,6 @@ pub(crate) fn guard_embed_insert<'a>(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
 impl EditingDoc {
     /// Whether the embed at `raw` in `story` is a plain- or rich-text content control.
     pub(crate) fn text_control_at(&self, story: &str, raw: u32) -> OpResult<bool> {

@@ -8,6 +8,9 @@ Office and macOS and are never committed. Point the script at the directories th
 
 `check` regenerates every table whose face it finds and reports any table that differs. Where two
 directories hold the same face, the first one listed wins: list Office's own fonts first.
+
+Japanese tables add punctuation, symbols, full-width forms and half-width katakana.
+Proportional Japanese faces also include kana; ideographs keep the substitute's widths.
 """
 
 import os
@@ -18,6 +21,15 @@ from pathlib import Path
 from fontTools.ttLib import TTCollection, TTFont
 
 PLAIN_STYLE_WORDS = {'regular', 'roman', 'book', 'normal', 'bold', 'italic', 'oblique'}
+JAPANESE_TABLES = {'MS_GOTHIC', 'MS_PGOTHIC', 'MS_UI_GOTHIC', 'MS_MINCHO', 'MS_PMINCHO'}
+PROPORTIONAL_JAPANESE_TABLES = {'MS_PGOTHIC', 'MS_UI_GOTHIC', 'MS_PMINCHO'}
+JAPANESE_EXTRA = (
+    set(range(0x2000, 0x2070)) | set(range(0x20A0, 0x20D0)) |
+    set(range(0x2100, 0x2150)) | set(range(0x2190, 0x219A)) |
+    set(range(0x2460, 0x2474)) | set(range(0x3000, 0x3040)) |
+    set(range(0xFF01, 0xFFA0)) | set(range(0xFFE0, 0xFFE7)) |
+    {ord(c) for c in '∀∂∃∇∈∋∑√∞∟∠∥∧∨∩∪∫∮∴∵∽≒≠≡≦≧⊂⊃⊆⊇⊥⌒■□▲△▼▽◆◇○◎●◯★☆♀♂♪♭♯'}
+)
 TABLES = Path(__file__).resolve().parents[2] / 'crates/ooxml-text/src/family_metrics.rs'
 
 
@@ -76,7 +88,7 @@ def rust(name, values):
 
 def main():
     tables, entries = parse(TABLES.read_text())
-    codes = sorted({code for values in tables.values() for code, _ in values[4]})
+    codes = {code for name, values in tables.items() if name not in JAPANESE_TABLES for code, _ in values[4]}
     mode, args = sys.argv[1], sys.argv[2:]
     if mode == 'print':
         name, dirs = args[0], args[1:]
@@ -95,7 +107,10 @@ def main():
         font = found.get((family, bold, italic))
         if font is None:
             continue
-        values = table(font, codes)
+        extra = codes | JAPANESE_EXTRA if const in JAPANESE_TABLES else codes
+        if const in PROPORTIONAL_JAPANESE_TABLES:
+            extra = extra | set(range(0x3040, 0x3100))
+        values = table(font, sorted(extra))
         if mode == 'print':
             print(rust(const, values))
             return
