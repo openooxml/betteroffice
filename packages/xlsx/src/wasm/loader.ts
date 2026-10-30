@@ -791,12 +791,14 @@ export function openWorkbook(
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
 const recoveryReaders = new WeakMap<WorkbookHandle, (throughSeq: number, preserveHistory: boolean) => Uint8Array>();
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function workbookRecoveryCheckpoint(handle: WorkbookHandle, throughSeq: number, preserveHistory = false): Uint8Array {
   const capture = recoveryReaders.get(handle);
   if (!capture) throw new TypeError('Workbook does not support recovery checkpoints');
   return capture(throughSeq, preserveHistory);
 }
 
+/** Checkpoints are only restorable by the same engine version and codec. */
 export function openWorkbookRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number,
   options: OpenWorkbookOptions = {}): WorkbookHandle {
   requireInitialized();

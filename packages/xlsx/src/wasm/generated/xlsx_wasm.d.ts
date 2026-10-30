@@ -98,6 +98,9 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
@@ -117,6 +120,9 @@ export class XlsxDocument {
      */
     rangeCellsJson(args: string): string;
     readCellsJson(request: string): string;
+    /**
+     * Checkpoints are only restorable by the same engine version and codec.
+     */
     recoveryCheckpoint(through_seq: number, preserve_history?: boolean | null): Uint8Array;
     /**
      * redo the last undone transaction; same shape as `undoJson`.

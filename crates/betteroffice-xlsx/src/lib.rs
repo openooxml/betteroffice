@@ -10,6 +10,12 @@ mod structured;
 mod types;
 mod workbook;
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::workbook::recovery::decode as recovery_decode;
+}
+
 pub use error::Error;
 pub use snapshot::{
     HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,

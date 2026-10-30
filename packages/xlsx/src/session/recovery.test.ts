@@ -54,7 +54,7 @@ test('checkpoint after N commands restores a fresh session boundary', async () =
     const projection = { ...opened.editState!, ...edit.editState, ...format.editState, ...selected.editState, ...mode.editState };
     const saved = await original.call.save();
     const checkpoint = await original.call.checkpoint();
-    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(7);
+    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(8);
     expect(await original.call.version()).toBe(mode.engineVersion);
     await expect(replacement.call.openRecovery({ ...checkpoint, throughSeq: checkpoint.throughSeq - 1 }))
       .rejects.toThrow('envelope mismatch');
@@ -97,30 +97,24 @@ function handle(version = 'engine:0') {
   } as unknown as WorkbookHandle;
 }
 
-function engineHeader(metadata = '{"collaborative":false}', version = 3) {
-  const payload = new TextEncoder().encode(metadata);
-  const engine = new Uint8Array(42 + payload.length);
+function engineHeader(collaborative = false, version = 8) {
+  const engine = new Uint8Array(42);
   engine.set([88, 76, 83, 88, 82, 69, 67, 86, version]);
-  engine[41] = payload.length;
-  engine.set(payload, 42);
+  engine[41] = Number(collaborative);
   return engine;
 }
 
-test('recovery reads engine checkpoints from before and since patterned fills', () => {
-  for (const version of [3, 5]) expect(isCollaborativeWorkbookRecovery(engineHeader(undefined, version))).toBe(false);
+test('recovery reads collaboration flags from binary engine checkpoints', () => {
+  expect(isCollaborativeWorkbookRecovery(engineHeader(false))).toBe(false);
+  expect(isCollaborativeWorkbookRecovery(engineHeader(true))).toBe(true);
 });
 
 test.each([
-  ['unsupported codec', engineHeader(undefined, 4)],
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 9, 255].map((codec) => [`unsupported codec ${codec}`, engineHeader(false, codec)] as const),
   ['invalid header', new Uint8Array(42)],
-  ['truncated header', engineHeader().slice(0, 41)],
-  ['truncated metadata', engineHeader().slice(0, -1)],
-  ['unterminated metadata length', new Uint8Array([...engineHeader().slice(0, 41), 128, 128, 128, 128, 128])],
-  ['malformed metadata', engineHeader('{')],
-  ['null metadata', engineHeader('null')],
-  ['missing collaboration mode', engineHeader('{}')],
-  ['invalid collaboration mode', engineHeader('{"collaborative":"false"}')],
-  ['invalid metadata encoding', engineHeader('{"collaborative":false,"value":"x"}').map((byte) => byte === 120 ? 255 : byte)],
+  ['truncated digest', engineHeader().slice(0, 40)],
+  ['missing flags', engineHeader().slice(0, 41)],
+  ['unknown flags', engineHeader().map((byte, index) => index === 41 ? 2 : byte)],
 ] as const)('recovery refuses %s before initialization', async (_name, engine) => {
   const opened = handle();
   const state = createWorkbookCommandState({ session: 'book', incarnation: 'first' },
@@ -252,18 +246,12 @@ test('recovery stores engine bytes without JSON expansion', () => {
   expect(decoded.engine.buffer).toBe(bytes.buffer);
 });
 
-test('engine checkpoints are read at codecs 3, 5, 6 and 7 and refused at any other', () => {
-  const engine = (codec: number, collaborative: boolean) => {
-    const metadata = new TextEncoder().encode(JSON.stringify({ collaborative }));
-    return new Uint8Array([...new TextEncoder().encode('XLSXRECV'), codec, ...new Uint8Array(32), metadata.length,
-      ...metadata]);
-  };
+test('old JSON engine checkpoints are refused before reading collaboration mode', () => {
+  const metadata = new TextEncoder().encode('{"collaborative":false}');
   for (const codec of [3, 5, 6, 7]) {
-    expect(isCollaborativeWorkbookRecovery(engine(codec, false))).toBe(false);
-    expect(isCollaborativeWorkbookRecovery(engine(codec, true))).toBe(true);
-  }
-  for (const codec of [2, 4, 8]) {
-    expect(() => isCollaborativeWorkbookRecovery(engine(codec, false))).toThrow('Unsupported workbook recovery checkpoint');
+    const engine = new Uint8Array([...new TextEncoder().encode('XLSXRECV'), codec, ...new Uint8Array(32),
+      metadata.length, ...metadata]);
+    expect(() => isCollaborativeWorkbookRecovery(engine)).toThrow('Unsupported workbook recovery checkpoint');
   }
 });
 
@@ -703,13 +691,11 @@ test('direct edits validate pending command settlements before synchronization',
   expect(() => host.validateDirectEdits()).toThrow('Direct edits require an unused command host');
 });
 
-test('cascade composition accepts released engine layouts and codecs six and seven', () => {
-  for (const codec of [3, 5, 6, 7]) {
-    for (const collaborative of [true, false]) {
-      expect(isCollaborativeWorkbookRecovery(engineHeader(JSON.stringify({ collaborative }), codec))).toBe(collaborative);
-    }
+test('cascade composition requires the binary engine codec', () => {
+  for (const collaborative of [true, false]) {
+    expect(isCollaborativeWorkbookRecovery(engineHeader(collaborative, 8))).toBe(collaborative);
   }
-  for (const codec of [2, 4, 8]) {
-    expect(() => isCollaborativeWorkbookRecovery(engineHeader(undefined, codec))).toThrow('Unsupported workbook recovery checkpoint');
+  for (const codec of [2, 3, 4, 5, 6, 7, 9]) {
+    expect(() => isCollaborativeWorkbookRecovery(engineHeader(false, codec))).toThrow('Unsupported workbook recovery checkpoint');
   }
 });

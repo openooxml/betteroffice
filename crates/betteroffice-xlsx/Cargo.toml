@@ -14,6 +14,7 @@ categories = ["parser-implementations", "rendering"]
 [features]
 default = ["raster"]
 raster = ["dep:xlsx-raster"]
+fuzzing = []
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["chart"] }
@@ -35,3 +36,4 @@ xlsx-model = { workspace = true, features = ["test-counters"] }
 xlsx-parse = { workspace = true, features = ["test-counters", "test-oracle"] }
 xlsx-render = { workspace = true, features = ["test-counters"] }
 png = "0.18"
+proptest = "1"

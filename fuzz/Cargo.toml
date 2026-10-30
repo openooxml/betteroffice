@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+betteroffice-xlsx = { path = "../crates/betteroffice-xlsx", features = ["fuzzing"] }
 ooxml-metafile = { package = "betteroffice-metafile", path = "../crates/ooxml-metafile", features = ["svg"] }
 ooxml-opc = { package = "betteroffice-opc", path = "../crates/ooxml-opc" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "../crates/pptx-parse" }
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "svg-decode"
 path = "fuzz_targets/svg-decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xlsx-recovery-decode"
+path = "fuzz_targets/xlsx-recovery-decode.rs"
 test = false
 doc = false
 bench = false

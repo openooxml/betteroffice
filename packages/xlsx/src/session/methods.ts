@@ -161,6 +161,7 @@ export interface WorkbookSessionEvents {
  */
 export type WorkbookSessionMethods = {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
+  /** Checkpoints are only restorable by the same engine version and codec. */
   openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
   version(): string;
   collaborationStateVector(): Uint8Array;
@@ -172,6 +173,7 @@ export type WorkbookSessionMethods = {
   applyEdits(request: XlsxEditRequest): XlsxEditResult;
   command(command: WorkbookCommand): WorkbookWireAck;
   edit(command: WorkbookSharedCommand): WorkbookSharedWireAck;
+  /** Checkpoints are only restorable by the same engine version and codec. */
   checkpoint(preserveHistory?: boolean): WorkbookCheckpoint;
   commandFrame(request?: WorkbookCommandFrameRequest): FrameEnvelope<WorkbookCommandWireFrame> | undefined;
   frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
