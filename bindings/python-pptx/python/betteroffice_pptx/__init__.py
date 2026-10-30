@@ -712,6 +712,10 @@ class Presentation:
             for value in json.loads(self._inner.proposals_json())
         ]
 
+    def list_proposals(self) -> list[Proposal]:
+        """Alias of proposals, named as in the TypeScript API."""
+        return self.proposals()
+
     def preview_proposal(self, proposal_id: str) -> ProposalPreview:
         """Preview edits against the current document without applying them."""
         return ProposalPreview._from_dict(
@@ -860,15 +864,31 @@ class Presentation:
         """
         return self._inner.state_vector()
 
+    def encode_state_vector(self) -> bytes:
+        """Alias of state_vector, named as in the TypeScript API."""
+        return self.state_vector()
+
     def state_as_update(self) -> bytes:
         """The whole document as one update, for a peer joining from nothing."""
         return self._inner.state_as_update()
+
+    def encode_state_as_update(
+        self, remote_state_vector: "bytes | bytearray | memoryview | None" = None,
+    ) -> bytes:
+        """Encode the full state, or a diff for the given remote state vector."""
+        if remote_state_vector is None:
+            return self.state_as_update()
+        return self.diff(remote_state_vector)
 
     def diff(self, state_vector: "bytes | bytearray | memoryview") -> bytes:
         """The update carrying everything the peer's state vector is missing."""
         return self._inner.diff(
             _as_bytes(state_vector, max_length=MAX_COLLABORATION_BYTES)
         )
+
+    def encode_diff(self, remote_state_vector: "bytes | bytearray | memoryview") -> bytes:
+        """Alias of diff, named as in the TypeScript API."""
+        return self.diff(remote_state_vector)
 
     def apply_update(self, update: "bytes | bytearray | memoryview") -> Deck:
         """Merge a peer's update and return the deck it produced."""
@@ -896,6 +916,10 @@ class Presentation:
     def add_undo_barrier(self) -> None:
         """Close the current undo step so the next edit starts a new one."""
         self._inner.add_undo_barrier()
+
+    def add_undo_boundary(self) -> None:
+        """Alias of add_undo_barrier, named as in the TypeScript API."""
+        self.add_undo_barrier()
 
     @property
     def undo_capture_mode(self) -> Literal["auto", "manual"]:
