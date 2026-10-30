@@ -9,6 +9,7 @@ export interface WasmTestWorker {
   readonly requests: ClientMessage[];
   readonly sources: Array<ArrayBuffer | WebAssembly.Module>;
   readonly modules: WebAssembly.Module[];
+  readonly urls: string[];
   readonly terminated: boolean;
   crash(): void;
 }
@@ -27,7 +28,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
             loader: 'js',
           }));
           build.onLoad({ filter: /\/wasm\/asset\.ts$/ }, () => ({
-            contents: 'export const wasmAssetUrl = () => new URL(testHarness.assetUrl);',
+            contents: `export const wasmAssetUrl = (png = true) => new URL(png
+              ? testHarness.assetUrl : testHarness.assetUrl.replace(/\\.wasm$/, '_lean.wasm'));`,
             loader: 'js',
           }));
           build.onLoad({ filter: /\/wasm\/loader\.ts$/ }, () => ({
@@ -101,6 +103,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
       readonly requests: ClientMessage[] = [];
       readonly sources: Array<ArrayBuffer | WebAssembly.Module> = [];
       readonly modules: WebAssembly.Module[] = [];
+      readonly urls: string[] = [];
       terminated = false;
       private readonly listeners = new Map<string, Set<EventListener>>();
       private readonly scopeListeners = new Map<string, Set<EventListener>>();
@@ -134,7 +137,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
             return compile ? compile() : Promise.resolve(module);
           },
           compile: () => { throw new Error('Unexpected byte compile'); },
-        }, () => {
+        }, (input: URL) => {
+          worker.urls.push(input.href);
           trace.push('fetch');
           return Promise.resolve(new Response(WASM_BYTES, {
             headers: { 'Content-Type': 'application/wasm' },

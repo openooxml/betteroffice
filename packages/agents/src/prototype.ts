@@ -68,7 +68,7 @@ export abstract class PrototypeDocument<Change, Step> {
   protected abstract currentVersion(): string;
   protected abstract validate(steps: Step[], version: string): void;
   protected abstract apply(steps: Step[], version: string): unknown;
-  protected abstract save(steps?: Step[]): Uint8Array;
+  protected abstract save(steps?: Step[]): Uint8Array | Promise<Uint8Array>;
   protected abstract reopen(bytes: Uint8Array): void;
   protected abstract dispose(): void;
 

@@ -236,6 +236,9 @@ impl Workbook {
             }
             return Ok((Arc::clone(&state.geometry), state.generation));
         }
+        xlsx_model::open_timing! {
+            let _timing = xlsx_model::open_timing::span("geometry_build");
+        }
         let geometry = Arc::new(GridGeometry::new(sheet_ref, &self.model.styles));
         cache.insert(
             sheet,

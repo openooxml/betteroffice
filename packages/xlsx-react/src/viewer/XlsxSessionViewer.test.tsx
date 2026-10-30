@@ -461,7 +461,10 @@ describe('workbook session viewer', () => {
         });
         const ready = mock((_api: XlsxWorkerViewerApi) => {});
         const errors = mock((_error: Error) => {});
-        const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+        let view!: ReturnType<typeof render>;
+        await act(async () => {
+          view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+        });
         expect(signal.aborted).toBe(false);
         if (close === 'unmount') view.unmount();
         else {
@@ -501,7 +504,10 @@ describe('workbook session viewer', () => {
     });
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
     const errors = mock((_error: Error) => {});
-    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+    });
     expect(worker.postMessage).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -517,7 +523,8 @@ describe('workbook session viewer', () => {
     const next = session();
     const opening = deferred<WorkbookSession>();
     const opener = open(old.viewer).mockImplementationOnce(() => opening.promise);
-    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    let view!: ReturnType<typeof render>;
+    await act(async () => { view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />); });
     opener.mockResolvedValue(next.viewer);
     view.rerender(<XlsxEditor legacySyncApi file={new Uint8Array([4])} readOnly experimentalWorkerOpen />);
     await opened();
@@ -1024,7 +1031,9 @@ describe('workbook session viewer', () => {
     { readOnly: true, experimentalWorkerOpen: false },
   ]) it(`keeps explicit local dispatch (${JSON.stringify(props)})`, async () => {
     const opener = open(session().viewer);
-    render(<XlsxEditor legacySyncApi {...props as XlsxInThreadEditorProps} experimentalWorkerOpen={false} />);
+    await act(async () => {
+      render(<XlsxEditor legacySyncApi {...props as XlsxInThreadEditorProps} experimentalWorkerOpen={false} />);
+    });
     expect(opener).not.toHaveBeenCalled();
     expect(painted.length).toBeGreaterThanOrEqual(1);
   });

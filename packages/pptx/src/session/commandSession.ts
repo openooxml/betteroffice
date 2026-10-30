@@ -8,6 +8,7 @@ import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
 import { CommandOutcomeUnknown } from './commandProtocol';
+import type { DefaultFontInstallation } from '../../../../shared/pptxDefaultFonts';
 import type {
   PresentationCommandClient, PresentationCommandFailure, PresentationCommandOpenResult,
 } from './commandProtocol';
@@ -22,6 +23,8 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
   readOnly?: boolean;
   observeChanges?: boolean;
   activeSlideIndex?: number;
+  /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
+  defaultFonts?: boolean;
   collaboration?: { clientId: number; initialUpdate?: Uint8Array };
   signal?: AbortSignal;
   onError?(error: PptxWorkerEditorFailedError): void;
@@ -61,6 +64,7 @@ export function createPptxWorkerSession(
     fonts: options.fonts, fallbackFonts: options.fallbackFonts,
     initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm,
     observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
+    defaultFonts: options.defaultFonts,
   };
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   const connectionErrors = new Set<(error: unknown) => void>();
@@ -141,6 +145,7 @@ export function createPptxWorkerSession(
       transport.close();
     },
   };
+  Object.assign(input, { pptxDefaultFontInstaller: (options as PptxWorkerSessionOptions & DefaultFontInstallation).pptxDefaultFontInstaller });
   const opening = createSharedPresentationCommandClient(bytes, input, monitored).then((opened) => {
     client = opened;
     offClientFailure = opened.subscribeFailure(fail);
