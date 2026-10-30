@@ -45,6 +45,7 @@ export default defineConfig([
       'wasm-edit': 'src/wasm/edit.ts',
       'wasm-parse': 'src/wasm/parse.ts',
       'wasm-preflight': 'src/wasm/preflight.ts',
+      'wasm-query': 'src/wasm/query.ts',
     },
     format: ['esm'],
     // cjs builds need the import.meta.url shim for the wasm asset URLs.

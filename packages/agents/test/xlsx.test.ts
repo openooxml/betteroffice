@@ -187,6 +187,20 @@ test('XLSX sort moves whole rows and formatting, preserves headers and handles m
   } finally { book.close(); }
 });
 
+test('XLSX export is byte-identical with or without a preview', async () => {
+  const saved: Record<string, string>[] = [];
+  for (const preview of [false, true]) {
+    const book = await openXlsx(await xlsxFixture());
+    try {
+      book.formatRanges({ version: book.overview().version, edits: [{ sheet: 'sheet:0', range: 'A3:C6', fill: '#FF0000' }] });
+      if (preview) for (const sheet of ['sheet:0', 'sheet:1']) book.previewRange({ sheet, range: 'A1:C6' });
+      const zip = await JSZip.loadAsync(await book.export());
+      saved.push(Object.fromEntries(await Promise.all(Object.values(zip.files).map(async file => [file.name, await file.async('string')] as const))));
+    } finally { book.close(); }
+  }
+  expect(saved[1]).toEqual(saved[0]);
+});
+
 test('XLSX previews return real PNG ranges, restore the active sheet and bound allocation', async () => {
   const book = await openXlsx(await xlsxFixture());
   try {

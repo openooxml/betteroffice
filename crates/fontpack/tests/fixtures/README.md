@@ -22,3 +22,6 @@ The Regular frame has no dictionary, the Bold `.ttf.zst` frame
 uses the Regular `.uw2` as its raw dictionary, and the Bold `.nodict.zst` frame
 is independent. Rust tests also compress the `.uw2` files in memory.
 TypeScript woff2t tests only require the built wasm decoder.
+`Synthetic-block-bomb.zst` is built byte by byte, not compressed: a frame that
+declares 1,000 bytes whose single compressed block holds 100 matches of 131,074
+bytes each. Both decoders must reject it without allocating the expansion.

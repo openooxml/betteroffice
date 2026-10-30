@@ -1,4 +1,4 @@
-// Builds the docx wasm cores (container / edit / parse / preflight) and
+// Builds the docx wasm cores (container / edit / parse / preflight / query) and
 // vendors the wasm-pack output into packages/docx/src/wasm/generated/. The glue
 // .js and the *_bg.wasm binaries are gitignored and rebuilt on demand
 // (predev/prebuild hooks) so the repo never carries multi-MB binaries.
@@ -28,6 +28,12 @@ const MODULES: WasmModule[] = [
     name: 'docx_preflight',
     generated: 'packages/docx/src/wasm/generated/preflight',
     cargoArgs: ['--locked', '--features', 'wasm'],
+  },
+  {
+    crate: 'docx-layout',
+    name: 'docx_query',
+    generated: 'packages/docx/src/wasm/generated/query',
+    cargoArgs: ['--locked', '--features', 'wasm-query'],
   },
 ];
 

@@ -567,7 +567,6 @@ pub struct EditApplication {
 }
 
 /// JSON of a policy outcome: the success body or the refusal, tagged with `ok`.
-#[cfg(feature = "wasm")]
 pub(crate) fn outcome_json<T: Serialize, R: Serialize>(
     outcome: &Result<T, R>,
 ) -> Result<String, serde_json::Error> {

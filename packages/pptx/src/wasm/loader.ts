@@ -79,6 +79,16 @@ export interface InspectPresentationOptions {
   includeMedia?: boolean;
 }
 
+/**
+ * Faces a save lays out text with, in a renderer of its own, so the saved
+ * bytes do not depend on the faces earlier renders registered with the handle.
+ */
+export interface SavePresentationOptions {
+  fonts: ReadonlyArray<PptxFontFace>;
+  /** Faces drawn only for characters the run's own face has no glyph for. */
+  fallbackFonts?: ReadonlyArray<PptxFontFace>;
+}
+
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
@@ -167,8 +177,12 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
-  /** serialize the presentation back to .pptx bytes, edits included. */
-  save(): Uint8Array;
+  /**
+   * serialize the presentation back to .pptx bytes, edits included. Normal
+   * autofit text the edits changed is fitted with the registered faces, or
+   * with `options.fonts` alone when given.
+   */
+  save(options?: SavePresentationOptions): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   /** `insertText` with the boundary's stage timings attached. */
   insertTextProfiled(
@@ -835,8 +849,16 @@ function openPresentationInternal(
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
     },
-    save(): Uint8Array {
-      return wasmCall(() => renderer.saveBytes(doc));
+    save(options?: SavePresentationOptions): Uint8Array {
+      if (!options) return wasmCall(() => renderer.saveBytes(doc));
+      const saver = construct(() => new PptxRenderer());
+      try {
+        for (const face of options.fonts) wasmCall(() => registerFont(saver, face));
+        for (const face of options.fallbackFonts ?? []) wasmCall(() => registerFont(saver, face, true));
+        return wasmCall(() => saver.saveBytes(doc));
+      } finally {
+        saver.free();
+      }
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(

@@ -6,11 +6,14 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { XlsxInThreadEditorProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
+import { asError } from './asError';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import {
   createWorkerEditorApi, type WorkerEditorApiBridge, type WorkerEditorSessionAccess,
   type XlsxWorkerEditorApi, XlsxWorkerEditorCollaborationError,
 } from './createWorkerEditorApi';
+export { asError } from './asError';
+export { XlsxWorkerSessionFailedError } from './workerEditorErrors';
 
 export const editableWorkbookSessionBackend = {
   open: openWorkbookSession,
@@ -29,12 +32,6 @@ export interface EditableWorkbookSessionOptions {
   onError(error: Error): void;
   onReady(): void | (() => void);
   isCurrent(): boolean;
-}
-
-export function asError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(
-    value && typeof value === 'object' && 'message' in value ? String(value.message) : String(value)
-  );
 }
 
 export class EditableWorkbookSession implements WorkerEditorSessionAccess {
@@ -207,14 +204,6 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
         reject(error);
       });
     });
-  }
-}
-
-export class XlsxWorkerSessionFailedError extends Error {
-  readonly code = 'worker-session-failed';
-  constructor(readonly cause: unknown) {
-    super(`Workbook worker session failed: ${asError(cause).message}`);
-    this.name = 'XlsxWorkerSessionFailedError';
   }
 }
 
