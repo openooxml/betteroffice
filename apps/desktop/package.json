@@ -21,6 +21,7 @@
     "@betteroffice/pptx-i18n": "workspace:*",
     "@betteroffice/fonts": "workspace:*",
     "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-intl": "workspace:*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

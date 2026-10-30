@@ -273,7 +273,8 @@ export type ResidentEngineSession = Pick<
     host: Document | undefined,
     comments: Comment[],
     record: ResidentSaveRecord,
-    stories?: readonly string[]
+    stories?: readonly string[],
+    yieldSave?: () => Promise<void>
   ): Promise<ArrayBuffer>;
 };
 
@@ -284,6 +285,14 @@ export async function createResidentEngineSession(
   requireUnreservedClientId(clientId);
   await preloadEditWasm();
   setEditWasmHeapLimit(heapLimitBytes);
+  return residentEngineSession(clientId);
+}
+
+export function createResidentSaveWarmupSession(): ResidentEngineSession {
+  return residentEngineSession(randomClientId());
+}
+
+function residentEngineSession(clientId: number): ResidentEngineSession {
   const hub = editSessionUpdateEvents(createEditSession(requireUnreservedClientId(clientId)));
   const session = hub.session;
   let partBase: Document | undefined;
@@ -1042,13 +1051,14 @@ export async function createResidentEngineSession(
       }
       return session.encode_diff_chunks(remoteStateVector.slice(), maxChunkBytes) as Uint8Array[];
     },
-    save: async (source, hostJson, host, comments, record, stories) => {
+    save: async (source, hostJson, host, comments, record, stories, yieldSave) => {
       const { saveResidentDocument } = await import('./residentSave');
+      if (yieldSave) await yieldSave();
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
         ? withPartMetadata(host ?? partDocument(), partMetadata(partDocument())) : host;
       if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
       return saveResidentDocument(
-        session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories
+        session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories, yieldSave
       );
     },
     markProjectionStories,
