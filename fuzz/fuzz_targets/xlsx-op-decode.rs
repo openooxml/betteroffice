@@ -218,7 +218,8 @@ macro_rules! object {
                 key: &'static str,
                 value: &T,
             ) -> serde_json::Result<()> {
-                self.fields.push((key.into(), value.serialize(ShapeSerializer)?));
+                self.fields
+                    .push((key.into(), value.serialize(ShapeSerializer)?));
                 Ok(())
             }
 
@@ -485,12 +486,18 @@ fn check_op(input: &[u8], direct: serde_json::Result<Op>, oracle: serde_json::Re
     match (&direct, &oracle) {
         (Ok(direct), Ok(oracle)) => {
             assert_eq!(direct, &Op::from(oracle.clone()));
-            assert_eq!(serde_json::to_vec(direct).unwrap(), serde_json::to_vec(oracle).unwrap());
+            assert_eq!(
+                serde_json::to_vec(direct).unwrap(),
+                serde_json::to_vec(oracle).unwrap()
+            );
         }
         (Err(_), Ok(oracle)) => {
             let fields = normalized_fields(input, root(input), oracle);
             let rebuilt = replace_fields(input, fields);
-            assert_eq!(serde_json::from_slice::<Op>(&rebuilt).unwrap(), Op::from(oracle.clone()));
+            assert_eq!(
+                serde_json::from_slice::<Op>(&rebuilt).unwrap(),
+                Op::from(oracle.clone())
+            );
             assert_eq!(
                 serde_json::from_str::<Op>(std::str::from_utf8(&rebuilt).unwrap()).unwrap(),
                 Op::from(oracle.clone())
@@ -511,8 +518,14 @@ fn check_op(input: &[u8], direct: serde_json::Result<Op>, oracle: serde_json::Re
         (Err(_), Err(_)) => {}
     }
     for canonical in [
-        direct.as_ref().ok().map(|op| serde_json::to_vec(op).unwrap()),
-        oracle.as_ref().ok().map(|op| serde_json::to_vec(op).unwrap()),
+        direct
+            .as_ref()
+            .ok()
+            .map(|op| serde_json::to_vec(op).unwrap()),
+        oracle
+            .as_ref()
+            .ok()
+            .map(|op| serde_json::to_vec(op).unwrap()),
     ]
     .into_iter()
     .flatten()
@@ -543,7 +556,10 @@ fn check_ops(
             .collect();
         let rebuilt = replace_fields(input, fields);
         let expected = oracle.iter().cloned().map(Op::from).collect::<Vec<_>>();
-        assert_eq!(serde_json::from_slice::<Vec<Op>>(&rebuilt).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_slice::<Vec<Op>>(&rebuilt).unwrap(),
+            expected
+        );
         assert_eq!(
             serde_json::from_str::<Vec<Op>>(std::str::from_utf8(&rebuilt).unwrap()).unwrap(),
             expected
@@ -590,8 +606,16 @@ fn check_ops(
 
 #[cfg(not(test))]
 fuzz_target!(|data: &[u8]| {
-    check_op(data, serde_json::from_slice(data), serde_json::from_slice(data));
-    check_ops(data, serde_json::from_slice(data), serde_json::from_slice(data));
+    check_op(
+        data,
+        serde_json::from_slice(data),
+        serde_json::from_slice(data),
+    );
+    check_ops(
+        data,
+        serde_json::from_slice(data),
+        serde_json::from_slice(data),
+    );
     if let Ok(text) = std::str::from_utf8(data) {
         check_op(data, serde_json::from_str(text), serde_json::from_str(text));
         check_ops(data, serde_json::from_str(text), serde_json::from_str(text));
@@ -692,10 +716,18 @@ mod tests {
             r##"{"type":"removeSheet","index":0,"unknown":1e309}"##,
         ] {
             let bytes = input.as_bytes();
-            check_op(bytes, serde_json::from_slice(bytes), serde_json::from_slice(bytes));
+            check_op(
+                bytes,
+                serde_json::from_slice(bytes),
+                serde_json::from_slice(bytes),
+            );
             let vector = format!("[{input}]");
             let bytes = vector.as_bytes();
-            check_ops(bytes, serde_json::from_slice(bytes), serde_json::from_slice(bytes));
+            check_ops(
+                bytes,
+                serde_json::from_slice(bytes),
+                serde_json::from_slice(bytes),
+            );
         }
     }
 
