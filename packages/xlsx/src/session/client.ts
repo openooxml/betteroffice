@@ -8,7 +8,6 @@ import {
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
-import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import {
   createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
   type OpenWorkbookOptions, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
@@ -118,8 +117,6 @@ export interface WorkbookSession {
   readonly failure: SessionFailure | undefined;
   dispose(): Promise<void>;
 }
-
-export const workbookFontRuntimes = new WeakMap<WorkbookSession, { decoder: FontDecoder }>();
 
 function copyBytes(bytes: Uint8Array | ArrayBuffer): Uint8Array<ArrayBuffer> {
   return ArrayBuffer.isView(bytes)
@@ -347,8 +344,6 @@ export async function createWorkbookSession(
     throw error;
   }
   let state: WorkbookSessionState;
-  const fontRuntime = { decoder: rpcFontDecoder((bytes, input, transfer) =>
-    client.callWithTransfer('decodeFontFace', [bytes, input], transfer)) };
   let commandContext: WorkbookCommandContext | undefined;
   let initialVersion: string | undefined;
   let initialPaint: WorkbookInitialPaint | undefined;
@@ -688,6 +683,5 @@ export async function createWorkbookSession(
   });
   if (peerSource) peerSources.set(session, peerSource);
   if (recovery) workbookSessionRecovery.set(session, recovery.recovery);
-  workbookFontRuntimes.set(session, fontRuntime);
   return session;
 }

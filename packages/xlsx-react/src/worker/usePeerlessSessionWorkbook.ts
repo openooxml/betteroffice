@@ -1,5 +1,4 @@
 import { workbookSessionRecovery, WorkbookRecoveryReplayError } from '@betteroffice/xlsx';
-import { workbookFontRuntimes } from '@betteroffice/xlsx/worker';
 import type { OpenWorkbookSessionOptions, WorkbookSession } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { XlsxEditorCollaborationOptions } from '../XlsxEditor';
@@ -36,7 +35,6 @@ export class PeerlessWorkbookSession {
   failure: XlsxWorkerSessionFailedError | null = null;
   beforeRetire: (() => void) | null = null;
   readonly session: WorkbookSession;
-  readonly fontRuntime: ReturnType<typeof workbookFontRuntimes.get>;
   private painted = false;
   private cleanup: void | (() => void) = undefined;
   private readonly listeners = new Set<() => void>();
@@ -63,7 +61,6 @@ export class PeerlessWorkbookSession {
     readonly generation: number,
     private readonly options: EditableWorkbookSessionOptions & { checkpointScheduler?: CheckpointScheduler }
   ) {
-    this.fontRuntime = workbookFontRuntimes.get(workerSession);
     this.checkpointScheduler = options.checkpointScheduler ?? {
       now: () => performance.now(),
       schedule(callback, delay) {

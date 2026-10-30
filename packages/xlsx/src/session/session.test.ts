@@ -8,7 +8,7 @@ import {
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { XlsxEditRequest, XlsxRangeTarget, XlsxReadResult } from '../edits';
 import { initWasm, openWorkbook, type Viewport, type WorkbookHandle } from '../wasm/loader';
-import { createWorkbookSession, workbookFontRuntimes, type WorkbookSession } from './client';
+import { createWorkbookSession, type WorkbookSession } from './client';
 import { createWorkbookSessionHost } from './host';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -47,20 +47,6 @@ test('font decoder RPC initializes without a workbook and propagates errors', as
     expect(new Uint8Array((await client.call.decodeFontFace(bytes, { codec: 'zstd' })).font))
       .toEqual(new Uint8Array(bytes));
   } finally { await client.dispose(); }
-});
-
-test('workbook font runtime decodes transferable copies through its worker', async () => {
-  const worker = await createTestWorkbookSession(fixture);
-  const bytes = new Uint8Array([99, 0, 1, 0, 0, 99]);
-  try {
-    const result = await workbookFontRuntimes.get(worker)!.decoder(bytes.subarray(1, 5), {
-      codec: 'zstd', dict: bytes.subarray(1, 3), maxOutput: 1024,
-    });
-    expect(new Uint8Array(result.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
-    expect(bytes.byteLength).toBe(6);
-    await expect(workbookFontRuntimes.get(worker)!.decoder(bytes, { codec: 'unsupported' }))
-      .rejects.toThrow('unsupported font face codec: unsupported');
-  } finally { await worker.dispose(); }
 });
 
 function read(result: XlsxReadResult): Extract<XlsxReadResult, { ok: true }> {
