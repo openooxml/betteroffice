@@ -10,7 +10,6 @@ import { decodeAwarenessUpdate, decodeMessages, encodeAwarenessUpdate, encodeSyn
 import type { AsyncCollaborationReplica, CollaborationError, CollaborationProviderOptions, CollaborationTransport, CollaborationTransportEvent } from '../collaboration/types';
 import type { PptxReadResult } from '../edits';
 import type { SlideDisplayList } from '../types';
-import { engineBackend } from '../wasm/engine';
 import { initWasm, openPresentation, type PresentationHandle } from '../wasm/loader';
 import { createPresentationCollaboration } from './collaboration';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
@@ -231,7 +230,7 @@ test('cursor pipe commands preserve a word drag gesture', async () => {
   } finally { await room.dispose(); }
 });
 
-for (const shared of [true, false]) test.skipIf(engineBackend() === 'native')(`worker burst merges once with ${shared ? 'shared' : 'direct'} commands`, async () => {
+for (const shared of [true, false]) test(`worker burst merges once with ${shared ? 'shared' : 'direct'} commands`, async () => {
   const room = await open({}, shared);
   const peer = openPresentation(bytes, { clientId: 8102 });
   try {
@@ -253,11 +252,11 @@ for (const shared of [true, false]) test.skipIf(engineBackend() === 'native')(`w
     expect(command.kind === 'collabPipe' && command.payload.ops.filter((op) => op.op === 'event')).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1]).toHaveLength(24);
     expect(room.transferred[room.transferred.length - 1].every((buffer) => buffer.byteLength === 0)).toBe(true);
-    expect(acks.map((ack) => ({ burstSeq: command.seq, throughSeq: ack.throughSeq, frame: ack.frame?.epoch,
-      outcomes: ack.outcomes.map((outcome) => outcome.status) }))).toHaveLength(1);
-    expect(acks[0].frame?.epoch).toBe(before.frame + 1);
-    expect(acks[0].version).not.toBe(before.version);
-    expect(acks[0].outcomes).toMatchObject([{ status: 'applied', committed: true }]);
+    const commandAcks = acks.filter((ack) => !('defaultFonts' in ack));
+    expect(commandAcks.map((ack) => ack.throughSeq)).toEqual([command.seq]);
+    expect(commandAcks[0].frame?.epoch).toBe(before.frame + 1);
+    expect(commandAcks[0].version).not.toBe(before.version);
+    expect(commandAcks[0].outcomes).toMatchObject([{ status: 'applied', committed: true }]);
     expect(room.client.state.editState.canUndo).toBe(false);
     const converged = content((await room.client.read()).result).stories[0]!;
     expect(converged.text).toBe(content(peer.readContent()).stories[0]!.text);
