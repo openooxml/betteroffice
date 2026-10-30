@@ -20,6 +20,7 @@ mod error;
 mod exports;
 mod fonts;
 mod frames;
+pub mod free;
 mod history;
 mod host;
 mod identity;
