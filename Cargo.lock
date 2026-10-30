@@ -107,6 +107,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
  "betteroffice-ooxml-diff",
+ "betteroffice-ooxml-font-preflight",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "foldhash",
@@ -138,6 +139,7 @@ name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
@@ -239,10 +241,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "quick-xml",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "betteroffice-ooxml-text"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -345,6 +358,7 @@ name = "betteroffice-pptx-render"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-opc",

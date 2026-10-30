@@ -11,11 +11,14 @@ await mkdir(output, { recursive: true });
 const faces = await Promise.all(BUNDLED_FONTS.map(async (face) => {
   const latin = isLatinFont(face.file);
   const file = face.file.replace(/\.zst$/, '');
-  const source = resolve(root, 'packages', face.script?.startsWith('cjk-') ? 'fonts-cjk' : 'fonts', 'assets', file);
-  const bytes = !latin && face.file.endsWith('.ttf.zst')
+  const source = resolve(root, 'packages/fonts/assets', file);
+  const bytes = !latin && face.file.endsWith('.zst')
     ? new Uint8Array(await loadPackedFontBytes(
         face,
-        async (dependency) => pathToFileURL(resolve(root, 'packages/fonts-intl/assets', dependency.file)),
+        async (dependency) => pathToFileURL(resolve(
+          root, 'packages', face.script?.startsWith('cjk-') ? 'fonts-cjk' : 'fonts-intl',
+          'assets', dependency.file,
+        )),
       ))
     : await readFile(source);
   if (!latin && bytes.length !== face.byteLength) throw new Error(`Font size mismatch: ${face.file}`);
