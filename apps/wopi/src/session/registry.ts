@@ -7,6 +7,14 @@ import { FileJournal } from "./journal";
 import type { SessionLogger, SessionScheduler } from "./scheduler";
 import type { openServerReplica } from "../replica/replica";
 
+function cleanWopiSrc(wopiSrc: string): string {
+  const url = new URL(wopiSrc);
+  url.searchParams.delete("access_token");
+  url.searchParams.delete("access_token_ttl");
+  url.hash = "";
+  return url.toString();
+}
+
 /** Dependencies for a session registry. */
 export interface SessionRegistryDeps {
   config: WopiConfig;
@@ -34,11 +42,10 @@ export class SessionRegistry {
     this.instanceId = deps.instanceId ?? deps.config.instanceId ?? randomUUID();
   }
 
-  /** File key for a host and WOPISrc, without query or fragment. */
+  /** File key for a host and WOPISrc. */
   static fileKey(hostId: string, wopiSrc: string): string {
-    const url = new URL(wopiSrc);
-    url.search = "";
-    url.hash = "";
+    const url = new URL(cleanWopiSrc(wopiSrc));
+    url.searchParams.sort();
     return `${hostId}:${url.toString()}`;
   }
 
@@ -72,14 +79,11 @@ export class SessionRegistry {
     const key = SessionRegistry.fileKey(hostId, wopiSrc);
     const existing = this.get(key);
     if (existing) return existing;
-    const url = new URL(wopiSrc);
-    url.search = "";
-    url.hash = "";
     const journalDir = this.#deps.journalDir ?? this.#config.journalDir;
     const session = new FileSession({
       hostClient: this.#deps.hostClient,
       hostId,
-      wopiSrc: url.toString(),
+      wopiSrc: cleanWopiSrc(wopiSrc),
       fileKey: key,
       instanceId: this.instanceId,
       logger: this.#deps.logger,
@@ -90,6 +94,7 @@ export class SessionRegistry {
       reconnectGraceMs: this.#config.reconnectGraceMs,
       openReplica: this.#deps.openReplica,
       autosave: this.#deps.autosave,
+      isLiveLock: (lock) => this.list().some((live) => live.lockId === lock),
       onClosed: (closed) => {
         if (this.#sessions.get(closed.fileKey) === closed) this.#sessions.delete(closed.fileKey);
       },

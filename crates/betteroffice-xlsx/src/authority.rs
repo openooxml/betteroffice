@@ -160,6 +160,7 @@ pub(crate) enum AuthorityError {
 struct WorkbookBase {
     bootstrap_client_id: u64,
     date_system: DateSystem,
+    full_precision: Option<bool>,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
     fingerprints: BTreeMap<i64, Vec<String>>,
@@ -232,6 +233,7 @@ impl WorkbookBase {
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
+            full_precision: Some(model.full_precision),
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints,
@@ -459,6 +461,7 @@ impl WorkbookBase {
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
+            full_precision: Some(model.full_precision),
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints,
@@ -507,6 +510,7 @@ impl WorkbookBase {
         WorkbookModel {
             sheets: Vec::new(),
             date_system: self.date_system,
+            full_precision: self.full_precision.unwrap_or(true),
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
@@ -802,7 +806,7 @@ impl WorkbookAuthority {
         }
         let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
-        base.date_system.write(&mut writer);
+        snapshot::CalculationSettings(base.date_system, base.full_precision).write(&mut writer);
         base.defined_names.write(&mut writer);
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);
@@ -864,6 +868,16 @@ impl WorkbookAuthority {
         writer.into_bytes()
     }
 
+    pub(crate) fn restore_full_precision(&mut self, full_precision: bool) {
+        if self.base.full_precision != Some(full_precision) {
+            Arc::make_mut(&mut self.base).full_precision = Some(full_precision);
+        }
+    }
+
+    pub(crate) fn full_precision_setting(&self) -> Option<bool> {
+        self.base.full_precision
+    }
+
     /// `row_styles` reads the row defaults that follow the Yrs state; a state
     /// releases before them encoded ends there.
     pub(crate) fn restore_recovery_state(
@@ -879,9 +893,12 @@ impl WorkbookAuthority {
             return Err(SnapshotError::new("Recovery client id is out of range"));
         }
         let mut reader = Reader::new(bytes);
+        let bootstrap_client_id = Codec::read(&mut reader)?;
+        let snapshot::CalculationSettings(date_system, full_precision) = Codec::read(&mut reader)?;
         let mut base = WorkbookBase {
-            bootstrap_client_id: Codec::read(&mut reader)?,
-            date_system: Codec::read(&mut reader)?,
+            bootstrap_client_id,
+            date_system,
+            full_precision,
             defined_names: Codec::read(&mut reader)?,
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,
@@ -1048,6 +1065,21 @@ impl WorkbookAuthority {
 
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
+    }
+
+    pub(crate) fn inherit_xf_xml_markers(&mut self, source: &Stylesheet) {
+        if !self.base.styles.has_xf_xml_markers() {
+            Arc::make_mut(&mut self.base)
+                .styles
+                .inherit_xf_xml_markers(source);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_xf_xml_markers_for_test(&mut self) {
+        let mut value = serde_json::to_value(&self.base.styles).unwrap();
+        value.as_object_mut().unwrap().remove("xfs_with_extra_xml");
+        Arc::make_mut(&mut self.base).styles = serde_json::from_value(value).unwrap();
     }
 
     pub(crate) fn snapshot_revision(&self) -> u64 {
@@ -6221,6 +6253,9 @@ fn fingerprint_model(
             validate_schema_version(spec.schema_version)?;
             let mut hasher = Sha256::new();
             hasher.update(fingerprint_domain(spec.schema_version, spec.reading));
+            if !model.full_precision {
+                hasher.update(b"fullPrecision=0");
+            }
             let base = if spec.include_defined_names {
                 serde_json::to_vec(&(
                     model.date_system,
@@ -6938,6 +6973,9 @@ fn fingerprint_model_with_row_domain_oracle(
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
     hasher.update(domain);
+    if !model.full_precision {
+        hasher.update(b"fullPrecision=0");
+    }
     let reading = TAGGED_FINGERPRINT_READINGS
         .into_iter()
         .chain([

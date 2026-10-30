@@ -45,11 +45,11 @@ All props below are optional. Omit the document source to show the placeholder.
 | `onError` | `(error: Error, info?: DocxErrorInfo) => void` | Receive errors; recoverable reports include `recoverable: true`. |
 | `collaboration` | `DocxEditorCollaborationOptions` | Configure the shared replica. |
 | `showToolbar` | `boolean` | Show built-in or supplied chrome; defaults to `true`. |
-| `toolbar` | `ReactNode` | Replace the toolbar; `null` hides it. Experimental composition API. |
+| `toolbar` | `ReactNode` | Replace the toolbar; `null` hides it. The composition API can change in minor releases. |
 | `showRuler` | `boolean` | Show the ruler; defaults to `false`. |
 | `showZoomControl` | `boolean` | Show zoom controls; defaults to `true`. |
 | `showHiddenText` | `boolean` | Include hidden text in layout; defaults to `false`. |
-| `previewFirstPage` | `boolean` | Experimental early page preview; off by default and ignored with collaboration. |
+| `previewFirstPage` | `boolean` | Paint a display-only first page while the document opens; off by default and ignored with collaboration. |
 | `onFirstPagePainted` | `() => void` | Called once per document when its first pages paint. |
 | `pageMirror` | `'full' \| 'text'` | Accessible page DOM; defaults to `'full'`. |
 | `measurementFontProvider` | `BundledFontProvider` | Override the measurement font provider for this editor. |
@@ -124,10 +124,10 @@ proposal access does not enable typing, edit batches, commands, or plugin writes
 
 ## Toolbar and plugins
 
-Use the experimental composition API to arrange built-in controls or supply external chrome;
+Use the composition API to arrange built-in controls or supply external chrome;
 see [compose the DOCX toolbar](https://docs.betteroffice.dev/docs/javascript#compose-the-docx-toolbar).
-The plugin API is experimental too. For host panels, overlays, sidebar items, lifecycle, and
-granted operations, see
+Both the composition and plugin APIs can change in minor releases. For host panels, overlays,
+sidebar items, lifecycle, and granted operations, see
 [host DOCX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-docx-editor-plugins).
 
 ## Edit batches and paragraph anchors

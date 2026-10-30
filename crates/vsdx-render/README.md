@@ -18,5 +18,5 @@ VSDX resolved-scene to display-list compiler and hit tester.
 
 Geometry sections keep their individual `IX` identities. Enabled or unevaluable
 section-level `NoFill`, `NoLine`, and `NoShow` controls produce an explicit
-unsupported placeholder; their paint semantics are not yet implemented. Disabled
+unsupported placeholder; their paint semantics are not implemented. Disabled
 controls remain renderable. The original section XML remains preserved on save.

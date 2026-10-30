@@ -396,6 +396,15 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
   const text = run.allCaps ? run.text.toUpperCase() : run.text;
   if (run.leaderGlyphs?.glyph && (run.leaderGlyphs.count ?? 0) > 0) {
     drawLeaderText(ctx, run, substituteScale);
+  } else if (run.canvasClusters?.length) {
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+    if ('wordSpacing' in ctx) ctx.wordSpacing = '0px';
+    for (const cluster of run.canvasClusters) {
+      const x = run.x + cluster.offset;
+      if (!drawModernRunText(ctx, cluster.text, x, run.baselineY, run, rect)) {
+        drawCanvasTextWithEffects(ctx, cluster.text, x, run.baselineY, run);
+      }
+    }
   } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
     drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
   }
