@@ -142,6 +142,7 @@ describe("FileJournal", () => {
       const session = [...h.registry.list()][0]!;
       const client = await openTestClient(a.joinPayload, sourceBytes(format), 93001);
       try {
+        expect(session.baselineGeneration).toBe(1);
         client.edit("saved-edit ", 0);
         session.applyUpdate(a.user.id, client.encodeStateAsUpdate(session.replica!.encodeStateVector()));
         await h.clock.advance(30000);
@@ -155,6 +156,7 @@ describe("FileJournal", () => {
         const b = await registry2.join({ hostId: "testhost", wopiSrc: SRC, accessToken: "tok-b", accessTokenTtl: 0, mode: "edit" });
         const session2 = [...registry2.list()][0]!;
         try {
+          expect(session2.baselineGeneration).toBe(2);
           expect(session2.replayStats?.rejected).toBe(0);
           expect(session2.replayStats?.accepted).toBeGreaterThan(0);
           expect(session2.dirty).toBe(true);

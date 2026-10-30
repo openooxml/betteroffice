@@ -1,5 +1,6 @@
 import { version } from '../../package.json';
 import wasmInit, {
+  decodeFontFace as wasmDecodeFontFace,
   decodeTiffPng as wasmDecodeTiffPng,
   exportPptxMarkdownJson as wasmExportPptxMarkdownJson,
   exportPptxStructuredJson as wasmExportPptxStructuredJson,
@@ -31,6 +32,7 @@ export interface SelectBackendOptions {
 }
 
 interface NativeEngineModule {
+  decodeFontFace?: unknown;
   decodeTiffPng?: unknown;
   exportPptxMarkdownJson?: unknown;
   exportPptxStructuredJson?: unknown;
@@ -177,6 +179,14 @@ export function engineBackend(): EngineBackend {
 }
 
 const nativeModule = backend === 'native' ? (loadedNative as NativeEngineModule) : undefined;
+
+export function decodeFontFace(...args: Parameters<typeof wasmDecodeFontFace>): ReturnType<typeof wasmDecodeFontFace> {
+  if (backend === 'wasm') return wasmDecodeFontFace(...args);
+  if (typeof nativeModule?.decodeFontFace !== 'function') {
+    throw new Error('@betteroffice/pptx-native does not export decodeFontFace');
+  }
+  return (nativeModule.decodeFontFace as typeof wasmDecodeFontFace)(...args);
+}
 
 export const decodeTiffPng = (nativeModule?.decodeTiffPng ??
   wasmDecodeTiffPng) as typeof wasmDecodeTiffPng;

@@ -67,6 +67,7 @@ Per-layer crates for single pipeline stages:
 - [betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff): the token diff behind proposal previews and DOCX comparison.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): shared DrawingML colors, themes and geometry.
 - [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): EMF, EMF+ and WMF replay into vector drawings and SVG.
+- [betteroffice-fonts](https://crates.io/crates/betteroffice-fonts): the font pack decoder (zstd and woff2t) shared by every engine; the pack builder is behind the `build` feature.
 
 ## Python packages
 

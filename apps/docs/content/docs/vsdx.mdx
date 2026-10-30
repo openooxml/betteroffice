@@ -30,6 +30,8 @@ bounds.
 
 `@betteroffice/vsdx` provides the Wasm engine and Canvas display-list painter. Initialize the Wasm module before opening a diagram.
 
+`decodeFontFace(bytes, { codec, dict?, maxOutput? })` from `@betteroffice/vsdx` asynchronously decodes a packed font with the engine into `{ font, payload? }` ArrayBuffers; it rejects on invalid options or decode errors without retrying another decoder.
+
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
 
 ## Rendering

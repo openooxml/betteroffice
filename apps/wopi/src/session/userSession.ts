@@ -10,6 +10,8 @@ export interface UserSessionInit {
   friendlyName: string;
   canWrite: boolean;
   joinedAt: number;
+  postMessageOrigin?: string;
+  closeUrl?: string;
 }
 
 /** Per user handle inside a file session. The token is never serialized. */
@@ -23,8 +25,11 @@ export class UserSession {
   readonly friendlyName: string;
   canWrite: boolean;
   readonly joinedAt: number;
+  readonly postMessageOrigin: string;
+  readonly closeUrl: string;
   lastSeen: number;
   connected: boolean;
+  connectionGeneration = 0;
 
   constructor(init: UserSessionInit) {
     this.id = randomBytes(32).toString("base64url");
@@ -36,6 +41,8 @@ export class UserSession {
     this.friendlyName = init.friendlyName;
     this.canWrite = init.canWrite;
     this.joinedAt = init.joinedAt;
+    this.postMessageOrigin = init.postMessageOrigin ?? "";
+    this.closeUrl = init.closeUrl ?? "";
     this.lastSeen = init.joinedAt;
     this.connected = true;
   }
@@ -55,6 +62,8 @@ export class UserSession {
       friendlyName: this.friendlyName,
       canWrite: this.canWrite,
       joinedAt: this.joinedAt,
+      postMessageOrigin: this.postMessageOrigin,
+      closeUrl: this.closeUrl,
       lastSeen: this.lastSeen,
       connected: this.connected,
     };

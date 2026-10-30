@@ -13,6 +13,7 @@
 import wasmInit, {
   initSync,
   EditSession,
+  decodeFontFace as decodePackedFontFace,
   export_docx_markdown_json,
   export_docx_structured_json,
   find_docx_content_controls_json,
@@ -123,3 +124,4 @@ export function renderDocxMarkdownWithPagesJson(content: string, options: string
 }
 
 export type { EditSession };
+export { decodePackedFontFace };

@@ -28,3 +28,8 @@ test('the Rust publish set respects each crate manifest', () => {
     expect(manifest.package.publish).toEqual(published ? ['crates-io'] : false);
   }
 });
+
+test('the shared font decoder publishes before every engine', () => {
+  expect(RUST_CRATES[0]).toEqual({ name: 'betteroffice-fonts', dependency: 'betteroffice-fonts' });
+  expect(RUST_PUBLISH_CRATES[0]!.name).toBe('betteroffice-fonts');
+});

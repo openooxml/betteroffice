@@ -8,9 +8,38 @@ use betteroffice_docx::{
     Document, EditCtx, EditOrigin, ImageScope, NoteKind, ParseLimits, SaveOptions,
     structured::ExportFailure,
 };
-use napi::bindgen_prelude::{AsyncTask, Buffer, JsObjectValue, Task, ToNapiValue, TypeName};
+use napi::bindgen_prelude::{
+    AsyncTask, Buffer, JsObjectValue, Task, ToNapiValue, TypeName, Uint8Array,
+};
 use napi::{Env, Error, JsTypeError, Result, Status, ValueType, sys};
 use napi_derive::napi;
+
+#[napi(object)]
+pub struct DecodedFontFace {
+    pub font: Uint8Array,
+    pub payload: Option<Uint8Array>,
+}
+
+/// Decodes one font pack face using this engine's linked decoder.
+#[napi(
+    js_name = "decodeFontFace",
+    ts_args_type = "bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null",
+    ts_return_type = "DecodedFontFace"
+)]
+pub fn decode_font_face(
+    bytes: Uint8Array,
+    codec: String,
+    dict: Option<Uint8Array>,
+    max_output: Option<f64>,
+) -> Result<DecodedFontFace> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(&bytes, &codec, dict.as_deref(), max_output)
+            .map_err(|error| Error::new(napi::Status::GenericFailure, error.to_string()))?;
+    Ok(DecodedFontFace {
+        font: Uint8Array::new(decoded.font),
+        payload: decoded.payload.map(Uint8Array::new),
+    })
+}
 
 fn error(reason: impl ToString) -> Error {
     Error::from_reason(reason.to_string())
