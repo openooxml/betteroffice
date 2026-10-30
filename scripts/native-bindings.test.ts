@@ -393,6 +393,8 @@ describe('native package release wiring', () => {
     expect(xlsx.run).toContain(
       'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx scripts/parity/parity.test.ts scripts/native-engine.test.ts'
     );
+    expect(xlsx.run).toContain('bun run build:docx-wasm');
+    expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(xlsx));
     const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     expect(root.scripts.test).not.toContain('bindings');
@@ -415,10 +417,11 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('package assembly is path-filtered and builds every format', () => {
+  test('package assembly runs after merges to main, path-filtered, and builds every format', () => {
     expect(packages.name).toBe('Native packages');
-    expect(Object.keys(packages.on).sort()).toEqual(['pull_request', 'workflow_dispatch']);
-    expect(packages.on.pull_request.paths).toEqual([
+    expect(Object.keys(packages.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(packages.on.push.branches).toEqual(['main']);
+    expect(packages.on.push.paths).toEqual([
       'bindings/*-native/**',
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',

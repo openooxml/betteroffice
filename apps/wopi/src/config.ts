@@ -14,8 +14,10 @@ export interface WopiConfig {
   journalDir?: string;
   instanceId?: string;
   maxEditorsPerFile?: number;
+  reconnectGraceMs?: number;
 }
 
+export const DEFAULT_RECONNECT_GRACE_MS = 30_000;
 export const DEFAULT_MAX_FILE_BYTES = 536870912;
 export const DEFAULT_PROOF_KEY_FILE = "data/proof-key.pem";
 
@@ -150,6 +152,15 @@ function parseMaxEditors(env: Record<string, string | undefined>): number {
   return value;
 }
 
+function parseReconnectGrace(env: Record<string, string | undefined>): number {
+  const raw = env.WOPI_RECONNECT_GRACE_MS;
+  if (raw === undefined) return DEFAULT_RECONNECT_GRACE_MS;
+  if (!/^\d+$/.test(raw)) fail("WOPI_RECONNECT_GRACE_MS must be a positive integer");
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) fail("WOPI_RECONNECT_GRACE_MS must be a positive integer");
+  return value;
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): WopiConfig {
   return {
     publicUrl: parsePublicUrl(env),
@@ -160,5 +171,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     journalDir: optionalFile(env, "WOPI_JOURNAL_DIR"),
     instanceId: optionalFile(env, "WOPI_INSTANCE_ID"),
     maxEditorsPerFile: parseMaxEditors(env),
+    reconnectGraceMs: parseReconnectGrace(env),
   };
 }

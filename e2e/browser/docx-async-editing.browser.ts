@@ -57,10 +57,19 @@ async function expectMirror(page: Page, paragraphs: string[]) {
   await expect.poll(() => mirrorText(page)).toBe(paragraphs.join('').replace(/\s/g, ''));
 }
 
+const downloadBurst = { count: 10, ms: 1_500 };
+const downloads = new WeakMap<Page, number[]>();
+
 async function save(page: Page) {
+  const times = downloads.get(page) ?? [];
+  downloads.set(page, times);
+  const settled = times.length < downloadBurst.count ? 0 : times[times.length - downloadBurst.count] + downloadBurst.ms - Date.now();
+  if (settled > 0) await page.waitForTimeout(settled);
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Save', exact: true }).first().click();
-  const stream = await (await downloading).createReadStream();
+  const download = await downloading;
+  times.push(Date.now());
+  const stream = await download.createReadStream();
   if (!stream) throw new Error('Save did not produce a download');
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
@@ -321,6 +330,17 @@ for (const { title, key, edited } of [
     await expect(input(page)).toBeFocused();
     await history(page, original, edited);
     await roundTrip(page, edited);
+  });
+}
+
+for (const arm of ['&peerless=0', '']) {
+  test(`every back-to-back Save without an edit downloads the document (${arm ? 'hybrid' : 'default'})`, async ({ page }) => {
+    const paragraphs = ['Saved without an edit.'];
+    await page.goto('/?format=docx' + arm);
+    await page.locator('input[type=file]').last().setInputFiles({ name: 'editing.docx', mimeType, buffer: await fixture(paragraphs) });
+    await expect(page.locator('.editor-stage canvas').first()).toBeVisible();
+    await expect(page.locator('[data-testid=yrs-input], .paged-editor__input').first()).toBeEditable();
+    for (let saved = 0; saved < 15; saved += 1) expect((await save(page)).paragraphs).toEqual(paragraphs);
   });
 }
 

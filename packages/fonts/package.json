@@ -30,7 +30,7 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:^0",
+    "@betteroffice/fonts-cjk": "workspace:*",
     "@betteroffice/fonts-intl": "workspace:^0"
   },
   "peerDependenciesMeta": {

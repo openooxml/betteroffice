@@ -4,6 +4,7 @@ import { MAX_COLLABORATION_FRAME_BYTES } from "../../../../shared/collaboration-
 import type { FileSession } from "../session/fileSession";
 import type { SessionRegistry } from "../session/registry";
 import type { UserSession } from "../session/userSession";
+import { decodeSequencedFrame, encodeSequenceAck } from "./sequence";
 import {
   classifyFrame,
   encodeAwarenessFrameRaw,
@@ -49,6 +50,9 @@ interface SocketState {
   awarenessFrames: Map<number, Uint8Array>;
   bucketTokens: number;
   bucketAt: number;
+  connectionId: string | null;
+  appliedSeq: number;
+  sequenceFailed: boolean;
 }
 
 function safeReason(reason: string): string {
@@ -124,6 +128,18 @@ export class CollabRelay {
       resolved.session.on("closed", () => this.closeSession(resolved.session, 1000, "session closed"));
       resolved.session.on("userInvalidated", ({ userId }) => this.closeUser(userId, 4401, "unauthorized"));
       resolved.session.on("rejoinRequired", () => this.#closeRoom(resolved.session, 4409, "rejoin from source"));
+      resolved.session.on("writable", () => {
+        const replica = resolved.session.replica;
+        if (!replica || resolved.session.viewOnly) return;
+        for (const state of [...(this.#rooms.get(resolved.session.fileKey) ?? [])]) {
+          if (!state.user.canWrite || !this.#authorize(state)) continue;
+          try {
+            this.#send(state, encodeSyncStep1(replica.encodeStateVector()));
+          } catch {
+            this.#close(state, 1011, "sync failed");
+          }
+        }
+      });
       resolved.session.on("replicaUpdate", ({ update }) => {
         this.#broadcastAll(resolved.session, encodeUpdateFrame(update));
       });
@@ -137,6 +153,9 @@ export class CollabRelay {
       awarenessFrames: new Map(),
       bucketTokens: AWARENESS_RATE_CAPACITY,
       bucketAt: Date.now(),
+      connectionId: null,
+      appliedSeq: 0,
+      sequenceFailed: false,
     };
     this.#byUser.set(resolved.user.id, state);
     this.#bySocket.set(ws, state);
@@ -148,6 +167,16 @@ export class CollabRelay {
     room.add(state);
     this.#heartbeat(state);
     return state;
+  }
+
+  hasSocket(session: FileSession, userId: string): boolean {
+    return this.#byUser.get(userId)?.session === session;
+  }
+
+  appliedSequence(session: FileSession, userId: string, connectionId: string): number | null {
+    const state = this.#byUser.get(userId);
+    if (!state || state.session !== session || state.connectionId !== connectionId || state.sequenceFailed) return null;
+    return state.appliedSeq;
   }
 
   #remove(state: SocketState, broadcastRemoval: boolean): void {
@@ -215,6 +244,7 @@ export class CollabRelay {
   }
 
   #close(state: SocketState, code: number, reason: string): void {
+    state.sequenceFailed = true;
     try {
       state.ws.close(code, safeReason(reason));
     } catch {}
@@ -276,7 +306,30 @@ export class CollabRelay {
       this.#close(state, 1003, "binary frames only");
       return;
     }
-    const bytes = data instanceof Uint8Array ? data.slice() : new Uint8Array(data.slice(0));
+    let bytes: Uint8Array = data instanceof Uint8Array ? data.slice() : new Uint8Array(data.slice(0));
+    let sequence: ReturnType<typeof decodeSequencedFrame>;
+    try {
+      sequence = decodeSequencedFrame(bytes);
+    } catch {
+      this.#close(state, 1002, "malformed sequence frame");
+      return;
+    }
+    if (sequence) {
+      if (state.sequenceFailed) return;
+      if (sequence.seq === 0 && state.connectionId === null) {
+        state.connectionId = sequence.connectionId;
+        this.#heartbeat(state);
+        return;
+      }
+      if (sequence.connectionId !== state.connectionId || sequence.seq !== state.appliedSeq + 1) {
+        this.#close(state, 1002, "invalid frame sequence");
+        return;
+      }
+      bytes = sequence.payload;
+    } else if (state.connectionId !== null) {
+      this.#close(state, 1002, "missing frame sequence");
+      return;
+    }
     if (bytes.byteLength > MAX_COLLABORATION_FRAME_BYTES) {
       this.#close(state, 1009, "frame too large");
       return;
@@ -338,6 +391,10 @@ export class CollabRelay {
         }
         if (!result.accepted) {
           if (result.reason === "causalGap") {
+            if (sequence) {
+              this.#close(state, 4400, "update rejected, resync");
+              return;
+            }
             if (replica) {
               try {
                 if (!this.#send(state, encodeSyncStep1(replica.encodeStateVector()))) return;
@@ -390,6 +447,10 @@ export class CollabRelay {
           }
         }
       }
+    }
+    if (sequence && !state.sequenceFailed) {
+      state.appliedSeq = sequence.seq;
+      this.#send(state, encodeSequenceAck(sequence));
     }
   }
 
