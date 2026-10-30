@@ -1986,6 +1986,24 @@ describe('XlsxEditor commands', () => {
     }
   });
 
+  it('fires onReady only once the workbook painted its first frame', async () => {
+    const target = cellRect(plain.grid, 3, 0)!;
+    const point = { x: target.x + target.w / 2, y: target.y + target.h / 2 };
+    const getRect = HTMLCanvasElement.prototype.getBoundingClientRect;
+    HTMLCanvasElement.prototype.getBoundingClientRect = () => new DOMRect(0, 0, VIEWPORT.width, VIEWPORT.height);
+    const hits: unknown[] = [];
+    const props = { onReady: (ready: XlsxEditorApi) => { hits.push(ready.getPositionAtPoint(point.x, point.y)); } };
+    try {
+      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
+      await waitFor(() => expect(hits).toHaveLength(1), MOUNTED);
+      view.rerender(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} {...props} file={plain.bytes.slice()} />);
+      await waitFor(() => expect(hits).toHaveLength(2), MOUNTED);
+      expect(hits).toEqual([{ sheet: 0, row: 3, col: 0 }, { sheet: 0, row: 3, col: 0 }]);
+    } finally {
+      HTMLCanvasElement.prototype.getBoundingClientRect = getRect;
+    }
+  });
+
   it('prints a replacement workbook only after it painted', async () => {
     let paints = 0;
     const getContext = HTMLCanvasElement.prototype.getContext;
@@ -2010,11 +2028,11 @@ describe('XlsxEditor commands', () => {
       );
       await waitFor(() => expect(api).toBeDefined(), MOUNTED);
       let printing: Promise<XlsxCommandResult> | undefined;
+      paints = 0;
       view.rerender(
         <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
           file={charted.bytes.slice()}
           onReady={(ready) => {
-            paints = 0;
             printing = ready.commands.execute('print', null);
           }}
         />
