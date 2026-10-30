@@ -116,6 +116,7 @@ jobs:
         run: |
           bun scripts/api-surface.ts --check xlsx
           bun scripts/api-surface.ts --check pptx
+          bun scripts/api-surface.ts --check xlsx-native
 
       # What `bun run test` builds; the tests themselves run in the package-tests shards.
       - name: Build the Wasm modules
@@ -464,8 +465,16 @@ jobs:
             else
               bunx napi build --cwd "$package" --platform -- --locked
             fi
+            bun run --cwd "$package" --if-present build:js
             bun test "$package/index.test.ts"
           done
+
+      - name: Check native declarations
+        run: |
+          (cd packages/xlsx && bunx tsup)
+          ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
+          ls bindings/xlsx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/wasm-declarations" -
+          while read -r file; do cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"; done < "$RUNNER_TEMP/wasm-declarations"
 
       - name: Test the xlsx packages on the native engine
         run: |
@@ -492,6 +501,8 @@ jobs:
 
       - name: Check runtimes
         run: |
+          export BETTEROFFICE_EXPORT_KEYS="$RUNNER_TEMP/native-export-keys.json"
+          bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"
           node scripts/native-bindings-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
@@ -501,6 +512,7 @@ jobs:
             package_dir="$smoke_dir/node_modules/@betteroffice/$format"
             mkdir -p "$package_dir"
             cp "$package/package.json" "$package/index.js" "$package/index.d.ts" "$package/"*.node "$package_dir/"
+            if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"

@@ -516,12 +516,10 @@ name = "betteroffice-xlsx-native"
 version = "0.5.1"
 dependencies = [
  "betteroffice-fonts",
- "betteroffice-xlsx",
  "betteroffice-xlsx-engine",
  "napi",
  "napi-build",
  "napi-derive",
- "serde_json",
 ]
 
 [[package]]

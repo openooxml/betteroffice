@@ -8,6 +8,7 @@ import {
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
+import { engineKind } from '../wasm/engine';
 import {
   createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
   type OpenWorkbookOptions, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
@@ -256,7 +257,7 @@ export async function openWorkbookSession(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
-  if (!options.worker && options.wasm === undefined && options.png !== false &&
+  if (engineKind !== 'native' && !options.worker && options.wasm === undefined && options.png !== false &&
     !wasmModules.has(wasmAssetUrl().href)) {
     requestWasmCompile(transport);
   }

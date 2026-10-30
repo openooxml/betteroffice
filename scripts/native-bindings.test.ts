@@ -277,9 +277,12 @@ describe('native package release wiring', () => {
     expect(makePublic.run).toBe('npm pkg delete private');
     expect(makePublic['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(makePublic.if).toBeUndefined();
+    const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(makePublic));
     const contents = steps.find((step: any) => step.name === 'Check root contents');
     expect(contents.run).toBe(
-      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'`
+      `npm pack --dry-run --json | jq -e --slurpfile manifest package.json '(["index.js", "index.d.ts"] + [$manifest[0].exports // {} | .. | strings | ltrimstr("./")]) - [.[0].files[].path] == []'`
     );
     expect(contents['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(contents.if).toBeUndefined();
@@ -337,6 +340,9 @@ describe('native package release wiring', () => {
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
+    const entries = steps.find((step: any) => step.name === 'Build the JS entries');
+    expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
+    expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
   });
@@ -366,7 +372,12 @@ describe('native package release wiring', () => {
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
-    expect(build.run).toContain('bun test "$package/index.test.ts"');
+    expect(build.run).toContain('bun run --cwd "$package" --if-present build:js');
+    expect(build.run.indexOf('build:js')).toBeLessThan(build.run.indexOf('bun test "$package/index.test.ts"'));
+    const nativeDeclarations = job.steps.find((step: any) => step.name === 'Check native declarations');
+    expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
+    expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
+    expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
     expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
     expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
@@ -389,6 +400,8 @@ describe('native package release wiring', () => {
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
+    expect(smoke.run).toContain('bun scripts/native-export-keys.ts > "$BETTEROFFICE_EXPORT_KEYS"');
+    expect(smoke.run).toContain('if [ -d "$package/dist" ]; then cp -R "$package/dist" "$package_dir/"; fi');
     expect(smoke.run).toContain('node scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
@@ -409,6 +422,7 @@ describe('native package release wiring', () => {
       'bindings/*-native/**',
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
+      'scripts/native-engine.ts',
       'scripts/version-packages.mjs',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',
@@ -473,16 +487,20 @@ describe('native package release wiring', () => {
     expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(artifacts));
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(makePublic));
     expect(job.steps.indexOf(makePublic)).toBeLessThan(job.steps.indexOf(validate));
+    const entries = job.steps.find((step: any) => step.name === 'Build the JS entries');
+    expect(entries.run).toBe('bun run --cwd bindings/${{ matrix.binding }}-native --if-present build:js');
+    expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(entries));
     const pack = job.steps.find((step: any) => step.name === 'Check package contents');
     expect(pack['working-directory']).toBe('bindings/${{ matrix.binding }}-native');
     expect(pack.run).toStartWith(
-      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'\n` +
+      `npm pack --dry-run --json | jq -e --slurpfile manifest package.json '(["index.js", "index.d.ts"] + [$manifest[0].exports // {} | .. | strings | ltrimstr("./")]) - [.[0].files[].path] == []'\n` +
         'npm pack --dry-run\n'
     );
     expect(pack.run).toContain('for package in npm/*; do');
     expect(pack.run).toContain('(cd "$package" && npm pack --dry-run)');
     expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(pack));
     expect(job.steps.indexOf(validate)).toBeLessThan(job.steps.indexOf(pack));
+    expect(job.steps.indexOf(entries)).toBeLessThan(job.steps.indexOf(pack));
   });
 });
 

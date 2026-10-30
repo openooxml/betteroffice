@@ -15,6 +15,14 @@ export const NATIVE_ENGINES = {
   },
 } as const;
 
+/** The wasm asset module each -native package build replaces, so no .wasm file is referenced. */
+export const NATIVE_ASSETS = {
+  xlsx: {
+    asset: 'packages/xlsx/src/wasm/asset.ts',
+    native: 'bindings/xlsx-native/js/asset.ts',
+  },
+} as const;
+
 export const NATIVE_ENGINE_FILTER = /[\\/]src[\\/]wasm[\\/]engine\.ts$/;
 
 const aliases = new Map(
@@ -26,10 +34,49 @@ export function nativeEngineFor(path: string): string | undefined {
   return aliases.get(resolve(path));
 }
 
+function reexport(path: string): string {
+  const specifier = JSON.stringify(path);
+  return `export * from ${specifier};\nexport { default } from ${specifier};\n`;
+}
+
 /** Module source that re-exports the native engine in place of the wasm engine module at `path`. */
 export function nativeEngineSource(path: string): string | undefined {
   const native = nativeEngineFor(path);
-  if (native === undefined) return undefined;
-  const specifier = JSON.stringify(native);
-  return `export * from ${specifier};\nexport { default } from ${specifier};\n`;
+  return native === undefined ? undefined : reexport(native);
+}
+
+interface LoadArgs {
+  path: string;
+}
+
+interface LoadResult {
+  contents: string;
+  loader: 'ts';
+}
+
+interface PluginBuild {
+  onLoad(options: { filter: RegExp }, callback: (args: LoadArgs) => LoadResult | undefined): void;
+}
+
+/** Source a -native package build of `format` links in place of the wasm engine or asset module at `path`, else undefined. */
+export function nativeBuildSource(format: keyof typeof NATIVE_ENGINES, path: string): string | undefined {
+  const absolute = resolve(path);
+  const { engine, native } = NATIVE_ENGINES[format];
+  if (absolute === resolve(root, engine)) return reexport(resolve(root, native));
+  const asset = (NATIVE_ASSETS as Record<string, { asset: string; native: string }>)[format];
+  if (asset && absolute === resolve(root, asset.asset)) return `export * from ${JSON.stringify(resolve(root, asset.native))};\n`;
+  return undefined;
+}
+
+/** esbuild plugin for a -native package build: links the native engine and asset modules of `format`. */
+export function nativeEnginePlugin(format: keyof typeof NATIVE_ENGINES) {
+  return {
+    name: 'betteroffice-native-engine',
+    setup(build: PluginBuild) {
+      build.onLoad({ filter: /[\\/]src[\\/]wasm[\\/](engine|asset)\.ts$/ }, ({ path }) => {
+        const contents = nativeBuildSource(format, path);
+        return contents === undefined ? undefined : { contents, loader: 'ts' };
+      });
+    },
+  };
 }

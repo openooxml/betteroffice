@@ -32,32 +32,6 @@ for (const load of [(name) => import(name), async (name) => require(name)]) {
   const reopenedDocument = await openDocument(await document.save());
   assert.equal((await reopenedDocument.structure).bodyParagraphs, structure.bodyParagraphs);
 
-  const { openWorkbook } = await load('@betteroffice/xlsx-native');
-  const workbook = await openWorkbook(xlsxBytes);
-  const edit = workbook.set(0, 'B2', '=1+2');
-  const value = workbook.value(0, 'B2');
-  await edit;
-  assert.equal((await value).number, 3);
-  await workbook.setNumberFormat(0, 'B2', 'plainText');
-  await workbook.setNumberFormat(0, 'B2', { type: 'custom', pattern: '0.000' });
-  await workbook.setNumberFormat(0, 'B2', 'increaseDecimal');
-  await workbook.setNumberFormat(0, 'B2', 'decreaseDecimal');
-  await workbook.setStyle(0, 'B2', {
-    border: { preset: 'all', style: 'dashed', color: '#123456' },
-    horizontalAlignment: 'right', textWrapping: 'wrap'
-  });
-  await workbook.setStyle(0, 'B2', { clear: ['borders', 'textWrapping'] });
-  const proposal = await workbook.propose({
-    agentId: 'smoke-agent',
-    edits: [{ sheet: 0, address: 'C2', input: '12.5', numberFormat: 'currency' }]
-  });
-  assert.equal(proposal.edits[0].after, '$12.50');
-  await workbook.acceptProposal(proposal.id);
-  const sheet = await workbook.renderSheet({ sheet: 0, range: 'A1:B3' });
-  assert.deepEqual(sheet.data.subarray(0, 8), pngSignature);
-  const reopenedWorkbook = await openWorkbook(await workbook.save());
-  assert.equal((await reopenedWorkbook.value(0, 'B2')).number, 3);
-
   const { openPresentation } = await load('@betteroffice/pptx-native');
   const presentation = await openPresentation(pptxBytes);
   const slideCount = await presentation.slideCount;
@@ -71,4 +45,32 @@ for (const load of [(name) => import(name), async (name) => require(name)]) {
   const reopenedPresentation = await openPresentation(await presentation.save());
   assert.equal(await reopenedPresentation.slideCount, slideCount);
 }
-console.log('Native DOCX/PPTX/XLSX import, require, save/reopen, PNG and recalculation checks passed.');
+assert.ok(process.env.BETTEROFFICE_EXPORT_KEYS, 'BETTEROFFICE_EXPORT_KEYS names the export names of each wasm entry');
+const exportKeys = JSON.parse(readFileSync(process.env.BETTEROFFICE_EXPORT_KEYS, 'utf8'));
+for (const [format, entries] of Object.entries(exportKeys)) {
+  for (const [entry, keys] of Object.entries(entries)) {
+    const name = `@betteroffice/${format}-native${entry.slice(1)}`;
+    assert.deepEqual(Object.keys(await import(name)).sort(), keys, name);
+  }
+}
+const { initWasm, openWorkbook, exportXlsxMarkdown } = await import('@betteroffice/xlsx-native');
+await initWasm();
+const workbook = openWorkbook(xlsxBytes);
+workbook.editCell(0, 1, 1, '=1+2');
+workbook.setNumberFormat(0, 'B2', { type: 'custom', pattern: '0.000' });
+workbook.patchRangeStyle(0, 'B2', {
+  border: { preset: 'all', style: 'dashed', color: '#123456' },
+  horizontalAlignment: 'right', textWrapping: 'wrap'
+});
+const proposal = workbook.propose('smoke-agent', null, [
+  { sheet: 0, row: 1, col: 2, input: '12.5', numberFormat: 'currency' }
+]);
+assert.equal(proposal.cells[0].newText, '$12.50');
+workbook.acceptProposal(proposal.id);
+const target = { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B2' } };
+const reopenedWorkbook = openWorkbook(workbook.save());
+assert.deepEqual(reopenedWorkbook.readCells({ ranges: [target] }).ranges[0].cells[0][0].value, { kind: 'number', value: 3 });
+assert.ok((await exportXlsxMarkdown(xlsxBytes)).markdown.length > 0);
+workbook.dispose();
+reopenedWorkbook.dispose();
+console.log('Native DOCX/PPTX import, require, save/reopen and PNG checks and XLSX package API, recalculation and save/reopen checks passed.');
