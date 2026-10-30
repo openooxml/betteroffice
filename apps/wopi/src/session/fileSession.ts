@@ -233,6 +233,11 @@ export class FileSession {
     return this.#journalBroken;
   }
 
+  /** Most users that may be connected to this file at once. */
+  get maxEditorsPerFile(): number {
+    return this.#deps.maxEditorsPerFile ?? 50;
+  }
+
   get viewOnly(): boolean {
     return this.#viewOnlyReason !== null;
   }
@@ -344,7 +349,7 @@ export class FileSession {
     if (this.#state === "closed" || this.#state === "closing") {
       throw new SessionError("closed", "file session is closed");
     }
-    const max = this.#deps.maxEditorsPerFile ?? 50;
+    const max = this.maxEditorsPerFile;
     const connectedCount = [...this.#users.values()].filter((user) => user.connected).length;
     if (connectedCount >= max) {
       throw new SessionError("tooManyEditors", "max editors per file reached");

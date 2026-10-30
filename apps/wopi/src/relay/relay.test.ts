@@ -374,6 +374,40 @@ describe("collab relay", () => {
     }
   });
 
+  test("reconnecting saved handles cannot open more sockets than the editor limit", async () => {
+    const h = makeHarness({ maxEditorsPerFile: 2 });
+    addToken(h, TOKENS[0]!, "user-a");
+    addToken(h, TOKENS[1]!, "viewer-b", { canWrite: false });
+    const a = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[0]!, accessTokenTtl: 0, mode: "edit" });
+    const relay = new CollabRelay(h.registry);
+    const closed: number[] = [];
+    const socket = (): RelaySocket => ({ send: (frame) => frame.length, close: (code) => { closed.push(code!); } });
+    try {
+      expect(relay.attach(socket(), relay.resolve(a.user.id)!, a.session.baselineGeneration)).not.toBeNull();
+      const saved: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const b = await h.registry.join({ wopiSrc: SRC, accessToken: TOKENS[1]!, accessTokenTtl: 0, mode: "view" });
+        const ws = socket();
+        relay.attach(ws, relay.resolve(b.user.id)!, b.session.baselineGeneration);
+        relay.detach(ws);
+        await h.clock.drain();
+        expect(b.user.connected).toBe(false);
+        saved.push(b.user.id);
+      }
+      expect(a.session.users.length).toBe(4);
+      expect(closed).toEqual([]);
+      expect(relay.attach(socket(), relay.resolve(saved[0]!)!, a.session.baselineGeneration)).not.toBeNull();
+      for (const handle of saved.slice(1)) {
+        expect(relay.attach(socket(), relay.resolve(handle)!, a.session.baselineGeneration)).toBeNull();
+      }
+      expect(closed).toEqual([1013, 1013]);
+      expect(relay.attach(socket(), relay.resolve(a.user.id)!, a.session.baselineGeneration)).not.toBeNull();
+      expect(closed).toEqual([1013, 1013, 1000]);
+    } finally {
+      a.session.abandon();
+    }
+  });
+
   test("two clients converge, one autosave has every edit, late joiner catches up", async () => {
     const s = setup("xlsx");
     const handleA = await joinPage(s, TOKENS[0]!);

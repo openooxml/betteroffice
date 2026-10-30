@@ -105,8 +105,14 @@ export class CollabRelay {
       try { ws.close(4409, "rejoin from source"); } catch {}
       return null;
     }
-    const generation = resolved.session.connect(resolved.user.id);
     const previous = this.#byUser.get(resolved.user.id);
+    const sockets = this.#rooms.get(resolved.session.fileKey);
+    const others = sockets ? sockets.size - (previous && sockets.has(previous) ? 1 : 0) : 0;
+    if (others >= resolved.session.maxEditorsPerFile) {
+      try { ws.close(1013, "too many editors"); } catch {}
+      return null;
+    }
+    const generation = resolved.session.connect(resolved.user.id);
     if (previous && previous.ws !== ws) {
       this.#remove(previous, true);
       try {
