@@ -1,6 +1,7 @@
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::SheetId;
+use xlsx_model::sort::sort_by_shared;
 
 use crate::ParseError;
 use crate::package::{PreservedPackage, XmlTemplate};
@@ -235,7 +236,7 @@ fn patch_attributes(source: &[u8], changes: &[(&str, String)]) -> Result<Vec<u8>
             let position = reader.buffer_position() as usize - if empty { 2 } else { 1 };
             replacements.push((position, position, additions.into_bytes()));
         }
-        replacements.sort_by_key(|(start, _, _)| *start);
+        sort_by_shared(&mut replacements, |(left, _, _), (right, _, _)| left.cmp(right));
         let mut output = Vec::with_capacity(source.len());
         let mut cursor = 0;
         for (start, end, value) in replacements {
