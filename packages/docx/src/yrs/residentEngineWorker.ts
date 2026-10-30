@@ -1293,7 +1293,7 @@ const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
 let editorSaves: ResidentSaveRecord = { full: false };
-let saveSeedStatesScheduled = false;
+let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
 let openedVersion: string | null | undefined;
@@ -1552,7 +1552,7 @@ async function runRequest(request: ScheduledRequest): Promise<void> {
       request.type !== 'commandUpdate' && request.type !== 'buildPages' && request.type !== 'commandViewport') {
       await commandHost.withFrameWork(() => handle(request));
     } else await handle(request);
-    if (request.type === 'commandInit' || request.type === 'bootstrap') scheduleSaveSeedStates();
+    primeSaveSeedStatesOnce();
   } catch (error) {
     replyFailure(request.id, error);
   } finally {
@@ -1800,7 +1800,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
     if (session) destroySession(true);
     openedSource = null;
     editorSaves = { full: false };
-    saveSeedStatesScheduled = false;
+    saveSeedStatesPrimed = false;
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -3216,7 +3216,9 @@ function scheduleCompletion(completion: SlicedCompletion): void {
       const owner = completion.commandOwner;
       if (owner) await owner.withFrameWork(() => completionSlice(completion, budgetMs));
       else await completionSlice(completion, budgetMs);
-      return slicedCompletion === completion ? 'yield' : 'done';
+      if (slicedCompletion === completion) return 'yield';
+      primeSaveSeedStatesOnce();
+      return 'done';
     },
   });
 }
@@ -3412,7 +3414,7 @@ function destroySession(keepSurfaces = false): void {
   openedParsedToolbar = null;
   sourcePreviewing = false;
   editorSaves = { full: false };
-  saveSeedStatesScheduled = false;
+  saveSeedStatesPrimed = false;
   openedVersion = undefined;
   previewing = false;
   cutPartial = false;
@@ -3578,7 +3580,7 @@ function adoptResidentSource(
   openedParsedToolbar = source.document ? parsedToolbar(source.document) : null;
   openedSource = source.bytes && hostJson && !source.cut ? { bytes: exactBuffer(source.bytes), hostJson } : null;
   editorSaves = { full: false };
-  saveSeedStatesScheduled = false;
+  saveSeedStatesPrimed = false;
   return { document, hostJson, embeddedFontFaces };
 }
 
@@ -3896,24 +3898,21 @@ function canPreloadSaveWasm(): boolean {
     (!!openedSource || openedParsed) && !trap && !projectionFailure;
 }
 
-function scheduleSaveSeedStates(): void {
-  if (saveSeedStatesScheduled || !session || !canPreloadSaveWasm()) return;
-  const owner = session;
-  saveSeedStatesScheduled = true;
-  scheduler.schedule({
-    kind: 'saveSeedStates', version: scheduler.version, generation: scheduler.generation,
-    idleAfterInputMs: COMPLETION_IDLE_MS,
-    onStale: () => 'continue',
-    fail: (error) => {
-      if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
-    },
-    run: () => {
-      if (session === owner && canPreloadSaveWasm() && saveWarmupHasHeadroom()) {
-        owner.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
-      }
-      return 'done';
-    },
-  });
+/**
+ * Records save seed states once per editable command document, as soon as its
+ * layout is complete: one bounded wasm call after a request or completion
+ * step, so the first save after an edit need not reseed.
+ */
+function primeSaveSeedStatesOnce(): void {
+  if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
+    incompleteLayout || commandLayout?.certifiedPages() != null) return;
+  saveSeedStatesPrimed = true;
+  if (!saveWarmupHasHeadroom()) return;
+  try {
+    session.primeSaveSeedStates(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) trapped(0, error);
+  }
 }
 
 function scheduleSaveWasmPreload(): void {

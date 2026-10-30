@@ -2501,21 +2501,19 @@ describe('document worker warmup', () => {
     return arm;
   }
 
-  test('save seed priming runs once after an editable open goes idle without replying', async () => {
+  test('save seed priming runs once when an editable open settles, without replying', async () => {
     const { w, client, replies } = await commandWorker();
     w.harness.now = () => now;
     try {
       await client.commandInit(COMMAND_INIT);
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
       const before = replies.length;
       await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
+      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
       expect(replies).toHaveLength(before);
-      advanceTimers(5_000);
       await client.edit(commandEnvelope(1));
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
       expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledTimes(1);
-      expect(w.harness.session.primeSaveSeedStates).toHaveBeenCalledWith(4096, 16 * 1024 * 1024);
     } finally {
       client.destroy();
     }
@@ -2543,26 +2541,6 @@ describe('document worker warmup', () => {
       advanceTimers(5_000);
       await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
       expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
-    } finally {
-      client.destroy();
-    }
-  });
-
-  test('input postpones save seed priming until the input idle window ends', async () => {
-    const { w, client } = await commandWorker();
-    w.harness.now = () => now;
-    try {
-      await client.commandInit(COMMAND_INIT);
-      await client.edit(commandEnvelope(1));
-      advanceTimers(299);
-      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
-      await client.edit(commandEnvelope(2));
-      advanceTimers(299);
-      await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
-      expect(w.harness.session.primeSaveSeedStates).not.toHaveBeenCalled();
-      advanceTimers(1);
-      await settleWarmup(() => w.harness.session.primeSaveSeedStates.mock.calls.length === 1);
     } finally {
       client.destroy();
     }
