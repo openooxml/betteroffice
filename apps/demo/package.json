@@ -42,7 +42,8 @@
     "@betteroffice/docx": "workspace:*",
     "@betteroffice/docx-react": "workspace:*",
     "@betteroffice/fonts": "workspace:*",
-    "@betteroffice/fonts-cjk": "workspace:*"
+    "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-intl": "workspace:*"
   },
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.12",

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import initWasm, * as wasm from '../../packages/pptx/src/wasm/generated/pptx_wasm.js';
+import type { SlideDisplayList } from '../../packages/pptx/src/types';
 import { expectSavedPartsEqual } from '../native-parity';
 
 type Engine = Pick<typeof wasm,
@@ -238,6 +239,50 @@ describe('pptx native engine parity', () => {
     }
   });
 
+  test('browser coverage fallback is opt-in and toggles equally in native and wasm', () => {
+    const font = readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(bytes(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        const slideId = (JSON.parse(doc.snapshotJson()) as Snapshot).slides[0].id;
+        const { shapeId } = JSON.parse(doc.addTextBoxJson(JSON.stringify({ slideId, draft: {
+          name: 'Coverage', rect: { x: 100000, y: 100000, width: 3000000, height: 1000000 },
+          text: 'A👩‍💻हB', style: { fontFamily: 'Arial', fontSizePt: 18, color: '#000000' },
+        } }))) as { shapeId: string };
+        const fontId = renderer.registerFont('Arial', false, false, new Uint8Array(font));
+        const layout = () => {
+          const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+          return list.primitives.filter((primitive) => primitive.kind === 'textBox' && primitive.shapeId === shapeId)
+            .flatMap((box) => box.kind === 'textBox' ? box.lines.flatMap((line) => line.runs) : []);
+        };
+        const initial = layout();
+        expect(initial.map((piece) => piece.text).join('')).toBe('A👩‍💻हB');
+        expect(initial.every((piece) => piece.fontId === fontId)).toBe(true);
+        const originalKey = renderer.slideLayoutKey(doc, 0);
+        renderer.setBrowserCoverageFallback(false);
+        expect(renderer.slideLayoutKey(doc, 0)).toBe(originalKey);
+        renderer.setBrowserCoverageFallback(true);
+        const enabledKey = renderer.slideLayoutKey(doc, 0);
+        expect(enabledKey).not.toBe(originalKey);
+        expect(renderer.setActiveSlide(doc, slideId, originalKey)).toBe(false);
+        const enabled = layout();
+        expect(enabled.some((piece) => piece.fontId === 0xffffffff)).toBe(true);
+        expect(enabled.map((piece) => piece.text).join('')).toBe('A👩‍💻हB');
+        renderer.setBrowserCoverageFallback(true);
+        expect(renderer.slideLayoutKey(doc, 0)).toBe(enabledKey);
+        renderer.setBrowserCoverageFallback(false);
+        expect(renderer.slideLayoutKey(doc, 0)).not.toBe(enabledKey);
+        expect(layout()).toEqual(initial);
+        return [initial, enabled].map((pieces) => pieces.map(({ text, start, end, fontId }) => ({ text, start, end, fontId })));
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);
@@ -357,6 +402,7 @@ describe('pptx native engine parity', () => {
       () => renderer.hitTestJson(0, 0), () => renderer.layoutSlideJson(doc, 0),
       () => renderer.saveBytes(doc), () => renderer.setActiveSlide(doc, 'slide', 'key'),
       () => renderer.registerFont('Arial', false, false, new Uint8Array()),
+      () => renderer.setBrowserCoverageFallback(true),
     ]) {
       const failure = caughtValue(call);
       expect(failure).toBeInstanceOf(Error);

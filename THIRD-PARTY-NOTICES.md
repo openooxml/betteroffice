@@ -45,10 +45,10 @@ License: SIL Open Font License, Version 1.1
 
 ---
 
-## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
+## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`, `packages/fonts-intl`)
 
-Seventy-five font binaries are vendored unmodified and redistributed in the published
-`@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
+Font binaries are vendored and redistributed in the published
+`@betteroffice/fonts`, `@betteroffice/fonts-cjk`, and `@betteroffice/fonts-intl` packages. All are licensed
 under the SIL Open Font License, Version 1.1. Each package ships the applicable
 license texts, with the copyright notices they cover, under its `LICENSES/`
 directory; those files are the authoritative copies for redistribution.
@@ -111,6 +111,11 @@ directory; those files are the authoritative copies for redistribution.
 
 Both are static `SubsetOTF` Regulars from
 https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
+
+`packages/fonts-intl/assets` contains hinted static Noto coverage faces for
+international scripts, stored with lossless Zstandard compression. Sources:
+https://github.com/notofonts/notofonts.github.io. The decoded fonts retain
+their copyright notices. `LICENSES/OFL-Noto.txt` contains the OFL 1.1 text.
 
 ---
 
@@ -175,13 +180,28 @@ It is used only by tests.
 
 `vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
 `facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
-It is compiled into the internal `fontpack` crate and its standalone wasm decoder.
+It is compiled into the internal `fontpack` crate for native targets; wasm builds
+decode zstd with `ruzstd` instead.
 
 Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
 License: BSD-3-Clause (`vendor/zstd/LICENSE`). The same upstream notice is
-included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt` for decoder
-redistribution.
+included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt`.
+
+---
+
+## ruzstd and twox-hash
+
+Wasm builds of the font decoder link `ruzstd` 0.9.1, a zstd decoder in Rust,
+https://github.com/KillingSpark/zstd-rs, and `twox-hash` 2 for its frame
+checksums, https://github.com/shepmaster/twox-hash.
+
+Copyright (c) 2019 Moritz Borcherding
+Copyright (c) 2015 Jake Goulding
+
+License: MIT. The unmodified upstream licences are included under
+`packages/fonts/LICENSES/MIT-ruzstd.txt` and
+`packages/fonts/LICENSES/MIT-twox-hash.txt` for decoder redistribution.
 
 ---
 

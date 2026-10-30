@@ -17,6 +17,7 @@ import { MaterialSymbol } from './ui/MaterialSymbol';
 import { useDocxCommand } from '../commands/hooks';
 import type { DocxCommandArgs, DocxCommandId } from '../commands/types';
 import { useTranslation } from '../i18n';
+import { useEditorChrome } from './EditorToolbarContext';
 
 // ============================================================================
 // BreakSubmenu — vertical list of break choices shown inside the Insert menu's
@@ -186,6 +187,7 @@ function useCommandMenuItem<K extends DocxCommandId>(
   args?: DocxCommandArgs[K]
 ): BoundMenuItem {
   const command = useDocxCommand(id, args);
+  const prepareSave = useEditorChrome()?.prepareSave;
   const { state } = command;
   return {
     entry: {
@@ -195,6 +197,8 @@ function useCommandMenuItem<K extends DocxCommandId>(
       disabled: !state.enabled,
       description: state.enabled ? undefined : state.disabledReason.message,
       onClick: () => void command.execute(),
+      onPointerEnter: id === 'save' ? prepareSave : undefined,
+      onFocus: id === 'save' ? prepareSave : undefined,
     },
     hidden: !state.enabled && (state.disabledReason.code === 'host-disabled' || state.disabledReason.code === 'unsupported-command'),
   };
